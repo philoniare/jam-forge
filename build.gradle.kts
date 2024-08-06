@@ -2,24 +2,29 @@ import io.gitlab.arturbosch.detekt.Detekt
 import io.gitlab.arturbosch.detekt.DetektCreateBaselineTask
 
 plugins {
-    kotlin("jvm") version "2.0.0"
-    id("io.gitlab.arturbosch.detekt") version "1.23.6"
+    kotlin("jvm") version "2.0.0" apply false
+    id("io.gitlab.arturbosch.detekt") version "1.23.6" apply false
 }
 
 allprojects {
     repositories {
         mavenCentral()
     }
+}
+
+subprojects {
+    apply(plugin = "org.jetbrains.kotlin.jvm")
+    apply(plugin = "io.gitlab.arturbosch.detekt")
 
     dependencies {
-        implementation(kotlin("stdlib"))
-        testImplementation(kotlin("test"))
-        detektPlugins("io.gitlab.arturbosch.detekt:detekt-formatting:1.23.6")
-        testImplementation("commons-codec:commons-codec:1.14")
-        testImplementation("org.mockito:mockito-core:3.+")
+        "implementation"(kotlin("stdlib"))
+        "testImplementation"(kotlin("test"))
+        "detektPlugins"("io.gitlab.arturbosch.detekt:detekt-formatting:1.23.6")
+        "testImplementation"("commons-codec:commons-codec:1.14")
+        "testImplementation"("org.mockito:mockito-core:3.+")
     }
 
-    tasks.test {
+    tasks.withType<Test> {
         useJUnitPlatform()
     }
 
@@ -31,16 +36,11 @@ allprojects {
         jvmTarget = "1.8"
         enabled = false
     }
-}
 
-subprojects {
-    apply(plugin = "kotlin")
-    apply(plugin = "io.gitlab.arturbosch.detekt")
-
-    detekt {
+    configure<io.gitlab.arturbosch.detekt.extensions.DetektExtension> {
         buildUponDefaultConfig = true
         allRules = false
-        config.setFrom("$rootDir/config/detekt.yml")
+        config.setFrom(files("$rootDir/config/detekt.yml"))
     }
 }
 
