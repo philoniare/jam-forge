@@ -1,10 +1,28 @@
 package io.forge.jam
 
+object abi {
+    /// The minimum required alignment of runtime code pointers.
+    const val VM_CODE_ADDRESS_ALIGNMENT: UInt = 2u
+
+    /// The maximum byte size of the code blob.
+    val VM_MAXIMUM_CODE_SIZE: UInt = 32u * 1024u * 1024u
+
+    /// The maximum number of functions the program can import.
+    const val VM_MAXIMUM_IMPORT_COUNT: UInt = 1024u
+
+    /// The maximum number of entries in the jump table.
+    val VM_MAXIMUM_JUMP_TABLE_ENTRIES: UInt = 16u * 1024u * 1024u
+
+
+}
+
 object Constants {
     // The magic bytes with which every program blob must start with.
-    @OptIn(ExperimentalUnsignedTypes::class)
     val BLOB_MAGIC: UByteArray =
         ubyteArrayOf('P'.code.toByte().toUByte(), 'V'.code.toByte().toUByte(), 'M'.code.toByte().toUByte(), 0.toUByte())
+
+    const val MAX_VARINT_LENGTH: Int = 5
+    val MAX_INSTRUCTION_LENGTH: Int = 2 + MAX_VARINT_LENGTH * 2
 
     const val SECTION_MEMORY_CONFIG: UByte = 1u
     const val SECTION_RO_DATA: UByte = 2u
@@ -24,7 +42,69 @@ object Constants {
     const val BITMASK_MAX: Int = 24
 }
 
-@OptIn(ExperimentalUnsignedTypes::class)
+class JumpTable(
+    private val blob: UByteArray,
+    private val entrySize: UInt
+) {
+    fun isEmpty(): Boolean = size == 0u
+
+    val size: UInt
+        get() = if (entrySize == 0u) 0u else (blob.size.toUInt() / entrySize)
+
+    fun getByAddress(address: UInt): UInt? {
+        if ((address and (abi.VM_CODE_ADDRESS_ALIGNMENT - 1u)) != 0u || address == 0u) {
+            return null
+        }
+        return getByIndex((address - abi.VM_CODE_ADDRESS_ALIGNMENT) / abi.VM_CODE_ADDRESS_ALIGNMENT)
+    }
+
+    fun getByIndex(index: UInt): UInt? {
+        if (entrySize == 0u) {
+            return null
+        }
+
+        val start = (index * entrySize).toLong()
+        val end = (start + entrySize.toLong()).coerceAtMost(blob.size.toLong())
+        if (start >= blob.size || start < 0 || end > blob.size || end <= start) {
+            return null
+        }
+
+        return when (entrySize.toInt()) {
+            1 -> blob[start.toInt()].toUInt()
+            2 -> (blob[start.toInt()].toUInt() or (blob[start.toInt() + 1].toUInt() shl 8))
+            3 -> (blob[start.toInt()].toUInt() or
+                (blob[start.toInt() + 1].toUInt() shl 8) or
+                (blob[start.toInt() + 2].toUInt() shl 16))
+
+            4 -> (blob[start.toInt()].toUInt() or
+                (blob[start.toInt() + 1].toUInt() shl 8) or
+                (blob[start.toInt() + 2].toUInt() shl 16) or
+                (blob[start.toInt() + 3].toUInt() shl 24))
+
+            else -> throw IllegalStateException("Unexpected entry size")
+        }
+    }
+
+    fun iterator(): Iterator<UInt> = JumpTableIterator(this)
+}
+
+class JumpTableIterator(private val jumpTable: JumpTable) : Iterator<UInt> {
+    private var index: UInt = 0u
+
+    override fun hasNext(): Boolean = index < jumpTable.size
+
+    override fun next(): UInt {
+        if (!hasNext()) throw NoSuchElementException()
+        val value = jumpTable.getByIndex(index) ?: throw IllegalStateException("Unexpected null value")
+        index++
+        return value
+    }
+}
+
+// Extension function to make JumpTable iterable
+operator fun JumpTable.iterator(): Iterator<UInt> = this.iterator()
+
+
 fun parseBitmaskSlow(bitmask: UByteArray, offset: Int): Pair<Int, Int>? {
     if (bitmask.isEmpty()) {
         return null
@@ -61,7 +141,6 @@ fun parseBitmaskSlow(bitmask: UByteArray, offset: Int): Pair<Int, Int>? {
 }
 
 
-@OptIn(ExperimentalUnsignedTypes::class)
 fun parseBitmaskFast(bitmask: UByteArray, offset: Int): Pair<Int, Int>? {
     var currentOffset = offset + 1
 
@@ -81,6 +160,52 @@ fun parseBitmaskFast(bitmask: UByteArray, offset: Int): Pair<Int, Int>? {
 
     return Pair(currentOffset, argsLength)
 }
+
+//class Instructions(
+//    private val code: UByteArray,
+//    private val bitmask: UByteArray,
+//    private var offset: Int
+//) : Iterator<ParsedInstruction> {
+//
+//    fun offset(): UInt = offset.toUInt()
+//
+//    fun <T> visit(visitor: InstructionVisitor<T>): T? {
+//        // TODO: Make this directly dispatched?
+//        return next().visit(visitor)
+//    }
+//
+//    override fun next(): ParsedInstruction {
+//        return parseInstruction(code, bitmask, offset).also { parsedInstruction ->
+//            offset = parsedInstruction?.offset?.toInt() ?: offset
+//        }
+//    }
+//
+//    fun sizeHint(): Pair<Int, Int?> {
+//        return Pair(0, (code.size - minOf(offset, code.size)).takeIf { it >= 0 })
+//    }
+//
+//    companion object {
+//        fun new(code: UByteArray, bitmask: UByteArray, offset: UInt): Instructions {
+//            return Instructions(code, bitmask, offset.toInt())
+//        }
+//    }
+//}
+//
+//data class ParsedInstruction(
+//    val kind: Instruction,
+//    val offset: UInt,
+//    val length: UInt
+//) {
+//    operator fun component1(): Instruction = kind
+//
+//    override fun toString(): String {
+//        return "%7d: %s".format(offset, kind)
+//    }
+//}
+
+//interface InstructionVisitor<T> {
+//    fun visit(instruction: ParsedInstruction): T
+//}
 
 
 enum class LineProgramOp(val value: Int) {

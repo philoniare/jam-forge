@@ -1,5 +1,6 @@
 import io.gitlab.arturbosch.detekt.Detekt
 import io.gitlab.arturbosch.detekt.DetektCreateBaselineTask
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
 
 plugins {
     kotlin("jvm") version "2.0.0" apply false
@@ -41,6 +42,14 @@ subprojects {
         buildUponDefaultConfig = true
         allRules = false
         config.setFrom(files("$rootDir/config/detekt.yml"))
+    }
+
+    tasks.named<KotlinCompilationTask<*>>("compileKotlin").configure {
+        compilerOptions.freeCompilerArgs.add("-opt-in=kotlin.ExperimentalUnsignedTypes")
+    }
+
+    tasks.named<KotlinCompilationTask<*>>("compileTestKotlin").configure {
+        compilerOptions.freeCompilerArgs.add("-opt-in=kotlin.ExperimentalUnsignedTypes")
     }
 }
 
