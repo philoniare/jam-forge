@@ -6,5 +6,5 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib"))
     testImplementation(kotlin("test"))
+    implementation("org.bouncycastle:bcprov-jdk15on:1.70")
 }
-
