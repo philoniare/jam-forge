@@ -1,5 +1,8 @@
 package io.forge.jam.core
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class Block(
     val header: Header,
     val extrinsic: Extrinsic
