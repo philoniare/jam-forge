@@ -8,7 +8,7 @@ data class Extrinsic(
     val disputes: Dispute,
     val preimages: List<Preimage>,
     val assurances: List<AssuranceExtrinsic>,
-    val guarantees: List<Guarantee>
+    val guarantees: List<GuaranteeExtrinsic>
 ) : Encodable {
     override fun encode(): ByteArray {
         val ticketsBytes = encodeList(tickets)
