@@ -18,6 +18,13 @@ class TestFileLoader {
             return jsonInputStream.bufferedReader().use { it.readText() }
         }
 
+        inline fun <reified T> loadParseJsonData(filename: String): T {
+            val json = Json { ignoreUnknownKeys = true }
+            val jsonData = loadJsonData(filename)
+            val parsedJson = json.decodeFromString<T>(jsonData)
+            return parsedJson
+        }
+
         /**
          * Loads expected binary data from the specified resource file.
          * @param filename The name of the binary file (without extension) to load.

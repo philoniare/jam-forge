@@ -11,6 +11,7 @@
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/jam-core" />
             <option value="$PROJECT_DIR$/jam-pvm" />
+            <option value="$PROJECT_DIR$/jam-safrole" />
             <option value="$PROJECT_DIR$/jam-vrfs" />
           </set>
         </option>
