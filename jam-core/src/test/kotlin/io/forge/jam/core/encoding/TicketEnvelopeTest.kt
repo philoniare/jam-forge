@@ -1,18 +1,18 @@
 package io.forge.jam.core.encoding
 
-import io.forge.jam.core.Ticket
+import io.forge.jam.core.TicketEnvelope
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
-class TicketTest {
+class TicketEnvelopeTest {
     @Test
     fun testEncodeTicket() {
         // Load JSON data from resources using the class loader
-        val (inputTickets, expectedOutputBytes) = TestFileLoader.loadTestData<List<Ticket>>("tickets_extrinsic")
+        val (inputTickets, expectedOutputBytes) = TestFileLoader.loadTestData<List<TicketEnvelope>>("tickets_extrinsic")
 
         val encodedTickets = inputTickets.map { ticket ->
             val extrinsic =
-                Ticket(ticket.attempt, ticket.signature)
+                TicketEnvelope(ticket.attempt, ticket.signature)
             extrinsic.encode()
         }
 

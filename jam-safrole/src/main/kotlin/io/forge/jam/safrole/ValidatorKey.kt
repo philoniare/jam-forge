@@ -4,7 +4,7 @@ import io.forge.jam.core.ByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
-class ValidatorData(
+class ValidatorKey(
     @Serializable(with = ByteArrayHexSerializer::class)
     val bandersnatch: ByteArray,
     @Serializable(with = ByteArrayHexSerializer::class)

@@ -1,10 +1,10 @@
-package io.forge.jam.safrole
+package io.forge.jam.core
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class CustomErrorCode {
+enum class JamErrorCode {
     @SerialName("bad-slot")
     BAD_SLOT,
 

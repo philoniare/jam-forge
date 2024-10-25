@@ -2,25 +2,41 @@ package io.forge.jam.safrole
 
 import io.forge.jam.core.ByteArrayHexSerializer
 import io.forge.jam.core.ByteArrayListHexSerializer
-import io.forge.jam.core.Ticket
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class SafroleState(
-    val tau: Long,
+    // Current timeslot
+    var tau: Long,
+
     @Serializable(with = ByteArrayListHexSerializer::class)
-    val eta: List<ByteArray>,
-    val lambda: List<ValidatorData>,
-    val kappa: List<ValidatorData>,
+    // Entropy accumulator
+    val eta: MutableList<ByteArray>,
+
+    // Previous epoch validators
+    var lambda: List<ValidatorKey>,
+
+    // Current validators
+    var kappa: List<ValidatorKey>,
+
+    // Next epoch validators
     @SerialName("gamma_k")
-    val gammaK: List<ValidatorData>,
-    val iota: List<ValidatorData>,
+    var gammaK: List<ValidatorKey>,
+
+    // Queued validators
+    val iota: List<ValidatorKey>,
+
+    // Ticket accumulator
     @SerialName("gamma_a")
-    val gammaA: List<Ticket>,
+    var gammaA: List<TicketBody>,
+
+    // Current sealing sequence
     @SerialName("gamma_s")
-    val gammaS: TicketsOrKeys,
+    var gammaS: TicketsOrKeys,
+
+    // Bandersnatch ring root
     @SerialName("gamma_z")
     @Serializable(with = ByteArrayHexSerializer::class)
-    val gammaZ: ByteArray
+    var gammaZ: ByteArray
 )

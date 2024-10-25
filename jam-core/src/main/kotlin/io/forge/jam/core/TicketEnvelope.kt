@@ -3,7 +3,7 @@ package io.forge.jam.core
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class Ticket(
+data class TicketEnvelope(
     val attempt: Long,
     @Serializable(with = ByteArrayHexSerializer::class)
     val signature: ByteArray

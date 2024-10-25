@@ -18,20 +18,13 @@ class TestFileLoader {
             return jsonInputStream.bufferedReader().use { it.readText() }
         }
 
-        inline fun <reified T> loadParseJsonData(filename: String): T {
-            val json = Json { ignoreUnknownKeys = true }
-            val jsonData = loadJsonData(filename)
-            val parsedJson = json.decodeFromString<T>(jsonData)
-            return parsedJson
-        }
-
         /**
          * Loads expected binary data from the specified resource file.
          * @param filename The name of the binary file (without extension) to load.
          * @return The binary data as a ByteArray.
          */
-        fun loadExpectedBinaryData(filename: String): ByteArray {
-            val binInputStream: InputStream = this::class.java.getResourceAsStream("/$filename.bin")
+        fun loadExpectedBinaryData(filename: String, fileExtension: String): ByteArray {
+            val binInputStream: InputStream = this::class.java.getResourceAsStream("/$filename$fileExtension")
                 ?: throw IllegalArgumentException("File not found: $filename.bin")
 
             return binInputStream.readBytes()
@@ -45,11 +38,11 @@ class TestFileLoader {
          * @param filename The name of the resource file (without extension) to load.
          * @return A pair containing the parsed JSON data as type [T] and the binary data as a ByteArray.
          */
-        inline fun <reified T> loadTestData(filename: String): Pair<T, ByteArray> {
+        inline fun <reified T> loadTestData(filename: String, fileExtension: String = ".bin"): Pair<T, ByteArray> {
             val json = Json { ignoreUnknownKeys = true }
             val jsonData = loadJsonData(filename)
             val parsedJson = json.decodeFromString<T>(jsonData)
-            return Pair(parsedJson, loadExpectedBinaryData(filename))
+            return Pair(parsedJson, loadExpectedBinaryData(filename, fileExtension))
         }
     }
 }

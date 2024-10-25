@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class Extrinsic(
-    val tickets: List<Ticket>,
+    val tickets: List<TicketEnvelope>,
     val disputes: Dispute,
     val preimages: List<Preimage>,
     val assurances: List<AssuranceExtrinsic>,
