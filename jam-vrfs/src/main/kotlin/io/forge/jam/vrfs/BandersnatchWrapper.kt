@@ -65,7 +65,7 @@ object RustLibrary {
     external fun destroyProver(proverPtr: Long)
 
     @JvmStatic
-    external fun createVerifier(ringSize: Int): Long
+    external fun createVerifier(ringSize: Int, keys: List<ByteArray>): Long
 
     @JvmStatic
     external fun destroyVerifier(verifierPtr: Long)
@@ -89,10 +89,14 @@ object RustLibrary {
     external fun rustFree(ptr: Long, len: Long)
 }
 
-// Extensions to make the API more Kotlin-friendly
-fun RustLibrary.use(ringSize: Int, proverKeyIndex: Int, block: (Pair<Long, Long>) -> Unit) {
+fun RustLibrary.use(
+    publicKeys: List<ByteArray>,
+    ringSize: Int,
+    proverKeyIndex: Int,
+    block: (Pair<Long, Long>) -> Unit
+) {
     val proverPtr = createProver(ringSize, proverKeyIndex)
-    val verifierPtr = createVerifier(ringSize)
+    val verifierPtr = createVerifier(ringSize, publicKeys)
     try {
         block(Pair(proverPtr, verifierPtr))
     } finally {

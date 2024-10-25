@@ -3,10 +3,12 @@ package io.forge.jam.safrole
 import io.forge.jam.core.EpochMark
 import io.forge.jam.core.Extrinsic
 import io.forge.jam.core.JamErrorCode
+import io.forge.jam.vrfs.RustLibrary
+import io.forge.jam.vrfs.use
 import org.bouncycastle.crypto.digests.Blake2bDigest
 
 object SafroleStateTransition {
-    const val EPOCH_LENGTH: Long = 600
+    const val EPOCH_LENGTH: Long = 12
     const val TICKET_CUTOFF: Long = 500
 
     fun transition(
@@ -27,30 +29,36 @@ object SafroleStateTransition {
             val newEpoch = input.slot / EPOCH_LENGTH
             val newPhase = input.slot % EPOCH_LENGTH
 
+            println("Debug: prevEpoch=$prevEpoch, newEpoch=$newEpoch")
+            println("Debug: preState.tau=${preState.tau}, input.slot=${input.slot}")
+            println("Debug: EPOCH_LENGTH=$EPOCH_LENGTH")
+
             // Create mutable post state
             var epochMark: EpochMark? = null
             var ticketsMark: List<TicketBody>? = null
 
-            // 3. Update timeslot (eq. 46)
-            postState.tau = input.slot
-
-            // 4. Process entropy accumulation (eq. 67)
+            // 3. Process entropy accumulation (eq. 67)
             postState.eta[0] = blake2b256(preState.eta[0] + input.entropy)
 
-            // 5. Handle epoch transition if needed
+            println("Print 0")
+            // 4. Handle epoch transition if needed
             if (newEpoch > prevEpoch) {
+                println("Print 1")
                 val transitionResult = handleEpochTransition(postState, preState, prevPhase)
                 epochMark = transitionResult.first
                 ticketsMark = transitionResult.second
             }
 
-            // 6. Process ticket submissions if any (eq. 74-80)
+            // 5. Process ticket submissions if any (eq. 74-80)
             if (input.extrinsic.isNotEmpty()) {
                 val ticketResult = processExtrinsics(postState, input.extrinsic, newPhase)
                 if (ticketResult != null) {
                     return Pair(postState, SafroleOutput(err = ticketResult))
                 }
             }
+
+            // 6. Update timeslot
+            postState.tau = input.slot
 
             return Pair(
                 postState, SafroleOutput(
@@ -85,9 +93,15 @@ object SafroleStateTransition {
         // 5.4. Generate new ring root
         postState.gammaZ = generateRingRoot(postState.gammaK)
 
+
+        // 5.5. Generate epoch mark (eq. 72)
+        val epochMark = EpochMark(
+            entropy = postState.eta[1],
+            validators = postState.gammaK.map { it.bandersnatch }
+        )
         var ticketsMark: List<TicketBody>? = null
 
-        // 5.5. Determine sealing sequence (eq. 69)
+        // 5.6. Determine sealing sequence (eq. 69)
         if (prevPhase >= TICKET_CUTOFF && preState.gammaA.size == EPOCH_LENGTH.toInt()) {
             // Use accumulated tickets
             val ticketSequence = transformTicketsSequence(preState.gammaA)
@@ -103,12 +117,6 @@ object SafroleStateTransition {
             )
             postState.gammaS = TicketsOrKeys.fromKeys(fallbackKeys)
         }
-
-        // 5.6. Generate epoch mark (eq. 72)
-        val epochMark = EpochMark(
-            entropy = postState.eta[1],
-            validators = postState.gammaK.map { it.bandersnatch }
-        )
 
         // 5.7. Clear ticket accumulator
         postState.gammaA = emptyList()
@@ -217,6 +225,10 @@ object SafroleStateTransition {
 
     private fun generateRingRoot(validators: List<ValidatorKey>): ByteArray {
         // Implement Bandersnatch ring root generation
+        var bandersnatchKeys = validators.map { it.bandersnatch }
+        RustLibrary.use(bandersnatchKeys.size, 0) { (_, verifierPtr) ->
+
+        }
         TODO()
     }
 

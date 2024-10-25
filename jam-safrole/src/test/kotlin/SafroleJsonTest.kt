@@ -42,7 +42,7 @@ class SafroleJsonTest {
             assertEquals(
                 inputCase.output,
                 output,
-                "State transition outputs do not match"
+                "State transition outputs do not match on case $testCase"
             )
 
             // Compare the expected and actual post_state

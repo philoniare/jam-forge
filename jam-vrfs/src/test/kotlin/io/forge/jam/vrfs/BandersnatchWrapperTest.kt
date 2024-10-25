@@ -5,12 +5,20 @@ import kotlin.test.Test
 import kotlin.test.assertNotNull
 
 class RustLibraryTest {
+    private fun generateTestPublicKeys(size: Int): List<ByteArray> {
+        return List(size) { i ->
+            // Generate some deterministic test keys
+            ByteArray(32) { j -> (i * j % 256).toByte() }
+        }
+    }
+
     @Test
     fun testRingVrfSignAndVerify() {
         val ringSize = 1023
         val proverKeyIndex = 3
+        val publicKeys = generateTestPublicKeys(ringSize)
 
-        RustLibrary.use(ringSize, proverKeyIndex) { (proverPtr, verifierPtr) ->
+        RustLibrary.use(publicKeys, ringSize, proverKeyIndex) { (proverPtr, verifierPtr) ->
             val vrfInputData = "test input".toByteArray()
             val auxData = "test aux".toByteArray()
 
@@ -38,8 +46,9 @@ class RustLibraryTest {
     fun testMultipleSignatures() {
         val ringSize = 1023
         val proverKeyIndex = 3
+        val publicKeys = generateTestPublicKeys(ringSize)
 
-        RustLibrary.use(ringSize, proverKeyIndex) { (proverPtr, verifierPtr) ->
+        RustLibrary.use(publicKeys, ringSize, proverKeyIndex) { (proverPtr, verifierPtr) ->
             repeat(3) { i ->
                 val vrfInputData = "test input $i".toByteArray()
                 val auxData = "test aux $i".toByteArray()

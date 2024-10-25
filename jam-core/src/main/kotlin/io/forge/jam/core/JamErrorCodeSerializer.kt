@@ -8,16 +8,20 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 
-class JamErrorCodeSerializer : KSerializer<JamErrorCode> {
+object JamErrorCodeSerializer : KSerializer<JamErrorCode> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("JamErrorCode", PrimitiveKind.STRING)
 
     override fun serialize(encoder: Encoder, value: JamErrorCode) {
-        encoder.encodeString(value.name)
+        val serialName = value.name.lowercase().replace('_', '-')
+        encoder.encodeString(serialName)
     }
 
     override fun deserialize(decoder: Decoder): JamErrorCode {
         val string = decoder.decodeString()
-        return JamErrorCode.values().find { it.name == string }
-            ?: throw SerializationException("Unknown error code: $string")
+        return JamErrorCode.values().find { errorCode ->
+            val hyphenName = errorCode.name.lowercase().replace('_', '-')
+            val underscoreName = errorCode.name.lowercase().replace('-', '_')
+            string == hyphenName || string == underscoreName
+        } ?: throw SerializationException("Unknown error code: $string")
     }
 }

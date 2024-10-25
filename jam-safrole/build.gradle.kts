@@ -9,6 +9,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.5.0")
     implementation("org.bouncycastle:bcprov-jdk15on:1.70")
     implementation(project(":jam-core"))
+    implementation(project(":jam-vrfs"))
 
 
     testImplementation(kotlin("test"))

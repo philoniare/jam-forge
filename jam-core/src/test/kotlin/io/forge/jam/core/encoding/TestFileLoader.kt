@@ -45,9 +45,6 @@ class TestFileLoader {
             return Pair(parsedJson, loadExpectedBinaryData(filename, fileExtension))
         }
 
-        /**
-         * Alternative implementation using URL listing if file system access isn't available
-         */
         fun getTestFilenamesFromResources(folderName: String): List<String> {
             val classLoader = TestFileLoader::class.java.classLoader
             val resource = classLoader.getResource(folderName)

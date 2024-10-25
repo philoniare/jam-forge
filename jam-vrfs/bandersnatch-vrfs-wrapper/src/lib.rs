@@ -3,11 +3,11 @@ use ark_ec_vrfs::{prelude::ark_serialize, suites::bandersnatch::edwards::RingCon
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use bandersnatch::{IetfProof, Input, Output, Public, RingProof, Secret};
 use jni::objects::{JByteArray, JClass};
-use jni::sys::{jbyteArray, jint, jlong};
+use jni::sys::{jbyteArray, jint, jlong, jobjectArray};
 use jni::JNIEnv;
 use std::sync::OnceLock;
 
-const RING_SIZE: usize = 1023;
+const RING_SIZE: usize = 6;
 static RING_CTX: OnceLock<RingContext> = OnceLock::new();
 
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<bandersnatch::BandersnatchSha512Ell2>;
@@ -212,16 +212,22 @@ pub extern "system" fn Java_io_forge_jam_vrfs_RustLibrary_destroyProver(
 
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_RustLibrary_createVerifier(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     ring_size: jint,
+    keys: jobjectArray,
 ) -> jlong {
-    let ring_size = ring_size as usize;
+    let mut pub_keys = Vec::with_capacity(ring_size as usize);
+
+    for i in 0..ring_size {
+        let byte_array = env.get_object_array_element(keys, i).unwrap();
+        let byte_array = env.auto_local(byte_array);
+        let bytes = env.convert_byte_array(byte_array.as_obj()).unwrap();
+        pub_keys.push(bytes.to_vec());
+    }
 
     // Initialize the ring
-    let ring: Vec<_> = (0..ring_size)
-        .map(|i| Secret::from_seed(&i.to_le_bytes()).public())
-        .collect();
+    let ring: Vec<_> = pub_keys.iter().map(|key| Public::deserialize_compressed(key).unwrap()).collect();
 
     // Create the Verifier
     let verifier = Verifier::new(ring);
