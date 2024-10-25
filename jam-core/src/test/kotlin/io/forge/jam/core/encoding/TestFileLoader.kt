@@ -44,5 +44,38 @@ class TestFileLoader {
             val parsedJson = json.decodeFromString<T>(jsonData)
             return Pair(parsedJson, loadExpectedBinaryData(filename, fileExtension))
         }
+
+        /**
+         * Alternative implementation using URL listing if file system access isn't available
+         */
+        fun getTestFilenamesFromResources(folderName: String): List<String> {
+            val classLoader = TestFileLoader::class.java.classLoader
+            val resource = classLoader.getResource(folderName)
+                ?: throw IllegalStateException("Resources directory not found")
+
+            return when (resource.protocol) {
+                "file" -> {
+                    java.io.File(resource.path)
+                        .walk()
+                        .filter { it.isFile && it.name.endsWith(".json") }
+                        .map { it.nameWithoutExtension }
+                        .toList()
+                }
+
+                "jar" -> {
+                    val jarPath = resource.path.substringBefore("!")
+                    val fs =
+                        java.nio.file.FileSystems.newFileSystem(java.net.URI(jarPath), mutableMapOf<String, String>())
+                    fs.use { fileSystem ->
+                        java.nio.file.Files.walk(fileSystem.getPath("/"))
+                            .filter { it.toString().endsWith(".json") }
+                            .map { it.fileName.toString().removeSuffix(".json") }
+                            .toList()
+                    }
+                }
+
+                else -> throw IllegalStateException("Unsupported protocol: ${resource.protocol}")
+            }
+        }
     }
 }
