@@ -1,8 +1,8 @@
 package io.forge.jam.safrole
 
 import io.forge.jam.core.EpochMark
-import io.forge.jam.core.Extrinsic
 import io.forge.jam.core.JamErrorCode
+import io.forge.jam.core.TicketEnvelope
 import org.bouncycastle.crypto.digests.Blake2bDigest
 
 object SafroleStateTransition {
@@ -120,7 +120,7 @@ object SafroleStateTransition {
 
     private fun processExtrinsics(
         postState: SafroleState,
-        extrinsics: List<Extrinsic>,
+        tickets: List<TicketEnvelope>,
         phase: Long
     ): JamErrorCode? {
         // Skip if in epoch tail
@@ -130,26 +130,24 @@ object SafroleStateTransition {
 
         val newTickets = mutableListOf<TicketBody>()
 
-        for (extrinsic in extrinsics) {
-            for (ticket in extrinsic.tickets) {
-                // Verify ring VRF proof
-                if (!verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)) {
-                    return JamErrorCode.BAD_TICKET_PROOF
-                }
-
-                val ticketBody = TicketBody(
-                    id = extractVrfOutput(ticket.signature),
-                    attempt = ticket.attempt
-                )
-
-                // Check uniqueness (eq. 78)
-                if (postState.gammaA.any { it.id.contentEquals(ticketBody.id) } ||
-                    newTickets.any { it.id.contentEquals(ticketBody.id) }) {
-                    return JamErrorCode.DUPLICATE_TICKET
-                }
-
-                newTickets.add(ticketBody)
+        for (ticket in tickets) {
+            // Verify ring VRF proof
+            if (!verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)) {
+                return JamErrorCode.BAD_TICKET_PROOF
             }
+
+            val ticketBody = TicketBody(
+                id = extractVrfOutput(ticket.signature),
+                attempt = ticket.attempt
+            )
+
+            // Check uniqueness (eq. 78)
+            if (postState.gammaA.any { it.id.contentEquals(ticketBody.id) } ||
+                newTickets.any { it.id.contentEquals(ticketBody.id) }) {
+                return JamErrorCode.DUPLICATE_TICKET
+            }
+
+            newTickets.add(ticketBody)
         }
 
 
