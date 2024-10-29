@@ -5,9 +5,11 @@ use bandersnatch::{Input, Output, Public, RingProof, Secret};
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jbyte, jbyteArray, jint, jlong};
 use jni::JNIEnv;
+use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
-static RING_CTX: OnceLock<RingContext> = OnceLock::new();
+static RING_CONTEXTS: OnceLock<Mutex<HashMap<usize, RingContext>>> = OnceLock::new();
 const ERROR_RESULT: [u8; 32] = [0; 32];
 
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<bandersnatch::BandersnatchSha512Ell2>;
@@ -41,31 +43,35 @@ fn vrf_input_point(vrf_input_data: &[u8]) -> Input {
 }
 
 fn initialize_ring_context(srs_data: &[u8], ring_size: jint) -> Result<(), String> {
-    if RING_CTX.get().is_some() {
-        return Ok(());  // Already initialized
-    }
-    let ring_size = ring_size as usize;
-
     use bandersnatch::PcsParams;
+    let ring_size = ring_size as usize;
+    let contexts = RING_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut contexts = contexts.lock().unwrap();
 
-    let pcs_params = PcsParams::deserialize_uncompressed_unchecked(&mut &srs_data[..])
-        .map_err(|e| format!("Failed to deserialize PCS params: {}", e))?;
+    if !contexts.contains_key(&ring_size) {
+        let pcs_params = PcsParams::deserialize_uncompressed_unchecked(&mut &srs_data[..])
+            .map_err(|e| format!("Failed to deserialize PCS params: {}", e))?;
 
-    let ring_ctx = match RingContext::from_srs(ring_size, pcs_params) {
-        Ok(ctx) => ctx,
-        Err(e) => return Err(format!("Failed to create ring context: {:?}", e)),
-    };
+        let ring_ctx = RingContext::from_srs(ring_size, pcs_params)
+            .map_err(|e| format!("Failed to create ring context: {:?}", e))?;
 
-    RING_CTX.set(ring_ctx)
-        .map_err(|_| "Ring context already initialized".to_string())?;
+        contexts.insert(ring_size, ring_ctx);
+    }
 
     Ok(())
 }
 
 // "Static" ring context data
-fn ring_context() -> &'static RingContext {
-    RING_CTX.get()
-        .expect("Ring context not initialized. Call initialize_ring_context first.")
+fn ring_context(ring_size: jint) -> Arc<RingContext> {
+    let ring_size = ring_size as usize;
+    let contexts = RING_CONTEXTS.get()
+        .expect("Ring contexts not initialized")
+        .lock()
+        .unwrap();
+
+    contexts.get(&ring_size)
+        .expect("Ring context not found for given size")
+        .clone().into()
 }
 
 #[no_mangle]
@@ -107,30 +113,27 @@ impl Prover {
         }
     }
 
-    /// Anonymous VRF signature.
-    ///
-    /// Used for tickets submission.
-    pub fn ring_vrf_sign(&self, vrf_input_data: &[u8], aux_data: &[u8]) -> Vec<u8> {
-        use ark_ec_vrfs::ring::Prover as _;
-
-        let input = vrf_input_point(vrf_input_data);
-        let output = self.secret.output(input);
-
-        // Backend currently requires the wrapped type (plain affine points)
-        let pts: Vec<_> = self.ring.iter().map(|pk| pk.0).collect();
-
-        // Proof construction
-        let ring_ctx = ring_context();
-        let prover_key = ring_ctx.prover_key(&pts);
-        let prover = ring_ctx.prover(prover_key, self.prover_idx);
-        let proof = self.secret.prove(input, output, aux_data, &prover);
-
-        // Output and Ring Proof bundled together (as per section 2.2)
-        let signature = RingVrfSignature { output, proof };
-        let mut buf = Vec::new();
-        signature.serialize_compressed(&mut buf).unwrap();
-        buf
-    }
+    // pub fn ring_vrf_sign(&self, vrf_input_data: &[u8], aux_data: &[u8]) -> Vec<u8> {
+    //     use ark_ec_vrfs::ring::Prover as _;
+    //
+    //     let input = vrf_input_point(vrf_input_data);
+    //     let output = self.secret.output(input);
+    //
+    //     // Backend currently requires the wrapped type (plain affine points)
+    //     let pts: Vec<_> = self.ring.iter().map(|pk| pk.0).collect();
+    //
+    //     // Proof construction
+    //     let ring_ctx = ring_context();
+    //     let prover_key = ring_ctx.prover_key(&pts);
+    //     let prover = ring_ctx.prover(prover_key, self.prover_idx);
+    //     let proof = self.secret.prove(input, output, aux_data, &prover);
+    //
+    //     // Output and Ring Proof bundled together (as per section 2.2)
+    //     let signature = RingVrfSignature { output, proof };
+    //     let mut buf = Vec::new();
+    //     signature.serialize_compressed(&mut buf).unwrap();
+    //     buf
+    // }
 }
 
 // Verifier actor.
@@ -139,10 +142,10 @@ struct Verifier {
 }
 
 impl Verifier {
-    fn new(ring: Vec<Public>) -> Self {
+    fn new(ring: Vec<Public>, ring_size: jint) -> Self {
         // Backend currently requires the wrapped type (plain affine points)
         let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
-        let verifier_key = ring_context().verifier_key(&pts);
+        let verifier_key = ring_context(ring_size).verifier_key(&pts);
         let commitment = verifier_key.commitment();
         Self { commitment }
     }
@@ -157,6 +160,7 @@ impl Verifier {
         attempt: u8,
         signature: &[u8],
         commitment: &[u8],
+        ring_size: jint,
     ) -> Result<[u8; 32], VrfError> {
         use ark_ec_vrfs::ring::Verifier as _;
 
@@ -170,7 +174,7 @@ impl Verifier {
         let input = vrf_input_point(&input_data);
         let output = signature.output;
 
-        let ring_ctx = ring_context();
+        let ring_ctx = ring_context(ring_size);
 
         let verifier_key = ring_ctx.verifier_key_from_commitment(commitment);
         let verifier = ring_ctx.verifier(verifier_key);
@@ -279,7 +283,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
     }
 
     // Step 6: Create the Verifier
-    let verifier = Verifier::new(ring);
+    let verifier = Verifier::new(ring, ring_size);
 
     // Step 7: Serialize the commitment
     let mut buf = Vec::new();
@@ -312,44 +316,44 @@ fn throw_exception(mut env: JNIEnv, message: &str) -> jbyteArray {
     std::ptr::null_mut()
 }
 
-#[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_proverRingVrfSign(
-    env: JNIEnv,
-    _class: JClass,
-    prover_ptr: jlong,
-    vrf_input_data: JByteArray,
-    aux_data: JByteArray,
-) -> jbyteArray {
-    if prover_ptr == 0 {
-        return throw_exception(env, "Null prover pointer");
-    }
-
-    unsafe {
-        let prover = &*(prover_ptr as *mut Prover);
-
-        let vrf_input_data = match env.convert_byte_array(vrf_input_data) {
-            Ok(data) => data,
-            Err(e) => return throw_exception(env, &format!("Failed to convert input data: {}", e)),
-        };
-
-        let aux_data = match env.convert_byte_array(aux_data) {
-            Ok(data) => data,
-            Err(e) => return throw_exception(env, &format!("Failed to convert aux data: {}", e)),
-        };
-
-        let signature = match std::panic::catch_unwind(|| {
-            prover.ring_vrf_sign(&vrf_input_data, &aux_data)
-        }) {
-            Ok(sig) => sig,
-            Err(_) => return throw_exception(env, "Panic during signature generation"),
-        };
-
-        match env.byte_array_from_slice(&signature) {
-            Ok(array) => array.into_raw(),
-            Err(e) => throw_exception(env, &format!("Failed to create output array: {}", e)),
-        }
-    }
-}
+// #[no_mangle]
+// pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_proverRingVrfSign(
+//     env: JNIEnv,
+//     _class: JClass,
+//     prover_ptr: jlong,
+//     vrf_input_data: JByteArray,
+//     aux_data: JByteArray,
+// ) -> jbyteArray {
+//     if prover_ptr == 0 {
+//         return throw_exception(env, "Null prover pointer");
+//     }
+//
+//     unsafe {
+//         let prover = &*(prover_ptr as *mut Prover);
+//
+//         let vrf_input_data = match env.convert_byte_array(vrf_input_data) {
+//             Ok(data) => data,
+//             Err(e) => return throw_exception(env, &format!("Failed to convert input data: {}", e)),
+//         };
+//
+//         let aux_data = match env.convert_byte_array(aux_data) {
+//             Ok(data) => data,
+//             Err(e) => return throw_exception(env, &format!("Failed to convert aux data: {}", e)),
+//         };
+//
+//         let signature = match std::panic::catch_unwind(|| {
+//             prover.ring_vrf_sign(&vrf_input_data, &aux_data)
+//         }) {
+//             Ok(sig) => sig,
+//             Err(_) => return throw_exception(env, "Panic during signature generation"),
+//         };
+//
+//         match env.byte_array_from_slice(&signature) {
+//             Ok(array) => array.into_raw(),
+//             Err(e) => throw_exception(env, &format!("Failed to create output array: {}", e)),
+//         }
+//     }
+// }
 
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVrfVerify(
@@ -359,6 +363,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     attempt: jbyte,
     signature: JByteArray,
     commitment: JByteArray,
+    ring_size: jint,
 ) -> jbyteArray {
     let return_error = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
@@ -387,7 +392,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     let attempt_value = attempt as u8;
 
     // Perform verification
-    match Verifier::ring_vrf_verify(&entropy_data, attempt_value, &signature_data, &commitment_data) {
+    match Verifier::ring_vrf_verify(&entropy_data, attempt_value, &signature_data, &commitment_data, ring_size) {
         Ok(output_hash) => match env.byte_array_from_slice(&output_hash) {
             Ok(array) => array.into_raw(),
             Err(_) => return_error(&mut env, "Failed to create output array")

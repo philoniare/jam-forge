@@ -47,7 +47,8 @@ class BandersnatchWrapper(ringSize: Int) {
             entropy: ByteArray,
             attempt: Long,
             signature: ByteArray,
-            commitment: ByteArray
+            commitment: ByteArray,
+            ringSize: Int
         ): ByteArray
     }
 
@@ -69,11 +70,12 @@ class BandersnatchWrapper(ringSize: Int) {
         entropy: ByteArray,
         attempt: Long,
         signature: ByteArray,
-        commitment: ByteArray
+        commitment: ByteArray,
+        ringSize: Int
     ): ByteArray {
         // If result is all zeros, verification failed
         try {
-            val result = verifierRingVrfVerify(entropy, attempt, signature, commitment)
+            val result = verifierRingVrfVerify(entropy, attempt, signature, commitment, ringSize)
             return result
         } catch (e: Exception) {
             return byteArrayOf(0)

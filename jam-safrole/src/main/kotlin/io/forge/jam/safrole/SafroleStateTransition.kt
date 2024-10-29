@@ -242,7 +242,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         entryIndex: Long
     ): ByteArray {
         // Implement Ring VRF proof verification
-        return bandersnatchWrapper.verifyRingProof(entropy, entryIndex, proof, ringRoot)
+        return bandersnatchWrapper.verifyRingProof(entropy, entryIndex, proof, ringRoot, config.ringSize)
     }
 
 
