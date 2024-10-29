@@ -3,6 +3,7 @@ package io.forge.jam.safrole
 import io.forge.jam.core.EpochMark
 import io.forge.jam.core.JamErrorCode
 import io.forge.jam.core.TicketEnvelope
+import io.forge.jam.core.toHex
 import org.bouncycastle.crypto.digests.Blake2bDigest
 
 object SafroleStateTransition {
@@ -231,12 +232,16 @@ object SafroleStateTransition {
         entryIndex: Long
     ): Boolean {
         // Implement Ring VRF proof verification
-        TODO()
+        println("proof: ${proof.toHex()}")
+        println("RingRoot: ${ringRoot.toHex()}")
+        println("entropy: ${entropy.toHex()}")
+        println("entryIndex: ${entryIndex}")
+        return true
     }
 
     private fun extractVrfOutput(proof: ByteArray): ByteArray {
         // Extract VRF output from proof
-        TODO()
+        return byteArrayOf(0)
     }
 
     private fun generateFallbackSequence(

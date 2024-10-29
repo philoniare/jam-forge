@@ -27,7 +27,6 @@ class RustLibraryTest {
             assertNotNull(commitmentBytes, "Commitment should not be null")
 
             val commitmentHex = commitmentBytes.joinToString("") { "%02x".format(it) }
-            println("commitmentHex: $commitmentHex")
 
             val expectedGammaZ =
                 "95f318fbd93287e8c3987874cded9b29adae70cf109c4321636fd9faeea003f8140710df8894ffbd6c84eaef4ff7cb58b17892749bb3cb3efe528eef951c688f7e83d3ede96f432de64f0b07e5c3cf0232f79ea4c221b7407f9a2348c0a0110692e630ae2b14e758ab0960e372172203f4c9a41777dadd529971d7ab9d23ab29fe0e9c85ec450505dde7f5ac038274cf"

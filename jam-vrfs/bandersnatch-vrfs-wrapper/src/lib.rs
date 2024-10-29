@@ -1,7 +1,7 @@
 use ark_ec_vrfs::suites::bandersnatch::edwards as bandersnatch;
 use ark_ec_vrfs::{prelude::ark_serialize, suites::bandersnatch::edwards::RingContext};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use bandersnatch::{IetfProof, Input, Output, Public, RingProof, Secret};
+use bandersnatch::{Input, Output, Public, RingProof, Secret};
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jbyteArray, jint, jlong};
 use jni::JNIEnv;
@@ -12,16 +12,7 @@ static RING_CTX: OnceLock<RingContext> = OnceLock::new();
 
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<bandersnatch::BandersnatchSha512Ell2>;
 
-// This is the IETF `Prove` procedure output as described in section 2.2
-// of the Bandersnatch VRFs specification
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
-struct IetfVrfSignature {
-    output: Output,
-    proof: IetfProof,
-}
 
-// This is the IETF `Prove` procedure output as described in section 4.2
-// of the Bandersnatch VRFs specification
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 struct RingVrfSignature {
     output: Output,
@@ -29,7 +20,6 @@ struct RingVrfSignature {
     proof: RingProof,
 }
 
-// Construct VRF Input Point from arbitrary data (section 1.2)
 fn vrf_input_point(vrf_input_data: &[u8]) -> Input {
     Input::new(vrf_input_data).unwrap()
 }
