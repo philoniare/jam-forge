@@ -67,13 +67,13 @@ object RustLibrary {
         attempt: Long,
         signature: ByteArray,
         commitment: ByteArray
-    ): Boolean {
+    ): ByteArray {
+        // If result is all zeros, verification failed
         try {
             val result = verifierRingVrfVerify(entropy, attempt, signature, commitment)
-            // If result is all zeros, verification failed
-            return !result.all { it == 0.toByte() }
+            return result
         } catch (e: Exception) {
-            return false
+            return byteArrayOf(0)
         }
     }
 

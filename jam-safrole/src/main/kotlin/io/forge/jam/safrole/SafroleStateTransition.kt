@@ -139,12 +139,13 @@ object SafroleStateTransition {
 
 
             // Verify ring VRF proof
-            if (!verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)) {
+            val ticketId = verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)
+            if (ticketId.all { it == 0.toByte() }) {
                 return JamErrorCode.BAD_TICKET_PROOF
             }
-
+            
             val ticketBody = TicketBody(
-                id = extractVrfOutput(ticket.signature),
+                id = ticketId,
                 attempt = ticket.attempt
             )
 
@@ -158,7 +159,8 @@ object SafroleStateTransition {
 
 
         // Verify ordering
-        if (!isOrderedByIdentifier(newTickets)) {
+        if (!hasStrictlyIncreasingIdentifiers(newTickets)) {
+            println("NewTickets: $newTickets")
             return JamErrorCode.BAD_TICKET_ORDER
         }
 
@@ -173,13 +175,14 @@ object SafroleStateTransition {
     }
 
     /**
-     * Implements equation 77 from the gray paper.
-     * Verifies that tickets are ordered by their identifier (VRF output).
+     * Implements equation 77 from gray paper.
+     * Verifies that tickets are strictly ordered by their VRF output identifier
+     * with no duplicates allowed.
      *
      * @param tickets The list of tickets to check ordering for
-     * @return true if tickets are properly ordered by identifier, false otherwise
+     * @return true if tickets are in strict ascending order by id, false otherwise
      */
-    private fun isOrderedByIdentifier(tickets: List<TicketBody>): Boolean {
+    private fun hasStrictlyIncreasingIdentifiers(tickets: List<TicketBody>): Boolean {
         if (tickets.size <= 1) return true
 
         // Compare each pair of adjacent tickets
@@ -187,10 +190,8 @@ object SafroleStateTransition {
             val current = tickets[i].id
             val next = tickets[i + 1].id
 
-            // Compare byte arrays lexicographically
-            // Must be strictly increasing (no equality allowed as per eq. 77)
-            val comparison = current.compareTo(next)
-            if (comparison >= 0) {  // If current is greater than or equal to next
+            // Must be strictly increasing (eq. 77: [x_y __ x ∈ n])
+            if (current.compareTo(next) >= 0) {
                 return false
             }
         }
@@ -231,7 +232,7 @@ object SafroleStateTransition {
         ringRoot: ByteArray,
         entropy: ByteArray,
         entryIndex: Long
-    ): Boolean {
+    ): ByteArray {
         // Implement Ring VRF proof verification
         return RustLibrary.verifyRingProof(entropy, entryIndex, proof, ringRoot)
     }
