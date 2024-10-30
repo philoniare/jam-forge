@@ -1,7 +1,7 @@
 import org.bouncycastle.jcajce.provider.digest.Blake2b
 
 // Blake2b-256 hash function
-fun hash(data: ByteArray): ByteArray {
+fun blakeHash(data: ByteArray): ByteArray {
     val digest = Blake2b.Blake2b256()
     digest.update(data, 0, data.size)
     return digest.digest()
@@ -22,7 +22,7 @@ fun leaf(k: ByteArray, v: ByteArray): ByteArray {
         byteArrayOf(head) + k.sliceArray(0 until k.size - 1) + v + ByteArray(32 - v.size)
     } else {
         val head = 0b11.toByte()
-        byteArrayOf(head) + k.sliceArray(0 until k.size - 1) + hash(v)
+        byteArrayOf(head) + k.sliceArray(0 until k.size - 1) + blakeHash(v)
     }
 }
 
@@ -51,5 +51,5 @@ fun merkle(kvs: List<Pair<ByteArray, ByteArray>>, i: Int = 0): ByteArray {
         branch(merkle(l, i + 1), merkle(r, i + 1))
     }
     require(encoded.size == 64) { "Encoded length must be 64 bytes" }
-    return hash(encoded)
+    return blakeHash(encoded)
 }

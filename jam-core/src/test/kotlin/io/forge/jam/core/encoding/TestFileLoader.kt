@@ -11,11 +11,13 @@ class TestFileLoader {
          * @param filename The name of the JSON file (without extension) to load.
          * @return The JSON data as a string.
          */
-        fun loadJsonData(filename: String): String {
+        inline fun <reified T> loadJsonData(filename: String): T {
+            val json = Json { ignoreUnknownKeys = true }
             val jsonInputStream: InputStream = this::class.java.getResourceAsStream("/$filename.json")
                 ?: throw IllegalArgumentException("File not found: $filename.json")
-
-            return jsonInputStream.bufferedReader().use { it.readText() }
+            val jsonData = jsonInputStream.bufferedReader().use { it.readText() }
+            val parsedJson = json.decodeFromString<T>(jsonData)
+            return parsedJson
         }
 
         /**
@@ -39,10 +41,7 @@ class TestFileLoader {
          * @return A pair containing the parsed JSON data as type [T] and the binary data as a ByteArray.
          */
         inline fun <reified T> loadTestData(filename: String, fileExtension: String = ".bin"): Pair<T, ByteArray> {
-            val json = Json { ignoreUnknownKeys = true }
-            val jsonData = loadJsonData(filename)
-            val parsedJson = json.decodeFromString<T>(jsonData)
-            return Pair(parsedJson, loadExpectedBinaryData(filename, fileExtension))
+            return Pair(loadJsonData<T>(filename), loadExpectedBinaryData(filename, fileExtension))
         }
 
         fun getTestFilenamesFromResources(folderName: String): List<String> {
