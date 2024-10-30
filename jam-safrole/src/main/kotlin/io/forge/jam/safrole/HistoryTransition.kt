@@ -1,10 +1,15 @@
 package io.forge.jam.safrole
 
+import org.bouncycastle.crypto.digests.KeccakDigest
+
 class HistoryTransition {
     companion object {
         const val BLOCK_HISTORY_LIMIT = 8
         const val MAX_CORES = 341
         val ZERO_HASH = ByteArray(32) { 0 }
+
+        // MMR node prefix as
+        private const val MMR_NODE_PREFIX = "\$mmr_node"
     }
 
     fun stf(input: HistoricalInput, preState: HistoricalState): HistoricalState {
@@ -50,16 +55,43 @@ class HistoryTransition {
         }
     }
 
+    /**
+     * Append a new peak to the MMR following the mountain range rules.
+     * Each peak represents a perfect binary tree of size 2^i where i is the index.
+     * When merging, we combine adjacent peaks of the same size and push the result up.
+     */
     private fun appendToMmr(previousMmr: HistoricalMmr, newPeak: ByteArray): HistoricalMmr {
-        return when {
-            previousMmr.peaks.isEmpty() -> HistoricalMmr(peaks = listOf(newPeak))
-            previousMmr.peaks.all { it == null } -> HistoricalMmr(peaks = listOf(newPeak))
+        val peaks = previousMmr.peaks.toMutableList()
+        appendRecursive(peaks, newPeak, 0)
+        return HistoricalMmr(peaks = peaks)
+    }
+
+    private fun appendRecursive(peaks: MutableList<ByteArray?>, data: ByteArray, index: Int) {
+        when {
+            // If we're beyond current peaks size, add new peak
+            index >= peaks.size -> {
+                peaks.add(data)
+            }
+            // If current position has a peak, merge and go up
+            peaks[index] != null -> {
+                val current = peaks[index]!!
+                peaks[index] = null
+                // Simply concatenate and hash the peaks
+                val merged = keccakHash(current + data)
+                appendRecursive(peaks, merged, index + 1)
+            }
+            // If current position is empty (null), place peak here
             else -> {
-                // Example logic - this should be replaced with proper MMR merge logic
-                val lastNonNullIndex = previousMmr.peaks.indexOfLast { it != null }
-                val newPeaks = previousMmr.peaks.take(lastNonNullIndex + 1) + newPeak
-                HistoricalMmr(peaks = newPeaks)
+                peaks[index] = data
             }
         }
+    }
+
+    private fun keccakHash(data: ByteArray): ByteArray {
+        val digest = KeccakDigest(256)
+        val output = ByteArray(32)
+        digest.update(data, 0, data.size)
+        digest.doFinal(output, 0)
+        return output
     }
 }

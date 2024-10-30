@@ -38,7 +38,7 @@ class HistoryJsonTest {
         )
 
         // Compare MMR
-//        assertMmrEquals(expected.mmr, actual.mmr, "$path.mmr")
+        assertMmrEquals(expected.mmr, actual.mmr, "$path.mmr")
 
         // Compare reported packages
         assertEquals(
