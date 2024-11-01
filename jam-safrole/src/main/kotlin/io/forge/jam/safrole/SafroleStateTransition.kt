@@ -103,7 +103,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
         // 5.3. Load new pending validators
         postState.gammaK = preState.iota.map { validator ->
-            if (input.postOffenders.any { offender -> offender.contentEquals(validator.ed25519) }) {
+            if (input.postOffenders?.any { offender -> offender.contentEquals(validator.ed25519) } == true) {
                 // Replace offender's entire validator key with zeros
                 ValidatorKey(
                     bandersnatch = ByteArray(32) { 0 },

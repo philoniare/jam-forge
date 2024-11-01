@@ -1,5 +1,6 @@
 package io.forge.jam.safrole
 
+import io.forge.jam.core.Dispute
 import io.forge.jam.core.TicketEnvelope
 import io.forge.jam.core.serializers.ByteArrayHexSerializer
 import io.forge.jam.core.serializers.ByteArrayListHexSerializer
@@ -8,12 +9,15 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class SafroleInput(
-    val slot: Long,
+    val slot: Long = 0,
+
     @Serializable(with = ByteArrayHexSerializer::class)
-    val entropy: ByteArray,
-    val extrinsic: List<TicketEnvelope>,
+    val entropy: ByteArray = byteArrayOf(0),
+    val extrinsic: List<TicketEnvelope> = emptyList(),
 
     @SerialName("post_offenders")
     @Serializable(with = ByteArrayListHexSerializer::class)
-    val postOffenders: List<ByteArray>,
+    val postOffenders: List<ByteArray>? = null,
+
+    val disputes: Dispute? = null
 )

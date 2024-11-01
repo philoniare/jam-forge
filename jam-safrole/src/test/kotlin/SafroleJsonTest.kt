@@ -41,7 +41,7 @@ class SafroleJsonTest {
 
     @Test
     fun testTinySafrole() {
-        val folderName = "tiny"
+        val folderName = "safrole/tiny"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
 
         for (testCase in testCases) {
@@ -58,7 +58,6 @@ class SafroleJsonTest {
                 )
             )
             val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
-            println("Output: $output")
 
             // Compare the expected and actual output
             assertSafroleOutputEquals(inputCase.output, output, testCase)
@@ -73,7 +72,7 @@ class SafroleJsonTest {
 
     @Test
     fun testFullSafrole() {
-        val folderName = "full"
+        val folderName = "safrole/full"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
 
         for (testCase in testCases) {
