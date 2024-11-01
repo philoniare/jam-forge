@@ -30,4 +30,13 @@ class ValidatorKey(
         result = 31 * result + metadata.contentHashCode()
         return result
     }
+
+    fun copy(): ValidatorKey {
+        return ValidatorKey(
+            bandersnatch = bandersnatch.clone(),
+            ed25519 = ed25519.clone(),
+            bls = bls.clone(),
+            metadata = metadata.clone()
+        )
+    }
 }

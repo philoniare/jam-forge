@@ -45,4 +45,20 @@ data class SafroleState(
     @Serializable(with = NullableAvailabilityAssignmentListSerializer::class)
     var rho: MutableList<AvailabilityAssignment?>? = null,
     var psi: Psi? = null
-)
+) {
+    fun deepCopy(): SafroleState {
+        return SafroleState(
+            tau = tau,
+            eta = eta.map { it.clone() }.toMutableList(),
+            lambda = lambda.map { it.copy() },
+            kappa = kappa.map { it.copy() },
+            gammaK = gammaK.map { it.copy() },
+            iota = iota.map { it.copy() },
+            gammaA = gammaA.map { it.copy() },
+            gammaS = gammaS.copy(),
+            gammaZ = gammaZ.clone(),
+            rho = rho?.map { it?.copy() }?.toMutableList(),
+            psi = psi?.copy()
+        )
+    }
+}

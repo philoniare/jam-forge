@@ -120,3 +120,37 @@ fun encodeOptionalByteArray(value: ByteArray?): ByteArray {
         existenceFlag + value
     }
 }
+
+fun List<Culprit>.validateCulprits(): OptionalResult<Unit, JamErrorCode> {
+    // Check if empty
+    if (isEmpty()) {
+        return OptionalResult.Ok(Unit)
+    }
+
+    // Check that keys are strictly increasing (implies both sorted and unique)
+    for (i in 0 until size - 1) {
+        // Compare ByteArrays lexicographically
+        val comparison = this[i].key.compareUnsigned(this[i + 1].key)
+        if (comparison >= 0) { // If current >= next or equal (not strictly increasing)
+            return OptionalResult.Err(JamErrorCode.CULPRITS_NOT_SORTED_UNIQUE)
+        }
+    }
+
+    return OptionalResult.Ok(Unit)
+}
+
+// Extension function to compare ByteArrays unsigned
+fun ByteArray.compareUnsigned(other: ByteArray): Int {
+    val minLength = minOf(this.size, other.size)
+
+    for (i in 0 until minLength) {
+        val b1 = this[i].toInt() and 0xFF
+        val b2 = other[i].toInt() and 0xFF
+
+        if (b1 != b2) {
+            return b1 - b2
+        }
+    }
+
+    return this.size - other.size
+}

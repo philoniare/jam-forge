@@ -18,7 +18,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         preState: SafroleState
     ): Pair<SafroleState, SafroleOutput> {
         try {
-            val postState = preState.copy()
+            val postState = preState.deepCopy()
 
             // Create mutable post state
             var epochMark: EpochMark? = null
@@ -31,7 +31,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 offendersMark = offendersList
 
                 if (error != null) {
-                    return Pair(postState, SafroleOutput(err = error))
+                    return Pair(preState, SafroleOutput(err = error))
                 }
 
                 // If only processing disputes, return immediately
@@ -104,16 +104,123 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         }
     }
 
+    fun validateDisputes(
+        disputes: Dispute,
+        state: SafroleState,
+    ): JamErrorCode? {
+        // 1. First validate signatures
+        // This comes from equation 101 which requires valid signatures:
+        // "s ∈ E_k ⟨X_G ⌢ r⟩"
+        var isOrderValid = true
+        val culprits = disputes.culprits
+        if (culprits.isNotEmpty()) {
+            for (i in 0 until culprits.size - 1) {
+                val culprit = culprits[i]
+                val message = JAM_GUARANTEE.toByteArray() + culprit.target
+
+                // Verify culprit signature
+                if (!verifyEd25519Signature(
+                        publicKey = culprit.key,
+                        message = message,
+                        signature = culprit.signature
+                    )
+                ) {
+                    return JamErrorCode.BAD_SIGNATURE
+                }
+                // From equation 104: "c = [k __ {r, k, s} ∈ c]"
+                if (culprits[i].key.compareUnsigned(culprits[i + 1].key) >= 0) {
+                    isOrderValid = false
+
+                }
+            }
+        }
+
+        // 2. Validate culprits ordering
+        if (!isOrderValid) {
+            return JamErrorCode.CULPRITS_NOT_SORTED_UNIQUE
+        }
+
+
+        for (verdict in disputes.verdicts) {
+            val target = verdict.target
+            // Verify all vote signatures
+            for (vote in verdict.votes) {
+                val validatorSet = if (verdict.age == 0L) {
+                    state.kappa
+                } else {
+                    state.lambda
+                }
+                val validator = validatorSet[vote.index.toInt()]
+                val message = if (vote.vote) {
+                    JAM_VALID.toByteArray() + target
+                } else {
+                    JAM_INVALID.toByteArray() + target
+                }
+
+                if (!verifyEd25519Signature(
+                        publicKey = validator.ed25519,
+                        message = message,
+                        signature = vote.signature
+                    )
+                ) {
+                    return JamErrorCode.BAD_SIGNATURE
+                }
+            }
+
+            // Validate if any verdict target has already been judged
+            println("Contains: ${target.toHex()} in ${state.psi?.psiB}: ${state.psi?.psiB?.contains(target)}")
+            if (state.psi?.psiG?.contains(target) == true ||
+                state.psi?.psiB?.contains(target) == true ||
+                state.psi?.psiW?.contains(target) == true
+            ) {
+                return JamErrorCode.ALREADY_JUDGED
+            }
+
+            // Validate enough culprits for all-negative verdicts
+            val negativeVotes = verdict.votes.count { !it.vote }
+            if (negativeVotes == verdict.votes.size) {
+                if (disputes.culprits.size < 2) {
+                    return JamErrorCode.NOT_ENOUGH_CULPRITS
+                }
+            }
+        }
+
+        for (fault in disputes.faults) {
+            val message = if (fault.vote) {
+                JAM_VALID.toByteArray() + fault.target
+            } else {
+                JAM_INVALID.toByteArray() + fault.target
+            }
+
+            if (!verifyEd25519Signature(
+                    publicKey = fault.key,
+                    message = message,
+                    signature = fault.signature
+                )
+            ) {
+                return JamErrorCode.BAD_SIGNATURE
+            }
+        }
+
+        return null
+    }
+
     private fun processDisputes(dispute: Dispute, postState: SafroleState): Pair<List<ByteArray>, JamErrorCode?> {
         // Track new offenders for the mark
         val offendersMark = mutableListOf<ByteArray>()
+        // Validate culprits
+        val errorResult = validateDisputes(dispute, postState)
+        if (errorResult != null) {
+            return Pair(offendersMark, errorResult)
+        }
+
         // Initialize post_state variables
         if (postState.psi == null) {
             postState.psi = Psi(
-                psiG = mutableListOf(),
-                psiB = mutableListOf(),
-                psiW = mutableListOf(),
-                psiO = mutableListOf()
+                psiG = ByteArrayList(),
+                psiB = ByteArrayList(),
+                psiW = ByteArrayList(),
+                psiO = ByteArrayList()
             )
         }
 
@@ -136,26 +243,6 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 postState.lambda
             }
 
-            // Verify all vote signatures
-            for (vote in verdict.votes) {
-                val validator = validatorSet[vote.index.toInt()]
-                val message = if (vote.vote) {
-                    JAM_VALID.toByteArray() + reportHash
-                } else {
-                    JAM_INVALID.toByteArray() + reportHash
-                }
-
-                val isSigValid = verifyEd25519Signature(
-                    publicKey = validator.ed25519,
-                    message = message,
-                    signature = vote.signature
-                )
-                if (!isSigValid) {
-                    // Return
-                    return Pair(offendersMark, JamErrorCode.BAD_SIGNATURE)
-                }
-            }
-
             // Calculate vote thresholds
             val numValidators = validatorSet.size
             val superMajority = (2 * numValidators / 3) + 1
@@ -171,18 +258,6 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
         // Process culprits
         for (culprit in dispute.culprits) {
-            val message = JAM_GUARANTEE.toByteArray() + culprit.target
-
-            // Verify culprit signature
-            val isSigValid = verifyEd25519Signature(
-                publicKey = culprit.key,
-                message = message,
-                signature = culprit.signature
-            )
-            if (!isSigValid) {
-                return Pair(offendersMark, JamErrorCode.BAD_SIGNATURE)
-            }
-
             val targetInPsiB = postState.psi!!.psiB.any { it.contentEquals(culprit.target) }
             val keyInPsiO = postState.psi!!.psiO.any { it.contentEquals(culprit.key) }
 
@@ -195,22 +270,6 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
         // Process faults
         for (fault in dispute.faults) {
-            val message = if (fault.vote) {
-                JAM_VALID.toByteArray() + fault.target
-            } else {
-                JAM_INVALID.toByteArray() + fault.target
-            }
-
-            // Verify fault signature
-            val isSigValid = verifyEd25519Signature(
-                publicKey = fault.key,
-                message = message,
-                signature = fault.signature
-            )
-            if (!isSigValid) {
-                return Pair(offendersMark, JamErrorCode.BAD_SIGNATURE)
-            }
-
             // Check if vote conflicts with verdict
             val isBad = fault.target in postState.psi!!.psiB
             val isGood = fault.target in postState.psi!!.psiG

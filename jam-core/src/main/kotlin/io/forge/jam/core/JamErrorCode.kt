@@ -28,4 +28,13 @@ enum class JamErrorCode {
 
     @SerialName("bad-signature")
     BAD_SIGNATURE,
+
+    @SerialName("not-enough-culprits")
+    NOT_ENOUGH_CULPRITS,
+
+    @SerialName("culprits-not-sorted-unique")
+    CULPRITS_NOT_SORTED_UNIQUE,
+
+    @SerialName("already-judged")
+    ALREADY_JUDGED,
 }
