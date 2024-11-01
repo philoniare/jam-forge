@@ -1,9 +1,6 @@
 package io.forge.jam.safrole
 
-import io.forge.jam.core.Dispute
-import io.forge.jam.core.EpochMark
-import io.forge.jam.core.JamErrorCode
-import io.forge.jam.core.TicketEnvelope
+import io.forge.jam.core.*
 import io.forge.jam.vrfs.BandersnatchWrapper
 import org.bouncycastle.crypto.digests.Blake2bDigest
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
@@ -173,8 +170,11 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 signature = culprit.signature
             )
 
+            val targetInPsiB = postState.psi!!.psiB.any { it.contentEquals(culprit.target) }
+            val keyInPsiO = postState.psi!!.psiO.any { it.contentEquals(culprit.key) }
+
             // Add culprit if report is bad and validator not already punished
-            if (culprit.target in postState.psi!!.psiB && culprit.key !in postState.psi!!.psiO) {
+            if (targetInPsiB && !keyInPsiO) {
                 postState.psi!!.psiO.add(culprit.key)
                 offendersMark.add(culprit.key)
             }
@@ -202,6 +202,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
             // Add fault if vote conflicts and validator not already punished
             if ((isBad != isGood) == fault.vote && fault.key !in postState.psi!!.psiO) {
                 postState.psi!!.psiO.add(fault.key)
+                println("Adding fault: ${fault.key.toHex()}")
                 offendersMark.add(fault.key)
             }
         }
