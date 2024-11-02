@@ -45,3 +45,5 @@ bin/
 **/target/
 **/Cargo.lock
 **/*.dylib
+
+.editorconfig
