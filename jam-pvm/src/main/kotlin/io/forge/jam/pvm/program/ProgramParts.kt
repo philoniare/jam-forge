@@ -20,7 +20,7 @@ data class ProgramParts(
     var debugLinePrograms: ArcBytes = ArcBytes.empty()
 ) {
     companion object {
-        private val BLOB_MAGIC: ByteArray = byteArrayOf('P'.code.toByte(), 'V'.code.toByte(), 'M'.code.toByte(), 0)
+        val BLOB_MAGIC: ByteArray = byteArrayOf('P'.code.toByte(), 'V'.code.toByte(), 'M'.code.toByte(), 0)
         private const val BLOB_VERSION_V1_32: Byte = 1
         private const val BLOB_VERSION_V1_64: Byte = 0
 
