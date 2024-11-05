@@ -16,7 +16,7 @@ data class PvmCase(
     val initialMemory: List<Memory>,
     @SerialName("initial-gas")
     val initialGas: Long,
-    val program: List<UInt>,
+    val program: ByteArray,
     @SerialName("expected-status")
     val expectedStatus: PvmStatus,
     @SerialName("expected-regs")

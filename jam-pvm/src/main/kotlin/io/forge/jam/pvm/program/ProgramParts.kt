@@ -1,6 +1,5 @@
 package io.forge.jam.pvm.program
 
-import io.forge.jam.core.startsWith
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -20,7 +19,6 @@ data class ProgramParts(
     var debugLinePrograms: ArcBytes = ArcBytes.empty()
 ) {
     companion object {
-        val BLOB_MAGIC: ByteArray = byteArrayOf('P'.code.toByte(), 'V'.code.toByte(), 'M'.code.toByte(), 0)
         private const val BLOB_VERSION_V1_32: Byte = 1
         private const val BLOB_VERSION_V1_64: Byte = 0
 
@@ -39,14 +37,15 @@ data class ProgramParts(
         private const val SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES: Byte = 130.toByte()
         private const val SECTION_END_OF_FILE: Byte = 0
 
-        fun fromBytes(blob: ArcBytes): Result<ProgramParts> = runCatching {
-            if (!blob.asRef().startsWith(BLOB_MAGIC)) {
-                throw ProgramParseError(
-                    ProgramParseErrorKind.Other("blob doesn't start with the expected magic bytes")
-                )
-            }
+        fun fromRaw(blob: ByteArray): Result<ProgramParts> = runCatching {
+            val parts = ProgramParts(is64Bit = true)
+            val arcBytes = ArcBytes.fromStatic(blob)
+            parts.codeAndJumpTable = arcBytes
+            parts
+        }
 
-            val reader = ArcBytesReader(blob, BLOB_MAGIC.size)
+        fun fromBytes(blob: ArcBytes): Result<ProgramParts> = runCatching {
+            val reader = ArcBytesReader(blob, 0)
 
             val is64Bit = when (val blobVersion = reader.readByte().getOrThrow()) {
                 BLOB_VERSION_V1_32 -> false
