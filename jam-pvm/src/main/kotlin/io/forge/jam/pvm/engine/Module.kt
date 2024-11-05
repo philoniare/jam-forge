@@ -126,4 +126,15 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
     fun isJumpTargetValid(offset: ProgramCounter): Boolean =
         state().blob.isJumpTargetValid(state().instructionSet, offset)
 
+    fun gasMetering(): GasMeteringKind? = state().gasMetering
+
+    fun findStartOfBasicBlock(offset: ProgramCounter): ProgramCounter {
+        Program.findStartOfBasicBlock(
+            state().instructionSet,
+            state().blob.code.toByteArray(),
+            state().blob.bitmask.toByteArray(),
+            offset.value
+        )?.let { return ProgramCounter(it) }
+    }
+
 }

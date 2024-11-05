@@ -134,7 +134,46 @@ enum class Opcode(val value: UByte) {
          * @return The corresponding Opcode or null if the byte value is invalid
          */
         fun fromUByteAny(byte: UByte): Opcode? = lookupTable[byte]
+
+
     }
 
     override fun toString(): String = name
+
+    fun canFallthrough(): Boolean = when (this) {
+        trap,
+        jump,
+        jump_indirect,
+        load_imm_and_jump,
+        load_imm_and_jump_indirect -> false
+
+        else -> true
+    }
+
+    fun startsNewBasicBlock(): Boolean = when (this) {
+        trap,
+        fallthrough,
+        jump,
+        jump_indirect,
+        load_imm_and_jump,
+        load_imm_and_jump_indirect,
+        branch_eq,
+        branch_eq_imm,
+        branch_greater_or_equal_signed,
+        branch_greater_or_equal_signed_imm,
+        branch_greater_or_equal_unsigned,
+        branch_greater_or_equal_unsigned_imm,
+        branch_greater_signed_imm,
+        branch_greater_unsigned_imm,
+        branch_less_or_equal_signed_imm,
+        branch_less_or_equal_unsigned_imm,
+        branch_less_signed,
+        branch_less_signed_imm,
+        branch_less_unsigned,
+        branch_less_unsigned_imm,
+        branch_not_eq,
+        branch_not_eq_imm -> true
+
+        else -> false
+    }
 }

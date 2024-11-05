@@ -15,7 +15,7 @@ data class ProgramBlob(
     var code: ArcBytes = ArcBytes.empty(),
     private var jumpTable: ArcBytes = ArcBytes.empty(),
     private var jumpTableEntrySize: Byte = 0,
-    private var bitmask: ArcBytes = ArcBytes.empty(),
+    var bitmask: ArcBytes = ArcBytes.empty(),
     private var importOffsets: ArcBytes = ArcBytes.empty(),
     private var importSymbols: ArcBytes = ArcBytes.empty(),
     private var exports: ArcBytes = ArcBytes.empty(),
