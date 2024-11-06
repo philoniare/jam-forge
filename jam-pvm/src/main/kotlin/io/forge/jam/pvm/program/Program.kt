@@ -35,7 +35,42 @@ class Program {
             offset: UInt,
             opcodeVisitor: OpcodeVisitor<Instruction, I>
         ): Triple<UInt, Instruction, Boolean> {
+            assert(code.size <= UInt.MAX_VALUE.toInt()) { "Code size exceeds maximum allowed" }
+            assert(bitmask.size == (code.size + 7) / 8) { "Invalid bitmask size" }
+            assert(offset.toInt() <= code.size) { "Offset exceeds code size" }
+            assert(getBitForOffset(bitmask, code.size, offset)) { "bit at $offset is zero" }
+            assert(offset.toInt() + 32 <= code.size) { "Insufficient code size for fast path" }
 
+            // Get chunk of code
+            val chunk = code.slice(offset.toInt() until offset.toInt() + 32)
+            val skip = parseBitmaskFast(bitmask, offset) ?: throw IllegalStateException("Failed to parse bitmask")
+            val opcode = chunk[0].toInt() and 0xFF
+
+            // Convert next 16 bytes to u128 equivalent (as ULong in Kotlin)
+            val chunkValue = chunk.drop(1).take(16).foldIndexed(0UL) { index, acc, byte ->
+                acc or (byte.toULong() and 0xFFUL shl (index * 8))
+            }
+
+            assert(skip <= BITMASK_MAX.toUInt()) { "Skip value exceeds maximum allowed" }
+            assert(
+                opcodeVisitor.instructionSet.opcodeFromU8(opcode.toUByte()) != null ||
+                    !isJumpTargetValid(opcodeVisitor.instructionSet, code, bitmask, offset + skip + 1u)
+            )
+
+            val nextOffset = offset + skip + 1u
+            val isNextInstructionInvalid = skip == 24u && !getBitForOffset(bitmask, code.size, nextOffset)
+
+            return Triple(
+                nextOffset,
+                opcodeVisitor.dispatch(
+                    state = state,
+                    opcode = opcode.toUInt(),
+                    chunk = chunkValue,
+                    offset = offset,
+                    skip = skip
+                ),
+                isNextInstructionInvalid
+            )
         }
 
         fun <I : InstructionSet> visitorStepSlow(

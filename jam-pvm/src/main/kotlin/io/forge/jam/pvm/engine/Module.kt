@@ -138,5 +138,4 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
     fun instructionsBoundedAt(offset: ProgramCounter): Instructions<RuntimeInstructionSet> {
         return state().blob.instructionsBoundedAt(state().instructionSet, offset)
     }
-
 }

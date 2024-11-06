@@ -1,8 +1,9 @@
 package io.forge.jam.pvm.engine
 
+import io.forge.jam.pvm.program.InstructionVisitor
 import io.forge.jam.pvm.program.RawReg
 
-class GasVisitor {
+class GasVisitor : InstructionVisitor<Unit> {
     private var cost: UInt = 0u
     private var lastBlockCost: UInt? = null
 
@@ -13,484 +14,484 @@ class GasVisitor {
 
     fun takeBlockCost(): UInt? = lastBlockCost.also { lastBlockCost = null }
 
-    fun invalid() {
+    override fun invalid() {
         trap()
     }
 
-    fun trap() {
+    override fun trap() {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun fallthrough() {
+    override fun fallthrough() {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun sbrk(_d: RawReg, _s: RawReg) {
+    override fun sbrk(_d: RawReg, _s: RawReg) {
         cost += 1u
     }
 
-    fun ecalli(_imm: UInt) {
+    override fun ecalli(_imm: UInt) {
         cost += 1u
     }
 
-    fun setLessThanUnsigned(_d: RawReg, _s1: RawReg, s2: RawReg) {
+    override fun setLessThanUnsigned(_d: RawReg, _s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun setLessThanSigned(_d: RawReg, _s1: RawReg, s2: RawReg) {
+    override fun setLessThanSigned(_d: RawReg, _s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftLogicalRight32(_d: RawReg, _s: RawReg, _imm: UInt) {
+    override fun shiftArithmeticRight32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftArithmeticRight32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun shiftLogicalLeft32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftLogicalLeft32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun shiftLogicalRight64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftLogicalRight64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun shiftArithmeticRight64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftArithmeticRight64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun shiftLogicalLeft64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun shiftLogicalLeft64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun shiftLogicalRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
         cost += 1u
     }
 
-    fun xor(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun xor(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun and(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun and(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun or(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun or(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun add32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun add32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun add64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun add64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun sub32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun sub32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun sub64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun sub64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mul32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun mul32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mul64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun mul64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mulUpperSignedSigned(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun mulUpperSignedSigned(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mulUpperUnsignedUnsigned(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun mulUpperUnsignedUnsigned(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mulUpperSignedUnsigned(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun mulUpperSignedUnsigned(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun divUnsigned32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun divUnsigned32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun divSigned32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun divSigned32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun remUnsigned32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun remUnsigned32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun remSigned32(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun remSigned32(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun divUnsigned64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun divUnsigned64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun divSigned64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun divSigned64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun remUnsigned64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun remUnsigned64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun remSigned64(d: RawReg, s1: RawReg, s2: RawReg) {
+    override fun remSigned64(d: RawReg, s1: RawReg, s2: RawReg) {
         cost += 1u
     }
 
-    fun mulImm32(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun mulImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun mulImm64(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun mulImm64(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun setLessThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun setLessThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun setLessThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun setLessThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun setGreaterThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun setGreaterThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun setGreaterThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun setGreaterThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalRightImm32(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftLogicalRightImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftArithmeticRightImm32(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftArithmeticRightImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalLeftImm32(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftLogicalLeftImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalRightImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftLogicalRightImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun shiftArithmeticRightImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftArithmeticRightImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalLeftImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftLogicalLeftImmAlt32(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalRightImm64(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftLogicalRightImm64(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftArithmeticRightImm64(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftArithmeticRightImm64(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalLeftImm64(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun shiftLogicalLeftImm64(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalRightImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftLogicalRightImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun shiftArithmeticRightImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftArithmeticRightImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun shiftLogicalLeftImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
+    override fun shiftLogicalLeftImmAlt64(d: RawReg, s2: RawReg, s1: UInt) {
         cost += 1u
     }
 
-    fun orImm(d: RawReg, s: RawReg, imm: UInt) {
+    override fun orImm(d: RawReg, s: RawReg, imm: UInt) {
         cost += 1u
     }
 
-    fun andImm(d: RawReg, s: RawReg, imm: UInt) {
+    override fun andImm(d: RawReg, s: RawReg, imm: UInt) {
         cost += 1u
     }
 
-    fun xorImm(d: RawReg, s: RawReg, imm: UInt) {
+    override fun xorImm(d: RawReg, s: RawReg, imm: UInt) {
         cost += 1u
     }
 
-    fun moveReg(d: RawReg, s: RawReg) {
+    override fun moveReg(d: RawReg, s: RawReg) {
         cost += 1u
     }
 
-    fun cmovIfZero(d: RawReg, s: RawReg, c: RawReg) {
+    override fun cmovIfZero(d: RawReg, s: RawReg, c: RawReg) {
         cost += 1u
     }
 
-    fun cmovIfNotZero(d: RawReg, s: RawReg, c: RawReg) {
+    override fun cmovIfNotZero(d: RawReg, s: RawReg, c: RawReg) {
         cost += 1u
     }
 
-    fun cmovIfZeroImm(d: RawReg, c: RawReg, s: UInt) {
+    override fun cmovIfZeroImm(d: RawReg, c: RawReg, s: UInt) {
         cost += 1u
     }
 
-    fun cmovIfNotZeroImm(d: RawReg, c: RawReg, s: UInt) {
+    override fun cmovIfNotZeroImm(d: RawReg, c: RawReg, s: UInt) {
         cost += 1u
     }
 
-    fun addImm32(d: RawReg, s: RawReg, imm: UInt) {
+    override fun addImm32(d: RawReg, s: RawReg, imm: UInt) {
         cost += 1u
     }
 
-    fun addImm64(d: RawReg, s: RawReg, imm: UInt) {
+    override fun addImm64(d: RawReg, s: RawReg, imm: UInt) {
         cost += 1u
     }
 
-    fun negateAndAddImm32(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun negateAndAddImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun negateAndAddImm64(d: RawReg, s1: RawReg, s2: UInt) {
+    override fun negateAndAddImm64(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
 
-    fun storeImmIndirectU8(base: RawReg, offset: UInt, value: UInt) {
+    override fun storeImmIndirectU8(base: RawReg, offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmIndirectU16(base: RawReg, offset: UInt, value: UInt) {
+    override fun storeImmIndirectU16(base: RawReg, offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmIndirectU32(base: RawReg, offset: UInt, value: UInt) {
+    override fun storeImmIndirectU32(base: RawReg, offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmIndirectU64(base: RawReg, offset: UInt, value: UInt) {
+    override fun storeImmIndirectU64(base: RawReg, offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeIndirectU8(src: RawReg, base: RawReg, offset: UInt) {
+    override fun storeIndirectU8(src: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeIndirectU16(src: RawReg, base: RawReg, offset: UInt) {
+    override fun storeIndirectU16(src: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeIndirectU32(src: RawReg, base: RawReg, offset: UInt) {
+    override fun storeIndirectU32(src: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeIndirectU64(src: RawReg, base: RawReg, offset: UInt) {
+    override fun storeIndirectU64(src: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeImmU8(offset: UInt, value: UInt) {
+    override fun storeImmU8(offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmU16(offset: UInt, value: UInt) {
+    override fun storeImmU16(offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmU32(offset: UInt, value: UInt) {
+    override fun storeImmU32(offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeImmU64(offset: UInt, value: UInt) {
+    override fun storeImmU64(offset: UInt, value: UInt) {
         cost += 1u
     }
 
-    fun storeU8(src: RawReg, offset: UInt) {
+    override fun storeU8(src: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeU16(src: RawReg, offset: UInt) {
+    override fun storeU16(src: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeU32(src: RawReg, offset: UInt) {
+    override fun storeU32(src: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun storeU64(src: RawReg, offset: UInt) {
+    override fun storeU64(src: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectU8(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectU8(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectI8(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectI8(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectU16(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectU16(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectI16(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectI16(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectU32(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectU32(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectI32(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectI32(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadIndirectU64(dst: RawReg, base: RawReg, offset: UInt) {
+    override fun loadIndirectU64(dst: RawReg, base: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadU8(dst: RawReg, offset: UInt) {
+    override fun loadU8(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadI8(dst: RawReg, offset: UInt) {
+    override fun loadI8(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadU16(dst: RawReg, offset: UInt) {
+    override fun loadU16(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadI16(dst: RawReg, offset: UInt) {
+    override fun loadI16(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadU32(dst: RawReg, offset: UInt) {
+    override fun loadU32(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadI32(dst: RawReg, offset: UInt) {
+    override fun loadI32(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun loadU64(dst: RawReg, offset: UInt) {
+    override fun loadU64(dst: RawReg, offset: UInt) {
         cost += 1u
     }
 
-    fun branchLessUnsigned(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchLessUnsigned(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchLessSigned(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchLessSigned(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterOrEqualUnsigned(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchGreaterOrEqualUnsigned(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterOrEqualSigned(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchGreaterOrEqualSigned(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchEq(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchEq(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchNotEq(s1: RawReg, s2: RawReg, imm: UInt) {
+    override fun branchNotEq(s1: RawReg, s2: RawReg, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchEqImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchEqImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchNotEqImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchNotEqImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchLessUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchLessUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchLessSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchLessSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterOrEqualUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchGreaterOrEqualUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterOrEqualSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchGreaterOrEqualSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchLessOrEqualUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchLessOrEqualUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchLessOrEqualSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchLessOrEqualSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchGreaterUnsignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun branchGreaterSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
+    override fun branchGreaterSignedImm(s1: RawReg, s2: UInt, imm: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun loadImm(dst: RawReg, value: UInt) {
+    override fun loadImm(dst: RawReg, value: UInt) {
         cost += 1u
     }
 
-    fun loadImm64(dst: RawReg, value: ULong) {
+    override fun loadImm64(dst: RawReg, value: ULong) {
         cost += 1u
     }
 
-    fun loadImmAndJump(ra: RawReg, value: UInt, target: UInt) {
-        cost += 1u
-        startNewBasicBlock()
-    }
-
-    fun loadImmAndJumpIndirect(ra: RawReg, base: RawReg, value: UInt, offset: UInt) {
+    override fun loadImmAndJump(ra: RawReg, value: UInt, target: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun jump(target: UInt) {
+    override fun loadImmAndJumpIndirect(ra: RawReg, base: RawReg, value: UInt, offset: UInt) {
         cost += 1u
         startNewBasicBlock()
     }
 
-    fun jumpIndirect(base: RawReg, offset: UInt) {
+    override fun jump(target: UInt) {
+        cost += 1u
+        startNewBasicBlock()
+    }
+
+    override fun jumpIndirect(base: RawReg, offset: UInt) {
         cost += 1u
         startNewBasicBlock()
     }

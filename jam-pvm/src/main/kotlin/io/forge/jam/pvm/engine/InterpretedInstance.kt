@@ -165,6 +165,14 @@ class InterpretedInstance private constructor(
         }
     }
 
+    fun packTarget(index: UInt, isJumpTargetValid: Boolean): NonZeroUInt {
+        var index = Cast(index).assertAlwaysFitsInU32()
+        if (isJumpTargetValid) {
+            index = index or (1u shl 31)
+        }
+        return NonZeroUInt(index)
+    }
+
     fun compileBlock(programCounter: ProgramCounter?): Target? {
         if (programCounter?.value!! > module.codeLen()) {
             return null
@@ -181,30 +189,26 @@ class InterpretedInstance private constructor(
         var isJumpTargetValid = module.isJumpTargetValid(programCounter)
 
         for (instruction in module.instructionsBoundedAt(programCounter)) {
-            compiledOffsetForBlock[instruction.offset.value] = packTarget(
-                compiledHandlers.size,
-                isJumpTargetValid
+            compiledOffsetForBlock.insert(
+                instruction.offset.value, packTarget(
+                    compiledHandlers.size.toUInt(),
+                    isJumpTargetValid
+                )
             )
 
             isJumpTargetValid = false
 
-            if (stepTracing) {
-                emit(Step(instruction.offset))
-            }
-
             if (module.gasMetering() != null) {
                 if (chargeGasIndex == null) {
-
                     chargeGasIndex = instruction.offset to compiledHandlers.size
-                    emit(ChargeGas(instruction.offset, 0))
                 }
-                instruction.visit(gasVisitor)
+                instruction.kind.visit(gasVisitor)
             }
 
             // Debug assertions equivalent
             val originalLength = compiledHandlers.size
 
-            instruction.visit(
+            instruction.kind.visit(
                 Compiler(
                     programCounter = instruction.offset,
                     nextProgramCounter = instruction.nextOffset,
@@ -219,7 +223,7 @@ class InterpretedInstance private constructor(
                 "Handler size must increase after instruction visit"
             }
 
-            if (instruction.opcode.startsNewBasicBlock()) {
+            if (instruction.kind.opcode().startsNewBasicBlock()) {
                 break
             }
         }

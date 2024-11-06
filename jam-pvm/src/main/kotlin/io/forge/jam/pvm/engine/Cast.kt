@@ -65,6 +65,12 @@ inline fun Cast<UShort>.toU64(): ULong = value.toULong()
  * UInt (u32) extensions
  */
 @Suppress("NOTHING_TO_INLINE")
+inline fun Cast<UInt>.assertAlwaysFitsInU32(): UInt {
+    assert(value <= UInt.MAX_VALUE) { "Value doesn't fit in UInt" }
+    return value.toUInt()
+}
+
+@Suppress("NOTHING_TO_INLINE")
 inline fun Cast<UInt>.toSigned(): Int = value.toInt()
 
 @Suppress("NOTHING_TO_INLINE")
