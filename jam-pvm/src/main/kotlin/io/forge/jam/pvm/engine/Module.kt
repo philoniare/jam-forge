@@ -138,4 +138,8 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
     fun instructionsBoundedAt(offset: ProgramCounter): Instructions<RuntimeInstructionSet> {
         return state().blob.instructionsBoundedAt(state().instructionSet, offset)
     }
+
+    fun roundToPageSizeDown(value: UInt): UInt {
+        return value and state().pageSizeMask.inv()
+    }
 }

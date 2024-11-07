@@ -19,6 +19,8 @@ class ProgramParseError(private val kind: ProgramParseErrorKind) : Exception() {
                     actualCount = actualCount
                 )
             )
+
+
     }
 
     override fun toString(): String = "ProgramParseError($kind)"
@@ -49,6 +51,7 @@ class ProgramParseError(private val kind: ProgramParseErrorKind) : Exception() {
                 "failed to parse program blob: ${kind.error}"
         }
 }
+
 
 // Sealed class to represent the different error kinds
 sealed class ProgramParseErrorKind {

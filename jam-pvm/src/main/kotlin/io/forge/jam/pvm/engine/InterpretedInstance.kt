@@ -125,12 +125,13 @@ class InterpretedInstance private constructor(
 
     fun pid(): UInt? = null
 
-    fun resetMemory() {
+    fun resetMemory(): Result<Unit> {
         if (!module.isDynamicPaging()) {
             basicMemory.reset(module)
         } else {
             dynamicMemory.clear()
         }
+        return Result.success(Unit)
     }
 
     private fun initializeModule() {
@@ -261,6 +262,105 @@ class InterpretedInstance private constructor(
         }
 
         return origin
+    }
+
+    fun eachPage(
+        module: Module,
+        address: UInt,
+        length: UInt,
+        callback: (pageAddress: UInt, pageOffset: UInt, bufferOffset: UInt, length: Int) -> Unit
+    ) {
+        val pageSize = module.memoryMap().pageSize
+        val pageAddressLo = module.roundToPageSizeDown(address)
+        val pageAddressHi = module.roundToPageSizeDown(address + (length - 1u))
+        eachPageImpl(pageSize, pageAddressLo, pageAddressHi, address, length, callback)
+    }
+
+    private fun eachPageImpl(
+        pageSize: UInt, pageAddressLo: UInt, pageAddressHi: UInt, address: UInt, length: UInt,
+        callback: (pageAddress: UInt, pageOffset: UInt, bufferOffset: UInt, length: Int) -> Unit
+    ) {
+        val pageSizeInt = Cast(pageSize).toUSize()
+        val lengthInt = Cast(length).toUSize()
+        val initialPageOffset = Cast(address).toUSize() - Cast(pageAddressLo).toUSize()
+        val initialChunkLength = minOf(lengthInt, pageSizeInt - initialPageOffset)
+        callback(pageAddressLo, initialPageOffset.toUInt(), 0u, initialChunkLength.toInt())
+
+        if (pageAddressLo == pageAddressHi) {
+            return
+        }
+
+        var pageAddressLoLong = Cast(pageAddressLo).toU64()
+        val pageAddressHiLong = Cast(pageAddressHi).toU64()
+        pageAddressLoLong += Cast(pageSize).toU64()
+        var bufferOffset = initialChunkLength
+
+        while (pageAddressLoLong < pageAddressHiLong) {
+            callback(
+                Cast(pageAddressLoLong).assertAlwaysFitsInU32(),
+                0u,
+                bufferOffset.toUInt(),
+                pageSizeInt.toInt()
+            )
+            bufferOffset += pageSizeInt
+            pageAddressLoLong += Cast(pageSize).toU64()
+        }
+
+        callback(
+            Cast(pageAddressLoLong).assertAlwaysFitsInU32(),
+            0u,
+            bufferOffset.toUInt(),
+            (lengthInt - bufferOffset).toInt()
+        )
+    }
+
+    fun readMemoryInto(address: UInt, buffer: ByteArray): Result<ByteArray> {
+        return try {
+            if (!module.isDynamicPaging()) {
+                // Handle basic memory case
+                val length = Cast(buffer.size.toUInt()).assertAlwaysFitsInU32()
+                val slice = basicMemory.getMemorySlice(module, address, length)
+                    ?: return Result.failure(
+                        MemoryAccessError.outOfRangeAccess(
+                            address = address,
+                            length = Cast(buffer.size.toUInt()).toU64()
+                        )
+                    )
+
+                slice.copyInto(buffer)
+                Result.success(buffer)
+            } else {
+                // Handle dynamic paging case
+                eachPage(
+                    module = module,
+                    address = address,
+                    length = Cast(buffer.size.toUInt()).assertAlwaysFitsInU32()
+                ) { pageAddress, pageOffset, bufferOffset, length ->
+                    // Validate offsets and lengths
+                    require(bufferOffset + length.toUInt() <= buffer.size.toUInt()) {
+                        "Buffer offset out of bounds"
+                    }
+                    require(pageOffset + length.toUInt() <= Cast(module.memoryMap().pageSize).toUSize()) {
+                        "Page offset out of bounds"
+                    }
+
+                    val page = dynamicMemory.pages[pageAddress]
+                    if (page != null) {
+                        page.copyInto(
+                            destination = buffer,
+                            destinationOffset = bufferOffset.toInt(),
+                            startIndex = pageOffset.toInt(),
+                            endIndex = (pageOffset + length.toUInt()).toInt()
+                        )
+                    } else {
+                        buffer.fill(0, bufferOffset.toInt(), (bufferOffset + length.toUInt()).toInt())
+                    }
+                }
+                Result.success(buffer)
+            }
+        } catch (e: Exception) {
+            Result.failure(MemoryAccessError.error(PvmError.fromDisplay(e.message ?: "Unknown error")))
+        }
     }
 
     private fun runImpl(debug: Boolean): InterruptKind {
