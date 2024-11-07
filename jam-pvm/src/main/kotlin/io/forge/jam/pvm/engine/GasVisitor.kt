@@ -7,6 +7,14 @@ class GasVisitor : InstructionVisitor<Unit> {
     private var cost: UInt = 0u
     private var lastBlockCost: UInt? = null
 
+    companion object {
+        fun trapCost(): UInt {
+            val gasVisitor = GasVisitor()
+            gasVisitor.trap()
+            return gasVisitor.takeBlockCost()!!
+        }
+    }
+
     fun startNewBasicBlock() {
         lastBlockCost = cost
         cost = 0u

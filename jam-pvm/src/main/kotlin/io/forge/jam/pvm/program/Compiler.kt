@@ -12,7 +12,7 @@ class Compiler(
     private val module: Module,
 ) : InstructionVisitor<Unit> {
 
-    private fun emit(
+    fun emit(
         handler: Handler,
         args: Args
     ) {
@@ -493,6 +493,24 @@ class Compiler(
                 this.nextProgramCounter = null
                 this.nextProgramCounterChanged = true
                 this.interrupt = InterruptKind.Trap
+            }
+            return null
+        }
+
+        fun notEnoughGasImpl(visitor: Visitor, programCounter: ProgramCounter, newGas: Long): Target? {
+            with(visitor.inner) {
+                gas = newGas
+                when (module.gasMetering()) {
+                    GasMeteringKind.Sync -> {
+                        this.programCounter = programCounter
+                        programCounterValid = true
+                        nextProgramCounter = programCounter
+                        nextProgramCounterChanged = false
+                    }
+
+                    null -> TODO()
+                }
+                interrupt = InterruptKind.NotEnoughGas
             }
             return null
         }

@@ -1,5 +1,7 @@
 package io.forge.jam.pvm.engine
 
+import io.forge.jam.pvm.RawHandlers
+import io.forge.jam.pvm.engine.GasVisitor.Companion.trapCost
 import io.forge.jam.pvm.program.Compiler
 import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.Reg
@@ -27,6 +29,12 @@ class InterpretedInstance private constructor(
     var interrupt: InterruptKind,
     val stepTracing: Boolean
 ) {
+
+    private fun emit(handler: Handler, args: Args) {
+        compiledHandlers.add(handler)
+        compiledArgs.add(args)
+    }
+
     companion object {
         private const val TARGET_OUT_OF_RANGE = 0u
 
@@ -139,6 +147,19 @@ class InterpretedInstance private constructor(
         compileOutOfRangeStub()
     }
 
+    fun compileOutOfRangeStub() {
+        if (stepTracing) {
+            emit(RawHandlers.stepOutOfRange, Args.stepOutOfRange())
+        }
+        val gasCost = if (module.gasMetering() != null) {
+            trapCost()
+        } else {
+            0u
+        }
+
+        emit(RawHandlers.stepOutOfRange, Args.outOfRange(gasCost))
+    }
+
     fun run(): Result<InterruptKind> = runCatching {
         runImpl(false)
     }
@@ -239,7 +260,7 @@ class InterpretedInstance private constructor(
             return null
         }
 
-        return origin.toTarget()
+        return origin
     }
 
     private fun runImpl(debug: Boolean): InterruptKind {
@@ -252,7 +273,7 @@ class InterpretedInstance private constructor(
                 nextProgramCounter ?: throw IllegalStateException("Failed to run: next program counter is not set")
 
             this.programCounter = programCounter
-            this.compiledOffset = resolveArbitraryJump(programCounter)
+            this.compiledOffset = resolveArbitraryJump(programCounter)!!
 
         }
 
