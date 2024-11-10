@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.readVarint
 
 open class Reader<T>(
@@ -10,6 +11,7 @@ open class Reader<T>(
     public override fun clone(): Reader<T> = Reader(blob, position)
 
     companion object {
+        private val logger = PvmLogger(Reader::class.java)
         fun <T> from(blob: T): Reader<T> where T : Any = Reader(blob)
     }
 
@@ -25,30 +27,32 @@ open class Reader<T>(
     }
 
     fun readByte(): Result<Byte> = runCatching {
-        val slice = readSlice(1).getOrThrow()
-        slice[0]
+        readSlice(1).getOrThrow().first()
     }
 
     open fun readSlice(length: Int): Result<ByteArray> = runCatching {
         val blobBytes = blob.asBytes()
-        if (position + length > blobBytes.size) {
+
+        val remainingBlob = blobBytes.copyOfRange(position, blobBytes.size)
+
+        if (length > remainingBlob.size) {
             throw ProgramParseError.unexpectedEndOfFile(
                 position,
                 length,
-                blobBytes.size - position
+                remainingBlob.size
             )
         }
-        val slice = blobBytes.copyOfRange(position, position + length)
+        val slice = remainingBlob.copyOfRange(0, length)
         position += length
-        println("slice: ${slice.contentToString()}")
         slice
     }
 
     fun readVarintInternal(): Result<UInt> = runCatching {
         val firstByte = readByte().getOrThrow()
         val blobBytes = blob.asBytes()
+        val remainingBytes = blobBytes.copyOfRange(position, blobBytes.size)
         val (length, value) = readVarint(
-            blobBytes.copyOfRange(position, blobBytes.size).toUByteArray(),
+            remainingBytes.toUByteArray(),
             firstByte.toUByte()
         ) ?: throw ProgramParseError.failedToReadVarint(position - 1)
         position += length.toInt()
@@ -72,14 +76,15 @@ open class Reader<T>(
 
     fun readSliceAsRange(count: Int): Result<IntRange> = runCatching {
         val blobBytes = blob.asBytes()
-        if (position + count > blobBytes.size) {
+        val remainingBytes = blobBytes.copyOfRange(position, blobBytes.size)
+        if (count > blobBytes.size) {
             throw ProgramParseError.unexpectedEndOfFile(
                 position,
                 count,
-                blobBytes.size - position
+                remainingBytes.size
             )
         }
-        val range = position until (position + count)
+        val range = position..(position + count)
         position += count
         range
     }

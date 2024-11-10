@@ -13,13 +13,16 @@ object Utils {
         }
 
         fun subslice(range: IntRange): ArcBytes {
-            if (range.first == range.last) return empty()
-            require(range.last >= range.first) { "range.last must be >= range.first" }
+            val start = range.first
+            val end = range.last + 1
+            if (start == end) {
+                return empty()
+            }
 
-            val newLength = range.last - range.first
-            require(newLength <= length) { "subslice length must be <= current length" }
-
-            return ArcBytes(data, offset + range.first, newLength)
+            assert(end >= start) { "Invalid range: end must be >= start" }
+            val length = end - start
+            assert(length <= this.length) { "Subslice length exceeds available length" }
+            return ArcBytes(data, offset + start, length)
         }
 
         fun asByteArray(): ByteArray = data.copyOfRange(offset, offset + length)
