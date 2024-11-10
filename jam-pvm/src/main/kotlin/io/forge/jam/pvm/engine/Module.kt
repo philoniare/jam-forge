@@ -61,20 +61,18 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
 
             val memoryMap = init.memoryMap().getOrThrow()
 
-// RO data starts at 0 by convention
+            // RO data starts at 0 by convention
             logger.debug(
-                """
-    Memory map: RO data: 0x${0.toString(16).padStart(8, '0')}..0x${
-                    memoryMap.roDataSize.toString(16).padStart(8, '0')
-                } (${blob.roData.toByteArray().size}/${memoryMap.roDataSize} bytes, non-zero until 0x${
-                    blob.roData.toByteArray().size.toString(16).padStart(8, '0')
-                })
-""".trimIndent()
+                """Memory map: RO data: 0x${memoryMap.roDataRange().first.toString(16).padStart(8, '0')}..0x${
+                    memoryMap.roDataRange().last.toString(16).padStart(8, '0')
+                } (${blob.roData.asRef().size}/${memoryMap.roDataRange().endInclusive - memoryMap.roDataRange().start} bytes, non-zero until 0x${
+                    (memoryMap.roDataRange().start + blob.roData.toByteArray().size.toUInt()).toString(16)
+                        .padStart(8, '0')
+                })""".trimIndent()
             )
 
             logger.debug(
-                """
-    Memory map: RW data: 0x${
+                """Memory map: RW data: 0x${
                     memoryMap.rwDataAddress.toString(16).padStart(8, '0')
                 }..0x${
                     (memoryMap.rwDataAddress + memoryMap.rwDataSize).toString(16).padStart(8, '0')

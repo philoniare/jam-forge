@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.engine
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.RawHandlers
 import io.forge.jam.pvm.engine.GasVisitor.Companion.trapCost
 import io.forge.jam.pvm.program.Compiler
@@ -37,6 +38,7 @@ class InterpretedInstance private constructor(
 
     companion object {
         private const val TARGET_OUT_OF_RANGE = 0u
+        private val logger = PvmLogger(InterpretedInstance::class.java)
 
         /**
          * Creates a new instance from a module
@@ -201,6 +203,8 @@ class InterpretedInstance private constructor(
         } catch (e: Exception) {
             throw IllegalStateException("Failed to compile block: ${e.message}")
         }
+
+        logger.debug("Compiling block:")
 
         val gasVisitor = GasVisitor()
         var chargeGasIndex: Pair<ProgramCounter, Int>? = null

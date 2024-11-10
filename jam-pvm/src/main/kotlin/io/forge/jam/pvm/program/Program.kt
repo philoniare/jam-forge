@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.engine.InstructionSet
 import io.forge.jam.pvm.engine.RuntimeInstructionSet
 import io.forge.jam.pvm.readSimpleVarint
@@ -9,6 +10,7 @@ import io.forge.jam.pvm.readSimpleVarint
  */
 class Program {
     companion object {
+        private val logger = PvmLogger(Program::class.java)
         const val BITMASK_MAX: UInt = 24u
         private const val INVALID_INSTRUCTION_INDEX: UInt = 256u
         val TABLE_1: LookupTable = LookupTable.build(1)
@@ -21,7 +23,7 @@ class Program {
             offset: UInt
         ): Triple<UInt, Instruction, Boolean> {
             val visitor = EnumVisitor(instructionSet)
-            return if (offset.toInt() <= code.size) {
+            return if (offset.toInt() + 32 <= code.size) {
                 visitorStepFast(code, bitmask, offset, visitor)
             } else {
                 visitorStepSlow(code, bitmask, offset, visitor)
@@ -34,7 +36,7 @@ class Program {
             offset: UInt,
             opcodeVisitor: OpcodeVisitor<Instruction, I>
         ): Triple<UInt, Instruction, Boolean> {
-            assert(code.size <= UInt.MAX_VALUE.toInt()) { "Code size exceeds maximum allowed" }
+            assert(code.size <= Int.MAX_VALUE && code.size.toUInt() <= UInt.MAX_VALUE) { "Code size exceeds maximum allowed" }
             assert(bitmask.size == (code.size + 7) / 8) { "Invalid bitmask size" }
             assert(offset.toInt() <= code.size) { "Offset exceeds code size" }
             assert(getBitForOffset(bitmask, code.size, offset)) { "bit at $offset is zero" }
@@ -81,7 +83,7 @@ class Program {
                 return Triple(offset + 1u, visitorStepInvalidInstruction(offset, opcodeVisitor), true)
             }
 
-            assert(code.size <= UInt.MAX_VALUE.toInt()) { "Code size exceeds maximum allowed" }
+            assert(code.size <= Int.MAX_VALUE && code.size.toUInt() <= UInt.MAX_VALUE) { "Code size exceeds maximum allowed" }
             assert(bitmask.size == (code.size + 7) / 8) { "Invalid bitmask size" }
             assert(offset.toInt() <= code.size) { "Offset exceeds code size" }
             assert(getBitForOffset(bitmask, code.size, offset)) { "bit at $offset is zero" }

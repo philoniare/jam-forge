@@ -15,7 +15,6 @@ class ArcBytesReader(
 
     fun readSliceAsBytes(length: Int): Result<ArcBytes> = runCatching {
         val range = readSliceAsRange(length).getOrThrow()
-        logger.debug("Range: $range")
         blob.subslice(range)
     }
 
