@@ -58,18 +58,6 @@ class TestFileLoader {
                         .toList()
                 }
 
-                "jar" -> {
-                    val jarPath = resource.path.substringBefore("!")
-                    val fs =
-                        java.nio.file.FileSystems.newFileSystem(java.net.URI(jarPath), mutableMapOf<String, String>())
-                    fs.use { fileSystem ->
-                        java.nio.file.Files.walk(fileSystem.getPath("/"))
-                            .filter { it.toString().endsWith(".json") }
-                            .map { it.fileName.toString().removeSuffix(".json") }
-                            .toList()
-                    }
-                }
-
                 else -> throw IllegalStateException("Unsupported protocol: ${resource.protocol}")
             }
         }
