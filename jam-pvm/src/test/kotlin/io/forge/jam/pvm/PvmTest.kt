@@ -33,7 +33,7 @@ class PvmTest {
             val engine = Engine.new(config).getOrThrow()
 
             var parts = ProgramParts()
-            parts.setCodeJumpTable(inputCase.program)
+            parts.setCodeJumpTable(inputCase.program.toByteArray())
             val blob = ProgramBlob.fromParts(parts).getOrThrow()
 
 

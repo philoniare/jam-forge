@@ -43,6 +43,8 @@ value class RawReg(private val value: UInt) {
  */
 fun Reg.toRawReg(): RawReg = RawReg.from(this)
 
+fun RawReg.toU32(): UInt = get().toIndex().toUInt()
+
 /**
  * Extension function to convert [RawReg] to [Reg].
  */

@@ -34,6 +34,7 @@ object RawHandlers {
         val args = visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
         val programCounter = ProgramCounter(args.a0)
         val gasCost = args.a1
+        logger.debug("Charging gas: $gasCost")
         val newGas = visitor.inner.gas - gasCost.toLong()
 
         if (newGas < 0) {
@@ -89,5 +90,14 @@ object RawHandlers {
         val imm = visitor.get64(s.toRegImm())
         visitor.set64(d, imm)
         visitor.goToNextInstruction()
+    }
+
+    val add32: Handler = { visitor ->
+        val args = visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
+        logger.debug("Args: $args")
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm(), { a, b -> a + b })
     }
 }

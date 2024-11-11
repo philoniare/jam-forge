@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.engine.InstructionSet
 
 data class Instructions<I : InstructionSet>(
@@ -11,8 +12,9 @@ data class Instructions<I : InstructionSet>(
     private var isDone: Boolean = false,
     private val instructionSet: I
 ) : Iterator<ParsedInstruction>, Cloneable {
-
-    override fun hasNext(): Boolean = !isDone && offset.toInt() < code.size
+    override fun hasNext(): Boolean {
+        return !isDone
+    }
 
     override fun next(): ParsedInstruction {
         invalidOffset?.let { invalid ->
@@ -24,48 +26,46 @@ data class Instructions<I : InstructionSet>(
             )
         }
 
-        if (isDone || offset.toInt() >= code.size) {
+        if (isDone || offset.toUInt() >= code.size.toUInt()) {
             throw NoSuchElementException("No more instructions")
         }
 
         val currentOffset = offset
-        assert(Program.getBitForOffset(bitmask, code.size, currentOffset)) {
-            "Invalid instruction offset"
-        }
 
+        require(Program.getBitForOffset(bitmask, code.size, currentOffset)) {
+            "bit at $currentOffset is zero"
+        }
 
         val (nextOffset, instruction, isNextInstructionInvalid) =
             Program.parseInstruction(instructionSet, code, bitmask, currentOffset)
-        assert(nextOffset > currentOffset)
+        logger.debug("next_offset: $nextOffset, instruction: $instruction, isNextInstructionInvalid: $isNextInstructionInvalid")
+
+        require(nextOffset > currentOffset) {
+            "assertion failed: next_offset > self.offset"
+        }
 
         if (!isNextInstructionInvalid) {
             offset = nextOffset
-            assert(
-                offset.toInt() == code.size ||
+            require(
+                offset == code.size.toUInt() ||
                     Program.getBitForOffset(bitmask, code.size, offset)
             ) { "bit at $offset is zero" }
         } else {
-            when {
-                nextOffset.toInt() == code.size -> {
-                    offset = (code.size + 1).toUInt()
+            if (nextOffset.toUInt() == code.size.toUInt()) {
+                offset = code.size.toUInt() + 1u
+            } else if (isBounded) {
+                isDone = true
+                if (instruction.opcode().canFallthrough()) {
+                    offset = code.size.toUInt()
+                } else {
+                    offset = nextOffset
                 }
-
-                isBounded -> {
-                    isDone = true
-                    offset = if (instruction.opcode().canFallthrough()) {
-                        code.size.toUInt()
-                    } else {
-                        nextOffset
-                    }
-                }
-
-                else -> {
-                    offset = Program.findNextOffsetUnbounded(bitmask, code.size.toUInt(), nextOffset)
-                    assert(
-                        offset.toInt() == code.size ||
-                            Program.getBitForOffset(bitmask, code.size, offset)
-                    ) { "bit at $offset is zero" }
-                }
+            } else {
+                offset = Program.findNextOffsetUnbounded(bitmask, code.size.toUInt(), nextOffset)
+                require(
+                    offset.toUInt() == code.size.toUInt() ||
+                        Program.getBitForOffset(bitmask, code.size, offset)
+                ) { "bit at $offset is zero" }
             }
 
             if (instruction.opcode().canFallthrough()) {
@@ -80,13 +80,10 @@ data class Instructions<I : InstructionSet>(
         )
     }
 
-    fun sizeHint(): Pair<Int, Int?> {
-        val remaining = code.size - minOf(offset.toInt(), code.size)
-        return 0 to remaining
-    }
-
 
     companion object {
+        private val logger = PvmLogger(Instructions::class.java)
+
         fun <I : InstructionSet> new(
             instructionSet: I,
             code: ByteArray,

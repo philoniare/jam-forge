@@ -2,6 +2,7 @@ package io.forge.jam.pvm.engine
 
 import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.RawReg
+import io.forge.jam.pvm.program.toU32
 
 /**
  * Arguments structure for VM instructions.
@@ -30,6 +31,12 @@ data class Args(
         fun stepOutOfRange() = Args()
         fun outOfRange(gasCost: UInt) = Args(a0 = gasCost)
 
-        fun moveReg(d: RawReg, s: RawReg) = Args(a0 = d.rawUnparsed(), a1 = s.rawUnparsed())
+        fun moveReg(d: RawReg, s: RawReg) = Args(a0 = d.toU32(), a1 = s.toU32())
+
+        fun add32(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2.toU32()
+        )
     }
 }

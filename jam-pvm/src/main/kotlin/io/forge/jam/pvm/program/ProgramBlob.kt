@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.engine.InstructionSet
 import io.forge.jam.pvm.engine.RuntimeInstructionSet
 
@@ -40,6 +41,7 @@ data class ProgramBlob(
 
 
     companion object {
+        private val logger = PvmLogger(ProgramBlob::class.java)
         private val VM_MAXIMUM_JUMP_TABLE_ENTRIES: UInt = 16u * 1024u * 1024u
         private val VM_MAXIMUM_CODE_SIZE: UInt = 32u * 1024u * 1024u
         private const val VERSION_DEBUG_LINE_PROGRAM_V1: Byte = 1

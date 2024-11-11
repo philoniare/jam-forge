@@ -57,7 +57,6 @@ class InterpretedInstance private constructor(
                 nextProgramCounterChanged = true,
                 cycleCounter = 0u,
                 gas = 0L,
-                // +1 for one implicit out-of-bounds trap
                 compiledOffsetForBlock = FlatMap.new(module.codeLen() + 1u),
                 compiledHandlers = mutableListOf(),
                 compiledArgs = mutableListOf(),
@@ -213,6 +212,7 @@ class InterpretedInstance private constructor(
         var i = 0
         for (instruction in module.instructionsBoundedAt(programCounter)) {
             i++
+            logger.debug("Instruction kind: ${instruction.kind} ${instruction.offset.value} ${instruction.nextOffset.value}")
             compiledOffsetForBlock.insert(
                 instruction.offset.value, packTarget(
                     compiledHandlers.size.toUInt(),
@@ -237,6 +237,7 @@ class InterpretedInstance private constructor(
                 }
                 instruction.kind.visit(gasVisitor)
             }
+
 
             logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: ${instruction.kind}")
 
@@ -263,12 +264,11 @@ class InterpretedInstance private constructor(
             }
         }
 
-        logger.debug("Compliled Handlers: $i")
+        logger.debug("Compliled Handlers: ${compiledHandlers.size}")
 
         chargeGasIndex?.let { (programCounter, index) ->
-            val gasCost = gasVisitor.takeBlockCost()
-            println("GasCost: $gasCost")
-            compiledArgs[index] = Args.chargeGas(programCounter, 0u)
+            val gasCost = gasVisitor.takeBlockCost()!!
+            compiledArgs[index] = Args.chargeGas(programCounter, gasCost)
         }
 
         if (compiledHandlers.size == origin.toInt()) {
@@ -441,7 +441,7 @@ class InterpretedInstance private constructor(
             }
 
             val handler = compiledHandlers[offset.toInt()]
-            logger.debug("Executing handler at: $offset, cycle counter: $cycleCounter")
+            logger.debug("Executing handler at: [$offset], cycle counter: $cycleCounter")
 
             val visitor = Visitor(this)
             when (val nextOffset = handler(visitor)) {

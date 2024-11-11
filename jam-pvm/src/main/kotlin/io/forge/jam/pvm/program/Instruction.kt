@@ -368,7 +368,7 @@ sealed class Instruction {
         is LoadImm64 -> Opcode.load_imm_64
         is ShiftArithmeticRightImm32 -> Opcode.shift_arithmetic_right_imm_32
         is ShiftArithmeticRightImm64 -> Opcode.shift_arithmetic_right_imm_64
-        Invalid -> TODO() // Invalid instruction
+        is Invalid -> Opcode.trap
     }
 
     /**

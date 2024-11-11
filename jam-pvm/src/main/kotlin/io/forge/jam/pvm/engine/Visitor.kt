@@ -65,7 +65,6 @@ class Visitor(
      * Performs a three-operand 32-bit operation
      */
     inline fun set3_32(
-        debug: Boolean,
         dst: Reg,
         s1: RegImm,
         s2: RegImm,
