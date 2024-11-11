@@ -19,6 +19,8 @@ data class Args(
 
         fun trap(programCounter: ProgramCounter) = Args(a0 = programCounter.value)
 
+        fun step(programCounter: ProgramCounter) = Args(a0 = programCounter.value)
+
         fun chargeGas(programCounter: ProgramCounter, gasCost: UInt) = Args(
             a0 = programCounter.value,
             a1 = gasCost

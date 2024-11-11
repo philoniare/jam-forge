@@ -10,7 +10,10 @@ typealias Target = UInt
 typealias Handler = (Visitor) -> Target?
 
 object RawHandlers {
+    val logger = PvmLogger(RawHandlers::class.java)
+
     val trap: Handler = { visitor ->
+        logger.debug("[${visitor.inner.compiledOffset}]: trap")
         val args = visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
         val programCounter = ProgramCounter(args.a0)
         trapImpl(visitor, programCounter)
@@ -28,6 +31,17 @@ object RawHandlers {
             visitor.inner.gas = newGas
             visitor.goToNextInstruction()
         }
+    }
+
+    val step: Handler = { visitor ->
+        val args = visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
+        val programCounter = ProgramCounter(args.a0)
+        visitor.inner.programCounter = programCounter
+        visitor.inner.programCounterValid = true
+        visitor.inner.nextProgramCounter = programCounter
+        visitor.inner.nextProgramCounterChanged = false
+        visitor.inner.interrupt = InterruptKind.Step
+        visitor.inner.compiledOffset++
     }
 
 
@@ -53,6 +67,5 @@ object RawHandlers {
             visitor.inner.gas = newGas.toLong()
             trapImpl(visitor, programCounter)
         }
-
     }
 }

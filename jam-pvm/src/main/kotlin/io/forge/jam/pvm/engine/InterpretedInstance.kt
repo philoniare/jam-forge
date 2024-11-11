@@ -220,7 +220,14 @@ class InterpretedInstance private constructor(
 
             isJumpTargetValid = false
 
+            if (stepTracing) {
+                logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: step")
+                emit(RawHandlers.step, Args.step(instruction.offset))
+            }
+
+
             if (module.gasMetering() != null) {
+                logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: charge_gas")
                 if (chargeGasIndex == null) {
                     chargeGasIndex = instruction.offset to compiledHandlers.size
                 }
