@@ -166,8 +166,17 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun branchGreaterOrEqualSignedImm(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+    override fun branchGreaterOrEqualSignedImm(s1: RawReg, s2: UInt, i: UInt) {
+        val targetTrue = ProgramCounter(i)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchGreaterOrEqualSignedImm,
+                Args.unresolvedBranchGreaterOrEqualSignedImm(s1, s2, targetTrue, targetFalse), "unresolvedBranchEqImm"
+            )
+        }
     }
 
     override fun branchLessOrEqualSignedImm(reg: RawReg, imm1: UInt, imm2: UInt) {
@@ -265,7 +274,10 @@ class Compiler(
     }
 
     override fun xorImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.xorImm,
+            Args.xorImm(reg1, reg2, imm), "xorImm"
+        )
     }
 
     override fun orImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
@@ -376,8 +388,18 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun branchGreaterOrEqualSigned(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+    override fun branchGreaterOrEqualSigned(s1: RawReg, s2: RawReg, i: UInt) {
+        val targetTrue = ProgramCounter(i)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchGreaterOrEqualSigned,
+                Args.unresolvedBranchGreaterOrEqualSigned(s1, s2, targetTrue, targetFalse),
+                "unresolvedBranchGreaterOrEqualSigned"
+            )
+        }
     }
 
     override fun add32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
@@ -392,7 +414,10 @@ class Compiler(
     }
 
     override fun sub32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.sub32,
+            Args.sub32(reg1, reg2, reg3), "sub32"
+        )
     }
 
     override fun sub64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
@@ -407,7 +432,10 @@ class Compiler(
     }
 
     override fun xor(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.xor,
+            Args.xor(reg1, reg2, reg3), "xor"
+        )
     }
 
     override fun or(reg1: RawReg, reg2: RawReg, reg3: RawReg) {

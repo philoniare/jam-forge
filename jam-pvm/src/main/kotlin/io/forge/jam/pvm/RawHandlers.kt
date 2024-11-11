@@ -1,9 +1,6 @@
 package io.forge.jam.pvm
 
-import io.forge.jam.pvm.engine.Args
-import io.forge.jam.pvm.engine.InterruptKind
-import io.forge.jam.pvm.engine.Visitor
-import io.forge.jam.pvm.engine.intoRegImm
+import io.forge.jam.pvm.engine.*
 import io.forge.jam.pvm.program.Compiler.Companion.TARGET_OUT_OF_RANGE
 import io.forge.jam.pvm.program.Compiler.Companion.notEnoughGasImpl
 import io.forge.jam.pvm.program.Compiler.Companion.trapImpl
@@ -207,5 +204,99 @@ object RawHandlers {
         val args = getArgs(visitor)
         val programCounter = ProgramCounter(args.a0)
         trapImpl(visitor, programCounter)
+    }
+
+    val xorImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { a, b -> a xor b }
+    }
+
+    val xor: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a xor b }
+    }
+
+    val sub32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a - b }
+    }
+
+    val branchGreaterOrEqualSignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = args.a1
+        val tt = args.a2
+        val tf = args.a3
+        logger.debug("[${visitor.inner.compiledOffset}]: jump ~$tt if $s1 >=s $s2")
+        visitor.branch(s1.toRegImm(), s2.intoRegImm(), tt, tf) { a, b ->
+            Cast(a).ulongToSigned() >= Cast(b).ulongToSigned()
+        }
+    }
+
+    val unresolvedBranchGreaterOrEqualSignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = args.a1
+        val targetTrue = ProgramCounter(args.a2)
+        val targetFalse = ProgramCounter(args.a3)
+
+        logger.debug("[${visitor.inner.compiledOffset}]: jump $targetTrue if $s1 >=s $s2")
+
+        val targetFalseResolved = visitor.inner.resolveJump(targetFalse) ?: TARGET_OUT_OF_RANGE
+        visitor.inner.resolveJump(targetTrue)?.let { targetTrueResolved ->
+            val offset = visitor.inner.compiledOffset
+            visitor.inner.compiledHandlers[offset.toInt()] = branchGreaterOrEqualSignedImm
+            visitor.inner.compiledArgs[offset.toInt()] = Args.branchGreaterOrEqualSignedImm(
+                s1.toRawReg(),
+                s2,
+                targetTrueResolved,
+                targetFalseResolved
+            )
+            offset
+        }
+    }
+
+    val branchGreaterOrEqualSigned: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = transmuteReg(args.a1)  // Note: transmuteReg here instead of immediate
+        val tt = args.a2
+        val tf = args.a3
+        logger.debug("[${visitor.inner.compiledOffset}]: jump ~$tt if $s1 >=s $s2")
+        visitor.branch(s1.toRegImm(), s2.toRegImm(), tt, tf) { a, b ->
+            Cast(a).ulongToSigned() >= Cast(b).ulongToSigned()
+        }
+    }
+
+    val unresolvedBranchGreaterOrEqualSigned: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = transmuteReg(args.a1)
+        val targetTrue = ProgramCounter(args.a2)
+        val targetFalse = ProgramCounter(args.a3)
+
+        logger.debug("[${visitor.inner.compiledOffset}]: jump $targetTrue if $s1 >=s $s2")
+
+        val targetFalseResolved = visitor.inner.resolveJump(targetFalse) ?: TARGET_OUT_OF_RANGE
+        visitor.inner.resolveJump(targetTrue)?.let { targetTrueResolved ->
+            val offset = visitor.inner.compiledOffset
+            visitor.inner.compiledHandlers[offset.toInt()] = branchGreaterOrEqualSigned
+            visitor.inner.compiledArgs[offset.toInt()] = Args.branchGreaterOrEqualSigned(
+                s1.toRawReg(),
+                s2.toRawReg(),
+                targetTrueResolved,
+                targetFalseResolved
+            )
+            offset
+        }
     }
 }
