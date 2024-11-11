@@ -162,8 +162,18 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun branchGreaterOrEqualUnsignedImm(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+    override fun branchGreaterOrEqualUnsignedImm(s1: RawReg, s2: UInt, i: UInt) {
+        val targetTrue = ProgramCounter(i)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchGreaterOrEqualUnsignedImm,
+                Args.unresolvedBranchGreaterOrEqualUnsignedImm(s1, s2, targetTrue, targetFalse),
+                "unresolvedBranchGreaterOrEqualUnsignedImm"
+            )
+        }
     }
 
     override fun branchGreaterOrEqualSignedImm(s1: RawReg, s2: UInt, i: UInt) {

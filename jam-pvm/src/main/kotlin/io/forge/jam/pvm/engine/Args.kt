@@ -135,5 +135,21 @@ data class Args(
             a2 = a2.value,
             a3 = a3.value
         )
+
+        fun branchGreaterOrEqualUnsignedImm(a0: RawReg, a1: UInt, a2: Target, a3: Target) = Args(
+            a0 = a0.toU32(),
+            a1 = a1,
+            a2 = a2,
+            a3 = a3
+        )
+
+        fun unresolvedBranchGreaterOrEqualUnsignedImm(a0: RawReg, a1: UInt, a2: ProgramCounter, a3: ProgramCounter) =
+            Args(
+                a0 = a0.toU32(),
+                a1 = a1,
+                a2 = a2.value,
+                a3 = a3.value
+            )
+
     }
 }
