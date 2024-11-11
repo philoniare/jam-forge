@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.engine
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.Reg
 
@@ -11,6 +12,11 @@ typealias Target = UInt
 class Visitor(
     val inner: InterpretedInstance
 ) {
+    companion object {
+        val logger: PvmLogger = PvmLogger(Visitor::class.java)
+    }
+
+
     /**
      * Gets a 32-bit value from either a register or immediate
      */

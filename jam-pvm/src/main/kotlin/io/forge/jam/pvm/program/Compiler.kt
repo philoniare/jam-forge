@@ -227,7 +227,10 @@ class Compiler(
     }
 
     override fun addImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        emit(
+            RawHandlers.addImm32,
+            Args.addImm32(reg1, reg2, imm)
+        )
     }
 
     override fun addImm64(reg1: RawReg, reg2: RawReg, imm: UInt) {

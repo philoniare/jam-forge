@@ -38,5 +38,11 @@ data class Args(
             a1 = a1.toU32(),
             a2 = a2.toU32()
         )
+
+        fun addImm32(a0: RawReg, a1: RawReg, imm: UInt) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = imm
+        )
     }
 }

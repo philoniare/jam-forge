@@ -25,6 +25,7 @@ class PvmTest {
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
 
         for (testCase in testCases) {
+            println("Running test case: $testCase")
             val inputCase = TestFileLoader.loadJsonData<PvmCase>(
                 "$folderName/$testCase",
             )

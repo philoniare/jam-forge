@@ -71,7 +71,7 @@ class InterpretedInstance private constructor(
 
     fun reg(reg: Reg): ULong {
         var value = regs[reg.toIndex()]
-        if (!module.isStrict()) {
+        if (!module.blob().is64Bit) {
             value = value and 0xFFFFFFFFu
         }
         return value
