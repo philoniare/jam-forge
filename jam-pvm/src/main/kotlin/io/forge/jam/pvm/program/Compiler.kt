@@ -124,6 +124,19 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
+    override fun branchEq(s1: RawReg, s2: RawReg, i: UInt) {
+        val targetTrue = ProgramCounter(i)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchEq,
+                Args.unresolvedBranchEq(s1, s2, targetTrue, targetFalse), "unresolvedBranchEq"
+            )
+        }
+    }
+
     override fun branchEqImm(s1: RawReg, s2: UInt, i: UInt) {
         val targetTrue = ProgramCounter(i)
         if (!module.isJumpTargetValid(targetTrue)) {
@@ -344,10 +357,6 @@ class Compiler(
     }
 
     override fun cmovIfNotZeroImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
-    }
-
-    override fun branchEq(reg1: RawReg, reg2: RawReg, imm: UInt) {
         TODO("Not yet implemented")
     }
 

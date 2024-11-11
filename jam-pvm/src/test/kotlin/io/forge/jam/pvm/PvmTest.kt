@@ -22,8 +22,8 @@ class PvmTest {
     @Test
     fun runTest() {
         val folderName = "pvm"
-//        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-        val testCases = listOf("inst_branch_eq_imm_ok")
+        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+//        val testCases = listOf("inst_branch_eq_ok")
 
         for (testCase in testCases) {
             println("Running test case: $testCase")
@@ -34,7 +34,7 @@ class PvmTest {
             val config = Config.new()
             val engine = Engine.new(config).getOrThrow()
 
-            var parts = ProgramParts()
+            val parts = ProgramParts()
             parts.setCodeJumpTable(inputCase.program.toByteArray())
             val blob = ProgramBlob.fromParts(parts).getOrThrow()
 

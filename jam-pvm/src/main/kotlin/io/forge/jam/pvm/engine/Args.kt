@@ -66,9 +66,23 @@ data class Args(
             a3 = a3
         )
 
+        fun branchEq(a0: RawReg, a1: RawReg, a2: Target, a3: Target) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2,
+            a3 = a3
+        )
+
         fun unresolvedBranchEqImm(a0: RawReg, a1: UInt, a2: ProgramCounter, a3: ProgramCounter) = Args(
             a0 = a0.toU32(),
             a1 = a1,
+            a2 = a2.value,
+            a3 = a3.value
+        )
+
+        fun unresolvedBranchEq(a0: RawReg, a1: RawReg, a2: ProgramCounter, a3: ProgramCounter) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
             a2 = a2.value,
             a3 = a3.value
         )

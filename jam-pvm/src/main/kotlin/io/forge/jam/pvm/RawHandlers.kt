@@ -139,13 +139,36 @@ object RawHandlers {
         visitor.goToNextInstruction()
     }
 
-    val branchEqImm: Handler = { visitor ->
+    val branchEq: Handler = { visitor ->
         val args = getArgs(visitor)
         val s1 = transmuteReg(args.a0)
-        val s2 = args.a1
+        val s2 = transmuteReg(args.a1)
         val tt = args.a2
         val tf = args.a3
-        visitor.branch(s1.toRegImm(), s2.intoRegImm(), tt, tf, { a, b -> a == b })
+        visitor.branch(s1.toRegImm(), s2.toRegImm(), tt, tf, { a, b -> a == b })
+    }
+
+    val unresolvedBranchEq: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = transmuteReg(args.a1)
+        val targetTrue = ProgramCounter(args.a2)
+        val targetFalse = ProgramCounter(args.a3)
+
+        logger.debug("[${visitor.inner.compiledOffset}]: jump $targetTrue if $s1 == $s2")
+
+        val targetFalseResolved = visitor.inner.resolveJump(targetFalse) ?: TARGET_OUT_OF_RANGE
+        visitor.inner.resolveJump(targetTrue)?.let { targetTrueResolved ->
+            val offset = visitor.inner.compiledOffset
+            visitor.inner.compiledHandlers[offset.toInt()] = branchEq
+            visitor.inner.compiledArgs[offset.toInt()] = Args.branchEq(
+                s1.toRawReg(),
+                s2.toRawReg(),
+                targetTrueResolved,
+                targetFalseResolved
+            )
+            offset
+        }
     }
 
     val unresolvedBranchEqImm: Handler = { visitor ->
@@ -168,7 +191,16 @@ object RawHandlers {
                 targetFalseResolved
             )
             offset
-        } ?: TODO("Not yet implemented")
+        }
+    }
+
+    val branchEqImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = args.a1
+        val tt = args.a2
+        val tf = args.a3
+        visitor.branch(s1.toRegImm(), s2.intoRegImm(), tt, tf, { a, b -> a == b })
     }
 
     val invalidBranch: Handler = { visitor ->

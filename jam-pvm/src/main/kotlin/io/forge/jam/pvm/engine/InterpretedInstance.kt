@@ -5,7 +5,6 @@ import io.forge.jam.pvm.RawHandlers
 import io.forge.jam.pvm.engine.GasVisitor.Companion.trapCost
 import io.forge.jam.pvm.program.Compiler
 import io.forge.jam.pvm.program.ProgramCounter
-import io.forge.jam.pvm.program.RawReg
 import io.forge.jam.pvm.program.Reg
 
 typealias Handler = (visitor: Visitor) -> Target?
@@ -36,41 +35,6 @@ class InterpretedInstance private constructor(
         logger.debug("Emitting handler: $name")
         compiledHandlers.add(handler)
         compiledArgs.add(args)
-    }
-
-    fun emitBranch(
-        s1: RawReg,
-        s2: UInt,
-        target: UInt,
-        unresolvedHandler: Handler,
-        unresolvedArgsConstructor: (RawReg, UInt, ProgramCounter, ProgramCounter) -> Args,
-        handlerName: String
-    ) {
-        val targetTrue = ProgramCounter(target)
-        logger.debug("Emit branch parameters:")
-        logger.debug("  Operation: $handlerName")
-        logger.debug("  Source 1: $s1")
-        logger.debug("  Source 2: $s2")
-        logger.debug("  Target true PC: $targetTrue")
-
-        if (!module.isJumpTargetValid(targetTrue)) {
-            logger.debug("  Invalid jump target detected at PC: $programCounter")
-            emit(
-                RawHandlers.invalidBranch,
-                Args.invalidBranch(programCounter),
-                "invalid_branch"
-            )
-            return
-        }
-
-        val targetFalse = nextProgramCounter!!
-
-        // Emit the unresolved branch handler and args
-        emit(
-            unresolvedHandler,
-            unresolvedArgsConstructor(s1, s2, targetTrue, targetFalse),
-            handlerName
-        )
     }
 
     companion object {
