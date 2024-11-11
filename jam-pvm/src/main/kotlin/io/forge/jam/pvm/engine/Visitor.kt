@@ -86,7 +86,6 @@ class Visitor(
      * Performs a three-operand 64-bit operation
      */
     inline fun set3_64(
-        debug: Boolean,
         dst: Reg,
         s1: RegImm,
         s2: RegImm,
@@ -102,7 +101,6 @@ class Visitor(
      * Performs a conditional branch
      */
     inline fun branch(
-        debug: Boolean,
         s1: RegImm,
         s2: RegImm,
         targetTrue: Target,

@@ -41,7 +41,6 @@ object RawHandlers {
         val args = getArgs(visitor)
         val programCounter = ProgramCounter(args.a0)
         val gasCost = args.a1
-        logger.debug("Charging gas: $gasCost")
         val newGas = visitor.inner.gas - gasCost.toLong()
 
         if (newGas < 0) {
@@ -113,5 +112,44 @@ object RawHandlers {
         val s1 = transmuteReg(args.a1)
         val s2 = args.a2
         visitor.set3_32(d, s1.toRegImm(), s2.intoRegImm(), ::wrappingAdd)
+    }
+
+    val and: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a and b }
+    }
+
+    val andImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { a, b -> a and b }
+    }
+
+    val loadImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val dst = transmuteReg(args.a0)
+        val imm = args.a1
+        visitor.set32(dst, imm)
+        visitor.goToNextInstruction()
+    }
+
+    val branchEqImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val s1 = transmuteReg(args.a0)
+        val s2 = args.a1
+        val tt = args.a2
+        val tf = args.a3
+        visitor.branch(s1.toRegImm(), s2.intoRegImm(), tt, tf, { a, b -> a == b })
+    }
+
+    val invalidBranch: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        trapImpl(visitor, programCounter)
     }
 }

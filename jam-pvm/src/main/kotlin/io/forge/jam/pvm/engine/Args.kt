@@ -44,5 +44,28 @@ data class Args(
             a1 = a1.toU32(),
             a2 = imm
         )
+
+        fun and(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2.toU32()
+        )
+
+        fun andImm(a0: RawReg, a1: RawReg, imm: UInt) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = imm
+        )
+
+        fun loadImm(a0: RawReg, imm: UInt) = Args(a0 = a0.toU32(), a1 = imm)
+
+        fun branchEqImm(a0: RawReg, a1: UInt, a2: Target, a3: Target) = Args(
+            a0 = a0.toU32(),
+            a1 = a1,
+            a2 = a2,
+            a3 = a3
+        )
+
+        fun invalidBranch(a0: ProgramCounter) = Args(a0 = a0.value)
     }
 }

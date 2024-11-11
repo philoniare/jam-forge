@@ -1,9 +1,12 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.Handler
 import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.RawHandlers
 import io.forge.jam.pvm.Target
 import io.forge.jam.pvm.engine.*
+
+private typealias BranchHandlerFactory = (s1: RawReg, s2: UInt, targetTrue: ProgramCounter, targetFalse: ProgramCounter) -> Pair<Handler, Args>
 
 class Compiler(
     private val programCounter: ProgramCounter,
@@ -11,10 +14,12 @@ class Compiler(
     private val compiledHandlers: MutableList<Handler>,
     private val compiledArgs: MutableList<Args>,
     private val module: Module,
+    private val instance: InterpretedInstance
 ) : InstructionVisitor<Unit> {
 
     companion object {
         private val logger = PvmLogger(Compiler::class.java)
+        private const val TARGET_OUT_OF_RANGE = 0u
         fun trapImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
             with(visitor.inner) {
                 this.programCounter = programCounter
@@ -53,6 +58,21 @@ class Compiler(
         compiledArgs.add(args)
     }
 
+
+    private fun emitBranch(
+        s1: RawReg,
+        s2: UInt,
+        targetIndex: ProgramCounter,
+        handler: (ProgramCounter, ProgramCounter) -> Pair<Handler, Args>
+    ) {
+        if (!module.isJumpTargetValid(targetIndex)) {
+            emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter))
+        } else {
+            val (h, a) = handler(targetIndex, nextProgramCounter)
+            emit(h, a)
+        }
+    }
+
     fun nextProgramCounter(): ProgramCounter = nextProgramCounter
 
     override fun invalid() {
@@ -75,7 +95,10 @@ class Compiler(
     }
 
     override fun loadImm(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        emit(
+            RawHandlers.loadImm,
+            Args.loadImm(reg, imm)
+        )
     }
 
     override fun loadU8(reg: RawReg, imm: UInt) {
@@ -126,8 +149,19 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun branchEqImm(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+    override fun branchEqImm(s1: RawReg, s2: UInt, i: UInt) {
+        emitBranch(s1, s2, ProgramCounter(i)) { targetTrue, targetFalse ->
+            InterpretedInstance.handleUnresolvedBranch(
+                instance = instance,
+                handler = RawHandlers.branchEqImm,
+                args = Args.branchEqImm(s1, s2, targetTrue.value, targetFalse.value),
+                targetTrue = targetTrue,
+                targetFalse = targetFalse,
+                debug = true
+            ) {
+                "[${instance.compiledOffset}]: jump ${targetTrue.value} if $s1 == $s2"
+            }
+        }
     }
 
     override fun branchNotEqImm(reg: RawReg, imm1: UInt, imm2: UInt) {
@@ -238,7 +272,10 @@ class Compiler(
     }
 
     override fun andImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        emit(
+            RawHandlers.andImm,
+            Args.andImm(reg1, reg2, imm)
+        )
     }
 
     override fun xorImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
@@ -381,7 +418,10 @@ class Compiler(
     }
 
     override fun and(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        emit(
+            RawHandlers.and,
+            Args.and(reg1, reg2, reg3)
+        )
     }
 
     override fun xor(reg1: RawReg, reg2: RawReg, reg3: RawReg) {

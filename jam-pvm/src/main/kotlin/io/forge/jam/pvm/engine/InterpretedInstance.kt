@@ -67,6 +67,37 @@ class InterpretedInstance private constructor(
                 initializeModule()
             }
         }
+
+        fun handleUnresolvedBranch(
+            instance: InterpretedInstance,
+            handler: Handler,
+            args: Args,
+            targetTrue: ProgramCounter,
+            targetFalse: ProgramCounter,
+            debug: Boolean = false,
+            debugMessage: () -> String = { "" }
+        ): Pair<Handler, Args> {
+            if (debug) {
+                logger.debug(debugMessage())
+            }
+
+            // Get target resolved
+            val targetFalseResolved = instance.resolveJump(targetFalse) ?: TARGET_OUT_OF_RANGE
+
+            return instance.resolveJump(targetTrue)?.let { targetTrueResolved ->
+                val offset = instance.compiledOffset
+                // Update the handler and args at current offset
+                instance.compiledHandlers[offset.toInt()] = handler
+                instance.compiledArgs[offset.toInt()] = args.copy(
+                    a2 = targetTrueResolved,
+                    a3 = targetFalseResolved
+                )
+                Pair(handler, args)
+            } ?: run {
+                // Return trap if target can't be resolved
+                Pair(RawHandlers.trap, Args.trap(instance.programCounter))
+            }
+        }
     }
 
     fun reg(reg: Reg): ULong {
@@ -168,6 +199,22 @@ class InterpretedInstance private constructor(
         return Pair(isJumpTargetValid, target)
     }
 
+    fun resolveJump(programCounter: ProgramCounter): Target? {
+        logger.debug("Resolving jump: ${programCounter.value}")
+        compiledOffsetForBlock.get(programCounter.value)?.let { compiledOffset ->
+            val (isJumpTargetValid, target) = unpackTarget(compiledOffset)
+            if (!isJumpTargetValid) {
+                return null
+            }
+            return target
+        }
+        if (!module.isJumpTargetValid(programCounter)) {
+            return null
+        }
+
+        return compileBlock(programCounter)
+    }
+
     fun resolveArbitraryJump(programCounter: ProgramCounter): Target? {
         compiledOffsetForBlock.get(programCounter.value)?.let { compiledOffset ->
             val (_, target) = unpackTarget(compiledOffset)
@@ -232,7 +279,6 @@ class InterpretedInstance private constructor(
                 if (chargeGasIndex == null) {
                     logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: charge_gas")
                     chargeGasIndex = Pair(instruction.offset, compiledHandlers.size)
-                    logger.debug("Gas Index: ${chargeGasIndex.first} ${chargeGasIndex.second}")
                     emit(RawHandlers.chargeGas, Args.chargeGas(instruction.offset, 0u))
                 }
                 instruction.kind.visit(gasVisitor)
@@ -250,7 +296,8 @@ class InterpretedInstance private constructor(
                     nextProgramCounter = instruction.nextOffset,
                     compiledHandlers = compiledHandlers,
                     compiledArgs = compiledArgs,
-                    module = module
+                    module = module,
+                    instance = this
                 )
             )
 
@@ -453,6 +500,7 @@ class InterpretedInstance private constructor(
             }
             return interrupt
         }
+        logger.debug("Finished execution")
     }
 
 }
