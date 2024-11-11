@@ -159,7 +159,7 @@ class InterpretedInstance private constructor(
     }
 
     fun run(): Result<InterruptKind> = runCatching {
-        runImpl(false)
+        runImpl(true)
     }
 
     private fun unpackTarget(value: NonZeroUInt): Pair<Boolean, Target> {
@@ -227,12 +227,15 @@ class InterpretedInstance private constructor(
 
 
             if (module.gasMetering() != null) {
-                logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: charge_gas")
                 if (chargeGasIndex == null) {
+                    logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: charge_gas")
                     chargeGasIndex = instruction.offset to compiledHandlers.size
+                    emit(RawHandlers.chargeGas, Args.chargeGas(instruction.offset, 0u))
                 }
                 instruction.kind.visit(gasVisitor)
             }
+
+            logger.debug("  [${compiledHandlers.size}]: ${instruction.offset}: ${instruction.kind}")
 
             // Debug assertions equivalent
             val originalLength = compiledHandlers.size
@@ -421,8 +424,9 @@ class InterpretedInstance private constructor(
                 nextProgramCounter ?: throw IllegalStateException("Failed to run: next program counter is not set")
 
             this.programCounter = programCounter
-            this.compiledOffset = resolveArbitraryJump(programCounter)!!
-
+            this.compiledOffset = resolveArbitraryJump(programCounter)
+                ?: TARGET_OUT_OF_RANGE
+            logger.debug("Starting execution at: ${programCounter.value} [$compiledOffset]")
         }
 
         var offset = compiledOffset
@@ -432,6 +436,8 @@ class InterpretedInstance private constructor(
             }
 
             val handler = compiledHandlers[offset.toInt()]
+            logger.debug("Executing handler at: $offset, cycle counter: $cycleCounter")
+
             val visitor = Visitor(this)
             when (val nextOffset = handler(visitor)) {
                 null -> return interrupt
@@ -440,6 +446,7 @@ class InterpretedInstance private constructor(
                     compiledOffset = offset
                 }
             }
+            return interrupt
         }
     }
 

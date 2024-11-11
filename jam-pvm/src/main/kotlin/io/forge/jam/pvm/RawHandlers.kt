@@ -13,9 +13,9 @@ object RawHandlers {
     val logger = PvmLogger(RawHandlers::class.java)
 
     val trap: Handler = { visitor ->
-        logger.debug("[${visitor.inner.compiledOffset}]: trap")
         val args = visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
         val programCounter = ProgramCounter(args.a0)
+        logger.debug("Trap at ${programCounter.value}: explicit trap")
         trapImpl(visitor, programCounter)
     }
 
@@ -42,6 +42,7 @@ object RawHandlers {
         visitor.inner.nextProgramCounterChanged = false
         visitor.inner.interrupt = InterruptKind.Step
         visitor.inner.compiledOffset++
+        null
     }
 
 

@@ -7,9 +7,18 @@ import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.ProgramParts
 import io.forge.jam.pvm.program.Reg
 import org.junit.jupiter.api.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class PvmTest {
+    fun assertUIntListMatchesBytes(expected: List<UInt>, actual: Result<ByteArray>) {
+        assertContentEquals(
+            expected = expected.map { it.toUByte() },
+            actual = actual.getOrThrow().map { it.toUByte() },
+            message = "Memory mismatch."
+        )
+    }
+
     @Test
     fun runTest() {
         val folderName = "pvm"
@@ -46,11 +55,12 @@ class PvmTest {
             }
 
             var finalPc = inputCase.initialPc
-            val expectedStatus = run {
+            val actualStatus = run {
                 while (true) {
-                    when (val result = instance.run().getOrThrow()) {
-                        InterruptKind.Finished -> return@run "halt"
-                        InterruptKind.Trap -> return@run "trap"
+                    val result = instance.run().getOrThrow()
+                    when (result) {
+                        InterruptKind.Finished -> return@run PvmStatus.HALT
+                        InterruptKind.Trap -> return@run PvmStatus.TRAP
                         InterruptKind.NotEnoughGas -> return@run "out-of-gas"
                         InterruptKind.Step -> {
                             finalPc = instance.programCounter()!!.value
@@ -62,22 +72,25 @@ class PvmTest {
                     }
                 }
             }
-            if (expectedStatus != "halt") {
+            if (actualStatus != PvmStatus.HALT) {
                 finalPc = instance.programCounter()!!.value
             }
+
+            // Validate status
+            assertEquals(inputCase.expectedStatus, actualStatus, "Status mismatch.")
 
             // Validate output state
             assertEquals(inputCase.expectedPc, finalPc, "Program counter mismatch.")
             // Validate reg values
-//            inputCase.expectedRegs.forEachIndexed { index, value ->
-//                assertEquals(value, instance.reg(index).getOrThrow(), "Register $index mismatch.")
-//            }
-//
-//            // Validate memory update
-//            inputCase.initialPageMap.forEachIndexed { index, page ->
-//                assertEquals(page, instance.pageMap(index).getOrThrow(), "Page map $index mismatch.")
-//            }
-//            assertEquals(inputCase.expectedGas, instance.gas(), "Gas mismatch.")
+            inputCase.expectedRegs.forEachIndexed { index, value ->
+                assertEquals(value, instance.reg(Reg.fromRaw(index)!!), "Register $index mismatch.")
+            }
+            // Validate memory update
+            inputCase.initialMemory.forEachIndexed { index, memory ->
+                val actualMemory = instance.readMemoryInto(memory.address, byteArrayOf(0))
+                assertUIntListMatchesBytes(memory.contents, actualMemory)
+            }
+            assertEquals(inputCase.expectedGas, instance.gas(), "Gas mismatch.")
         }
     }
 }

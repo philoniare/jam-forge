@@ -77,4 +77,15 @@ sealed class InterruptKind {
             is Step -> 6
         }
     }
+
+    override fun toString(): String {
+        return when (this) {
+            is Finished -> "Finished"
+            is Trap -> "Trap"
+            is Ecalli -> "Ecalli(value=$value)"
+            is Segfault -> "Segfault(fault=$fault)"
+            is NotEnoughGas -> "NotEnoughGas"
+            is Step -> "Step"
+        }
+    }
 }

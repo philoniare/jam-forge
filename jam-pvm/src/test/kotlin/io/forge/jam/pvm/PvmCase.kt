@@ -20,7 +20,7 @@ data class PvmCase(
     @SerialName("expected-status")
     val expectedStatus: PvmStatus,
     @SerialName("expected-regs")
-    val expectedRegs: List<UInt>,
+    val expectedRegs: List<ULong>,
     @SerialName("expected-pc")
     val expectedPc: UInt,
     @SerialName("expected-memory")

@@ -1,5 +1,6 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.RawHandlers
 import io.forge.jam.pvm.Target
 import io.forge.jam.pvm.engine.*
@@ -11,6 +12,38 @@ class Compiler(
     private val compiledArgs: MutableList<Args>,
     private val module: Module,
 ) : InstructionVisitor<Unit> {
+
+    companion object {
+        private val logger = PvmLogger(Compiler::class.java)
+        fun trapImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
+            with(visitor.inner) {
+                this.programCounter = programCounter
+                this.programCounterValid = true
+                this.nextProgramCounter = null
+                this.nextProgramCounterChanged = true
+                this.interrupt = InterruptKind.Trap
+            }
+            return null
+        }
+
+        fun notEnoughGasImpl(visitor: Visitor, programCounter: ProgramCounter, newGas: Long): Target? {
+            with(visitor.inner) {
+                gas = newGas
+                when (module.gasMetering()) {
+                    GasMeteringKind.Sync -> {
+                        this.programCounter = programCounter
+                        programCounterValid = true
+                        nextProgramCounter = programCounter
+                        nextProgramCounterChanged = false
+                    }
+
+                    null -> TODO()
+                }
+                interrupt = InterruptKind.NotEnoughGas
+            }
+            return null
+        }
+    }
 
     fun emit(
         handler: Handler,
@@ -485,34 +518,5 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    companion object {
-        fun trapImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
-            with(visitor.inner) {
-                this.programCounter = programCounter
-                this.programCounterValid = true
-                this.nextProgramCounter = null
-                this.nextProgramCounterChanged = true
-                this.interrupt = InterruptKind.Trap
-            }
-            return null
-        }
 
-        fun notEnoughGasImpl(visitor: Visitor, programCounter: ProgramCounter, newGas: Long): Target? {
-            with(visitor.inner) {
-                gas = newGas
-                when (module.gasMetering()) {
-                    GasMeteringKind.Sync -> {
-                        this.programCounter = programCounter
-                        programCounterValid = true
-                        nextProgramCounter = programCounter
-                        nextProgramCounterChanged = false
-                    }
-
-                    null -> TODO()
-                }
-                interrupt = InterruptKind.NotEnoughGas
-            }
-            return null
-        }
-    }
 }
