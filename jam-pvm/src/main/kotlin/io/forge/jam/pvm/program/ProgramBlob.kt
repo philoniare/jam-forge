@@ -2,6 +2,7 @@ package io.forge.jam.pvm.program
 
 import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.engine.InstructionSet
+import io.forge.jam.pvm.engine.JumpTable
 import io.forge.jam.pvm.engine.RuntimeInstructionSet
 
 /**
@@ -15,8 +16,8 @@ data class ProgramBlob(
     var roData: ArcBytes = ArcBytes.empty(),
     var rwData: ArcBytes = ArcBytes.empty(),
     var code: ArcBytes = ArcBytes.empty(),
-    private var jumpTable: ArcBytes = ArcBytes.empty(),
-    private var jumpTableEntrySize: Byte = 0,
+    var jumpTable: ArcBytes = ArcBytes.empty(),
+    var jumpTableEntrySize: Byte = 0,
     var bitmask: ArcBytes = ArcBytes.empty(),
     private var importOffsets: ArcBytes = ArcBytes.empty(),
     private var importSymbols: ArcBytes = ArcBytes.empty(),
@@ -25,6 +26,10 @@ data class ProgramBlob(
     private var debugLineProgramRanges: ArcBytes = ArcBytes.empty(),
     private var debugLinePrograms: ArcBytes = ArcBytes.empty()
 ) {
+
+    fun jumpTable(): JumpTable {
+        return JumpTable(jumpTable, jumpTableEntrySize.toUInt())
+    }
 
     fun <I : InstructionSet> instructionsBoundedAt(instructionSet: I, offset: ProgramCounter): Instructions<I> {
         return Instructions(

@@ -3,7 +3,6 @@ package io.forge.jam.pvm
 import io.forge.jam.pvm.engine.*
 import io.forge.jam.pvm.program.Compiler.Companion.TARGET_OUT_OF_RANGE
 import io.forge.jam.pvm.program.Compiler.Companion.notEnoughGasImpl
-import io.forge.jam.pvm.program.Compiler.Companion.trapImpl
 import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.Reg
 import io.forge.jam.pvm.program.toRegImm
@@ -794,5 +793,21 @@ object RawHandlers {
         visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
             ArithmeticOps.divu64(a, b)
         }
+    }
+
+    val loadI8Basic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val dst = transmuteReg(args.a1)
+        val offset = args.a2
+        visitor.load<I8LoadTy>(programCounter, dst, null, offset, 1u, false)
+    }
+
+    val loadI8Dynamic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val dst = transmuteReg(args.a1)
+        val offset = args.a2
+        visitor.load<I8LoadTy>(programCounter, dst, null, offset, 1u, true)
     }
 }

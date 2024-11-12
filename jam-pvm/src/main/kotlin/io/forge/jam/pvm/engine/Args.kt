@@ -341,5 +341,17 @@ data class Args(
             a1 = a1.toU32(),
             a2 = a2.toU32()
         )
+
+        fun loadI8Basic(programCounter: ProgramCounter, dst: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = dst.toU32(),
+            a2 = offset
+        )
+
+        fun loadI8Dynamic(programCounter: ProgramCounter, dst: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = dst.toU32(),
+            a2 = offset
+        )
     }
 }

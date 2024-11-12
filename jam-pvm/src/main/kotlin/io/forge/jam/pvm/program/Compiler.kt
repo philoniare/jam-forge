@@ -18,16 +18,6 @@ class Compiler(
     companion object {
         private val logger = PvmLogger(Compiler::class.java)
         const val TARGET_OUT_OF_RANGE = 0u
-        fun trapImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
-            with(visitor.inner) {
-                this.programCounter = programCounter
-                this.programCounterValid = true
-                this.nextProgramCounter = null
-                this.nextProgramCounterChanged = true
-                this.interrupt = InterruptKind.Trap
-            }
-            return null
-        }
 
         fun notEnoughGasImpl(visitor: Visitor, programCounter: ProgramCounter, newGas: Long): Target? {
             with(visitor.inner) {
@@ -81,7 +71,17 @@ class Compiler(
     }
 
     override fun loadI8(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.loadI8Basic,
+                Args.loadI8Basic(programCounter, reg, imm), "loadI8Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.loadI8Dynamic,
+                Args.loadI8Dynamic(programCounter, reg, imm), "loadI8Dynamic"
+            )
+        }
     }
 
     override fun loadU16(reg: RawReg, imm: UInt) {

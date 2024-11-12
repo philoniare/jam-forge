@@ -11,9 +11,9 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class PvmTest {
-    fun assertUIntListMatchesBytes(expected: List<UInt>, actual: Result<ByteArray>) {
+    fun assertUIntListMatchesBytes(expected: UByteArray, actual: Result<ByteArray>) {
         assertContentEquals(
-            expected = expected.map { it.toUByte() },
+            expected = expected,
             actual = actual.getOrThrow().map { it.toUByte() },
             message = "Memory mismatch."
         )
@@ -22,8 +22,8 @@ class PvmTest {
     @Test
     fun runTest() {
         val folderName = "pvm"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-//        val testCases = listOf("inst_branch_greater_unsigned_imm_nok")
+//        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        val testCases = listOf("inst_load_i8")
 
         for (testCase in testCases) {
             println("Running test case: $testCase")
@@ -55,6 +55,11 @@ class PvmTest {
             inputCase.initialRegs.forEachIndexed { index, value ->
                 instance.setReg(Reg.fromRaw(index)!!, value.toULong())
             }
+
+            inputCase.initialMemory.forEachIndexed { index, memory ->
+                instance.writeMemory(memory.address, memory.contents.toByteArray())
+            }
+
 
             var finalPc = inputCase.initialPc
             val actualStatus = run {

@@ -171,6 +171,8 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
 
     fun gasMetering(): GasMeteringKind? = state().gasMetering
 
+    fun jumpTable() = state().blob.jumpTable()
+
     fun findStartOfBasicBlock(offset: ProgramCounter): ProgramCounter? {
         return Program.findStartOfBasicBlock(
             state().instructionSet,
