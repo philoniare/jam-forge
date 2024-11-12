@@ -133,15 +133,15 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun branchEq(s1: RawReg, s2: RawReg, i: UInt) {
-        val targetTrue = ProgramCounter(i)
+    override fun branchEq(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        val targetTrue = ProgramCounter(imm)
         if (!module.isJumpTargetValid(targetTrue)) {
             instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
         } else {
             val targetFalse = nextProgramCounter
             instance.emit(
                 RawHandlers.unresolvedBranchEq,
-                Args.unresolvedBranchEq(s1, s2, targetTrue, targetFalse), "unresolvedBranchEq"
+                Args.unresolvedBranchEq(reg1, reg2, targetTrue, targetFalse), "unresolvedBranchEq"
             )
         }
     }
@@ -243,18 +243,17 @@ class Compiler(
     }
 
     override fun branchLessOrEqualUnsignedImm(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
-//        val targetTrue = ProgramCounter(i)
-//        if (!module.isJumpTargetValid(targetTrue)) {
-//            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
-//        } else {
-//            val targetFalse = nextProgramCounter
-//            instance.emit(
-//                RawHandlers.unresolvedBranchLessOrEqualUnsignedImm,
-//                Args.unresolvedBranchLessOrEqualUnsignedImm(s1, s2, targetTrue, targetFalse),
-//                "unresolvedBranchLessOrEqualUnsignedImm"
-//            )
-//        }
+        val targetTrue = ProgramCounter(imm2)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchLessOrEqualUnsignedImm,
+                Args.unresolvedBranchLessOrEqualUnsignedImm(reg, imm1, targetTrue, targetFalse),
+                "unresolvedBranchLessOrEqualUnsignedImm"
+            )
+        }
     }
 
     override fun branchGreaterSignedImm(s1: RawReg, s2: UInt, i: UInt) {
@@ -272,18 +271,17 @@ class Compiler(
     }
 
     override fun branchGreaterUnsignedImm(s1: RawReg, s2: UInt, i: UInt) {
-        TODO("Not yet implemented")
-//        val targetTrue = ProgramCounter(i)
-//        if (!module.isJumpTargetValid(targetTrue)) {
-//            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
-//        } else {
-//            val targetFalse = nextProgramCounter
-//            instance.emit(
-//                RawHandlers.unresolvedBranchGreaterUnsignedImm,
-//                Args.unresolvedBranchGreaterUnsignedImm(s1, s2, targetTrue, targetFalse),
-//                "unresolvedBranchGreaterUnsignedImm"
-//            )
-//        }
+        val targetTrue = ProgramCounter(i)
+        if (!module.isJumpTargetValid(targetTrue)) {
+            instance.emit(RawHandlers.invalidBranch, Args.invalidBranch(programCounter), "invalidBranch")
+        } else {
+            val targetFalse = nextProgramCounter
+            instance.emit(
+                RawHandlers.unresolvedBranchGreaterUnsignedImm,
+                Args.unresolvedBranchGreaterUnsignedImm(s1, s2, targetTrue, targetFalse),
+                "unresolvedBranchGreaterUnsignedImm"
+            )
+        }
     }
 
     override fun storeImmIndirectU8(reg: RawReg, imm1: UInt, imm2: UInt) {
