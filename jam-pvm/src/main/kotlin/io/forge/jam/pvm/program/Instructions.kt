@@ -7,17 +7,38 @@ data class Instructions<I : InstructionSet>(
     private val code: ByteArray,
     private val bitmask: ByteArray,
     var offset: UInt = 0u,
-    private var invalidOffset: UInt? = null,
+    var invalidOffset: UInt? = null,
     private var isBounded: Boolean = false,
     private var isDone: Boolean = false,
     private val instructionSet: I
 ) : Iterator<ParsedInstruction>, Cloneable {
+    private var nextInstruction: ParsedInstruction? = null
+
     override fun hasNext(): Boolean {
-        return !isDone
+        if (nextInstruction != null) {
+            return true
+        }
+
+        try {
+            nextInstruction = computeNext()
+            return true
+        } catch (e: NoSuchElementException) {
+            return false
+        }
     }
 
     override fun next(): ParsedInstruction {
+        val cached = nextInstruction
+        if (cached != null) {
+            nextInstruction = null
+            return cached
+        }
+        return computeNext()
+    }
+
+    private fun computeNext(): ParsedInstruction {
         invalidOffset?.let { invalid ->
+            logger.debug("Invalid offset: ${invalid}")
             invalidOffset = null
             return ParsedInstruction(
                 kind = Instruction.Invalid,
@@ -29,7 +50,6 @@ data class Instructions<I : InstructionSet>(
         if (isDone || offset.toUInt() >= code.size.toUInt()) {
             throw NoSuchElementException("No more instructions")
         }
-
         val currentOffset = offset
 
         require(Program.getBitForOffset(bitmask, code.size, currentOffset)) {
@@ -78,8 +98,7 @@ data class Instructions<I : InstructionSet>(
             nextOffset = ProgramCounter(nextOffset)
         )
     }
-
-
+    
     companion object {
         private val logger = PvmLogger(Instructions::class.java)
 
@@ -90,6 +109,10 @@ data class Instructions<I : InstructionSet>(
             offset: UInt,
             isBounded: Boolean
         ): Instructions<I> {
+            logger.debug("NEW: code.size=${code.size}, bitmask.size=${bitmask.size}, offset=$offset, isBounded=$isBounded")
+            logger.debug("NEW: code=${code.joinToString(",")}, bitmask=${bitmask.joinToString(",")}")
+
+
             require(code.size <= Int.MAX_VALUE && code.size.toUInt() <= UInt.MAX_VALUE) {
                 "Code size exceeds maximum value"
             }
@@ -108,6 +131,7 @@ data class Instructions<I : InstructionSet>(
                 val nextOffset = Program.findNextOffsetUnbounded(bitmask, code.size.toUInt(), offset)
                 nextOffset to offset
             }
+            logger.debug("Final offset: ${finalOffset}, ${invalidOffset}, ${isDone}")
 
             return Instructions(
                 code = code,

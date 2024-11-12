@@ -32,11 +32,13 @@ data class ProgramBlob(
     }
 
     fun <I : InstructionSet> instructionsBoundedAt(instructionSet: I, offset: ProgramCounter): Instructions<I> {
-        return Instructions(
+        logger.debug("instructionsBoundedAt: offset=$offset")
+        return Instructions.new(
             code = code.toByteArray(),
             bitmask = bitmask.toByteArray(),
             offset = offset.value,
-            instructionSet = instructionSet
+            instructionSet = instructionSet,
+            isBounded = true
         )
     }
 

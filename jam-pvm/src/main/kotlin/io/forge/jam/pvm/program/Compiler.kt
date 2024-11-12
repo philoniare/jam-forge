@@ -52,7 +52,13 @@ class Compiler(
     }
 
     override fun fallthrough() {
-        TODO("Not yet implemented")
+        val target = nextProgramCounter()
+        logger.debug("Target: $target")
+        instance.emit(
+            RawHandlers.unresolvedFallthrough,
+            Args.unresolvedFallthrough(target),
+            "unresolvedFallthrough"
+        )
     }
 
     override fun jumpIndirect(reg: RawReg, imm: UInt) {
@@ -860,7 +866,11 @@ class Compiler(
     }
 
     override fun jump(imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.unresolvedJump,
+            Args.unresolvedJump(programCounter, ProgramCounter(imm)),
+            "unresolvedJump"
+        )
     }
 
     override fun ecalli(imm: UInt) {

@@ -190,6 +190,20 @@ class InterpretedInstance private constructor(
         return finalTarget
     }
 
+    fun resolveFallthrough(programCounter: ProgramCounter): Target? {
+        // First try to get from compiled offset block
+        compiledOffsetForBlock.get(programCounter.value)?.let { compiledOffset ->
+            val (isJumpTargetValid, target) = unpackTarget(compiledOffset)
+            if (!isJumpTargetValid) {
+                return null
+            }
+            return target
+        }
+
+        // If not found, compile block
+        return compileBlock(programCounter)
+    }
+
     fun resolveArbitraryJump(programCounter: ProgramCounter): Target? {
         compiledOffsetForBlock.get(programCounter.value)?.let { compiledOffset ->
             val (_, target) = unpackTarget(compiledOffset)
@@ -216,6 +230,7 @@ class InterpretedInstance private constructor(
 
     private fun compileBlock(programCounter: ProgramCounter?): Target? {
         if (programCounter?.value!! > module.codeLen()) {
+            logger.debug("Program counter out of range: ${programCounter.value}")
             return null
         }
 
@@ -226,7 +241,7 @@ class InterpretedInstance private constructor(
             compiledHandlers.size.toUInt()
         }
 
-        logger.debug("Compiling block:")
+        logger.debug("Compiling block: ${origin}")
 
         val gasVisitor = GasVisitor()
         var chargeGasIndex: Pair<ProgramCounter, Int>? = null
@@ -272,6 +287,7 @@ class InterpretedInstance private constructor(
                 )
             )
 
+            logger.debug("Impossible: ${compiledHandlers.size}, ${originalLength}")
             assert(compiledHandlers.size > originalLength) {
                 "Handler size must increase after instruction visit"
             }
@@ -288,7 +304,9 @@ class InterpretedInstance private constructor(
         }
 
         // Convert origin back to size type for comparison, like Rust does
+        logger.debug("Compiled block: ${origin} -> ${compiledHandlers.size}")
         if (compiledHandlers.size == origin.toInt()) {
+            logger.debug("Exiting early")
             return null
         }
 
@@ -466,14 +484,15 @@ class InterpretedInstance private constructor(
             logger.debug("Executing handler at: [$offset], cycle counter: $cycleCounter")
 
             val visitor = Visitor(this)
-            when (val nextOffset = handler(visitor)) {
+            val nextOffset = handler(visitor)
+            logger.debug("Next offset: $nextOffset")
+            when (nextOffset) {
                 null -> return interrupt
                 else -> {
                     offset = nextOffset
                     this.compiledOffset = offset
                 }
             }
-            return interrupt
         }
     }
 }

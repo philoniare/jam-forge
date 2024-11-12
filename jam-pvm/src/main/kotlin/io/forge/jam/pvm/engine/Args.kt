@@ -626,5 +626,20 @@ data class Args(
             a1 = s2.toU32(),
             a2 = s1
         )
+
+        fun jump(target: Target) = Args(
+            a0 = target
+        )
+
+        fun fallthrough() = Args()
+
+        fun unresolvedJump(programCounter: ProgramCounter, jumpTo: ProgramCounter) = Args(
+            a0 = programCounter.value,
+            a1 = jumpTo.value
+        )
+
+        fun unresolvedFallthrough(jumpTo: ProgramCounter) = Args(
+            a0 = jumpTo.value
+        )
     }
 }

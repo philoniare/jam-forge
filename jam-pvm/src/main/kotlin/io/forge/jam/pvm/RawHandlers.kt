@@ -1324,5 +1324,69 @@ object RawHandlers {
         }
     }
 
+    val jump: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val target = args.a0
+        logger.debug("[${visitor.inner.compiledOffset}]: jump ~$target")
+        target
+    }
 
+    val fallthrough: Handler = { visitor ->
+        logger.debug("[${visitor.inner.compiledOffset}]: fallthrough")
+        visitor.goToNextInstruction()
+    }
+
+    val unresolvedJump: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val jumpTo = ProgramCounter(args.a1)
+        logger.debug("[${visitor.inner.compiledOffset}]: unresolved jump $jumpTo")
+
+        visitor.inner.resolveJump(jumpTo)?.let { target ->
+            val offset = visitor.inner.compiledOffset
+
+            if (offset + 1u == target) {
+                logger.debug("  -> resolved to fallthrough")
+                visitor.inner.compiledHandlers[offset.toInt()] = fallthrough
+                visitor.inner.compiledArgs[offset.toInt()] = Args.fallthrough()
+            } else {
+                logger.debug("  -> resolved to jump")
+                visitor.inner.compiledHandlers[offset.toInt()] = jump
+                visitor.inner.compiledArgs[offset.toInt()] = Args.jump(target)
+            }
+            target
+        } ?: run {
+            logger.debug("  -> resolved to trap")
+            trapImpl(visitor, programCounter)
+        }
+    }
+
+    val unresolvedFallthrough: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val jumpTo = ProgramCounter(args.a0)
+        logger.debug("[${visitor.inner.compiledOffset}]: unresolved fallthrough $jumpTo")
+
+        val offset = visitor.inner.compiledOffset
+
+        visitor.inner.resolveFallthrough(jumpTo)?.let { target ->
+            logger.debug("Resolved fallthrough: ${target}")
+            trapImpl(visitor, jumpTo)
+            if (offset + 1u == target) {
+                logger.debug("  -> resolved to fallthrough")
+                visitor.inner.compiledHandlers[offset.toInt()] = fallthrough
+                visitor.inner.compiledArgs[offset.toInt()] = Args.fallthrough()
+            } else {
+                logger.debug("  -> resolved to jump")
+                visitor.inner.compiledHandlers[offset.toInt()] = jump
+                visitor.inner.compiledArgs[offset.toInt()] = Args.jump(target)
+            }
+            target
+        } ?: run {
+            logger.debug("UNIResolved fallthrough: ${jumpTo}")
+            trapImpl(visitor, jumpTo)
+            visitor.inner.compiledHandlers[offset.toInt()] = jump
+            visitor.inner.compiledArgs[offset.toInt()] = Args.jump(TARGET_OUT_OF_RANGE)
+            TARGET_OUT_OF_RANGE
+        }
+    }
 }

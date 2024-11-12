@@ -112,7 +112,7 @@ class InstructionsTest {
 
         assertThrows<NoSuchElementException> { instructions.next() }
     }
-    
+
     @Test
     fun `test instructions iterator very long bitmask unbounded`() {
         val code = ByteArray(64) { 0 }.apply {
