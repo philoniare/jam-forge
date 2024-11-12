@@ -482,5 +482,29 @@ data class Args(
             a3 = value,
             a4 = offset
         )
+
+        fun setLessThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
+
+        fun setGreaterThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
+
+        fun setLessThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
+
+        fun setGreaterThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
     }
 }

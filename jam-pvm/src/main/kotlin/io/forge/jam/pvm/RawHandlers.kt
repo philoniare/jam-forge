@@ -1059,4 +1059,48 @@ object RawHandlers {
         visitor.set32(ra, value)
         visitor.jumpIndirectImpl(programCounter, dynamicAddress)
     }
+
+    val setLessThanUnsignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: set_less_than_unsigned_imm $d = $s1 <u $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            if (s1 < s2) 1uL else 0uL
+        }
+    }
+
+    val setGreaterThanUnsignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: set_greater_than_unsigned_imm $d = $s1 >u $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            if (s1 > s2) 1uL else 0uL
+        }
+    }
+
+    val setLessThanSignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: set_less_than_signed_imm $d = $s1 <s $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            if (Cast(s1).ulongToSigned() < Cast(s2).ulongToSigned()) 1uL else 0uL
+        }
+    }
+
+    val setGreaterThanSignedImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: set_greater_than_signed_imm $d = $s1 >s $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            if (Cast(s1).ulongToSigned() > Cast(s2).ulongToSigned()) 1uL else 0uL
+        }
+    }
 }

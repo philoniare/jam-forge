@@ -388,12 +388,20 @@ class Compiler(
         )
     }
 
-    override fun setLessThanUnsignedImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+    override fun setLessThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+        instance.emit(
+            RawHandlers.setLessThanUnsignedImm,
+            Args.setLessThanUnsignedImm(d, s1, s2),
+            "setLessThanUnsignedImm"
+        )
     }
 
-    override fun setLessThanSignedImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+    override fun setLessThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+        instance.emit(
+            RawHandlers.setLessThanSignedImm,
+            Args.setLessThanSignedImm(d, s1, s2),
+            "setLessThanSignedImm"
+        )
     }
 
     override fun shiftLogicalLeftImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
@@ -436,12 +444,20 @@ class Compiler(
         )
     }
 
-    override fun setGreaterThanUnsignedImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+    override fun setGreaterThanUnsignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+        instance.emit(
+            RawHandlers.setGreaterThanUnsignedImm,
+            Args.setGreaterThanUnsignedImm(d, s1, s2),
+            "setGreaterThanUnsignedImm"
+        )
     }
 
-    override fun setGreaterThanSignedImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+    override fun setGreaterThanSignedImm(d: RawReg, s1: RawReg, s2: UInt) {
+        instance.emit(
+            RawHandlers.setGreaterThanSignedImm,
+            Args.setGreaterThanSignedImm(d, s1, s2),
+            "setGreaterThanSignedImm"
+        )
     }
 
     override fun shiftLogicalRightImmAlt32(reg1: RawReg, reg2: RawReg, imm: UInt) {
