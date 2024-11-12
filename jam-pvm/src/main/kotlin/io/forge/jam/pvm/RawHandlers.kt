@@ -1032,4 +1032,31 @@ object RawHandlers {
             ).longToUnsigned()
         }
     }
+
+    val jumpIndirect: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+
+        logger.debug("[${visitor.inner.compiledOffset}]: jump_indirect ${base}, $offset")
+
+        val dynamicAddress = visitor.get32(base.toRegImm()).plus(offset)
+        visitor.jumpIndirectImpl(programCounter, dynamicAddress)
+    }
+
+    val loadImmAndJumpIndirect: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val ra = transmuteReg(args.a1)
+        val base = transmuteReg(args.a2)
+        val value = args.a3
+        val offset = args.a4
+
+        logger.debug("[${visitor.inner.compiledOffset}]: load_imm_and_jump_indirect $ra, $base, $value, $offset")
+
+        val dynamicAddress = visitor.get32(base.toRegImm()).plus(offset)
+        visitor.set32(ra, value)
+        visitor.jumpIndirectImpl(programCounter, dynamicAddress)
+    }
 }

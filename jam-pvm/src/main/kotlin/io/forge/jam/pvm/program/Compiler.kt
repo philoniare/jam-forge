@@ -56,7 +56,10 @@ class Compiler(
     }
 
     override fun jumpIndirect(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.jumpIndirect,
+            Args.jumpIndirect(programCounter, reg, imm), "jumpIndirect"
+        )
     }
 
     override fun loadImm(reg: RawReg, imm: UInt) {
@@ -795,8 +798,12 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
-    override fun loadImmAndJumpIndirect(reg1: RawReg, reg2: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+    override fun loadImmAndJumpIndirect(ra: RawReg, base: RawReg, value: UInt, offset: UInt) {
+        instance.emit(
+            RawHandlers.loadImmAndJumpIndirect,
+            Args.loadImmAndJumpIndirect(programCounter, ra, base, value, offset),
+            "loadImmAndJumpIndirect"
+        )
     }
 
     override fun loadImm64(reg: RawReg, imm: ULong) {

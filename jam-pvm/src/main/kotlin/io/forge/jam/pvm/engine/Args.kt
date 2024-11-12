@@ -11,7 +11,8 @@ data class Args(
     val a0: UInt = 0u,
     val a1: UInt = 0u,
     val a2: UInt = 0u,
-    val a3: UInt = 0u
+    val a3: UInt = 0u,
+    val a4: UInt = 0u
 ) {
     companion object {
         /**
@@ -460,6 +461,26 @@ data class Args(
             a0 = d.toU32(),
             a1 = s1.toU32(),
             a2 = s2.toU32()
+        )
+
+        fun jumpIndirect(programCounter: ProgramCounter, base: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset
+        )
+
+        fun loadImmAndJumpIndirect(
+            programCounter: ProgramCounter,
+            ra: RawReg,
+            base: RawReg,
+            value: UInt,
+            offset: UInt
+        ) = Args(
+            a0 = programCounter.value,
+            a1 = ra.toU32(),
+            a2 = base.toU32(),
+            a3 = value,
+            a4 = offset
         )
     }
 }
