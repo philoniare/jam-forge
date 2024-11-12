@@ -437,5 +437,29 @@ data class Args(
             a1 = s1.toU32(),
             a2 = s2
         )
+
+        fun remUnsigned32(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
+
+        fun remUnsigned64(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
+
+        fun remSigned32(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
+
+        fun remSigned64(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
     }
 }

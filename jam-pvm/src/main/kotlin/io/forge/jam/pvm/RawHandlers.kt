@@ -978,4 +978,58 @@ object RawHandlers {
             s2.minus(s1)
         }
     }
+
+    val remUnsigned32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: rem_unsigned_32 $d = $s1 % $s2")
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            ArithmeticOps.remu(a, b)
+        }
+    }
+
+    val remUnsigned64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: rem_unsigned_64 $d = $s1 % $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            ArithmeticOps.remu64(a, b)
+        }
+    }
+
+    val remSigned32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: rem_signed_32 $d = $s1 % $s2")
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            Cast(
+                ArithmeticOps.rem(
+                    Cast(a).uintToSigned(),
+                    Cast(b).uintToSigned()
+                )
+            ).intToUnsigned()
+        }
+    }
+
+    val remSigned64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: rem_signed_64 $d = $s1 % $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            Cast(
+                ArithmeticOps.rem64(
+                    Cast(a).ulongToSigned(),
+                    Cast(b).ulongToSigned()
+                )
+            ).longToUnsigned()
+        }
+    }
 }

@@ -718,19 +718,35 @@ class Compiler(
     }
 
     override fun remUnsigned32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.remUnsigned32,
+            Args.remUnsigned32(reg1, reg2, reg3),
+            "remUnsigned32"
+        )
     }
 
     override fun remUnsigned64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.remUnsigned64,
+            Args.remUnsigned64(reg1, reg2, reg3),
+            "remUnsigned64"
+        )
     }
 
     override fun remSigned32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.remSigned32,
+            Args.remSigned32(reg1, reg2, reg3),
+            "remSigned32"
+        )
     }
 
     override fun remSigned64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.remSigned64,
+            Args.remSigned64(reg1, reg2, reg3),
+            "remSigned64"
+        )
     }
 
     override fun cmovIfZero(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
