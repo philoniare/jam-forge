@@ -673,11 +673,19 @@ class Compiler(
     }
 
     override fun setLessThanUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.setLessThanUnsigned,
+            Args.setLessThanUnsigned(reg1, reg2, reg3),
+            "setLessThanUnsigned"
+        )
     }
 
     override fun setLessThanSigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.setLessThanSigned,
+            Args.setLessThanSigned(reg1, reg2, reg3),
+            "setLessThanSigned"
+        )
     }
 
     override fun shiftLogicalLeft32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {

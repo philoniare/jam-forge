@@ -506,5 +506,17 @@ data class Args(
             a1 = s1.toU32(),
             a2 = s2
         )
+
+        fun setLessThanUnsigned(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
+
+        fun setLessThanSigned(d: RawReg, s1: RawReg, s2: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2.toU32()
+        )
     }
 }

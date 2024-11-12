@@ -1103,4 +1103,26 @@ object RawHandlers {
             if (Cast(s1).ulongToSigned() > Cast(s2).ulongToSigned()) 1uL else 0uL
         }
     }
+
+    val setLessThanUnsigned: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: set_less_than_unsigned $d = $s1 <u $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { s1, s2 ->
+            if (s1 < s2) 1uL else 0uL
+        }
+    }
+
+    val setLessThanSigned: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        logger.debug("[${visitor.inner.compiledOffset}]: set_less_than_signed $d = $s1 <s $s2")
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { s1, s2 ->
+            if (Cast(s1).ulongToSigned() < Cast(s2).ulongToSigned()) 1uL else 0uL
+        }
+    }
 }
