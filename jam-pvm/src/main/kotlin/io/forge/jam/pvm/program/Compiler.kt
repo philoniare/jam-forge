@@ -363,7 +363,10 @@ class Compiler(
     }
 
     override fun orImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.orImm,
+            Args.orImm(reg1, reg2, imm), "orImm"
+        )
     }
 
     override fun mulImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
@@ -415,11 +418,19 @@ class Compiler(
     }
 
     override fun negateAndAddImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.negateAndAddImm32,
+            Args.negateAndAddImm32(reg1, reg2, imm),
+            "negateAndAddImm32"
+        )
     }
 
     override fun negateAndAddImm64(reg1: RawReg, reg2: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.negateAndAddImm64,
+            Args.negateAndAddImm64(reg1, reg2, imm),
+            "negateAndAddImm64"
+        )
     }
 
     override fun setGreaterThanUnsignedImm(reg1: RawReg, reg2: RawReg, imm: UInt) {
@@ -572,7 +583,10 @@ class Compiler(
     }
 
     override fun or(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.or,
+            Args.or(reg1, reg2, reg3), "or"
+        )
     }
 
     override fun mul32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {

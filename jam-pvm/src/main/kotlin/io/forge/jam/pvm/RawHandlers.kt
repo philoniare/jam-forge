@@ -940,4 +940,42 @@ object RawHandlers {
             ).longToUnsigned()
         }
     }
+
+    val orImm: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { a, b -> a or b }
+    }
+
+    val or: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a or b }
+    }
+
+    val negateAndAddImm32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: negate_and_add_imm_32 $d = $s2 - $s1")
+        visitor.set3_32(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            s2.minus(s1)
+        }
+    }
+
+    val negateAndAddImm64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = args.a2
+        logger.debug("[${visitor.inner.compiledOffset}]: negate_and_add_imm_64 $d = $s2 - $s1")
+        visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm()) { s1, s2 ->
+            s2.minus(s1)
+        }
+    }
 }

@@ -413,5 +413,29 @@ data class Args(
             a1 = s1.toU32(),
             a2 = s2.toU32()
         )
+
+        fun orImm(a0: RawReg, a1: RawReg, imm: UInt) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = imm
+        )
+
+        fun or(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2.toU32()
+        )
+
+        fun negateAndAddImm32(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
+
+        fun negateAndAddImm64(d: RawReg, s1: RawReg, s2: UInt) = Args(
+            a0 = d.toU32(),
+            a1 = s1.toU32(),
+            a2 = s2
+        )
     }
 }
