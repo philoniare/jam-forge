@@ -257,73 +257,70 @@ class Visitor(
                 set64(dst, value)
                 return goToNextInstruction()
             } ?: return trapImpl(this, programCounter)
-        }
+        } else {
+            // Dynamic memory mode
+            val addressEnd = address.plus(size)
+            if (addressEnd < address) {
+                return trapImpl(this, programCounter)
+            }
 
-        return trapImpl(this, programCounter)
-//        } else {
-//            // Dynamic memory mode
-//            val addressEnd = address.plus(size)
-//            if (addressEnd < address) {
-//                return trapImpl(this, programCounter)
-//            }
-//
-//            val pageAddressLo = inner.module.roundToPageSizeDown(address)
-//            val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
-//
-//            if (pageAddressLo == pageAddressHi) {
-//                // Single page access
-//                inner.dynamicMemory.pages[pageAddressLo]?.let { page ->
-//                    val pageOffset = (address - pageAddressLo).toInt()
-//                    val loadTy = when (T::class) {
-//                        U8LoadTy::class -> U8LoadTy
-//                        I8LoadTy::class -> I8LoadTy
-//                        U16LoadTy::class -> U16LoadTy
-//                        I16LoadTy::class -> I16LoadTy
-//                        U32LoadTy::class -> U32LoadTy
-//                        I32LoadTy::class -> I32LoadTy
-//                        U64LoadTy::class -> U64LoadTy
-//                        else -> throw IllegalArgumentException("Unknown LoadTy type")
-//                    }
-//                    val value = loadTy.fromSlice(page.sliceArray(pageOffset until pageOffset + size.toInt()))
-//                    set64(dst, value)
-//                    return goToNextInstruction()
-//                } ?: return segfaultImpl(programCounter, pageAddressLo)
-//            } else {
-//                // Cross-page access
-//                val pages = inner.dynamicMemory.pages
-//                val lo = pages[pageAddressLo]
-//                val hi = pages[pageAddressHi]
-//
-//                when {
-//                    lo != null && hi != null -> {
-//                        val pageSize = inner.module.memoryMap().pageSize.toInt()
-//                        val loLen = (pageAddressHi - address).toInt()
-//                        val hiLen = size.toInt() - loLen
-//                        val buffer = ByteArray(size.toInt())
-//
-//                        System.arraycopy(lo, pageSize - loLen, buffer, 0, loLen)
-//                        System.arraycopy(hi, 0, buffer, loLen, hiLen)
-//
-//                        val loadTy = when (T::class) {
-//                            U8LoadTy::class -> U8LoadTy
-//                            I8LoadTy::class -> I8LoadTy
-//                            U16LoadTy::class -> U16LoadTy
-//                            I16LoadTy::class -> I16LoadTy
-//                            U32LoadTy::class -> U32LoadTy
-//                            I32LoadTy::class -> I32LoadTy
-//                            U64LoadTy::class -> U64LoadTy
-//                            else -> throw IllegalArgumentException("Unknown LoadTy type")
-//                        }
-//                        val value = loadTy.fromSlice(buffer)
-//                        set64(dst, value)
-//                        return goToNextInstruction()
-//                    }
-//
-//                    lo == null -> return segfaultImpl(programCounter, pageAddressLo)
-//                    else -> return segfaultImpl(programCounter, pageAddressHi)
-//                }
-//            }
-//        }
+            val pageAddressLo = inner.module.roundToPageSizeDown(address)
+            val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
+
+            if (pageAddressLo == pageAddressHi) {
+                // Single page access
+                inner.dynamicMemory.pages[pageAddressLo]?.let { page ->
+                    val pageOffset = (address - pageAddressLo).toInt()
+                    val loadTy = when (T::class) {
+                        U8LoadTy::class -> U8LoadTy
+                        I8LoadTy::class -> I8LoadTy
+                        U16LoadTy::class -> U16LoadTy
+                        I16LoadTy::class -> I16LoadTy
+                        U32LoadTy::class -> U32LoadTy
+                        I32LoadTy::class -> I32LoadTy
+                        U64LoadTy::class -> U64LoadTy
+                        else -> throw IllegalArgumentException("Unknown LoadTy type")
+                    }
+                    val value = loadTy.fromSlice(page.sliceArray(pageOffset until pageOffset + size.toInt()))
+                    set64(dst, value)
+                    return goToNextInstruction()
+                } ?: return segfaultImpl(programCounter, pageAddressLo)
+            } else {
+                // Cross-page access
+                val pages = inner.dynamicMemory.pages
+                val lo = pages[pageAddressLo]
+                val hi = pages[pageAddressHi]
+
+                when {
+                    lo != null && hi != null -> {
+                        val pageSize = inner.module.memoryMap().pageSize.toInt()
+                        val loLen = (pageAddressHi - address).toInt()
+                        val hiLen = size.toInt() - loLen
+                        val buffer = ByteArray(size.toInt())
+
+                        System.arraycopy(lo, pageSize - loLen, buffer, 0, loLen)
+                        System.arraycopy(hi, 0, buffer, loLen, hiLen)
+
+                        val loadTy = when (T::class) {
+                            U8LoadTy::class -> U8LoadTy
+                            I8LoadTy::class -> I8LoadTy
+                            U16LoadTy::class -> U16LoadTy
+                            I16LoadTy::class -> I16LoadTy
+                            U32LoadTy::class -> U32LoadTy
+                            I32LoadTy::class -> I32LoadTy
+                            U64LoadTy::class -> U64LoadTy
+                            else -> throw IllegalArgumentException("Unknown LoadTy type")
+                        }
+                        val value = loadTy.fromSlice(buffer)
+                        set64(dst, value)
+                        return goToNextInstruction()
+                    }
+
+                    lo == null -> return segfaultImpl(programCounter, pageAddressLo)
+                    else -> return segfaultImpl(programCounter, pageAddressHi)
+                }
+            }
+        }
 
     }
 

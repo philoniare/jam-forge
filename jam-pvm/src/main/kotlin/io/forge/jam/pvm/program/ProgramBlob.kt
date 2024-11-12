@@ -32,7 +32,6 @@ data class ProgramBlob(
     }
 
     fun <I : InstructionSet> instructionsBoundedAt(instructionSet: I, offset: ProgramCounter): Instructions<I> {
-        logger.debug("instructionsBoundedAt: offset=$offset")
         return Instructions.new(
             code = code.toByteArray(),
             bitmask = bitmask.toByteArray(),
@@ -54,6 +53,7 @@ data class ProgramBlob(
         private const val VERSION_DEBUG_LINE_PROGRAM_V1: Byte = 1
 
         fun fromParts(parts: ProgramParts): Result<ProgramBlob> = runCatching {
+
             val blob = ProgramBlob(
                 is64Bit = parts.is64Bit,
                 roDataSize = parts.roDataSize,

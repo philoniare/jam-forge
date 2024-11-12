@@ -32,7 +32,6 @@ class InterpretedInstance private constructor(
 ) {
 
     fun emit(handler: Handler, args: Args, name: String) {
-        logger.debug("Emitting handler: $name")
         compiledHandlers.add(handler)
         compiledArgs.add(args)
     }
@@ -234,14 +233,11 @@ class InterpretedInstance private constructor(
             return null
         }
 
-        logger.debug("Compiled handlers: ${compiledHandlers.size}. ${programCounter}")
         val origin = if (compiledHandlers.size > UInt.MAX_VALUE.toLong()) {
             throw IllegalStateException("internal compiled program counter overflow: the program is too big!")
         } else {
             compiledHandlers.size.toUInt()
         }
-
-        logger.debug("Compiling block: ${origin}")
 
         val gasVisitor = GasVisitor()
         var chargeGasIndex: Pair<ProgramCounter, Int>? = null
@@ -250,8 +246,6 @@ class InterpretedInstance private constructor(
         var i = 0
         for (instruction in module.instructionsBoundedAt(programCounter)) {
             i++
-            logger.debug("Instruction kind: ${instruction.kind}, ${instruction.offset.value}, ${instruction.nextOffset.value}")
-
             compiledOffsetForBlock.insert(
                 instruction.offset.value,
                 packTarget(compiledHandlers.size.toUInt(), isJumpTargetValid)
@@ -287,7 +281,6 @@ class InterpretedInstance private constructor(
                 )
             )
 
-            logger.debug("Impossible: ${compiledHandlers.size}, ${originalLength}")
             assert(compiledHandlers.size > originalLength) {
                 "Handler size must increase after instruction visit"
             }
@@ -296,20 +289,16 @@ class InterpretedInstance private constructor(
                 break
             }
         }
-        logger.debug("Processed instructions: ${i}")
 
         chargeGasIndex?.let { (programCounter, index) ->
             val gasCost = gasVisitor.takeBlockCost()!!
             compiledArgs[index] = Args.chargeGas(programCounter, gasCost)
         }
 
-        // Convert origin back to size type for comparison, like Rust does
-        logger.debug("Compiled block: ${origin} -> ${compiledHandlers.size}")
         if (compiledHandlers.size == origin.toInt()) {
             logger.debug("Exiting early")
             return null
         }
-
         return origin
     }
 
@@ -459,7 +448,6 @@ class InterpretedInstance private constructor(
             basicMemory.markDirty()
         }
 
-        logger.debug("Running impl: ${nextProgramCounterChanged}")
         if (nextProgramCounterChanged) {
             val pc = nextProgramCounter
             nextProgramCounter = null
@@ -467,10 +455,8 @@ class InterpretedInstance private constructor(
                 pc ?: throw IllegalStateException("Failed to run: next program counter is not set")
 
             this.programCounter = programCounter
-            logger.debug("PC: ${programCounter.value}")
             this.compiledOffset = resolveArbitraryJump(programCounter)
                 ?: TARGET_OUT_OF_RANGE
-            logger.debug("Resolved jump: ${compiledOffset}")
             logger.debug("Starting execution at: ${programCounter.value} [$compiledOffset]")
         } else {
             logger.debug("Implicitly resuming at: ${programCounter.value} [$compiledOffset]")
@@ -481,12 +467,8 @@ class InterpretedInstance private constructor(
             cycleCounter++
 
             val handler = compiledHandlers[offset.toInt()]
-            logger.debug("Executing handler at: [$offset], cycle counter: $cycleCounter")
-
             val visitor = Visitor(this)
-            val nextOffset = handler(visitor)
-            logger.debug("Next offset: $nextOffset")
-            when (nextOffset) {
+            when (val nextOffset = handler(visitor)) {
                 null -> return interrupt
                 else -> {
                     offset = nextOffset

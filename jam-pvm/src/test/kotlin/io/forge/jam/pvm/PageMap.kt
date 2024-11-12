@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class PageMap(
-    val address: UInt,
-    val length: UInt,
+    val address: Int,
+    val length: Int,
     @SerialName("is-writable") val isWritable: Boolean,
 )

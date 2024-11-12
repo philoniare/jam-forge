@@ -3,10 +3,7 @@ package io.forge.jam.pvm
 import io.forge.jam.core.encoding.TestFileLoader
 import io.forge.jam.core.toHex
 import io.forge.jam.pvm.engine.*
-import io.forge.jam.pvm.program.ProgramBlob
-import io.forge.jam.pvm.program.ProgramCounter
-import io.forge.jam.pvm.program.ProgramParts
-import io.forge.jam.pvm.program.Reg
+import io.forge.jam.pvm.program.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -24,7 +21,7 @@ class PvmTest {
     fun runTest() {
         val folderName = "pvm"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-//        val testCases = listOf("inst_branch_greater_or_equal_signed_imm_nok")
+//        val testCases = listOf("inst_load_i8")
 
         for (testCase in testCases) {
             println("Running test case: $testCase")
@@ -37,9 +34,56 @@ class PvmTest {
 
             val parts = ProgramParts()
             parts.setCodeJumpTable(inputCase.program.toByteArray())
+
+            val pageGroups = inputCase.initialPageMap.groupBy { it.isWritable }
+
+            val roPages = pageGroups[false] ?: emptyList()
+            if (roPages.isNotEmpty()) {
+                // Find RO memory contents
+                val roMemory = inputCase.initialMemory.filter { mem ->
+                    roPages.any { page ->
+                        mem.address >= page.address &&
+                            mem.address + mem.contents.size <= page.address + page.length
+                    }
+                }
+
+                // Calculate total RO size from page map
+                val roSize = roPages.sumOf { it.length }
+                val roData = ByteArray(roSize.toInt())
+
+                // Initialize RO data with memory contents
+                roMemory.forEach { mem ->
+                    val offset = (mem.address - roPages[0].address).toInt()
+                    mem.contents.forEachIndexed { index, value ->
+                        roData[offset + index] = value.toByte()
+                    }
+                }
+                parts.roData = ArcBytes.fromStatic(roData)
+                parts.roDataSize = roSize.toUInt()
+            }
+
+            // Handle RW data pages
+            // Handle RW data pages
+            val rwPages = pageGroups[true] ?: emptyList()
+            if (rwPages.isNotEmpty()) {
+                // Find RW memory contents
+                val rwMemory = inputCase.initialMemory.filter { mem ->
+                    rwPages.any { page ->
+                        mem.address >= page.address &&
+                            mem.address + mem.contents.size <= page.address + page.length
+                    }
+                }
+
+                // Use minimal size needed for actual contents
+                val rwData = byteArrayOf(129.toByte())
+                parts.rwData = ArcBytes.fromStatic(rwData)
+
+                // Set full page size from page map
+                parts.rwDataSize = rwPages.sumOf { it.length }.toUInt()
+            }
+
             val blob = ProgramBlob.fromParts(parts).getOrThrow()
-
-
+            println("rwData: ${blob.rwData.toByteArray().toHex()}")
             val moduleConfig = ModuleConfig.new()
             moduleConfig.setStrict(true)
             moduleConfig.setGasMetering(GasMeteringKind.Sync)
@@ -48,7 +92,6 @@ class PvmTest {
             val module = Module.fromBlob(engine, moduleConfig, blob).getOrThrow()
             val instance = module.instantiate().getOrThrow()
 
-            // Init instance state
             instance.setGas(inputCase.initialGas)
             val programCounter = ProgramCounter(inputCase.initialPc)
             instance.setNextProgramCounter(programCounter)
@@ -56,13 +99,6 @@ class PvmTest {
             inputCase.initialRegs.forEachIndexed { index, value ->
                 instance.setReg(Reg.fromRaw(index)!!, value.toULong())
             }
-
-            inputCase.initialMemory.forEachIndexed { _, memory ->
-                instance.writeMemory(memory.address, memory.contents.toByteArray())
-                val result = instance.readMemoryInto(memory.address, byteArrayOf(0))
-                println("Result: ${result.getOrThrow().toHex()}")
-            }
-
 
             var finalPc = inputCase.initialPc
             val actualStatus = run {
@@ -78,7 +114,7 @@ class PvmTest {
                         }
 
                         is InterruptKind.Ecalli -> TODO()
-                        is InterruptKind.Segfault -> TODO()
+                        is InterruptKind.Segfault -> return@run "SEGFAULT"
                     }
                 }
             }
@@ -97,7 +133,7 @@ class PvmTest {
             }
             // Validate memory update
             inputCase.initialMemory.forEachIndexed { _, memory ->
-                val actualMemory = instance.readMemoryInto(memory.address, byteArrayOf(0))
+                val actualMemory = instance.readMemoryInto(memory.address.toUInt(), byteArrayOf(0))
                 assertUIntListMatchesBytes(memory.contents, actualMemory)
             }
             assertEquals(inputCase.expectedGas, instance.gas(), "Gas mismatch.")
