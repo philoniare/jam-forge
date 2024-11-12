@@ -817,5 +817,101 @@ data class Args(
             a2 = base.toU32(),
             a3 = offset
         )
+
+        fun storeImmU8Basic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU8Dynamic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeU16Basic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU16Dynamic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU32Basic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU32Dynamic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU64Basic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU64Dynamic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeImmU16Basic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU16Dynamic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU32Basic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU32Dynamic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU64Basic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeImmU64Dynamic(programCounter: ProgramCounter, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = offset,
+            a2 = value
+        )
+
+        fun storeU8Basic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
+
+        fun storeU8Dynamic(programCounter: ProgramCounter, src: RawReg, offset: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = src.toU32(),
+            a2 = offset
+        )
     }
 }

@@ -184,19 +184,67 @@ class Compiler(
     }
 
     override fun storeU8(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeU8Basic,
+                Args.storeU8Basic(programCounter, reg, imm),
+                "storeU8Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeU8Dynamic,
+                Args.storeU8Dynamic(programCounter, reg, imm),
+                "storeU8Dynamic"
+            )
+        }
     }
 
     override fun storeU16(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeU16Basic,
+                Args.storeU16Basic(programCounter, reg, imm),
+                "storeU16Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeU16Dynamic,
+                Args.storeU16Dynamic(programCounter, reg, imm),
+                "storeU16Dynamic"
+            )
+        }
     }
 
     override fun storeU32(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeU32Basic,
+                Args.storeU32Basic(programCounter, reg, imm),
+                "storeU32Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeU32Dynamic,
+                Args.storeU32Dynamic(programCounter, reg, imm),
+                "storeU32Dynamic"
+            )
+        }
     }
 
     override fun storeU64(reg: RawReg, imm: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeU64Basic,
+                Args.storeU64Basic(programCounter, reg, imm),
+                "storeU64Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeU64Dynamic,
+                Args.storeU64Dynamic(programCounter, reg, imm),
+                "storeU64Dynamic"
+            )
+        }
     }
 
     override fun loadImmAndJump(reg: RawReg, imm1: UInt, imm2: UInt) {
@@ -1038,19 +1086,67 @@ class Compiler(
     }
 
     override fun storeImmU8(imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmU8Basic,
+                Args.storeImmU8Basic(programCounter, imm1, imm2),
+                "storeImmU8Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmU8Dynamic,
+                Args.storeImmU8Dynamic(programCounter, imm1, imm2),
+                "storeImmU8Dynamic"
+            )
+        }
     }
 
     override fun storeImmU16(imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmU16Basic,
+                Args.storeImmU16Basic(programCounter, imm1, imm2),
+                "storeImmU16Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmU16Dynamic,
+                Args.storeImmU16Dynamic(programCounter, imm1, imm2),
+                "storeImmU16Dynamic"
+            )
+        }
     }
 
     override fun storeImmU32(imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmU32Basic,
+                Args.storeImmU32Basic(programCounter, imm1, imm2),
+                "storeImmU32Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmU32Dynamic,
+                Args.storeImmU32Dynamic(programCounter, imm1, imm2),
+                "storeImmU32Dynamic"
+            )
+        }
     }
 
     override fun storeImmU64(imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmU64Basic,
+                Args.storeImmU64Basic(programCounter, imm1, imm2),
+                "storeImmU64Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmU64Dynamic,
+                Args.storeImmU64Dynamic(programCounter, imm1, imm2),
+                "storeImmU64Dynamic"
+            )
+        }
     }
 
     override fun moveReg(reg1: RawReg, reg2: RawReg) {

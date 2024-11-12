@@ -23,6 +23,51 @@ interface LoadTy {
     fun fromSlice(bytes: ByteArray): ULong
 }
 
+interface StoreTy {
+    fun intoBytes(value: ULong): ByteArray
+}
+
+object U8StoreTy : StoreTy {
+    override fun intoBytes(value: ULong): ByteArray {
+        return byteArrayOf(value.toUByte().toByte())
+    }
+}
+
+object U16StoreTy : StoreTy {
+    override fun intoBytes(value: ULong): ByteArray {
+        return ByteArray(2).apply {
+            this[0] = (value and 0xFFu).toByte()
+            this[1] = ((value shr 8) and 0xFFu).toByte()
+        }
+    }
+}
+
+object U32StoreTy : StoreTy {
+    override fun intoBytes(value: ULong): ByteArray {
+        return ByteArray(4).apply {
+            this[0] = (value and 0xFFu).toByte()
+            this[1] = ((value shr 8) and 0xFFu).toByte()
+            this[2] = ((value shr 16) and 0xFFu).toByte()
+            this[3] = ((value shr 24) and 0xFFu).toByte()
+        }
+    }
+}
+
+object U64StoreTy : StoreTy {
+    override fun intoBytes(value: ULong): ByteArray {
+        return ByteArray(8).apply {
+            this[0] = (value and 0xFFu).toByte()
+            this[1] = ((value shr 8) and 0xFFu).toByte()
+            this[2] = ((value shr 16) and 0xFFu).toByte()
+            this[3] = ((value shr 24) and 0xFFu).toByte()
+            this[4] = ((value shr 32) and 0xFFu).toByte()
+            this[5] = ((value shr 40) and 0xFFu).toByte()
+            this[6] = ((value shr 48) and 0xFFu).toByte()
+            this[7] = ((value shr 56) and 0xFFu).toByte()
+        }
+    }
+}
+
 object U8LoadTy : LoadTy {
     override fun fromSlice(bytes: ByteArray): ULong {
         return bytes[0].toUByte().toULong()
@@ -44,25 +89,12 @@ object U16LoadTy : LoadTy {
 
 object I16LoadTy : LoadTy {
     override fun fromSlice(bytes: ByteArray): ULong {
-        // First combine bytes in little-endian order (bytes[0] is LSB)
         val byte0 = bytes[0].toInt() and 0xFF
         val byte1 = bytes[1].toInt() and 0xFF
-        println("byte0: ${byte0.toString(16)}, byte1: ${byte1.toString(16)}")
-
         val value = byte0 or (byte1 shl 8)
-        println("combined value: ${value.toString(16)}")
-
-        // Convert to Short and sign extend
         val shortValue = (value and 0xFFFF).toShort()
-        println("as short: ${shortValue}")
-
-        // Sign extend from i16 to i64, then convert to unsigned
         val signExtended = Cast(shortValue).shortToI64SignExtend()
-        println("sign extended: ${signExtended.toString(16)}")
-
         val result = Cast(signExtended).longToUnsigned()
-        println("final result: ${result.toString(16)}")
-
         return result
     }
 }
@@ -341,8 +373,97 @@ class Visitor(
 
     }
 
-    fun store() {
+    inline fun <reified T : StoreTy> store(
+        programCounter: ProgramCounter,
+        src: RegImm,
+        base: Reg?,
+        offset: UInt,
+        isDynamic: Boolean
+    ): Target? {
+        // Get the source value
+        val value = when (src) {
+            is RegImm.RegValue -> {
+                // Get value from register
+                val regValue = inner.regs[src.reg.toIndex()]
+                logger.debug("Memory [0x${offset.toString(16)}] = ${src.reg} = 0x${regValue.toString(16)}")
+                regValue
+            }
 
+            is RegImm.ImmValue -> {
+                // Convert immediate value to ULong with sign extension
+                val immValue = Cast(Cast(src.value).uintToSigned())
+                    .intToI64SignExtend()
+                    .let { Cast(it) }
+                    .longToUnsigned()
+                logger.debug("Memory [0x${offset.toString(16)}] = 0x${immValue.toString(16)}")
+                immValue
+            }
+        }
+
+        // Calculate target address
+        val address = base?.let { get32(RegImm.RegValue(it)) }?.plus(offset) ?: offset
+
+        // Get the StoreTy implementation
+        val storeTy = when (T::class) {
+            U8StoreTy::class -> U8StoreTy
+            U16StoreTy::class -> U16StoreTy
+            U32StoreTy::class -> U32StoreTy
+            U64StoreTy::class -> U64StoreTy
+            else -> throw IllegalArgumentException("Unknown StoreTy type")
+        }
+
+        // Convert value to bytes
+        val bytes = storeTy.intoBytes(value)
+        val length = bytes.size.toUInt()
+
+        if (!isDynamic) {
+            // Basic memory mode
+            inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
+                bytes.copyInto(slice)
+                return goToNextInstruction()
+            } ?: return trapImpl(this, programCounter)
+        } else {
+            // Dynamic memory mode
+            val addressEnd = address.plus(length)
+            if (addressEnd < address) {
+                return trapImpl(this, programCounter)
+            }
+
+            val pageAddressLo = inner.module.roundToPageSizeDown(address)
+            val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
+
+            if (pageAddressLo == pageAddressHi) {
+                // Single page access
+                inner.dynamicMemory.pages[pageAddressLo]?.let { page ->
+                    val pageOffset = (address - pageAddressLo).toInt()
+                    bytes.copyInto(page, pageOffset)
+                    return goToNextInstruction()
+                } ?: return segfaultImpl(programCounter, pageAddressLo)
+            } else {
+                // Cross-page access
+                val pages = inner.dynamicMemory.pages
+                val lo = pages[pageAddressLo]
+                val hi = pages[pageAddressHi]
+
+                when {
+                    lo != null && hi != null -> {
+                        val pageSize = inner.module.memoryMap().pageSize.toInt()
+                        val loLen = (pageAddressHi - address).toInt()
+                        val hiLen = bytes.size - loLen
+
+                        // Copy to low page
+                        bytes.copyInto(lo, pageSize - loLen, 0, loLen)
+                        // Copy to high page
+                        bytes.copyInto(hi, 0, loLen, loLen + hiLen)
+
+                        return goToNextInstruction()
+                    }
+
+                    lo == null -> return segfaultImpl(programCounter, pageAddressLo)
+                    else -> return segfaultImpl(programCounter, pageAddressHi)
+                }
+            }
+        }
     }
 
     fun jumpIndirectImpl(programCounter: ProgramCounter, dynamicAddress: UInt): Target? {

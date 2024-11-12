@@ -21,7 +21,6 @@ class PvmTest {
     fun runTest() {
         val folderName = "pvm"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-//        val testCases = listOf("inst_load_i16")
 
         for (testCase in testCases) {
             println("Running test case: $testCase")
