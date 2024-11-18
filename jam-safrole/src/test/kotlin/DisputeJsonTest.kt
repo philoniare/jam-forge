@@ -94,11 +94,12 @@ class DisputeJsonTest {
     fun testTinyDisputes() {
         val folderName = "disputes/tiny"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        println("TestCases: $testCases")
 
         for (testCase in testCases) {
             val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
                 "$folderName/$testCase",
-                ".scale"
+                ".bin"
             )
 
             val safrole = SafroleStateTransition(
@@ -125,7 +126,7 @@ class DisputeJsonTest {
         for (testCase in testCases) {
             val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
                 "$folderName/$testCase",
-                ".scale"
+                ".bin"
             )
 
             val safrole = SafroleStateTransition(
