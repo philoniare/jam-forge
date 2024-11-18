@@ -21,7 +21,6 @@ data class PackageSpec(
         val lenBytes = encodeFixedWidthInteger(length, 4, false)
         val erasureRootBytes = erasureRoot
         val exportsRootBytes = exportsRoot
-        println("Export root bytes: ${exportsRootBytes.asUByteArray()}")
         return hashBytes + lenBytes + erasureRootBytes + exportsRootBytes
     }
 }

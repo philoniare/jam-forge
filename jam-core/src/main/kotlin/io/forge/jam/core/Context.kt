@@ -25,7 +25,6 @@ data class Context(
 ) : Encodable {
     override fun encode(): ByteArray {
         val anchorBytes = anchor
-        println("Anchor bytes: ${anchorBytes.asUByteArray()}")
         val stateRootBytes = stateRoot
         val beefyRootBytes = beefyRoot
         val lookupAnchorBytes = lookupAnchor
