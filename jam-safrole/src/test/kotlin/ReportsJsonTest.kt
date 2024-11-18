@@ -1,13 +1,15 @@
 package io.forge.jam.core.encoding
 
 import io.forge.jam.core.toHex
-import io.forge.jam.safrole.safrole.*
+import io.forge.jam.safrole.report.ReportCase
+import io.forge.jam.safrole.safrole.SafroleOutput
+import io.forge.jam.safrole.safrole.SafroleState
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.fail
 
-class DisputeJsonTest {
+class ReportsJsonTest {
 
     fun assertDisputeOutputEquals(expected: SafroleOutput, actual: SafroleOutput, testCase: String) {
         if (expected.err != null) {
@@ -91,57 +93,56 @@ class DisputeJsonTest {
     }
 
     @Test
-    fun testTinyDisputes() {
-        val folderName = "disputes/tiny"
+    fun testTinyReports() {
+        val folderName = "reports/tiny"
         val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-        println("TestCases: $testCases")
 
         for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
+            val (inputCase) = TestFileLoader.loadTestData<ReportCase>(
                 "$folderName/$testCase",
                 ".bin"
             )
 
-            val safrole = SafroleStateTransition(
-                SafroleConfig(
-                    epochLength = 12,
-                    ticketCutoff = 10,
-                    ringSize = 6,
-                    validatorCount = 6
-                )
-            )
-            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
-
-            assertDisputeOutputEquals(inputCase.output, output, testCase)
-
-            assertDisputeStateEquals(inputCase.postState, postState)
+//            val safrole = SafroleStateTransition(
+//                SafroleConfig(
+//                    epochLength = 12,
+//                    ticketCutoff = 10,
+//                    ringSize = 6,
+//                    validatorCount = 6
+//                )
+//            )
+//            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
+//
+//            assertDisputeOutputEquals(inputCase.output, output, testCase)
+//
+//            assertDisputeStateEquals(inputCase.postState, postState)
         }
     }
 
-    @Test
-    fun testFullDisputes() {
-        val folderName = "disputes/full"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-
-        for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
-                "$folderName/$testCase",
-                ".bin"
-            )
-
-            val safrole = SafroleStateTransition(
-                SafroleConfig(
-                    epochLength = 600,
-                    ticketCutoff = 500,
-                    ringSize = 6,
-                    validatorCount = 1023
-                )
-            )
-            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
-
-            assertDisputeOutputEquals(inputCase.output, output, testCase)
-
-            assertDisputeStateEquals(inputCase.postState, postState)
-        }
-    }
+//    @Test
+//    fun testFullDisputes() {
+//        val folderName = "disputes/full"
+//        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+//
+//        for (testCase in testCases) {
+//            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
+//                "$folderName/$testCase",
+//                ".bin"
+//            )
+//
+//            val safrole = SafroleStateTransition(
+//                SafroleConfig(
+//                    epochLength = 600,
+//                    ticketCutoff = 500,
+//                    ringSize = 6,
+//                    validatorCount = 1023
+//                )
+//            )
+//            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
+//
+//            assertDisputeOutputEquals(inputCase.output, output, testCase)
+//
+//            assertDisputeStateEquals(inputCase.postState, postState)
+//        }
+//    }
 }

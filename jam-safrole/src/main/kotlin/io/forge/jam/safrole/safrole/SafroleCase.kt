@@ -1,4 +1,4 @@
-package io.forge.jam.safrole
+package io.forge.jam.safrole.safrole
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

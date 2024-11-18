@@ -1,4 +1,4 @@
-package io.forge.jam.safrole
+package io.forge.jam.safrole.safrole
 
 import io.forge.jam.core.Dispute
 import io.forge.jam.core.TicketEnvelope

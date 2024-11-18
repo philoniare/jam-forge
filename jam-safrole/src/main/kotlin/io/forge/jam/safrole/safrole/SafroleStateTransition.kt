@@ -1,6 +1,7 @@
-package io.forge.jam.safrole
+package io.forge.jam.safrole.safrole
 
 import io.forge.jam.core.*
+import io.forge.jam.safrole.*
 import io.forge.jam.vrfs.BandersnatchWrapper
 import org.bouncycastle.crypto.digests.Blake2bDigest
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
@@ -10,26 +11,27 @@ private const val JAM_VALID = "jam_valid"
 private const val JAM_INVALID = "jam_invalid"
 private const val JAM_GUARANTEE = "jam_guarantee"
 
+
 class SafroleStateTransition(private val config: SafroleConfig) {
     private val bandersnatchWrapper: BandersnatchWrapper = BandersnatchWrapper(config.ringSize)
 
     private fun validateJudgementAge(
         verdict: Verdict,
         currentEpoch: Long
-    ): JamErrorCode? {
+    ): SafroleErrorCode? {
         // Verdicts must use either:
         // - Current validator set (κ) if age == currentEpoch
         // - Previous validator set (λ) if age == currentEpoch - 1
         val validAges = setOf(currentEpoch, currentEpoch - 1)
 
         if (!validAges.contains(verdict.age)) {
-            return JamErrorCode.BAD_JUDGEMENT_AGE
+            return SafroleErrorCode.BAD_JUDGEMENT_AGE
         }
 
         return null
     }
 
-    private fun validateVoteDistribution(verdict: Verdict, validatorSet: List<ValidatorKey>): JamErrorCode? {
+    private fun validateVoteDistribution(verdict: Verdict, validatorSet: List<ValidatorKey>): SafroleErrorCode? {
         val positiveVotes = verdict.votes.count { it.vote }
         val totalVotes = verdict.votes.size
 
@@ -44,7 +46,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         )
 
         if (!validThresholds.contains(positiveVotes)) {
-            return JamErrorCode.BAD_VOTE_SPLIT
+            return SafroleErrorCode.BAD_VOTE_SPLIT
         }
         return null
     }
@@ -78,7 +80,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
             // Validate slot transition (eq. 42)
             if (input.slot!! <= preState.tau) {
-                return Pair(postState, SafroleOutput(err = JamErrorCode.BAD_SLOT))
+                return Pair(postState, SafroleOutput(err = SafroleErrorCode.BAD_SLOT))
             }
 
             // Calculate epoch data (eq. 47)
@@ -136,14 +138,14 @@ class SafroleStateTransition(private val config: SafroleConfig) {
             )
         } catch (e: Exception) {
             println("Error: ${e.message}")
-            return Pair(preState, SafroleOutput(err = JamErrorCode.RESERVED))
+            return Pair(preState, SafroleOutput(err = SafroleErrorCode.RESERVED))
         }
     }
 
     fun validateDisputes(
         disputes: Dispute,
         state: SafroleState,
-    ): JamErrorCode? {
+    ): SafroleErrorCode? {
         val currentEpoch = state.tau / config.epochLength
         // 1. First validate signatures
         // This comes from equation 101 which requires valid signatures:
@@ -162,7 +164,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                         signature = culprit.signature
                     )
                 ) {
-                    return JamErrorCode.BAD_SIGNATURE
+                    return SafroleErrorCode.BAD_SIGNATURE
                 }
                 // From equation 104: "c = [k __ {r, k, s} ∈ c]"
                 if (i < culprits.size - 1) {
@@ -173,14 +175,14 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
 
                 if (state.psi?.psiO?.any { it.contentEquals(culprit.key) } == true) {
-                    return JamErrorCode.OFFENDER_ALREADY_REPORTED
+                    return SafroleErrorCode.OFFENDER_ALREADY_REPORTED
                 }
             }
         }
 
         // 2. Validate culprits ordering
         if (!isOrderValid) {
-            return JamErrorCode.CULPRITS_NOT_SORTED_UNIQUE
+            return SafroleErrorCode.CULPRITS_NOT_SORTED_UNIQUE
         }
 
         for (i in 0 until disputes.verdicts.size) {
@@ -211,7 +213,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
             ) {
                 // If we have all positive votes but no faults registered against
                 // validators who may have incorrectly judged it invalid
-                return JamErrorCode.NOT_ENOUGH_FAULTS
+                return SafroleErrorCode.NOT_ENOUGH_FAULTS
             }
 
             if (positiveVotes >= config.superMajority) {
@@ -219,7 +221,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                     fault.target.contentEquals(target)
                 }
                 if (!hasFault) {
-                    return JamErrorCode.NOT_ENOUGH_FAULTS
+                    return SafroleErrorCode.NOT_ENOUGH_FAULTS
                 }
             }
 
@@ -232,7 +234,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 // For a bad verdict (not supermajority positive),
                 // faults must have vote=true to be valid
                 if (fault.vote == isGoodVerdict) {
-                    return JamErrorCode.FAULT_VERDICT_WRONG
+                    return SafroleErrorCode.FAULT_VERDICT_WRONG
                 }
             }
 
@@ -252,12 +254,12 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                         signature = vote.signature
                     )
                 ) {
-                    return JamErrorCode.BAD_SIGNATURE
+                    return SafroleErrorCode.BAD_SIGNATURE
                 }
 
                 if (i < verdict.votes.size - 1) {
                     if (verdict.votes[i].index >= verdict.votes[i + 1].index) {
-                        return JamErrorCode.JUDGEMENTS_NOT_SORTED_UNIQUE
+                        return SafroleErrorCode.JUDGEMENTS_NOT_SORTED_UNIQUE
                     }
                 }
             }
@@ -267,14 +269,14 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 state.psi?.psiB?.contains(target) == true ||
                 state.psi?.psiW?.contains(target) == true
             ) {
-                return JamErrorCode.ALREADY_JUDGED
+                return SafroleErrorCode.ALREADY_JUDGED
             }
 
             // Validate enough culprits for all-negative verdicts
             val negativeVotes = verdict.votes.count { !it.vote }
             if (negativeVotes == verdict.votes.size) {
                 if (disputes.culprits.size < 2) {
-                    return JamErrorCode.NOT_ENOUGH_CULPRITS
+                    return SafroleErrorCode.NOT_ENOUGH_CULPRITS
                 }
             }
 
@@ -282,7 +284,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 val current = disputes.verdicts[i].target
                 val next = disputes.verdicts[i + 1].target
                 if (current.compareUnsigned(next) >= 0) {
-                    return JamErrorCode.VERDICTS_NOT_SORTED_UNIQUE
+                    return SafroleErrorCode.VERDICTS_NOT_SORTED_UNIQUE
                 }
             }
         }
@@ -294,7 +296,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 val nextKey = disputes.faults[i + 1].key
 
                 if (currentKey.compareUnsigned(nextKey) >= 0) {
-                    return JamErrorCode.FAULTS_NOT_SORTED_UNIQUE
+                    return SafroleErrorCode.FAULTS_NOT_SORTED_UNIQUE
                 }
             }
             val message = if (fault.vote) {
@@ -309,18 +311,18 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                     signature = fault.signature
                 )
             ) {
-                return JamErrorCode.BAD_SIGNATURE
+                return SafroleErrorCode.BAD_SIGNATURE
             }
 
             if (state.psi?.psiO?.any { it.contentEquals(fault.key) } == true) {
-                return JamErrorCode.OFFENDER_ALREADY_REPORTED
+                return SafroleErrorCode.OFFENDER_ALREADY_REPORTED
             }
         }
 
         return null
     }
 
-    private fun processDisputes(dispute: Dispute, postState: SafroleState): Pair<List<ByteArray>, JamErrorCode?> {
+    private fun processDisputes(dispute: Dispute, postState: SafroleState): Pair<List<ByteArray>, SafroleErrorCode?> {
         // Track new offenders for the mark
         val offendersMark = mutableListOf<ByteArray>()
         // Validate culprits
@@ -374,7 +376,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         // Verify that all culprit targets are marked as bad before processing them
         for (culprit in dispute.culprits) {
             if (culprit.target !in postState.psi!!.psiB) {
-                return Pair(emptyList(), JamErrorCode.CULPRITS_VERDICT_NOT_BAD)
+                return Pair(emptyList(), SafroleErrorCode.CULPRITS_VERDICT_NOT_BAD)
             }
         }
 
@@ -533,10 +535,10 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         postState: SafroleState,
         tickets: List<TicketEnvelope>,
         phase: Long
-    ): JamErrorCode? {
+    ): SafroleErrorCode? {
         // Skip if in epoch tail
         if (phase >= config.ticketCutoff) {
-            return JamErrorCode.UNEXPECTED_TICKET
+            return SafroleErrorCode.UNEXPECTED_TICKET
         }
 
         val newTickets = mutableListOf<TicketBody>()
@@ -544,14 +546,14 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         for (ticket in tickets) {
             // Check for valid attempt value
             if (ticket.attempt > 1) {
-                return JamErrorCode.BAD_TICKET_ATTEMPT
+                return SafroleErrorCode.BAD_TICKET_ATTEMPT
             }
 
 
             // Verify ring VRF proof
             val ticketId = verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)
             if (ticketId.all { it == 0.toByte() }) {
-                return JamErrorCode.BAD_TICKET_PROOF
+                return SafroleErrorCode.BAD_TICKET_PROOF
             }
 
             val ticketBody = TicketBody(
@@ -561,7 +563,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
             // Check uniqueness (eq. 78)
             if (postState.gammaA.any { it.id.contentEquals(ticketBody.id) }) {
-                return JamErrorCode.DUPLICATE_TICKET
+                return SafroleErrorCode.DUPLICATE_TICKET
             }
 
             newTickets.add(ticketBody)
@@ -570,7 +572,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
         // Verify ordering
         if (!hasStrictlyIncreasingIdentifiers(newTickets)) {
-            return JamErrorCode.BAD_TICKET_ORDER
+            return SafroleErrorCode.BAD_TICKET_ORDER
         }
 
         // Update accumulator with new tickets (eq. 79)

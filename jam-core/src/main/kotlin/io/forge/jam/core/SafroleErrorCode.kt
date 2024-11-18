@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class JamErrorCode {
+enum class SafroleErrorCode {
     @SerialName("bad-slot")
     BAD_SLOT,
 

@@ -1,4 +1,4 @@
-package io.forge.jam.safrole
+package io.forge.jam.safrole.safrole
 
 data class SafroleConfig(
     val epochLength: Long,

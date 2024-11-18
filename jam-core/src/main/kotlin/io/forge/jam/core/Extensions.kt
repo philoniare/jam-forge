@@ -121,7 +121,7 @@ fun encodeOptionalByteArray(value: ByteArray?): ByteArray {
     }
 }
 
-fun List<Culprit>.validateCulprits(): OptionalResult<Unit, JamErrorCode> {
+fun List<Culprit>.validateCulprits(): OptionalResult<Unit, SafroleErrorCode> {
     // Check if empty
     if (isEmpty()) {
         return OptionalResult.Ok(Unit)
@@ -132,7 +132,7 @@ fun List<Culprit>.validateCulprits(): OptionalResult<Unit, JamErrorCode> {
         // Compare ByteArrays lexicographically
         val comparison = this[i].key.compareUnsigned(this[i + 1].key)
         if (comparison >= 0) { // If current >= next or equal (not strictly increasing)
-            return OptionalResult.Err(JamErrorCode.CULPRITS_NOT_SORTED_UNIQUE)
+            return OptionalResult.Err(SafroleErrorCode.CULPRITS_NOT_SORTED_UNIQUE)
         }
     }
 

@@ -1,7 +1,7 @@
 package io.forge.jam.core.encoding
 
 import io.forge.jam.core.toHex
-import io.forge.jam.safrole.*
+import io.forge.jam.safrole.historical.*
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
 import kotlin.test.assertContentEquals

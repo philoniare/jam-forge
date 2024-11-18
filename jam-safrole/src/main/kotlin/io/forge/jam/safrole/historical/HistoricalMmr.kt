@@ -1,4 +1,4 @@
-package io.forge.jam.safrole
+package io.forge.jam.safrole.historical
 
 import io.forge.jam.core.serializers.NullableByteArrayListSerializer
 import io.forge.jam.core.toHex
