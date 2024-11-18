@@ -5,10 +5,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class Extrinsic(
     val tickets: List<TicketEnvelope>,
-    val disputes: Dispute,
     val preimages: List<Preimage>,
+    val guarantees: List<GuaranteeExtrinsic>,
     val assurances: List<AssuranceExtrinsic>,
-    val guarantees: List<GuaranteeExtrinsic>
+    val disputes: Dispute,
 ) : Encodable {
     override fun encode(): ByteArray {
         val ticketsBytes = encodeList(tickets)
@@ -16,7 +16,7 @@ data class Extrinsic(
         val preimagesBytes = encodeList(preimages)
         val assurancesBytes = encodeList(assurances)
         val guaranteesBytes = encodeList(guarantees)
-        return ticketsBytes + disputesBytes + preimagesBytes + assurancesBytes + guaranteesBytes
+        return ticketsBytes + preimagesBytes + guaranteesBytes + assurancesBytes + disputesBytes
     }
 }
 

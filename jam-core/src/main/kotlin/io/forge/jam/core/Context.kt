@@ -1,6 +1,7 @@
 package io.forge.jam.core
 
 import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.serializers.ByteArrayListHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -19,16 +20,17 @@ data class Context(
     val lookupAnchor: ByteArray,
     @SerialName("lookup_anchor_slot")
     val lookupAnchorSlot: Long,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val prerequisite: ByteArray?
+    @Serializable(with = ByteArrayListHexSerializer::class)
+    val prerequisites: List<EncodableByteArray>
 ) : Encodable {
     override fun encode(): ByteArray {
         val anchorBytes = anchor
+        println("Anchor bytes: ${anchorBytes.asUByteArray()}")
         val stateRootBytes = stateRoot
         val beefyRootBytes = beefyRoot
         val lookupAnchorBytes = lookupAnchor
         val lookupAnchorSlotBytes = encodeFixedWidthInteger(lookupAnchorSlot, 4, false)
-        val prerequisiteBytes = encodeOptionalByteArray(prerequisite)
+        val prerequisiteBytes = encodeList(prerequisites)
         return anchorBytes + stateRootBytes + beefyRootBytes + lookupAnchorBytes + lookupAnchorSlotBytes + prerequisiteBytes
     }
 }

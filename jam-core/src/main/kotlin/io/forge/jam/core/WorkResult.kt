@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class WorkResult(
+    @SerialName("service_id")
     val service: Long,
     @SerialName("code_hash")
     @Serializable(with = ByteArrayHexSerializer::class)

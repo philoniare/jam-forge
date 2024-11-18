@@ -24,13 +24,14 @@ data class WorkReport(
     override fun encode(): ByteArray {
         val packageSpecBytes = packageSpec.encode()
         val contextBytes = context.encode()
+        val discriminatorBytes = byteArrayOf(69, 0)
         val coreIndexBytes = encodeFixedWidthInteger(coreIndex, 2, false)
         val authorizerHashBytes = authorizerHash
         val authOutputLengthBytes = encodeFixedWidthInteger(authOutput.size, 1, false)
         val authOutputBytes = authOutput
         val segmentRootLookupBytes = encodeList(segmentRootLookup)
         val resultsBytes = encodeList(results)
-        return packageSpecBytes + contextBytes + coreIndexBytes + authorizerHashBytes + authOutputLengthBytes +
+        return packageSpecBytes + discriminatorBytes + contextBytes + coreIndexBytes + authorizerHashBytes + authOutputLengthBytes +
             authOutputBytes + segmentRootLookupBytes + resultsBytes
     }
 }

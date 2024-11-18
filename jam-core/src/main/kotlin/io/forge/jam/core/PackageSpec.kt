@@ -8,7 +8,7 @@ import kotlinx.serialization.Serializable
 data class PackageSpec(
     @Serializable(with = ByteArrayHexSerializer::class)
     val hash: ByteArray,
-    val len: Long,
+    val length: Long,
     @Serializable(with = ByteArrayHexSerializer::class)
     @SerialName("erasure_root")
     val erasureRoot: ByteArray,
@@ -18,9 +18,10 @@ data class PackageSpec(
 ) : Encodable {
     override fun encode(): ByteArray {
         val hashBytes = hash
-        val lenBytes = encodeFixedWidthInteger(len, 4, false)
+        val lenBytes = encodeFixedWidthInteger(length, 4, false)
         val erasureRootBytes = erasureRoot
         val exportsRootBytes = exportsRoot
+        println("Export root bytes: ${exportsRootBytes.asUByteArray()}")
         return hashBytes + lenBytes + erasureRootBytes + exportsRootBytes
     }
 }
