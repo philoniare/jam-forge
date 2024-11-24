@@ -39,23 +39,43 @@ class ReportsJsonTest {
             // If ok is present, verify all mark fields
             expected.ok?.let { expectedMarks ->
                 actual.ok?.let { actualMarks ->
-                    // Compare reported lists (nested ByteArrays)
+                    // Compare reported packages
                     assertEquals(
                         expectedMarks.reported.size,
                         actualMarks.reported.size,
-                        "$testCase: Mismatch in reported list size"
+                        "$testCase: Mismatch in reported packages list size"
                     )
+
+                    // Compare each ReportPackage
                     for (i in expectedMarks.reported.indices) {
+                        val expectedPackage = expectedMarks.reported[i]
+                        val actualPackage = actualMarks.reported[i]
+
+                        // Compare workPackageHash lists
                         assertEquals(
-                            expectedMarks.reported[i].size,
-                            actualMarks.reported[i].size,
-                            "$testCase: Mismatch in reported inner list size at index $i"
+                            expectedPackage.workPackageHash.size,
+                            actualPackage.workPackageHash.size,
+                            "$testCase: Mismatch in workPackageHash list size at package index $i"
                         )
-                        for (j in expectedMarks.reported[i].indices) {
+                        for (j in expectedPackage.workPackageHash.indices) {
                             assertArrayEquals(
-                                expectedMarks.reported[i][j],
-                                actualMarks.reported[i][j],
-                                "$testCase: Mismatch in reported ByteArray at indices [$i][$j]"
+                                expectedPackage.workPackageHash[j],
+                                actualPackage.workPackageHash[j],
+                                "$testCase: Mismatch in workPackageHash ByteArray at package index $i, hash index $j"
+                            )
+                        }
+
+                        // Compare segmentTreeRoot lists
+                        assertEquals(
+                            expectedPackage.segment_tree_root.size,
+                            actualPackage.segment_tree_root.size,
+                            "$testCase: Mismatch in segment_tree_root list size at package index $i"
+                        )
+                        for (j in expectedPackage.segment_tree_root.indices) {
+                            assertArrayEquals(
+                                expectedPackage.segment_tree_root[j],
+                                actualPackage.segment_tree_root[j],
+                                "$testCase: Mismatch in segment_tree_root ByteArray at package index $i, root index $j"
                             )
                         }
                     }
@@ -192,7 +212,11 @@ class ReportsJsonTest {
                 ReportStateConfig(
                     MAX_LOOKUP_ANCHOR_AGE = 14_000L,
                     MAX_AUTH_POOL_ITEMS = 8,
-                    MAX_ACCUMULATION_GAS = 100_000L
+                    MAX_ACCUMULATION_GAS = 100_000L,
+                    MAX_CORES = 341,
+                    MAX_DEPENDENCIES = 100,
+                    MIN_GUARANTORS = 3,
+                    ROTATION_PERIOD = 1_000L
                 )
             )
             val (postState, output) = report.transition(inputCase.input, inputCase.preState)

@@ -413,7 +413,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         for (i in postState.rho!!.indices) {
             val report = postState.rho!![i] ?: continue
 
-            val reportHash = blake2b256(report.dummyWorkReport)
+            val reportHash = blake2b256(report.report.authorizerHash)
 
             // Find matching verdict if any
             val verdict = dispute.verdicts.find { it.target.contentEquals(reportHash) }

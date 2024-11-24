@@ -1,6 +1,6 @@
 package io.forge.jam.safrole.serializer
 
-import io.forge.jam.core.toHex
+import io.forge.jam.core.encodeOptionalByteArray
 import io.forge.jam.safrole.AvailabilityAssignment
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
@@ -22,7 +22,7 @@ object NullableAvailabilityAssignmentListSerializer : KSerializer<List<Availabil
                 null -> encoder.encodeNull()
                 else -> {
                     encoder.beginStructure(descriptor).apply {
-                        encodeStringElement(descriptor, 0, value.dummyWorkReport.toHex())
+                        encodeOptionalByteArray(value.report.encode())
                         encodeLongElement(descriptor, 1, value.timeout)
                         endStructure(descriptor)
                     }
