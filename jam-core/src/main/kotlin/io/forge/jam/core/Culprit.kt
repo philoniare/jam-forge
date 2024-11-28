@@ -1,18 +1,18 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class Culprit(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val target: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val key: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val signature: ByteArray
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val target: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val key: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val signature: JamByteArray
 ) : Encodable {
     override fun encode(): ByteArray {
-        return target + key + signature
+        return target.bytes + key.bytes + signature.bytes
     }
 }

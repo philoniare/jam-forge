@@ -1,13 +1,13 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
-import io.forge.jam.core.serializers.ByteArrayMapSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayMapSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class TrieTestVector(
-    @Serializable(with = ByteArrayMapSerializer::class)
+    @Serializable(with = JamByteArrayMapSerializer::class)
     val input: Map<ByteArray, ByteArray> = emptyMap(),
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val output: ByteArray
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val output: JamByteArray
 )

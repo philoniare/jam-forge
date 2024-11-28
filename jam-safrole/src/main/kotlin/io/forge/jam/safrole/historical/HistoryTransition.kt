@@ -1,5 +1,6 @@
 package io.forge.jam.safrole.historical
 
+import io.forge.jam.core.JamByteArray
 import org.bouncycastle.crypto.digests.KeccakDigest
 
 class HistoryTransition {
@@ -37,7 +38,7 @@ class HistoryTransition {
         val newBlock = HistoricalBeta(
             hash = input.headerHash,
             mmr = newMmr,
-            stateRoot = ZERO_HASH,
+            stateRoot = JamByteArray(ZERO_HASH),
             reported = input.workPackages
         )
 
@@ -60,13 +61,13 @@ class HistoryTransition {
      * Each peak represents a perfect binary tree of size 2^i where i is the index.
      * When merging, we combine adjacent peaks of the same size and push the result up.
      */
-    private fun appendToMmr(previousMmr: HistoricalMmr, newPeak: ByteArray): HistoricalMmr {
+    private fun appendToMmr(previousMmr: HistoricalMmr, newPeak: JamByteArray): HistoricalMmr {
         val peaks = previousMmr.peaks.toMutableList()
         appendRecursive(peaks, newPeak, 0)
         return HistoricalMmr(peaks = peaks)
     }
 
-    private fun appendRecursive(peaks: MutableList<ByteArray?>, data: ByteArray, index: Int) {
+    private fun appendRecursive(peaks: MutableList<JamByteArray?>, data: JamByteArray, index: Int) {
         when {
             // If we're beyond current peaks size, add new peak
             index >= peaks.size -> {
@@ -87,11 +88,11 @@ class HistoryTransition {
         }
     }
 
-    private fun keccakHash(data: ByteArray): ByteArray {
+    private fun keccakHash(data: JamByteArray): JamByteArray {
         val digest = KeccakDigest(256)
         val output = ByteArray(32)
-        digest.update(data, 0, data.size)
+        digest.update(data.bytes, 0, data.size)
         digest.doFinal(output, 0)
-        return output
+        return JamByteArray(output)
     }
 }

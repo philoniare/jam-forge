@@ -1,19 +1,19 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
-import io.forge.jam.core.serializers.ByteArrayListHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class EpochMark(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val entropy: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val entropy: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
     @SerialName("tickets_entropy")
-    val ticketsEntropy: ByteArray,
-    @Serializable(with = ByteArrayListHexSerializer::class)
-    val validators: List<ByteArray>
+    val ticketsEntropy: JamByteArray,
+    @Serializable(with = JamByteArrayListHexSerializer::class)
+    val validators: List<JamByteArray>
 ) : Encodable {
     override fun toString(): String {
         return "EpochMark(" +
@@ -26,9 +26,9 @@ data class EpochMark(
     override fun encode(): ByteArray {
         val validatorsBytes =
             validators.fold(byteArrayOf()) { acc, validator ->
-                acc + validator
+                acc + validator.bytes
             }
-        return entropy + ticketsEntropy + validatorsBytes
+        return entropy.bytes + ticketsEntropy.bytes + validatorsBytes
     }
 
     override fun equals(other: Any?): Boolean {

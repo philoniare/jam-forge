@@ -1,12 +1,12 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class Verdict(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val target: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val target: JamByteArray,
     val age: Long,
     val votes: List<Vote>
 ) : Encodable {
@@ -14,6 +14,6 @@ data class Verdict(
         val targetBytes = target
         val ageBytes = encodeFixedWidthInteger(age, 4, false)
         val votesBytes = encodeList(votes, false)
-        return targetBytes + ageBytes + votesBytes
+        return targetBytes.bytes + ageBytes + votesBytes
     }
 }

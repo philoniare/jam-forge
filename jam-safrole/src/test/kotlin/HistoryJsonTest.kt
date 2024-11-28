@@ -1,10 +1,7 @@
 package io.forge.jam.core.encoding
 
-import io.forge.jam.core.toHex
 import io.forge.jam.safrole.historical.*
-import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class HistoryJsonTest {
@@ -24,14 +21,14 @@ class HistoryJsonTest {
 
     private fun assertHistoricalBetaEquals(expected: HistoricalBeta, actual: HistoricalBeta, path: String) {
         // Compare header hash
-        assertArrayEquals(
+        assertEquals(
             expected.hash,
             actual.hash,
             "$path: Mismatch in hash. Expected: ${expected.hash.toHex()}, Actual: ${actual.hash.toHex()}"
         )
 
         // Compare state root
-        assertArrayEquals(
+        assertEquals(
             expected.stateRoot,
             actual.stateRoot,
             "$path: Mismatch in stateRoot. Expected: ${expected.stateRoot.toHex()}, Actual: ${actual.stateRoot.toHex()}"
@@ -48,7 +45,7 @@ class HistoryJsonTest {
         )
 
         for (i in expected.reported.indices) {
-            assertArrayEquals(
+            assertEquals(
                 expected.reported[i].hash,
                 actual.reported[i].hash,
                 "$path: Mismatch in reported[$i]. Expected: ${expected.reported[i].hash.toHex()}, Actual: ${actual.reported[i].hash.toHex()}"
@@ -64,7 +61,7 @@ class HistoryJsonTest {
         )
 
         for (i in expected.peaks.indices) {
-            assertContentEquals(
+            assertEquals(
                 expected.peaks[i],
                 actual.peaks[i],
                 "$path: Mismatch in peaks[$i]. Expected: ${expected.peaks[i]?.toHex()}, Actual: ${actual.peaks[i]?.toHex()}"

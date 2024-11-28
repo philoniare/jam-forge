@@ -1,19 +1,25 @@
 package io.forge.jam.safrole
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.Encodable
+import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 class ValidatorKey(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val bandersnatch: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val ed25519: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val bls: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val metadata: ByteArray
-) {
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val bandersnatch: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val ed25519: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val bls: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val metadata: JamByteArray
+) : Encodable {
+    override fun encode(): ByteArray {
+        return bandersnatch.bytes + ed25519.bytes + bls.bytes + metadata.bytes
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ValidatorKey) return false

@@ -1,8 +1,6 @@
 package io.forge.jam.core.encoding
 
-import io.forge.jam.core.toHex
 import io.forge.jam.safrole.safrole.*
-import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.fail
@@ -24,7 +22,7 @@ class DisputeJsonTest {
                     "$testCase: Mismatch in OffendersMark size"
                 )
                 for (i in expected.ok!!.offendersMark!!.indices) {
-                    assertArrayEquals(
+                    assertEquals(
                         expected.ok!!.offendersMark!![i],
                         actual.ok?.offendersMark!![i],
                         "$testCase: Mismatch in OffendersMark at index $i"
@@ -60,7 +58,7 @@ class DisputeJsonTest {
 
         assertEquals(expected.eta.size, actual.eta.size, "Mismatch in eta size. TestCase: $testCase")
         for (i in expected.eta.indices) {
-            assertArrayEquals(
+            assertEquals(
                 expected.eta[i],
                 actual.eta[i],
                 "Mismatch in eta at index $i. Expected: ${expected.eta[i].toHex()}, Actual: ${actual.eta[i].toHex()}. TestCase: $testCase"
@@ -73,7 +71,7 @@ class DisputeJsonTest {
         assertEquals(expected.iota, actual.iota, "Mismatch in iota. TestCase: $testCase")
         assertEquals(expected.gammaA, actual.gammaA, "Mismatch in gammaA. TestCase: $testCase")
         assertEquals(expected.gammaS, actual.gammaS, "Mismatch in gammaS. TestCase: $testCase")
-        assertArrayEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ. TestCase: $testCase")
+        assertEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ. TestCase: $testCase")
 
         // Check rho
         assertEquals(expected.rho?.size, actual.rho?.size, "Mismatch in rho size. TestCase: $testCase")
@@ -86,7 +84,7 @@ class DisputeJsonTest {
         // Check psi
         assertEquals(expected.psi!!.bad, actual.psi!!.bad, "Mismatch in bad. TestCase: $testCase")
         assertEquals(expected.psi!!.good, actual.psi!!.good, "Mismatch in good. TestCase: $testCase")
-        assertListOfByteArraysEqualsIgnoreOrder(
+        assertEquals(
             expected.psi!!.offenders,
             actual.psi!!.offenders,
             "Mismatch in offenders. TestCase: $testCase"

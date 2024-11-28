@@ -1,10 +1,7 @@
 package io.forge.jam.safrole.safrole
 
-import io.forge.jam.core.ByteArrayList
-import io.forge.jam.core.Encodable
-import io.forge.jam.core.encodeFixedWidthInteger
-import io.forge.jam.core.encodeList
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.*
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import io.forge.jam.safrole.*
 import io.forge.jam.safrole.serializer.NullableAvailabilityAssignmentListSerializer
 import kotlinx.serialization.SerialName
@@ -16,7 +13,7 @@ data class SafroleState(
     var tau: Long,
 
     // Entropy accumulator
-    val eta: ByteArrayList = ByteArrayList(),
+    val eta: JamByteArrayList = JamByteArrayList(),
 
     // Previous epoch validators
     var lambda: List<ValidatorKey> = emptyList(),
@@ -41,9 +38,8 @@ data class SafroleState(
 
     // Bandersnatch ring root
     @SerialName("gamma_z")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    var gammaZ: ByteArray = ByteArray(0),
-
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    var gammaZ: JamByteArray = JamByteArray(ByteArray(0)),
 
     @Serializable(with = NullableAvailabilityAssignmentListSerializer::class)
     var rho: MutableList<AvailabilityAssignment?>? = null,
@@ -74,7 +70,7 @@ data class SafroleState(
         val iotaBytes = encodeList(iota)
         val gammaABytes = encodeList(gammaA)
         val gammaSBytes = gammaS.encode()
-        val gammaZBytes = gammaZ
+        val gammaZBytes = gammaZ.bytes
         val rhoBytes = rho?.let { encodeList(it) } ?: byteArrayOf(0)
         val psiBytes = psi?.encode() ?: byteArrayOf(0)
         return tauBytes + etaBytes + lambdaBytes + kappaBytes + gammaKBytes + iotaBytes + gammaABytes + gammaSBytes + gammaZBytes + rhoBytes + psiBytes

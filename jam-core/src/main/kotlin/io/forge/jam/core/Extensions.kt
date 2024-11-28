@@ -6,14 +6,14 @@ import java.nio.ByteOrder
 // Convert ByteArray to hex string
 fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
-// Convert hex string to ByteArray
-fun String.hexToBytes(): ByteArray {
+// Convert hex string to JamByteArray
+fun String.hexToJamBytes(): JamByteArray {
     val hex = this.removePrefix("0x")
     val len = hex.length
     require(len % 2 == 0) { "Hex string must have even length" }
-    return ByteArray(len / 2) { i ->
+    return JamByteArray(ByteArray(len / 2) { i ->
         hex.substring(2 * i, 2 * i + 2).toInt(16).toByte()
-    }
+    })
 }
 
 // Convert Integer to Little Endian Bytes
@@ -28,10 +28,14 @@ fun Int.toLEBytes(size: Int = 4): ByteArray {
 // Convert Boolean to Byte
 fun Boolean.toByte(): Byte = if (this) 1.toByte() else 0.toByte()
 
+fun <T : Encodable> encodeNullable(item: T?): ByteArray {
+    return item?.encode() ?: byteArrayOf(0)
+}
+
 // Encode a list of Encodable items with length prefix
-fun <T : Encodable> encodeList(list: List<T>, includeLength: Boolean = true): ByteArray {
+fun <T : Encodable> encodeList(list: List<T?>, includeLength: Boolean = true): ByteArray {
     val itemsBytes = list.fold(ByteArray(0)) { acc, item ->
-        acc + item.encode()
+        acc + encodeNullable(item)
     }
     if (includeLength) {
         val lengthBytes = encodeFixedWidthInteger(list.size, 1, false)
@@ -137,35 +141,4 @@ fun List<Culprit>.validateCulprits(): OptionalResult<Unit, SafroleErrorCode> {
     }
 
     return OptionalResult.Ok(Unit)
-}
-
-// Extension function to compare ByteArrays unsigned
-fun ByteArray.compareUnsigned(other: ByteArray): Int {
-    val minLength = minOf(this.size, other.size)
-
-    for (i in 0 until minLength) {
-        val b1 = this[i].toInt() and 0xFF
-        val b2 = other[i].toInt() and 0xFF
-
-        if (b1 != b2) {
-            return b1 - b2
-        }
-    }
-
-    return this.size - other.size
-}
-
-fun ByteArray.startsWith(prefix: ByteArray): Boolean {
-    if (this.size < prefix.size) return false
-    return prefix.withIndex().all { (i, byte) -> this[i] == byte }
-}
-
-// Extension function to compare ByteArrays
-fun ByteArray.compareTo(other: ByteArray): Int {
-    val minLength = minOf(size, other.size)
-    for (i in 0 until minLength) {
-        val diff = (this[i].toInt() and 0xFF) - (other[i].toInt() and 0xFF)
-        if (diff != 0) return diff
-    }
-    return size - other.size
 }

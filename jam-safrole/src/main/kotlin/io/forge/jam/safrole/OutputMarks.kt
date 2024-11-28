@@ -2,9 +2,9 @@ package io.forge.jam.safrole
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.EpochMark
+import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.encodeList
-import io.forge.jam.core.serializers.ByteArrayListHexSerializer
-import io.forge.jam.core.toHex
+import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -15,8 +15,8 @@ data class OutputMarks(
     @SerialName("tickets_mark")
     val ticketsMark: List<TicketBody>? = null,
     @SerialName("offenders_mark")
-    @Serializable(with = ByteArrayListHexSerializer::class)
-    val offendersMark: List<ByteArray>? = null,
+    @Serializable(with = JamByteArrayListHexSerializer::class)
+    val offendersMark: List<JamByteArray>? = null,
 ) : Encodable {
     override fun encode(): ByteArray {
         val epochMarkBytes = epochMark?.encode() ?: ByteArray(0)

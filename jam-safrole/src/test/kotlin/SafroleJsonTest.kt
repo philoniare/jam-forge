@@ -1,8 +1,6 @@
 package io.forge.jam.core.encoding
 
-import io.forge.jam.core.toHex
 import io.forge.jam.safrole.safrole.*
-import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -23,7 +21,7 @@ class SafroleJsonTest {
 
         assertEquals(expected.eta.size, actual.eta.size, "Mismatch in eta size")
         for (i in expected.eta.indices) {
-            assertArrayEquals(
+            assertEquals(
                 expected.eta[i],
                 actual.eta[i],
                 "Mismatch in eta at index $i. Expected: ${expected.eta[i].toHex()}, Actual: ${actual.eta[i].toHex()}"
@@ -36,7 +34,7 @@ class SafroleJsonTest {
         assertEquals(expected.iota, actual.iota, "Mismatch in iota")
         assertEquals(expected.gammaA, actual.gammaA, "Mismatch in gammaA")
         assertEquals(expected.gammaS, actual.gammaS, "Mismatch in gammaS")
-        assertArrayEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ")
+        assertEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ")
     }
 
     @Test
@@ -79,7 +77,7 @@ class SafroleJsonTest {
         for (testCase in testCases) {
             val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
                 "$folderName/$testCase",
-                ".scale"
+                ".bin"
             )
 
             val safrole = SafroleStateTransition(

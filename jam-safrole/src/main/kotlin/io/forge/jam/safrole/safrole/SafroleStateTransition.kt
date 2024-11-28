@@ -61,7 +61,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
             // Create mutable post state
             var epochMark: EpochMark? = null
             var ticketsMark: List<TicketBody>? = null
-            var offendersMark: List<ByteArray>? = null
+            var offendersMark: List<JamByteArray>? = null
 
             // Process disputes without slot advancement
             if (input.disputes != null) {
@@ -155,7 +155,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         if (culprits.isNotEmpty()) {
             for (i in 0 until culprits.size) {
                 val culprit = culprits[i]
-                val message = JAM_GUARANTEE.toByteArray() + culprit.target
+                val message = JamByteArray(JAM_GUARANTEE.toByteArray()) + culprit.target
 
                 // Verify culprit signature
                 if (!verifyEd25519Signature(
@@ -243,9 +243,9 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 val vote = verdict.votes[i]
                 val validator = validatorSet[vote.index.toInt()]
                 val message = if (vote.vote) {
-                    JAM_VALID.toByteArray() + target
+                    JamByteArray(JAM_VALID.toByteArray()) + target
                 } else {
-                    JAM_INVALID.toByteArray() + target
+                    JamByteArray(JAM_INVALID.toByteArray()) + target
                 }
 
                 if (!verifyEd25519Signature(
@@ -300,9 +300,9 @@ class SafroleStateTransition(private val config: SafroleConfig) {
                 }
             }
             val message = if (fault.vote) {
-                JAM_VALID.toByteArray() + fault.target
+                JamByteArray(JAM_VALID.toByteArray()) + fault.target
             } else {
-                JAM_INVALID.toByteArray() + fault.target
+                JamByteArray(JAM_INVALID.toByteArray()) + fault.target
             }
 
             if (!verifyEd25519Signature(
@@ -322,9 +322,12 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         return null
     }
 
-    private fun processDisputes(dispute: Dispute, postState: SafroleState): Pair<List<ByteArray>, SafroleErrorCode?> {
+    private fun processDisputes(
+        dispute: Dispute,
+        postState: SafroleState
+    ): Pair<List<JamByteArray>, SafroleErrorCode?> {
         // Track new offenders for the mark
-        val offendersMark = mutableListOf<ByteArray>()
+        val offendersMark = mutableListOf<JamByteArray>()
         // Validate culprits
         val errorResult = validateDisputes(dispute, postState)
         if (errorResult != null) {
@@ -334,10 +337,10 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         // Initialize post_state variables
         if (postState.psi == null) {
             postState.psi = Psi(
-                good = ByteArrayList(),
-                bad = ByteArrayList(),
-                wonky = ByteArrayList(),
-                offenders = ByteArrayList()
+                good = JamByteArrayList(),
+                bad = JamByteArrayList(),
+                wonky = JamByteArrayList(),
+                offenders = JamByteArrayList()
             )
         }
 
@@ -413,7 +416,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         for (i in postState.rho!!.indices) {
             val report = postState.rho!![i] ?: continue
 
-            val reportHash = blake2b256(report.report.encode())
+            val reportHash = blake2b256(JamByteArray(report.report.encode()))
             println(
                 "Encoded: ${
                     report.report.encode().toHex()
@@ -442,9 +445,9 @@ class SafroleStateTransition(private val config: SafroleConfig) {
     }
 
     private fun verifyEd25519Signature(
-        publicKey: ByteArray,
-        message: ByteArray,
-        signature: ByteArray
+        publicKey: JamByteArray,
+        message: JamByteArray,
+        signature: JamByteArray
     ): Boolean {
         // Validate input lengths
         if (publicKey.size != 32) {
@@ -459,17 +462,17 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
         try {
             // Create Ed25519 public key parameters
-            val pubKeyParams = Ed25519PublicKeyParameters(publicKey, 0)
+            val pubKeyParams = Ed25519PublicKeyParameters(publicKey.bytes, 0)
 
             // Create and initialize the signer in verification mode
             val signer = Ed25519Signer()
             signer.init(false, pubKeyParams)
 
             // Add message data
-            signer.update(message, 0, message.size)
+            signer.update(message.bytes, 0, message.size)
 
             // Verify the signature
-            return signer.verifySignature(signature)
+            return signer.verifySignature(signature.bytes)
         } catch (e: Exception) {
             return true
         }
@@ -482,7 +485,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         newEpoch: Long,
         prevEpoch: Long,
         prevPhase: Long,
-        originalEta0: ByteArray
+        originalEta0: JamByteArray
     ): EpochMark {
         // 5.1. Rotate entropy values (eq. 68)
         postState.eta[3] = preState.eta[2]
@@ -498,10 +501,10 @@ class SafroleStateTransition(private val config: SafroleConfig) {
             if (input.postOffenders?.any { offender -> offender.contentEquals(validator.ed25519) } == true) {
                 // Replace offender's entire validator key with zeros
                 ValidatorKey(
-                    bandersnatch = ByteArray(32) { 0 },
-                    ed25519 = ByteArray(32) { 0 },
-                    bls = ByteArray(144) { 0 },
-                    metadata = ByteArray(128) { 0 }
+                    bandersnatch = JamByteArray(ByteArray(32) { 0 }),
+                    ed25519 = JamByteArray(ByteArray(32) { 0 }),
+                    bls = JamByteArray(ByteArray(144) { 0 }),
+                    metadata = JamByteArray(ByteArray(128) { 0 })
                 )
             } else {
                 validator
@@ -509,7 +512,7 @@ class SafroleStateTransition(private val config: SafroleConfig) {
         }
 
         // 5.4. Generate new ring root
-        postState.gammaZ = generateRingRoot(postState.gammaK)
+        postState.gammaZ = JamByteArray(generateRingRoot(postState.gammaK))
 
         // 5.5. Generate epoch mark (eq. 72)
         val epochMark = EpochMark(
@@ -562,13 +565,14 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
 
             // Verify ring VRF proof
-            val ticketId = verifyRingProof(ticket.signature, postState.gammaZ, postState.eta[2], ticket.attempt)
+            val ticketId =
+                verifyRingProof(ticket.signature.bytes, postState.gammaZ.bytes, postState.eta[2].bytes, ticket.attempt)
             if (ticketId.all { it == 0.toByte() }) {
                 return SafroleErrorCode.BAD_TICKET_PROOF
             }
 
             val ticketBody = TicketBody(
-                id = ticketId,
+                id = JamByteArray(ticketId),
                 attempt = ticket.attempt
             )
 
@@ -636,16 +640,16 @@ class SafroleStateTransition(private val config: SafroleConfig) {
     }
 
     // Cryptographic helper functions
-    private fun blake2b256(data: ByteArray): ByteArray {
+    private fun blake2b256(data: JamByteArray): JamByteArray {
         val digest = Blake2bDigest(256)
-        digest.update(data, 0, data.size)
+        digest.update(data.bytes, 0, data.size)
         val hash = ByteArray(32)
         digest.doFinal(hash, 0)
-        return hash
+        return JamByteArray(hash)
     }
 
     private fun generateRingRoot(validators: List<ValidatorKey>): ByteArray {
-        var bandersnatchKeys = validators.map { it.bandersnatch }
+        val bandersnatchKeys = validators.map { it.bandersnatch.bytes }
         return bandersnatchWrapper.generateRingRoot(bandersnatchKeys, config.ringSize) ?: ByteArray(0)
     }
 
@@ -661,10 +665,10 @@ class SafroleStateTransition(private val config: SafroleConfig) {
 
 
     private fun generateFallbackSequence(
-        entropy: ByteArray,
+        entropy: JamByteArray,
         validators: List<ValidatorKey>
-    ): List<ByteArray> {
-        val result = ArrayList<ByteArray>(config.epochLength.toInt())
+    ): List<JamByteArray> {
+        val result = ArrayList<JamByteArray>(config.epochLength.toInt())
         val bandersnatchKeys = validators.map { it.bandersnatch }
 
         for (i in 0 until config.epochLength.toInt()) {

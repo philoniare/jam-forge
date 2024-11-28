@@ -1,22 +1,22 @@
 package io.forge.jam.safrole.historical
 
+import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.ReportedWorkPackage
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
-import io.forge.jam.core.toHex
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class HistoricalBeta(
     @SerialName("header_hash")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val hash: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val hash: JamByteArray,
 
     val mmr: HistoricalMmr,
 
     @SerialName("state_root")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val stateRoot: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val stateRoot: JamByteArray,
 
     @SerialName("reported")
     val reported: List<ReportedWorkPackage>

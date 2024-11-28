@@ -1,7 +1,6 @@
 package io.forge.jam.core.encoding
 
 import io.forge.jam.safrole.report.*
-import org.junit.jupiter.api.Assertions.assertArrayEquals
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.fail
@@ -58,7 +57,7 @@ class ReportsJsonTest {
                             "$testCase: Mismatch in workPackageHash list size at package index $i"
                         )
                         for (j in expectedPackage.workPackageHash.indices) {
-                            assertArrayEquals(
+                            assertEquals(
                                 expectedPackage.workPackageHash[j],
                                 actualPackage.workPackageHash[j],
                                 "$testCase: Mismatch in workPackageHash ByteArray at package index $i, hash index $j"
@@ -72,7 +71,7 @@ class ReportsJsonTest {
                             "$testCase: Mismatch in segment_tree_root list size at package index $i"
                         )
                         for (j in expectedPackage.segment_tree_root.indices) {
-                            assertArrayEquals(
+                            assertEquals(
                                 expectedPackage.segment_tree_root[j],
                                 actualPackage.segment_tree_root[j],
                                 "$testCase: Mismatch in segment_tree_root ByteArray at package index $i, root index $j"
@@ -87,7 +86,7 @@ class ReportsJsonTest {
                         "$testCase: Mismatch in reporters list size"
                     )
                     for (i in expectedMarks.reporters.indices) {
-                        assertArrayEquals(
+                        assertEquals(
                             expectedMarks.reporters[i],
                             actualMarks.reporters[i],
                             "$testCase: Mismatch in reporters ByteArray at index $i"
@@ -168,7 +167,7 @@ class ReportsJsonTest {
                 "$testCase: Mismatch in authPools inner list size at index $i"
             )
             for (j in expected.authPools[i].indices) {
-                assertArrayEquals(
+                assertEquals(
                     expected.authPools[i][j],
                     actual.authPools[i][j],
                     "$testCase: Mismatch in authPools at indices [$i][$j]"

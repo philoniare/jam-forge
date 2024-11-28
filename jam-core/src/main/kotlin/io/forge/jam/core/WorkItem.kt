@@ -1,6 +1,6 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -8,10 +8,10 @@ import kotlinx.serialization.Serializable
 data class WorkItem(
     val service: Long,
     @SerialName("code_hash")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val codeHash: ByteArray,
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val payload: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val codeHash: JamByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val payload: JamByteArray,
     @SerialName("gas_limit")
     val gasLimit: Long,
     @SerialName("import_segments")
@@ -27,6 +27,6 @@ data class WorkItem(
         val extrinsicBytes = encodeList(extrinsic)
         val exportCountBytes = encodeFixedWidthInteger(exportCount, 2, false)
         val payloadLengthBytes = encodeFixedWidthInteger(payload.size, 1, false)
-        return serviceBytes + codeHash + payloadLengthBytes + payload + gasLimitBytes + importSegmentsBytes + extrinsicBytes + exportCountBytes
+        return serviceBytes + codeHash.bytes + payloadLengthBytes + payload.bytes + gasLimitBytes + importSegmentsBytes + extrinsicBytes + exportCountBytes
     }
 }

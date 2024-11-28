@@ -1,13 +1,13 @@
 package io.forge.jam.safrole.historical
 
-import io.forge.jam.core.serializers.NullableByteArrayListSerializer
-import io.forge.jam.core.toHex
+import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.serializers.NullableJamByteArrayListSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class HistoricalMmr(
-    @Serializable(with = NullableByteArrayListSerializer::class)
-    val peaks: List<ByteArray?>
+    @Serializable(with = NullableJamByteArrayListSerializer::class)
+    val peaks: List<JamByteArray?>
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

@@ -1,7 +1,7 @@
 package io.forge.jam.safrole
 
-import io.forge.jam.core.ByteArrayList
 import io.forge.jam.core.Encodable
+import io.forge.jam.core.JamByteArrayList
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -9,26 +9,26 @@ import kotlinx.serialization.Serializable
 data class Psi(
     // Good/Valid Reports
     @SerialName("good")
-    val good: ByteArrayList = ByteArrayList(),
+    val good: JamByteArrayList = JamByteArrayList(),
 
     // Bad/Invalid Reports
     @SerialName("bad")
-    val bad: ByteArrayList = ByteArrayList(),
+    val bad: JamByteArrayList = JamByteArrayList(),
 
     // Wonky/Unknown Reports
     @SerialName("wonky")
-    val wonky: ByteArrayList = ByteArrayList(),
+    val wonky: JamByteArrayList = JamByteArrayList(),
 
     // Offending validators
     @SerialName("offenders")
-    val offenders: ByteArrayList = ByteArrayList(),
+    val offenders: JamByteArrayList = JamByteArrayList(),
 ) : Encodable {
 
     fun copy(): Psi = Psi(
-        good = ByteArrayList().apply { addAll(good) },
-        bad = ByteArrayList().apply { addAll(bad) },
-        wonky = ByteArrayList().apply { addAll(wonky) },
-        offenders = ByteArrayList().apply { addAll(offenders) }
+        good = JamByteArrayList().apply { addAll(good) },
+        bad = JamByteArrayList().apply { addAll(bad) },
+        wonky = JamByteArrayList().apply { addAll(wonky) },
+        offenders = JamByteArrayList().apply { addAll(offenders) }
     )
 
     override fun encode(): ByteArray {

@@ -1,15 +1,15 @@
 package io.forge.jam.safrole
 
 import io.forge.jam.core.Encodable
+import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.encodeFixedWidthInteger
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
-import io.forge.jam.core.toHex
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class TicketBody(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val id: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val id: JamByteArray,
     val attempt: Long
 ) : Encodable {
     override fun toString(): String {
@@ -21,7 +21,7 @@ data class TicketBody(
 
     override fun encode(): ByteArray {
         val attemptBytes = encodeFixedWidthInteger(attempt, 1, false)
-        return id + attemptBytes
+        return id.bytes + attemptBytes
     }
 
     override fun equals(other: Any?): Boolean {

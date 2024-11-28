@@ -1,20 +1,20 @@
 package io.forge.jam.safrole
 
 import io.forge.jam.core.Encodable
-import io.forge.jam.core.serializers.ByteArrayListHexSerializer
-import io.forge.jam.core.toHex
+import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class TicketsOrKeys(
-    @Serializable(with = ByteArrayListHexSerializer::class)
-    val keys: List<ByteArray>? = null,
+    @Serializable(with = JamByteArrayListHexSerializer::class)
+    val keys: List<JamByteArray>? = null,
     val tickets: List<TicketBody>? = null
 ) : Encodable {
 
 
     companion object {
-        fun fromKeys(keys: List<ByteArray>) = TicketsOrKeys(keys = keys)
+        fun fromKeys(keys: List<JamByteArray>) = TicketsOrKeys(keys = keys)
         fun fromTickets(tickets: List<TicketBody>) = TicketsOrKeys(tickets = tickets)
     }
 
@@ -26,7 +26,7 @@ data class TicketsOrKeys(
 
     override fun encode(): ByteArray {
         val keysBytes =
-            if (keys != null) keys.fold(ByteArray(0)) { acc, byteArray -> acc + byteArray } else ByteArray(0)
+            if (keys != null) keys.fold(ByteArray(0)) { acc, byteArray -> acc + byteArray.bytes } else ByteArray(0)
         val ticketsBytes =
             if (tickets != null) tickets.fold(ByteArray(0)) { acc, ticketBody -> acc + ticketBody.encode() } else ByteArray(
                 0

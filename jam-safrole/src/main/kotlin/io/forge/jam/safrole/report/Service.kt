@@ -1,14 +1,15 @@
 package io.forge.jam.safrole.report
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class Service(
     @SerialName("code_hash")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val codeHash: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val codeHash: JamByteArray,
     @SerialName("min_item_gas")
     val minItemGas: Long,
     @SerialName("min_memo_gas")

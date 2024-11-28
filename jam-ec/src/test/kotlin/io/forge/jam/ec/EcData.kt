@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class EcData(
-    @Serializable(with = ByteArrayHexSerializer::class)
+    @Serializable(with = JamByteArrayHexSerializer::class)
     val data: ByteArray,
     @Serializable(with = ByteArrayListHexSerializer::class)
     val chunks: List<ByteArray>

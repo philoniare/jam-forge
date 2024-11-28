@@ -1,11 +1,12 @@
 package io.forge.jam.safrole.report
 
-import io.forge.jam.core.serializers.ByteArrayListHexSerializer
+import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class ReportOutputMarks(
     val reported: List<ReportPackage>,
-    @Serializable(with = ByteArrayListHexSerializer::class)
-    val reporters: List<ByteArray>
+    @Serializable(with = JamByteArrayListHexSerializer::class)
+    val reporters: List<JamByteArray>
 )

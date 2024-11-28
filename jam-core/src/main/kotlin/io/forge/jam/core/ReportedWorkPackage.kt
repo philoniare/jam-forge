@@ -1,18 +1,18 @@
 package io.forge.jam.core
 
-import io.forge.jam.core.serializers.ByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class ReportedWorkPackage(
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val hash: ByteArray,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val hash: JamByteArray,
     @SerialName("exports_root")
-    @Serializable(with = ByteArrayHexSerializer::class)
-    val exportsRoot: ByteArray
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val exportsRoot: JamByteArray
 ) : Encodable {
     override fun encode(): ByteArray {
-        return hash + exportsRoot
+        return hash.bytes + exportsRoot.bytes
     }
 }

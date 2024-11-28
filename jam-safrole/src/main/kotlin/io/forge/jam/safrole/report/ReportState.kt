@@ -1,5 +1,6 @@
 package io.forge.jam.safrole.report
 
+import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.serializers.ByteArrayNestedListSerializer
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
@@ -19,7 +20,7 @@ data class ReportState(
     val recentBlocks: List<HistoricalBeta>,
     @SerialName("auth_pools")
     @Serializable(with = ByteArrayNestedListSerializer::class)
-    val authPools: List<List<ByteArray>>,
+    val authPools: List<List<JamByteArray>>,
     @SerialName("services")
     @Serializable(with = ServiceListSerializer::class)
     val services: List<Pair<Long, Service>>

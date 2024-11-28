@@ -2,7 +2,7 @@ package io.forge.jam.core
 
 import blakeHash
 
-fun jamComputeShuffle(size: Int, entropy: ByteArray): List<Int> {
+fun jamComputeShuffle(size: Int, entropy: JamByteArray): List<Int> {
     if (size == 0) return emptyList()
 
     val sequence = (0 until size).toList()
@@ -26,7 +26,7 @@ private fun computeShuffleEq329(sequence: List<Int>, entropyNumbers: List<Int>):
     )
 }
 
-private fun computeQ(hash: ByteArray, length: Int): List<Int> {
+private fun computeQ(hash: JamByteArray, length: Int): List<Int> {
     return (0 until length).map { i ->
         val counter = i / 8
         val preimage = ByteArray(hash.size + 4).apply {

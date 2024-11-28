@@ -1,6 +1,7 @@
 package io.forge.jam.safrole.report
 
 import io.forge.jam.core.GuaranteeExtrinsic
+import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
@@ -14,8 +15,8 @@ class ReportStateTransition(private val config: ReportStateConfig) {
      * This would need to implement the actual MMR validation logic.
      */
     private fun validateBeefyRootAgainstMmrPeaks(
-        beefyRoot: ByteArray,
-        mmrPeaks: List<ByteArray?>
+        beefyRoot: JamByteArray,
+        mmrPeaks: List<JamByteArray?>
     ): Boolean {
         // TODO: Implement proper MMR peak validation logic
         return mmrPeaks.any { peak ->
@@ -95,7 +96,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
     fun validateWorkReport(
         workReport: WorkReport,
         services: Map<Long, Service>,
-        authPools: List<List<ByteArray>>,
+        authPools: List<List<JamByteArray>>,
         currentSlot: Long,
         pendingReports: List<WorkReport>
     ): ReportErrorCode? {
@@ -170,7 +171,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
 
         // Track cores with pending reports to prevent duplicates
         val pendingReports = mutableListOf<WorkReport>()
-        val validGuarantors = mutableListOf<ByteArray>()
+        val validGuarantors = mutableListOf<JamByteArray>()
         val reportPackages = mutableListOf<ReportPackage>()
 
         // Validate guarantees
@@ -204,8 +205,8 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             pendingReports.add(guarantee.report)
 
             // Create report package from segment root lookups
-            val workPackageHashes = mutableListOf<ByteArray>()
-            val segmentTreeRoots = mutableListOf<ByteArray>()
+            val workPackageHashes = mutableListOf<JamByteArray>()
+            val segmentTreeRoots = mutableListOf<JamByteArray>()
 
             // Add the primary work package hash and exports root
             workPackageHashes.add(guarantee.report.packageSpec.hash)
