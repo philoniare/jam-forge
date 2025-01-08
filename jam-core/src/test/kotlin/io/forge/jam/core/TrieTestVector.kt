@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class TrieTestVector(
     @Serializable(with = JamByteArrayMapSerializer::class)
-    val input: Map<ByteArray, ByteArray> = emptyMap(),
+    val input: Map<JamByteArray, JamByteArray> = emptyMap(),
     @Serializable(with = JamByteArrayHexSerializer::class)
     val output: JamByteArray
 )
