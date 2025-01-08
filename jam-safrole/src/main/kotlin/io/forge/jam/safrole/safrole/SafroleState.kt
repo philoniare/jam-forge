@@ -2,6 +2,7 @@ package io.forge.jam.safrole.safrole
 
 import io.forge.jam.core.*
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
+import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import io.forge.jam.safrole.*
 import io.forge.jam.safrole.serializer.NullableAvailabilityAssignmentListSerializer
 import kotlinx.serialization.SerialName
@@ -41,6 +42,10 @@ data class SafroleState(
     @Serializable(with = JamByteArrayHexSerializer::class)
     var gammaZ: JamByteArray = JamByteArray(ByteArray(0)),
 
+    @SerialName("post_offenders")
+    @Serializable(with = JamByteArrayListHexSerializer::class)
+    val postOffenders: List<JamByteArray>? = null,
+
     @Serializable(with = NullableAvailabilityAssignmentListSerializer::class)
     var rho: MutableList<AvailabilityAssignment?>? = null,
     var psi: Psi? = null
@@ -56,6 +61,7 @@ data class SafroleState(
             gammaA = gammaA.map { it.copy() },
             gammaS = gammaS.copy(),
             gammaZ = gammaZ.clone(),
+            postOffenders = postOffenders?.map { it.copy() },
             rho = rho?.map { it?.copy() }?.toMutableList(),
             psi = psi?.copy()
         )
@@ -71,8 +77,9 @@ data class SafroleState(
         val gammaABytes = encodeList(gammaA)
         val gammaSBytes = gammaS.encode()
         val gammaZBytes = gammaZ.bytes
+        val postOffendersBytes = postOffenders?.let { encodeList(it) } ?: byteArrayOf(0)
         val rhoBytes = rho?.let { encodeList(it) } ?: byteArrayOf(0)
         val psiBytes = psi?.encode() ?: byteArrayOf(0)
-        return tauBytes + etaBytes + lambdaBytes + kappaBytes + gammaKBytes + iotaBytes + gammaABytes + gammaSBytes + gammaZBytes + rhoBytes + psiBytes
+        return tauBytes + etaBytes + lambdaBytes + kappaBytes + gammaKBytes + iotaBytes + gammaABytes + gammaSBytes + gammaZBytes + postOffendersBytes + rhoBytes + psiBytes
     }
 }
