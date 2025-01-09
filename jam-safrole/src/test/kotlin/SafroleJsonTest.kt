@@ -50,10 +50,11 @@ class SafroleJsonTest {
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
-                    epochLength = 12,
+                    validatorCount = 6,
+                    epochDuration = 12,
                     ticketCutoff = 10,
                     ringSize = 6,
-                    validatorCount = 6
+                    maxTicketAttempts = 3
                 )
             )
             val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
@@ -83,10 +84,10 @@ class SafroleJsonTest {
 //
 //            val safrole = SafroleStateTransition(
 //                SafroleConfig(
-//                    epochLength = 600,
+//    validatorCount = 1023,
+//                    epochDuration = 600,
 //                    ticketCutoff = 500,
-//                    ringSize = 1023,
-//                    validatorCount = 1023
+//                    ringSize = 1023
 //                )
 //            )
 //            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)

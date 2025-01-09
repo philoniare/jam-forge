@@ -105,7 +105,8 @@ class DisputeJsonTest {
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
-                    epochLength = 12,
+                    maxTicketAttempts = 3,
+                    epochDuration = 12,
                     ticketCutoff = 10,
                     ringSize = 6,
                     validatorCount = 6
@@ -132,10 +133,11 @@ class DisputeJsonTest {
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
-                    epochLength = 600,
+                    epochDuration = 600,
                     ticketCutoff = 500,
                     ringSize = 6,
-                    validatorCount = 1023
+                    validatorCount = 1023,
+                    maxTicketAttempts = 3
                 )
             )
             val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
