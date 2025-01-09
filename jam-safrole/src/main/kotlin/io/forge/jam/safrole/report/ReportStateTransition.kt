@@ -125,13 +125,13 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
 
             // Validate gas requirements (eq. 144)
-            if (result.gas < service.minItemGas) {
+            if (result.accumulateGas < service.minItemGas) {
                 return ReportErrorCode.SERVICE_ITEM_GAS_TOO_LOW
             }
         }
 
         // Validate total gas limit (eq. 144)
-        val totalGas = workReport.results.sumOf { it.gas }
+        val totalGas = workReport.results.sumOf { it.accumulateGas }
         if (totalGas > config.MAX_ACCUMULATION_GAS) {
             return ReportErrorCode.WORK_REPORT_GAS_TOO_HIGH
         }

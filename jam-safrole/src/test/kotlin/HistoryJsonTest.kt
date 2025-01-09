@@ -82,7 +82,6 @@ class HistoryJsonTest {
 
             val transition = HistoryTransition()
             val postState = transition.stf(inputCase.input, inputCase.preState)
-
             assertHistoryStateEquals(
                 inputCase.postState,
                 postState,
