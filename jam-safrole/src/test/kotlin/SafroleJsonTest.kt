@@ -71,35 +71,37 @@ class SafroleJsonTest {
         }
     }
 
-//    @Test
-//    fun testFullSafrole() {
-//        val folderName = "safrole/full"
-//        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-//
-//        for (testCase in testCases) {
-//            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
-//                "$folderName/$testCase",
-//                ".bin"
-//            )
-//
-//            val safrole = SafroleStateTransition(
-//                SafroleConfig(
-//    validatorCount = 1023,
-//                    epochDuration = 600,
-//                    ticketCutoff = 500,
-//                    ringSize = 1023
-//                )
-//            )
-//            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
-//
-//            // Compare the expected and actual output
-//            assertSafroleOutputEquals(inputCase.output, output, testCase)
-//
-//            // Compare the expected and actual post_state
-//            assertSafroleStateEquals(
-//                inputCase.postState,
-//                postState,
-//            )
-//        }
-//    }
+    @Test
+    fun testFullSafrole() {
+        val folderName = "safrole/full"
+        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+
+        for (testCase in testCases) {
+            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
+                "$folderName/$testCase",
+                ".bin"
+            )
+
+            val safrole = SafroleStateTransition(
+                SafroleConfig(
+                    validatorCount = 1023,
+                    epochDuration = 600,
+                    ticketCutoff = 500,
+                    ringSize = 1023,
+                    maxTicketAttempts = 2
+                )
+            )
+            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
+
+            // Compare the expected and actual output
+            assertSafroleOutputEquals(inputCase.output, output, testCase)
+
+            // Compare the expected and actual post_state
+            assertSafroleStateEquals(
+                inputCase.postState,
+                postState,
+                testCase
+            )
+        }
+    }
 }
