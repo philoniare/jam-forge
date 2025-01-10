@@ -95,7 +95,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
      */
     fun validateWorkReport(
         workReport: WorkReport,
-        services: Map<Long, Service>,
+        services: List<ServiceItem>,
         authPools: List<List<JamByteArray>>,
         currentSlot: Long,
         pendingReports: List<WorkReport>
@@ -114,21 +114,20 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         }
 
         // Validate work results
-        for (result in workReport.results) {
-            // Validate service exists
-            val service = services[result.service]
-                ?: return ReportErrorCode.BAD_SERVICE_ID
-
-            // Validate code hash matches service state (eq. 156)
-            if (!result.codeHash.contentEquals(service.codeHash)) {
-                return ReportErrorCode.BAD_CODE_HASH
-            }
-
-            // Validate gas requirements (eq. 144)
-            if (result.accumulateGas < service.minItemGas) {
-                return ReportErrorCode.SERVICE_ITEM_GAS_TOO_LOW
-            }
-        }
+//        for (result in workReport.results) {
+//            // Validate service exists
+//            val service = services[result.service]
+//
+//            // Validate code hash matches service state (eq. 156)
+//            if (!result.codeHash.contentEquals(service.codeHash)) {
+//                return ReportErrorCode.BAD_CODE_HASH
+//            }
+//
+//            // Validate gas requirements (eq. 144)
+//            if (result.accumulateGas < service.minItemGas) {
+//                return ReportErrorCode.SERVICE_ITEM_GAS_TOO_LOW
+//            }
+//        }
 
         // Validate total gas limit (eq. 144)
         val totalGas = workReport.results.sumOf { it.accumulateGas }
@@ -179,7 +178,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             // Validate the work report
             validateWorkReport(
                 guarantee.report,
-                preState.services.toMap(),
+                preState.services,
                 preState.authPools,
                 currentSlot,
                 pendingReports

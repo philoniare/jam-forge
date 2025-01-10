@@ -183,14 +183,9 @@ class ReportsJsonTest {
         )
         for (i in expected.services.indices) {
             assertEquals(
-                expected.services[i].first,
-                actual.services[i].first,
-                "$testCase: Mismatch in service ID at index $i"
-            )
-            assertEquals(
-                expected.services[i].second,
-                actual.services[i].second,
-                "$testCase: Mismatch in service data at index $i"
+                expected.services[i],
+                actual.services[i],
+                "$testCase: Mismatch in service at index $i"
             )
         }
     }
