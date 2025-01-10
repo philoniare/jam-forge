@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 class ServiceItem(
-    val id: Int,
+    val id: Long,
     val info: ServiceInfo
 ) {
     override fun equals(other: Any?): Boolean {
@@ -25,7 +25,7 @@ class ServiceItem(
     }
 
     fun copy(
-        id: Int = this.id,
+        id: Long = this.id,
         info: ServiceInfo = this.info
     ): ServiceItem {
         return ServiceItem(id, info)

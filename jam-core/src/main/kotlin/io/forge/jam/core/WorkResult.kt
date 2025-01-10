@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class WorkResult(
     @SerialName("service_id")
-    val service: Long,
+    val serviceId: Long,
     @SerialName("code_hash")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val codeHash: JamByteArray,
@@ -19,7 +19,7 @@ data class WorkResult(
     val result: ExecutionResult
 ) : Encodable {
     override fun encode(): ByteArray {
-        val serviceBytes = encodeFixedWidthInteger(service, 4, false)
+        val serviceBytes = encodeFixedWidthInteger(serviceId, 4, false)
         val gasBytes = encodeFixedWidthInteger(accumulateGas, 8, false)
         return serviceBytes + codeHash.bytes + payloadHash.bytes + gasBytes + result.encode()
     }
