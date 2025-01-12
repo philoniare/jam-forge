@@ -1,6 +1,5 @@
 package io.forge.jam.safrole.report
 
-import blakeHash
 import io.forge.jam.core.GuaranteeExtrinsic
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
@@ -8,9 +7,24 @@ import io.forge.jam.core.toHex
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.historical.HistoricalBeta
+import keccakHash
 
 
 class ReportStateTransition(private val config: ReportStateConfig) {
+
+    private fun calculatePeak(peaks: List<JamByteArray>): ByteArray {
+        return when {
+            peaks.isEmpty() -> ByteArray(32) { 0 }
+            peaks.size == 1 -> peaks[0].bytes
+            else -> {
+                val subPeaks = peaks.dropLast(1)
+                val lastPeak = peaks.last()
+                val prefix = "node".toByteArray()
+                val recursiveResult = calculatePeak(subPeaks)
+                keccakHash(prefix + recursiveResult + lastPeak.bytes)
+            }
+        }
+    }
 
     /**
      * Validates the Beefy root against the MMR peaks.
@@ -24,23 +38,10 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             return false
         }
 
-        var bagHash = ByteArray(32) { 0 }
-        for (peak in mmrPeaks.reversed()) {
-            if (peak != null) {
-                println("Current bag hash: ${bagHash.toHex()}")
-                println("Adding peak: ${peak.bytes.toHex()}")
-
-                // Concatenate and hash
-                val combined = bagHash + peak.bytes
-                println("Combined bytes: ${combined.toHex()}")
-
-                bagHash = blakeHash(combined)
-                println("New bag hash: ${bagHash.toHex()}\n")
-            }
-        }
-        println("BagHash: ${bagHash.toHex()}")
-
-        return bagHash.contentEquals(beefyRoot.bytes)
+        val nonNullPeaks = mmrPeaks.filterNotNull()
+        val root = calculatePeak(nonNullPeaks)
+        println("Root: ${root.toHex()}")
+        return root.contentEquals(beefyRoot.bytes)
     }
 
     /**

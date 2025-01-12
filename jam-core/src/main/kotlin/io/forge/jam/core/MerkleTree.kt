@@ -1,4 +1,5 @@
 import io.forge.jam.core.JamByteArray
+import org.bouncycastle.crypto.digests.KeccakDigest
 import org.bouncycastle.jcajce.provider.digest.Blake2b
 
 // Blake2b-256 hash function
@@ -6,6 +7,14 @@ fun blakeHash(data: ByteArray): ByteArray {
     val digest = Blake2b.Blake2b256()
     digest.update(data, 0, data.size)
     return digest.digest()
+}
+
+fun keccakHash(data: ByteArray): ByteArray {
+    val digest = KeccakDigest(256)
+    val output = ByteArray(32)
+    digest.update(data, 0, data.size)
+    digest.doFinal(output, 0)
+    return output
 }
 
 /**
