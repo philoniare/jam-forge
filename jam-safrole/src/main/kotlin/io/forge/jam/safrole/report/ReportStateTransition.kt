@@ -3,7 +3,6 @@ package io.forge.jam.safrole.report
 import io.forge.jam.core.GuaranteeExtrinsic
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
-import io.forge.jam.core.toHex
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.historical.HistoricalBeta
@@ -40,7 +39,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
 
         val nonNullPeaks = mmrPeaks.filterNotNull()
         val root = calculatePeak(nonNullPeaks)
-        println("Root: ${root.toHex()}")
         return root.contentEquals(beefyRoot.bytes)
     }
 
@@ -136,11 +134,9 @@ class ReportStateTransition(private val config: ReportStateConfig) {
 
         // Validate work results
         for (result in workReport.results) {
-            println("ServiceId: ${result.serviceId}")
             // Validate service exists
-            val service = services.find { it.id == result.serviceId } ?: continue
-
-
+            val service = services.find { it.id == result.serviceId } ?: return ReportErrorCode.BAD_SERVICE_ID
+            
             // Validate code hash matches service state (eq. 156)
             if (!result.codeHash.contentEquals(service.info.codeHash)) {
                 return ReportErrorCode.BAD_CODE_HASH

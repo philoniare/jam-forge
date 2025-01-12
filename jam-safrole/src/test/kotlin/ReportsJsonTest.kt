@@ -207,10 +207,10 @@ class ReportsJsonTest {
                     MAX_LOOKUP_ANCHOR_AGE = 14_000L,
                     MAX_AUTH_POOL_ITEMS = 8,
                     MAX_ACCUMULATION_GAS = 100_000L,
-                    MAX_CORES = 341,
+                    MAX_CORES = 2,
                     MAX_DEPENDENCIES = 100,
                     MIN_GUARANTORS = 3,
-                    ROTATION_PERIOD = 1_000L
+                    ROTATION_PERIOD = 4
                 )
             )
             val (postState, output) = report.transition(inputCase.input, inputCase.preState)
