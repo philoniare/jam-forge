@@ -10,7 +10,7 @@ import kotlinx.serialization.Serializable
 data class HistoricalBeta(
     @SerialName("header_hash")
     @Serializable(with = JamByteArrayHexSerializer::class)
-    val hash: JamByteArray,
+    val headerHash: JamByteArray,
 
     val mmr: HistoricalMmr,
 
@@ -27,7 +27,7 @@ data class HistoricalBeta(
 
         other as HistoricalBeta
 
-        if (!hash.contentEquals(other.hash)) return false
+        if (!headerHash.contentEquals(other.headerHash)) return false
         if (!stateRoot.contentEquals(other.stateRoot)) return false
 
         if (mmr != other.mmr) return false
@@ -37,7 +37,7 @@ data class HistoricalBeta(
     }
 
     override fun hashCode(): Int {
-        var result = hash.contentHashCode()
+        var result = headerHash.contentHashCode()
         result = 31 * result + mmr.hashCode()
         result = 31 * result + stateRoot.contentHashCode()
         result = 31 * result + reported.hashCode()
@@ -45,6 +45,6 @@ data class HistoricalBeta(
     }
 
     override fun toString(): String {
-        return "\nHistoricalBeta(headerHash=${hash.toHex()}, mmr=$mmr, stateRoot=${stateRoot.toHex()}, reported=[$reported])"
+        return "\nHistoricalBeta(headerHash=${headerHash.toHex()}, mmr=$mmr, stateRoot=${stateRoot.toHex()}, reported=[$reported])"
     }
 }

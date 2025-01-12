@@ -36,7 +36,7 @@ class HistoryTransition {
             input.accumulateRoot
         )
         val newBlock = HistoricalBeta(
-            hash = input.headerHash,
+            headerHash = input.headerHash,
             mmr = newMmr,
             stateRoot = JamByteArray(ZERO_HASH),
             reported = input.workPackages

@@ -1,8 +1,10 @@
 package io.forge.jam.safrole.report
 
+import blakeHash
 import io.forge.jam.core.GuaranteeExtrinsic
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
+import io.forge.jam.core.toHex
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.historical.HistoricalBeta
@@ -18,10 +20,27 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         beefyRoot: JamByteArray,
         mmrPeaks: List<JamByteArray?>
     ): Boolean {
-        // TODO: Implement proper MMR peak validation logic
-        return mmrPeaks.any { peak ->
-            peak?.contentEquals(beefyRoot) == true
+        if (mmrPeaks.isEmpty()) {
+            return false
         }
+
+        var bagHash = ByteArray(32) { 0 }
+        for (peak in mmrPeaks.reversed()) {
+            if (peak != null) {
+                println("Current bag hash: ${bagHash.toHex()}")
+                println("Adding peak: ${peak.bytes.toHex()}")
+
+                // Concatenate and hash
+                val combined = bagHash + peak.bytes
+                println("Combined bytes: ${combined.toHex()}")
+
+                bagHash = blakeHash(combined)
+                println("New bag hash: ${bagHash.toHex()}\n")
+            }
+        }
+        println("BagHash: ${bagHash.toHex()}")
+
+        return bagHash.contentEquals(beefyRoot.bytes)
     }
 
     /**
@@ -47,12 +66,12 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
 
             // Find anchor block and lookup anchor block
-            val lookupAnchorBlock = recentBlocks.find { it.hash.contentEquals(context.lookupAnchor) }
+            val lookupAnchorBlock = recentBlocks.find { it.headerHash.contentEquals(context.lookupAnchor) }
             if (lookupAnchorBlock == null) {
                 return ReportErrorCode.ANCHOR_NOT_RECENT
             }
 
-            val anchorBlock = recentBlocks.find { it.hash.contentEquals(context.anchor) }
+            val anchorBlock = recentBlocks.find { it.headerHash.contentEquals(context.anchor) }
             if (anchorBlock == null) {
                 return ReportErrorCode.ANCHOR_NOT_RECENT
             }
@@ -67,6 +86,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             val mmrPeaks = anchorBlock.mmr.peaks
 
             if (!validateBeefyRootAgainstMmrPeaks(beefyRoot, mmrPeaks)) {
+                println("Bad BEEFY ${mmrPeaks}")
                 return ReportErrorCode.BAD_BEEFY_MMR_ROOT
             }
 

@@ -22,9 +22,9 @@ class HistoryJsonTest {
     private fun assertHistoricalBetaEquals(expected: HistoricalBeta, actual: HistoricalBeta, path: String) {
         // Compare header hash
         assertEquals(
-            expected.hash,
-            actual.hash,
-            "$path: Mismatch in hash. Expected: ${expected.hash.toHex()}, Actual: ${actual.hash.toHex()}"
+            expected.headerHash,
+            actual.headerHash,
+            "$path: Mismatch in hash. Expected: ${expected.headerHash.toHex()}, Actual: ${actual.headerHash.toHex()}"
         )
 
         // Compare state root
