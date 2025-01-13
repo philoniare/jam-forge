@@ -9,7 +9,7 @@ data class SegmentRootLookup(
     @SerialName("work_package_hash")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val workPackageHash: JamByteArray,
-    @SerialName("segmentTreeRoot")
+    @SerialName("segment_tree_root")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val segmentTreeRoot: JamByteArray
 ) : Encodable {
