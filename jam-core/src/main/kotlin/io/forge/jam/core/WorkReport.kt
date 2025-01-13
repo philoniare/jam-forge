@@ -27,11 +27,13 @@ data class WorkReport(
         val coreIndexBytes = encodeFixedWidthInteger(coreIndex, 2, false)
         val authorizerHashBytes = authorizerHash.bytes
         // Auth output - 1 byte length prefix
-        val authOutputLengthBytes = encodeFixedWidthInteger(authOutput.size.toLong(), 1, false)
+        val authOutputLengthBytes = encodeCompactInteger(authOutput.size.toLong())
         val authOutputBytes = authOutput.bytes
         // Segment root lookup - 1 byte length prefix
         val segmentRootLookupBytes = encodeFixedWidthInteger(segmentRootLookup.size.toLong(), 1, false)
         val segmentRootLookupListBytes = encodeList(segmentRootLookup, false)
+        
+
         // Results - 1 byte length prefix
         val resultsLengthBytes = encodeFixedWidthInteger(results.size.toLong(), 1, false)
         val resultsListBytes = encodeList(results, false)

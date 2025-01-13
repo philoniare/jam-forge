@@ -1,7 +1,9 @@
 package io.forge.jam.safrole.historical
 
+import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.ReportedWorkPackage
+import io.forge.jam.core.encodeList
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -20,7 +22,13 @@ data class HistoricalBeta(
 
     @SerialName("reported")
     val reported: List<ReportedWorkPackage>
-) {
+) : Encodable {
+    override fun encode(): ByteArray {
+        val mmrBytes = mmr.encode()
+        val reportedBytes = encodeList(reported)
+        return headerHash.bytes + mmrBytes + stateRoot.bytes + reportedBytes
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other == null || this::class != other::class) return false

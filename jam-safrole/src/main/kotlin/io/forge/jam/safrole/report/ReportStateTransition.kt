@@ -1,5 +1,6 @@
 package io.forge.jam.safrole.report
 
+import blakeHash
 import io.forge.jam.core.GuaranteeExtrinsic
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
@@ -88,7 +89,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             val mmrPeaks = anchorBlock.mmr.peaks
 
             if (!validateBeefyRootAgainstMmrPeaks(beefyRoot, mmrPeaks)) {
-                println("Bad BEEFY ${mmrPeaks}")
                 return ReportErrorCode.BAD_BEEFY_MMR_ROOT
             }
 
@@ -108,24 +108,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         }
 
         return null
-    }
-
-    private fun validateSignature(
-        signature: JamByteArray,
-        validatorKey: JamByteArray,
-        message: ByteArray,
-        prefix: ByteArray
-    ): Boolean {
-        return try {
-            val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
-            val signer = Ed25519Signer()
-            signer.init(false, publicKey)
-            signer.update(prefix, 0, prefix.size)
-            signer.update(message, 0, message.size)
-            signer.verifySignature(signature.bytes)
-        } catch (e: Exception) {
-            false
-        }
     }
 
     /**
@@ -166,8 +148,9 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             if (isEpochChanging) entropyPool[3] else entropyPool[2]
         )
 
-        val reportHash = guarantee.report.authorizerHash.bytes
+        val reportHash = blakeHash(guarantee.report.encode())
         val signaturePrefix = "jam_guarantee".toByteArray()
+        val signatureMessage = signaturePrefix + reportHash
 
         for (signature in guarantee.signatures) {
             // Validate validator index
@@ -179,13 +162,14 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             } ?: return ReportErrorCode.BAD_SIGNATURE
 
             try {
+                println("Key: ${validatorKey.toHex()}")
                 val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
                 val signer = Ed25519Signer()
                 signer.init(false, publicKey)
-                signer.update(signaturePrefix, 0, signaturePrefix.size)
-                signer.update(reportHash, 0, reportHash.size)
+                signer.update(signatureMessage, 0, signatureMessage.size)
 
                 if (!signer.verifySignature(signature.signature.bytes)) {
+                    println("bad sig")
                     return ReportErrorCode.BAD_SIGNATURE
                 }
             } catch (e: Exception) {
@@ -319,10 +303,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         preState: ReportState
     ): Pair<ReportState, ReportOutput> {
         val postState = preState.deepCopy()
-        val currentSlot = input.slot ?: return Pair(
-            postState,
-            ReportOutput(err = ReportErrorCode.FUTURE_REPORT_SLOT)
-        )
+        val currentSlot = input.slot
 
         // Validate anchor and context
         validateAnchor(input.guarantees, preState.recentBlocks, currentSlot)?.let {
@@ -374,26 +355,19 @@ class ReportStateTransition(private val config: ReportStateConfig) {
 
             pendingReports.add(guarantee.report)
 
-            // Create report package from segment root lookups
-            val workPackageHashes = mutableListOf<JamByteArray>()
-            val segmentTreeRoots = mutableListOf<JamByteArray>()
-
             // Add the primary work package hash and exports root
-            workPackageHashes.add(guarantee.report.packageSpec.hash)
-            segmentTreeRoots.add(guarantee.report.packageSpec.exportsRoot)
+            reportPackages.add(
+                ReportPackage(
+                    guarantee.report.packageSpec.hash,
+                    guarantee.report.packageSpec.exportsRoot
+                )
+            )
+
 
             // Add any segment root lookups
             guarantee.report.segmentRootLookup.forEach { lookup ->
-                workPackageHashes.add(lookup.workPackageHash)
-                segmentTreeRoots.add(lookup.segmentTreeRoot)
+                reportPackages.add(ReportPackage(lookup.workPackageHash, lookup.segmentTreeRoot))
             }
-
-            reportPackages.add(
-                ReportPackage(
-                    workPackageHash = workPackageHashes,
-                    segment_tree_root = segmentTreeRoots
-                )
-            )
 
             // Collect valid guarantor Ed25519 keys
             guarantee.signatures.forEach { signature ->

@@ -1,6 +1,8 @@
 package io.forge.jam.safrole.report
 
+import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.encodeList
 import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import kotlinx.serialization.Serializable
 
@@ -9,4 +11,10 @@ data class ReportOutputMarks(
     val reported: List<ReportPackage>,
     @Serializable(with = JamByteArrayListHexSerializer::class)
     val reporters: List<JamByteArray>
-)
+) : Encodable {
+    override fun encode(): ByteArray {
+        val reportedBytes = encodeList(reported)
+        val reportersBytes = encodeList(reporters)
+        return reportedBytes + reportersBytes
+    }
+}

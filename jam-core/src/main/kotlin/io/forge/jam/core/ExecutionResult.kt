@@ -11,7 +11,7 @@ data class ExecutionResult(
 ) : Encodable {
     override fun encode(): ByteArray {
         if (ok != null) {
-            val lengthBytes = encodeFixedWidthInteger(ok.size, 1, false)
+            val lengthBytes = encodeCompactInteger(ok.bytes.size.toLong())
             return byteArrayOf(0) + lengthBytes + ok.bytes
         } else {
             return byteArrayOf(2)

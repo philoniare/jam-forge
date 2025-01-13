@@ -1,10 +1,11 @@
 package io.forge.jam.safrole.report
 
+import io.forge.jam.core.Encodable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class ReportErrorCode {
+enum class ReportErrorCode : Encodable {
     @SerialName("anchor_not_recent")
     ANCHOR_NOT_RECENT,
 
@@ -69,5 +70,9 @@ enum class ReportErrorCode {
     TOO_MANY_DEPENDENCIES,
 
     @SerialName("wrong_assignment")
-    WRONG_ASSIGNMENT,
+    WRONG_ASSIGNMENT;
+
+    override fun encode(): ByteArray {
+        return byteArrayOf(ordinal.toByte())
+    }
 }

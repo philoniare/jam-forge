@@ -52,6 +52,25 @@ fun <T : Encodable> encodeList(list: List<T>, includeLength: Boolean = true): By
 }
 
 /**
+ * Encodes nested lists according to JAM protocol specification.
+ * For lists of variable length, includes a length prefix.
+ * Recursively handles nested structures.
+ */
+fun <T : Encodable> encodeNestedList(list: List<List<T>>, includeLength: Boolean = true): ByteArray {
+    val outerLengthBytes = if (includeLength) {
+        encodeFixedWidthInteger(list.size, 1, false)
+    } else {
+        ByteArray(0)
+    }
+
+    val innerListsBytes = list.fold(ByteArray(0)) { acc, innerList ->
+        acc + encodeList(innerList, true)
+    }
+
+    return outerLengthBytes + innerListsBytes
+}
+
+/**
  * Encode a list of optional Encodable items
  */
 fun <T : Encodable> encodeOptionalList(list: List<T?>, includeLength: Boolean = true): ByteArray {
@@ -67,6 +86,42 @@ fun <T : Encodable> encodeOptionalList(list: List<T?>, includeLength: Boolean = 
         encodeFixedWidthInteger(list.size, 1, false) + itemsBytes
     } else {
         itemsBytes
+    }
+}
+
+/**
+ * Helper to convert Long to little-endian byte array of specified size
+ */
+fun Long.toByteArray(size: Int): ByteArray {
+    val result = ByteArray(size)
+    var value = this
+    for (i in 0 until size) {
+        result[i] = (value and 0xFF).toByte()
+        value = value shr 8
+    }
+    return result
+}
+
+/**
+ * Encodes a natural number x according to JAM protocol encoding:
+ * - For x = 0: Returns [0]
+ * - For values that can fit in l bytes (where 2^(7l) ≤ x < 2^(7(l+1))):
+ *   Returns [(2^8 - 2^(8-l)) + (x/2^(8l))] followed by l bytes of x in little-endian
+ * - For values needing full 8 bytes: Returns [255] followed by all 8 bytes
+ */
+fun encodeLength(length: Long): ByteArray {
+    return when {
+        length == 0L -> byteArrayOf(0)
+        length < 128 -> byteArrayOf(-128, length.toByte())
+        length < 16384 -> {
+            byteArrayOf(
+                -64,  // 0xC0 prefix for 2 bytes
+                (length and 0xFF).toByte(),
+                ((length shr 8) and 0xFF).toByte()
+            )
+        }
+        // ... handle larger lengths
+        else -> throw IllegalArgumentException("Length too large")
     }
 }
 
@@ -89,52 +144,55 @@ fun encodeFixedWidthInteger(value: Number, byteSize: Int = 4, hasDiscriminator: 
     return buffer.array()
 }
 
-fun encodeCompactInteger(value: Long): ByteArray {
-    if (value < 0) {
-        throw IllegalArgumentException("Value must be non-negative")
+/**
+ * Encodes a nonnegative Long (up to < 2^64) according to
+ * Section C.6 of the Gray Paper ("General Natural Number Serialization").
+ *
+ * Returns the full spec-compliant encoding: prefix byte + E_l(remainder).
+ * - If x = 0, returns [0].
+ * - If 2^(7l) <= x < 2^(7(l+1)) for some l in [0..8], then
+ *     [ 256 - 2^(8-l) + floor(x / 2^(8*l)) ] ++ E_l(x mod 2^(8*l))
+ * - Otherwise (x < 2^64), returns [255] ++ E_8(x).
+ *
+ * Here E_l( r ) means "r in little-endian form over l bytes."
+ */
+fun encodeCompactInteger(x: Long): ByteArray {
+    require(x >= 0) { "No negative values allowed." }
+    // 1) Special case x = 0
+    if (x == 0L) {
+        return byteArrayOf(0)
     }
 
-    return when {
-        value < (1L shl 6) -> {
-            // Single-byte mode (mode 0, discriminator '00')
-            val encoded = (value shl 2).toByte()
-            byteArrayOf(encoded)
-        }
+    // 2) If x < 2^(64), figure out which l fits 2^(7l) <= x < 2^(7(l+1))
+    //    for l in [0..8].
+    //    (We only go up to l=8 because 2^(7*8) = 2^56 < 2^64.)
+    for (l in 0..8) {
+        val lowerBound = 1L shl (7 * l)          // 2^(7l)
+        val upperBound = 1L shl (7 * (l + 1))    // 2^(7(l+1))
+        if (x in lowerBound until upperBound) {
+            // prefix = 256 - 2^(8-l) + floor(x / 2^(8*l))
+            val prefixVal = (256 - (1 shl (8 - l))) + (x ushr (8 * l))
+            val prefixByte = prefixVal.toByte()
 
-        value < (1L shl 14) -> {
-            // Two-byte mode (mode 1, discriminator '01')
-            val v = (value shl 2) or 0x01L
-            byteArrayOf(
-                (v and 0xFF).toByte(),
-                ((v shr 8) and 0xFF).toByte()
-            )
-        }
-
-        value < (1L shl 30) -> {
-            // Four-byte mode (mode 2, discriminator '10')
-            val v = (value shl 2) or 0x02L
-            byteArrayOf(
-                (v and 0xFF).toByte(),
-                ((v shr 8) and 0xFF).toByte(),
-                ((v shr 16) and 0xFF).toByte(),
-                ((v shr 24) and 0xFF).toByte()
-            )
-        }
-
-        else -> {
-            // Big-integer mode (mode 3, discriminator '11')
-            val valueBytes = ByteBuffer.allocate(8)
-                .order(ByteOrder.LITTLE_ENDIAN)
-                .putLong(value)
-                .array()
-            val length = valueBytes.size // 8 bytes
-            val lengthByte = (((length - 4) shl 2) or 0x03).toByte()
-            val bytes = ByteArray(1 + length)
-            bytes[0] = lengthByte
-            System.arraycopy(valueBytes, 0, bytes, 1, length)
-            bytes
+            // remainder = x mod 2^(8*l)
+            val remainder = x and ((1L shl (8 * l)) - 1)
+            // E_l(remainder) -> little-endian representation in l bytes
+            val remainderBytes = ByteArray(l)
+            for (i in 0 until l) {
+                remainderBytes[i] = ((remainder shr (8 * i)) and 0xFF).toByte()
+            }
+            return byteArrayOf(prefixByte) + remainderBytes
         }
     }
+
+    // 3) Otherwise (still x < 2^64 from the require() above):
+    //    [255] ++ E_8(x)
+    val prefix = 0xFF.toByte()
+    val fullBytes = ByteArray(8)
+    for (i in 0 until 8) {
+        fullBytes[i] = ((x shr (8 * i)) and 0xFF).toByte()
+    }
+    return byteArrayOf(prefix) + fullBytes
 }
 
 
@@ -148,22 +206,4 @@ fun encodeOptionalByteArray(value: ByteArray?): ByteArray {
         // Combine existence flag and data
         existenceFlag + value
     }
-}
-
-fun List<Culprit>.validateCulprits(): OptionalResult<Unit, SafroleErrorCode> {
-    // Check if empty
-    if (isEmpty()) {
-        return OptionalResult.Ok(Unit)
-    }
-
-    // Check that keys are strictly increasing (implies both sorted and unique)
-    for (i in 0 until size - 1) {
-        // Compare ByteArrays lexicographically
-        val comparison = this[i].key.compareUnsigned(this[i + 1].key)
-        if (comparison >= 0) { // If current >= next or equal (not strictly increasing)
-            return OptionalResult.Err(SafroleErrorCode.CULPRITS_NOT_SORTED_UNIQUE)
-        }
-    }
-
-    return OptionalResult.Ok(Unit)
 }

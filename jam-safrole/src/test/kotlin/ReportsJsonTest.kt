@@ -3,6 +3,7 @@ package io.forge.jam.core.encoding
 import io.forge.jam.safrole.report.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlin.test.fail
 
 class ReportsJsonTest {
@@ -22,76 +23,74 @@ class ReportsJsonTest {
     }
 
     fun assertReportOutputEquals(expected: ReportOutput, actual: ReportOutput, testCase: String) {
-        // Check error state
-        if (expected.err != null) {
-            assertEquals(expected.err, actual.err, "$testCase: Mismatch in error code")
+        println("Testing case: $testCase")
+        println("Expected: $expected")
+        println("Actual: $actual")
+
+        // First verify that both outputs are in the same state (error or success)
+        when {
+            expected.err != null && actual.err == null -> {
+                fail("$testCase: Expected error ${expected.err} but got success")
+            }
+
+            expected.err == null && actual.err != null -> {
+                fail("$testCase: Expected success but got error ${actual.err}")
+            }
+
+            expected.err != null && actual.err != null -> {
+                // Both have errors - compare them
+                assertEquals(expected.err, actual.err, "$testCase: Error codes don't match")
+                // Early return since we don't need to check marks when we have errors
+                return
+            }
         }
 
-        // Check output marks if present
-        if (expected.ok != null) {
-            assertEquals(
-                expected.ok != null,
-                actual.ok != null,
-                "$testCase: One output has null ReportOutputMarks while the other doesn't"
-            )
+        // At this point, both should have ok values (no errors)
+        if (expected.ok == null && actual.ok != null) {
+            fail("$testCase: Expected null ok but got ${actual.ok}")
+        }
+        if (expected.ok != null && actual.ok == null) {
+            fail("$testCase: Expected ${expected.ok} but got null ok")
+        }
 
-            // If ok is present, verify all mark fields
-            expected.ok?.let { expectedMarks ->
-                actual.ok?.let { actualMarks ->
-                    // Compare reported packages
-                    assertEquals(
-                        expectedMarks.reported.size,
-                        actualMarks.reported.size,
-                        "$testCase: Mismatch in reported packages list size"
+        // Compare output marks if present
+        expected.ok?.let { expectedMarks ->
+            actual.ok?.let { actualMarks ->
+                // Compare reported packages
+                assertEquals(
+                    expectedMarks.reported.size,
+                    actualMarks.reported.size,
+                    "$testCase: Mismatch in reported packages list size"
+                )
+
+                // Compare each ReportPackage
+                for (i in expectedMarks.reported.indices) {
+                    val expectedPackage = expectedMarks.reported[i]
+                    val actualPackage = actualMarks.reported[i]
+
+                    assertTrue(
+                        expectedPackage.workPackageHash.contentEquals(actualPackage.workPackageHash),
+                        "$testCase: Mismatch in workPackageHash at package index $i"
                     )
 
-                    // Compare each ReportPackage
-                    for (i in expectedMarks.reported.indices) {
-                        val expectedPackage = expectedMarks.reported[i]
-                        val actualPackage = actualMarks.reported[i]
-
-                        // Compare workPackageHash lists
-                        assertEquals(
-                            expectedPackage.workPackageHash.size,
-                            actualPackage.workPackageHash.size,
-                            "$testCase: Mismatch in workPackageHash list size at package index $i"
-                        )
-                        for (j in expectedPackage.workPackageHash.indices) {
-                            assertEquals(
-                                expectedPackage.workPackageHash[j],
-                                actualPackage.workPackageHash[j],
-                                "$testCase: Mismatch in workPackageHash ByteArray at package index $i, hash index $j"
-                            )
-                        }
-
-                        // Compare segmentTreeRoot lists
-                        assertEquals(
-                            expectedPackage.segment_tree_root.size,
-                            actualPackage.segment_tree_root.size,
-                            "$testCase: Mismatch in segment_tree_root list size at package index $i"
-                        )
-                        for (j in expectedPackage.segment_tree_root.indices) {
-                            assertEquals(
-                                expectedPackage.segment_tree_root[j],
-                                actualPackage.segment_tree_root[j],
-                                "$testCase: Mismatch in segment_tree_root ByteArray at package index $i, root index $j"
-                            )
-                        }
-                    }
-
-                    // Compare reporters (List<ByteArray>)
-                    assertEquals(
-                        expectedMarks.reporters.size,
-                        actualMarks.reporters.size,
-                        "$testCase: Mismatch in reporters list size"
+                    assertTrue(
+                        expectedPackage.segmentTreeRoot.contentEquals(actualPackage.segmentTreeRoot),
+                        "$testCase: Mismatch in segmentTreeRoot at package index $i"
                     )
-                    for (i in expectedMarks.reporters.indices) {
-                        assertEquals(
-                            expectedMarks.reporters[i],
-                            actualMarks.reporters[i],
-                            "$testCase: Mismatch in reporters ByteArray at index $i"
-                        )
-                    }
+                }
+
+                // Compare reporters list
+                assertEquals(
+                    expectedMarks.reporters.size,
+                    actualMarks.reporters.size,
+                    "$testCase: Mismatch in reporters list size"
+                )
+
+                for (i in expectedMarks.reporters.indices) {
+                    assertTrue(
+                        expectedMarks.reporters[i].contentEquals(actualMarks.reporters[i]),
+                        "$testCase: Mismatch in reporter at index $i"
+                    )
                 }
             }
         }

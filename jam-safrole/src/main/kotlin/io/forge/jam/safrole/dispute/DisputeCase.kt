@@ -19,7 +19,6 @@ data class DisputeCase(
         val inputBytes = input.encode()
         val preStateBytes = preState.encode()
         val outputBytes = output.encode()
-        println("output: ${outputBytes.toList()}")
         val postStateBytes = postState.encode()
         return inputBytes + preStateBytes + outputBytes + postStateBytes
     }

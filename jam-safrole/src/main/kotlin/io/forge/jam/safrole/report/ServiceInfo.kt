@@ -1,6 +1,8 @@
 package io.forge.jam.safrole.report
 
+import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.encodeFixedWidthInteger
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -10,7 +12,6 @@ class ServiceInfo(
     @SerialName("code_hash")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val codeHash: JamByteArray,
-
     val balance: Long,
     @SerialName("min_item_gas")
     val minItemGas: Long,
@@ -18,7 +19,18 @@ class ServiceInfo(
     val minMemoGas: Long,
     val bytes: Long,
     val items: Int
-) {
+) : Encodable {
+    override fun encode(): ByteArray {
+        val balanceBytes = encodeFixedWidthInteger(balance, 8, false)
+
+        val minItemGasBytes = encodeFixedWidthInteger(minItemGas, 8, false)
+        val minMemoGasBytes = encodeFixedWidthInteger(minMemoGas, 8, false)
+        val bytesBytes = encodeFixedWidthInteger(bytes, 8, false)
+        val itemsBytes = encodeFixedWidthInteger(items, 4, false)
+        println("Balance: ${itemsBytes.toList()}")
+        return codeHash.bytes + balanceBytes + minItemGasBytes + minMemoGasBytes + bytesBytes + itemsBytes
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ServiceInfo) return false

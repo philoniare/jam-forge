@@ -1,6 +1,8 @@
 package io.forge.jam.safrole.historical
 
+import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.encodeOptionalList
 import io.forge.jam.core.serializers.NullableJamByteArrayListSerializer
 import kotlinx.serialization.Serializable
 
@@ -8,7 +10,11 @@ import kotlinx.serialization.Serializable
 data class HistoricalMmr(
     @Serializable(with = NullableJamByteArrayListSerializer::class)
     val peaks: List<JamByteArray?>
-) {
+) : Encodable {
+    override fun encode(): ByteArray {
+        return encodeOptionalList(peaks)
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is HistoricalMmr) return false

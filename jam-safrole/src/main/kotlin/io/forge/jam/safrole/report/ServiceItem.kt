@@ -1,12 +1,19 @@
 package io.forge.jam.safrole.report
 
+import io.forge.jam.core.Encodable
+import io.forge.jam.core.encodeFixedWidthInteger
 import kotlinx.serialization.Serializable
 
 @Serializable
 class ServiceItem(
     val id: Long,
     val info: ServiceInfo
-) {
+) : Encodable {
+    override fun encode(): ByteArray {
+        val idBytes = encodeFixedWidthInteger(id, 4, false)
+        return idBytes + info.encode()
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ServiceItem) return false
