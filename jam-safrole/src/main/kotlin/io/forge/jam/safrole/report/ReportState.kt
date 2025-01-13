@@ -12,7 +12,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ReportState(
     @SerialName("avail_assignments")
-    val availAssignments: List<AvailabilityAssignment?>,
+    var availAssignments: List<AvailabilityAssignment?>,
 
     @SerialName("curr_validators")
     val currValidators: List<ValidatorKey>,

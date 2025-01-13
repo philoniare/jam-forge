@@ -10,7 +10,6 @@ import io.forge.jam.safrole.historical.HistoricalBeta
 import keccakHash
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
-import kotlin.math.abs
 
 
 class ReportStateTransition(private val config: ReportStateConfig) {
@@ -110,86 +109,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         return null
     }
 
-    /**
-     * Validates guarantor signatures according to JAM protocol specification.
-     * Implements validation rules from section 11.4, equation 11.26.
-     */
-    fun validateGuarantorSignatures(
-        guarantee: GuaranteeExtrinsic,
-        currValidators: List<ValidatorKey>,
-        prevValidators: List<ValidatorKey>,
-        currentSlot: Long,
-        entropyPool: List<JamByteArray>
-    ): ReportErrorCode? {
-        // Validate minimum number of signatures
-        if (guarantee.signatures.size !in 2..3) {
-            return ReportErrorCode.BAD_SIGNATURE
-        }
-
-        for (signature in guarantee.signatures) {
-            // Validate validator index
-            val validatorIndex = signature.validatorIndex.toInt()
-            if (validatorIndex < 0 || validatorIndex >= currValidators.size || validatorIndex >= prevValidators.size) {
-                return ReportErrorCode.BAD_VALIDATOR_INDEX
-            }
-        }
-
-        val isCurrent = (guarantee.slot / config.ROTATION_PERIOD) == (currentSlot / config.ROTATION_PERIOD)
-        val isEpochChanging = (currentSlot % config.EPOCH_LENGTH) < config.ROTATION_PERIOD
-        val currCoreAssignments = calculateCoreAssignments(
-            currentSlot,
-            currValidators,
-            entropyPool[2]
-        )
-
-        val prevCoreAssignments = calculateCoreAssignments(
-            currentSlot - config.ROTATION_PERIOD,
-            if (isEpochChanging) prevValidators else currValidators,
-            if (isEpochChanging) entropyPool[3] else entropyPool[2]
-        )
-
-        val reportHash = blakeHash(guarantee.report.encode())
-        val signaturePrefix = "jam_guarantee".toByteArray()
-        val signatureMessage = signaturePrefix + reportHash
-
-        for (signature in guarantee.signatures) {
-            // Validate validator index
-            val validatorIndex = signature.validatorIndex.toInt()
-            val validatorKey = if (isCurrent) {
-                currValidators.getOrNull(validatorIndex)?.ed25519
-            } else {
-                prevValidators.getOrNull(validatorIndex)?.ed25519
-            } ?: return ReportErrorCode.BAD_SIGNATURE
-
-            try {
-                println("Key: ${validatorKey.toHex()}")
-                val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
-                val signer = Ed25519Signer()
-                signer.init(false, publicKey)
-                signer.update(signatureMessage, 0, signatureMessage.size)
-
-                if (!signer.verifySignature(signature.signature.bytes)) {
-                    println("bad sig")
-                    return ReportErrorCode.BAD_SIGNATURE
-                }
-            } catch (e: Exception) {
-                return ReportErrorCode.BAD_SIGNATURE
-            }
-
-            val assignments = if (isCurrent) {
-                currCoreAssignments
-            } else {
-                prevCoreAssignments
-            }
-            val assignedCore = assignments[validatorIndex]
-            if (assignedCore != guarantee.report.coreIndex.toInt()) {
-                return ReportErrorCode.BAD_CORE_INDEX
-            }
-        }
-
-        return null
-    }
-
 
     /**
      * Validates work report according to JAM protocol specifications.
@@ -260,39 +179,152 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         }
     }
 
-    private class RandomGenerator(private val seed: JamByteArray) {
-        private var index = 0
-
-        fun nextInt(bound: Int): Int {
-            // Use the next 4 bytes of the seed as randomness
-            val bytes = seed.bytes.copyOfRange(index, index + 4)
-            index = (index + 4) % seed.bytes.size
-
-            val value = bytes[0].toInt() and 0xFF shl 24 or
-                (bytes[1].toInt() and 0xFF shl 16) or
-                (bytes[2].toInt() and 0xFF shl 8) or
-                (bytes[3].toInt() and 0xFF)
-
-            return abs(value) % bound
-        }
-    }
-
     private fun calculateCoreAssignments(
         timeslot: Long,
-        validator: List<ValidatorKey>,
+        validators: List<ValidatorKey>,
         randomness: JamByteArray
     ): List<Int> {
-        val source = Array(config.MAX_VALIDATORS) { i -> (config.MAX_CORES * i / config.MAX_VALIDATORS).toInt() }
-        source.shuffle(RandomGenerator(randomness))
+//        validateRotationInput(timeslot, validators)
 
-        // Calculate rotation offset
-        val n = (timeslot % config.EPOCH_LENGTH) / config.ROTATION_PERIOD
+        // Calculate base assignments - one core per 3 validators
+        val validatorsPerCore = validators.size / config.MAX_CORES
 
-        // Apply rotation and return core assignments
-        return source.map { value ->
-            ((value + n) % config.MAX_CORES).toInt()
+        // Create initial sequential assignments
+        val baseAssignments = Array(validators.size) { validatorIndex ->
+            (validatorIndex * config.MAX_CORES / validators.size).toInt()
+        }
+
+        // Create deterministic shuffle
+        baseAssignments.shuffle(RandomGenerator(randomness))
+
+        // Calculate rotation
+        val rotationIndex = (timeslot / config.ROTATION_PERIOD).toInt()
+
+        // Apply rotation
+        return baseAssignments.map { core ->
+            Math.floorMod(core + rotationIndex, config.MAX_CORES)
+        }.also { assignments ->
+            println(
+                """
+            Debug info:
+            - Timeslot: $timeslot
+            - Rotation index: $rotationIndex 
+            - Base assignments: ${baseAssignments.joinToString()}
+            - Final assignments: ${assignments.joinToString()}
+            - Distribution: ${assignments.groupBy { it }.mapValues { it.value.size }}
+        """.trimIndent()
+            )
         }
     }
+
+    fun validateGuarantorSignatures(
+        guarantee: GuaranteeExtrinsic,
+        currValidators: List<ValidatorKey>,
+        prevValidators: List<ValidatorKey>,
+        currentSlot: Long,
+        entropyPool: List<JamByteArray>
+    ): ReportErrorCode? {
+        // Validate minimum number of signatures
+        if (guarantee.signatures.size !in 2..3) {
+            return ReportErrorCode.BAD_SIGNATURE
+        }
+
+        val reportedCore = guarantee.report.coreIndex.toInt()
+
+        // Calculate current and previous assignments
+        val currAssignments = calculateCoreAssignments(currentSlot, currValidators, entropyPool[2])
+        val prevAssignments = if ((currentSlot % config.EPOCH_LENGTH) < config.ROTATION_PERIOD) {
+            calculateCoreAssignments(currentSlot - config.ROTATION_PERIOD, prevValidators, entropyPool[3])
+        } else {
+            calculateCoreAssignments(currentSlot - config.ROTATION_PERIOD, currValidators, entropyPool[2])
+        }
+
+        // Calculate which set of assignments to use
+        val isCurrent = (guarantee.slot / config.ROTATION_PERIOD) == (currentSlot / config.ROTATION_PERIOD)
+        val assignments = if (isCurrent) currAssignments else prevAssignments
+        val validators = if (isCurrent) currValidators else prevValidators
+
+        println(
+            """
+        Signature validation:
+        - Report core: $reportedCore
+        - Current slot: $currentSlot
+        - Guarantee slot: ${guarantee.slot}
+        - Using current assignments: $isCurrent
+        - Assignments: ${assignments.joinToString()}
+    """.trimIndent()
+        )
+
+        // First verify all validator indices are valid
+        for (signature in guarantee.signatures) {
+            val validatorIndex = signature.validatorIndex.toInt()
+            if (validatorIndex < 0 || validatorIndex >= validators.size) {
+                return ReportErrorCode.BAD_VALIDATOR_INDEX
+            }
+        }
+
+        // Verify at least one validator is assigned to the reported core
+        var hasValidCoreAssignment = false
+        for (signature in guarantee.signatures) {
+            val validatorIndex = signature.validatorIndex.toInt()
+            val assignedCore = assignments[validatorIndex]
+            println("Validator $validatorIndex assigned to core $assignedCore")
+
+            if (assignedCore == reportedCore) {
+                hasValidCoreAssignment = true
+            }
+
+            // Validate signature
+            val validatorKey = validators[validatorIndex].ed25519
+            val signaturePrefix = "jam_guarantee".toByteArray()
+            val signatureMessage = signaturePrefix + blakeHash(guarantee.report.encode())
+
+            try {
+                val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
+                val signer = Ed25519Signer()
+                signer.init(false, publicKey)
+                signer.update(signatureMessage, 0, signatureMessage.size)
+
+                if (!signer.verifySignature(signature.signature.bytes)) {
+                    return ReportErrorCode.BAD_SIGNATURE
+                }
+            } catch (e: Exception) {
+                return ReportErrorCode.BAD_SIGNATURE
+            }
+        }
+
+        // Return BAD_CORE_INDEX only if no validator was assigned to the reported core
+        if (!hasValidCoreAssignment) {
+            return ReportErrorCode.BAD_CORE_INDEX
+        }
+
+        return null
+    }
+
+    private class RandomGenerator(private val seed: JamByteArray) {
+        private var counter = 0
+
+        fun nextInt(bound: Int): Int {
+            // Ensure positive value
+            val hash = blakeHash(seed.bytes + counter.toBigInteger().toByteArray())
+            counter++
+            val value = hash.fold(0L) { acc, byte ->
+                (acc * 256 + (byte.toLong() and 0xFF))
+            }
+            return Math.floorMod(value, bound.toLong()).toInt()
+        }
+    }
+
+    // Helper extension function for safe modulo
+    private fun Long.safeMod(other: Long): Long {
+        return Math.floorMod(this, other)
+    }
+
+    // Helper extension function for safe modulo with Int
+    private fun Long.safeMod(other: Int): Int {
+        return Math.floorMod(this, other.toLong()).toInt()
+    }
+
 
     /**
      * Performs state transition according to JAM protocol specifications.
@@ -399,14 +431,18 @@ class ReportStateTransition(private val config: ReportStateConfig) {
     /**
      * Updates state with new work reports according to section 11.5
      */
+    /**
+     * Updates state with new work reports according to section 11.5
+     */
     private fun updateStateWithReports(
         state: ReportState,
         reports: List<WorkReport>,
         currentSlot: Long
     ) {
-        // Create new list with updated assignments
+        // Create new assignments list with updated values
         val newAssignments = state.availAssignments.toMutableList()
 
+        // Update assignments for each report
         reports.forEach { report ->
             val index = report.coreIndex.toInt()
             if (index < newAssignments.size) {
@@ -417,18 +453,8 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
         }
 
-        // Create new state with updated assignments
-        val updatedState = state.copy(
-            availAssignments = newAssignments
-        )
-
-        // Update all fields from updatedState back to state
-        state.apply {
-            ReportState::class.java.declaredFields.forEach { field ->
-                field.isAccessible = true
-                field.set(this, field.get(updatedState))
-            }
-        }
+        // Update mutable state fields directly
+        state.availAssignments = newAssignments
     }
 
     private fun List<Long>.isSorted(): Boolean {
