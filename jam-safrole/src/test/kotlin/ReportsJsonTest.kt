@@ -205,7 +205,6 @@ class ReportsJsonTest {
                 ReportStateConfig(
                     MAX_LOOKUP_ANCHOR_AGE = 14_000L,
                     MAX_AUTH_POOL_ITEMS = 8,
-                    MAX_ACCUMULATION_GAS = 100_000L,
                     MAX_CORES = 2,
                     MAX_DEPENDENCIES = 100,
                     MIN_GUARANTORS = 3,

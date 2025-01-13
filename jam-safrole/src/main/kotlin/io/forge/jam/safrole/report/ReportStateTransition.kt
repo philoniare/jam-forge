@@ -260,17 +260,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         // Apply rotation
         return baseAssignments.map { core ->
             Math.floorMod(core + rotationIndex, config.MAX_CORES)
-        }.also { assignments ->
-            println(
-                """
-            Debug info:
-            - Timeslot: $timeslot
-            - Rotation index: $rotationIndex 
-            - Base assignments: ${baseAssignments.joinToString()}
-            - Final assignments: ${assignments.joinToString()}
-            - Distribution: ${assignments.groupBy { it }.mapValues { it.value.size }}
-        """.trimIndent()
-            )
         }
     }
 
@@ -301,17 +290,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         val assignments = if (isCurrent) currAssignments else prevAssignments
         val validators = if (isCurrent) currValidators else prevValidators
 
-        println(
-            """
-        Signature validation:
-        - Report core: $reportedCore
-        - Current slot: $currentSlot
-        - Guarantee slot: ${guarantee.slot}
-        - Using current assignments: $isCurrent
-        - Assignments: ${assignments.joinToString()}
-    """.trimIndent()
-        )
-
         // First verify all validator indices are valid
         for (signature in guarantee.signatures) {
             val validatorIndex = signature.validatorIndex.toInt()
@@ -325,7 +303,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         for (signature in guarantee.signatures) {
             val validatorIndex = signature.validatorIndex.toInt()
             val assignedCore = assignments[validatorIndex]
-            println("Validator $validatorIndex assigned to core $assignedCore")
 
             if (assignedCore == reportedCore) {
                 hasValidCoreAssignment = true
@@ -438,16 +415,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 return Pair(postState, ReportOutput(err = ReportErrorCode.CORE_ENGAGED))
             }
 
-            // Validate guarantor assignments
-//            validateGuarantorAssignments(
-//                guarantee,
-//                preState.currValidators,
-//                preState.prevValidators,
-//                currentSlot
-//            )?.let {
-//                return Pair(postState, ReportOutput(err = it))
-//            }
-
             pendingReports.add(guarantee.report)
 
             // Add the primary work package hash and exports root
@@ -457,7 +424,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                     guarantee.report.packageSpec.exportsRoot
                 )
             )
-
 
             // Add any segment root lookups
             guarantee.report.segmentRootLookup.forEach { lookup ->
@@ -480,12 +446,15 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         // Update state with new reports
         updateStateWithReports(postState, pendingReports, currentSlot)
 
+        val sortedReportPackages = reportPackages.sortedBy { it.workPackageHash.toHex() }
+        val sortedGuarantors = validGuarantors.distinct().sortedBy { it.toHex() }
+
         return Pair(
             postState,
             ReportOutput(
                 ok = ReportOutputMarks(
-                    reported = reportPackages,
-                    reporters = validGuarantors
+                    reported = sortedReportPackages,
+                    reporters = sortedGuarantors
                 )
             )
         )
