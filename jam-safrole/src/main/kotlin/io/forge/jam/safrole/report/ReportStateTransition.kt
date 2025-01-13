@@ -172,10 +172,15 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         currentSlot: Long,
         services: List<ServiceItem>,
         authPools: List<List<JamByteArray>>,
-        pendingReports: List<WorkReport>
+        availAssignments: List<AvailabilityAssignment?>
     ): ReportErrorCode? {
         if (guaranteeSlot > currentSlot) {
             return ReportErrorCode.FUTURE_REPORT_SLOT
+        }
+
+        val existingAssignment = availAssignments.getOrNull(workReport.coreIndex.toInt())
+        if (existingAssignment?.report != null) {
+            return ReportErrorCode.CORE_ENGAGED
         }
 
         // Validate core index is within bounds (eq. 143)
@@ -395,7 +400,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 currentSlot,
                 preState.services,
                 preState.authPools,
-                pendingReports
+                preState.availAssignments
             )?.let {
                 return Pair(postState, ReportOutput(err = it))
             }
