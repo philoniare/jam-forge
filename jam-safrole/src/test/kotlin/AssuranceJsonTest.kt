@@ -58,7 +58,7 @@ class AssuranceJsonTest {
         expected.availAssignments.zip(actual.availAssignments).forEachIndexed { index, (exp, act) ->
             when {
                 exp == null && act == null -> {} // Both null is fine
-                exp == null -> fail("Expected null assignment at index $index but got non-null in test case: $testCase")
+                exp == null -> fail("Expected null assignment at index $index but got non-null in test case: $testCase. Index: ${index}. Actual: ${act}")
                 act == null -> fail("Expected non-null assignment at index $index but got null in test case: $testCase")
                 else -> assertAvailabilityAssignmentEquals(exp, act, "$testCase - Assignment[$index]")
             }
@@ -129,21 +129,21 @@ class AssuranceJsonTest {
         }
     }
 
-//    @Test
-//    fun testFullAssurances() {
-//        val folderName = "assurances/full"
-//        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
-//
-//        for (testCase in testCases) {
-//            val (inputCase) = TestFileLoader.loadTestData<AssuranceCase>(
-//                "$folderName/$testCase",
-//                ".bin"
-//            )
-//
-//            val stf = AssuranceStateTransition(AssuranceConfig(VALIDATOR_COUNT = 1023, CORE_COUNT = 341))
-//            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-//            assertAssuranceStateEquals(inputCase.postState, postState, testCase)
-//            assertAssuranceOutputEquals(inputCase.output, output, testCase)
-//        }
-//    }
+    @Test
+    fun testFullAssurances() {
+        val folderName = "assurances/full"
+        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+
+        for (testCase in testCases) {
+            val (inputCase) = TestFileLoader.loadTestData<AssuranceCase>(
+                "$folderName/$testCase",
+                ".bin"
+            )
+
+            val stf = AssuranceStateTransition(AssuranceConfig(VALIDATOR_COUNT = 1023, CORE_COUNT = 341))
+            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
+            assertAssuranceStateEquals(inputCase.postState, postState, testCase)
+            assertAssuranceOutputEquals(inputCase.output, output, testCase)
+        }
+    }
 }

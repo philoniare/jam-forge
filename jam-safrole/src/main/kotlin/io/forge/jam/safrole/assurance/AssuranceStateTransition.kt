@@ -44,6 +44,21 @@ class AssuranceStateTransition(private val assuranceConfig: AssuranceConfig) {
         }
     }
 
+    private fun isReportTimedOut(timeout: Int, currentSlot: Int): Boolean {
+        return currentSlot >= timeout + assuranceConfig.TIMEOUT_PERIOD
+    }
+
+    private fun handleTimeouts(state: AssuranceState, currentSlot: Int): AssuranceState {
+        val newAssignments = state.availAssignments.mapIndexed { index, assignment ->
+            if (assignment != null && isReportTimedOut(assignment.timeout.toInt(), currentSlot)) {
+                null
+            } else {
+                assignment
+            }
+        }
+        return state.copy(availAssignments = newAssignments)
+    }
+
     private fun validateSortedAndUniqueValidators(assurances: List<AssuranceExtrinsic>): Boolean {
         return assurances.zipWithNext().all { (curr, next) ->
             curr.validatorIndex < next.validatorIndex
@@ -83,13 +98,14 @@ class AssuranceStateTransition(private val assuranceConfig: AssuranceConfig) {
     }
 
     private fun processAvailableReports(availableCores: Set<Int>, state: AssuranceState): List<WorkReport> {
-        return availableCores.mapNotNull { coreIndex ->
+        return availableCores.sorted().mapNotNull { coreIndex ->
             state.availAssignments.getOrNull(coreIndex)?.report
         }
     }
 
     private fun findAvailableCores(input: AssuranceInput, state: AssuranceState): Set<Int> {
         val validatorCount = state.currValidators.size
+        val requiredAssurances = (validatorCount * 2) / 3
 
         // For each core, count how many validators have assured it
         return input.assurances.fold(mutableMapOf<Int, Int>()) { counts, assurance ->
@@ -101,7 +117,7 @@ class AssuranceStateTransition(private val assuranceConfig: AssuranceConfig) {
             }
             counts
         }.filterValues { count ->
-            count > assuranceConfig.superMajority
+            count > requiredAssurances
         }.keys
     }
 
@@ -137,7 +153,7 @@ class AssuranceStateTransition(private val assuranceConfig: AssuranceConfig) {
         input: AssuranceInput,
         preState: AssuranceState
     ): Pair<AssuranceState, AssuranceOutput> {
-        val postState = preState.copy()
+        val postState = handleTimeouts(preState, input.slot.toInt())
 
         if (!validateCoreEngagement(input, preState)) {
             return Pair(postState, AssuranceOutput(err = AssuranceErrorCode.CORE_NOT_ENGAGED))
