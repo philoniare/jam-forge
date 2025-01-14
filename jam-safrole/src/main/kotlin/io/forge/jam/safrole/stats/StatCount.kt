@@ -7,14 +7,14 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class StatCount(
-    val blocks: Long,
-    val tickets: Long,
+    var blocks: Long = 0,
+    var tickets: Long = 0,
     @SerialName("pre_images")
-    val preImages: Long,
+    var preImages: Long = 0,
     @SerialName("pre_images_size")
-    val preImagesSize: Long,
-    val guarantees: Long,
-    val assurances: Long
+    var preImagesSize: Long = 0,
+    var guarantees: Long = 0,
+    var assurances: Long = 0
 ) : Encodable {
     override fun encode(): ByteArray {
         val blocksBytes = encodeFixedWidthInteger(blocks, 4, false)

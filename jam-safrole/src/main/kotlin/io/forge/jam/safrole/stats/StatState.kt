@@ -14,6 +14,12 @@ data class StatState(
     @SerialName("kappa_prime")
     val kappaPrime: List<ValidatorKey>,
 ) : Encodable {
+    fun copy() = StatState(
+        pi = pi.copy(),
+        tau = tau,
+        kappaPrime = kappaPrime.map { it.copy() }
+    )
+
     override fun encode(): ByteArray {
         val tauBytes = encodeFixedWidthInteger(tau, 4, false)
         return pi.encode() + tauBytes + encodeList(kappaPrime)
