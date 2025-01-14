@@ -330,23 +330,31 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         validators: List<ValidatorKey>,
         randomness: JamByteArray
     ): List<Int> {
-        // Initial assignments based on equation 133 from gray paper
-        // Every 3 consecutive validators get assigned to the same core
+        println("Calculating assignments for ${validators.size} validators")
+
+        // Base assignments grouped in 3s according to equation 133
         val baseAssignments = (0 until validators.size).map { i ->
-            i / 3 // Integer division to group by 3
+            i / 3
         }
+        println("Initial base assignments: ${baseAssignments.take(10)}")
 
-        // Compute shuffled indices according to equation 134
+        // Get shuffled indices according to equation 134
         val shuffledIndices = jamComputeShuffle(validators.size, randomness)
+        println("Shuffled indices: ${shuffledIndices.take(10)}")
 
-        // Apply rotation according to equation 135
+        // Calculate rotation according to equation 135
         val rotationIndex = (slot / config.ROTATION_PERIOD).toInt()
+        println("Rotation index: $rotationIndex")
 
-        // Calculate final assignments according to equation 136
-        return (0 until validators.size).map { validatorIndex ->
+        // According to equation 136, for each validator:
+        // 1. Use their position after shuffling to get base core assignment
+        // 2. Add rotation and wrap around MAX_CORES
+        return List(validators.size) { validatorIndex ->
             val shuffledPos = shuffledIndices[validatorIndex].toInt()
             val baseCore = baseAssignments[shuffledPos]
-            Math.floorMod(baseCore + rotationIndex, config.MAX_CORES)
+            val finalCore = Math.floorMod(baseCore + rotationIndex, config.MAX_CORES)
+            println("Validator $validatorIndex: shuffled to $shuffledPos, base core $baseCore, final core $finalCore")
+            finalCore
         }
     }
 
@@ -357,9 +365,10 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         currentSlot: Long,
         entropyPool: List<JamByteArray>
     ): ReportErrorCode? {
-        println("=== Validating Guarantor Signatures ===")
-        println("Report Core: ${guarantee.report.coreIndex}")
-        println("Current Slot: $currentSlot")
+        println("Validating guarantor signatures")
+        println("Report core: ${guarantee.report.coreIndex}")
+        println("Guarantee slot: ${guarantee.slot}")
+        println("Current slot: $currentSlot")
 
         val reportRotation = guarantee.slot / config.ROTATION_PERIOD
         val currentRotation = currentSlot / config.ROTATION_PERIOD
@@ -392,11 +401,25 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         val isCurrent = (guarantee.slot / config.ROTATION_PERIOD) == (currentSlot / config.ROTATION_PERIOD)
         println("Using Current Rotation: $isCurrent")
 
+        val assignmentsCurrent = calculateCoreAssignments(
+            true,
+            guarantee.slot,
+            currValidators,
+            entropyPool[3]
+        )
+
+        val assignmentsPrevious = calculateCoreAssignments(
+            false,
+            guarantee.slot,
+            prevValidators,
+            entropyPool[2]
+        )
+
         val assignments = calculateCoreAssignments(
             isCurrent,
             guarantee.slot,
             if (isCurrent) currValidators else prevValidators,
-            if (isCurrent) entropyPool[2] else entropyPool[3]
+            if (isCurrent) entropyPool[3] else entropyPool[2]
         )
         val validators = if (isCurrent) currValidators else prevValidators
 
@@ -411,8 +434,6 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             println("Validator $validatorIndex assigned to core: $assignedCore")
         }
 
-        var hasValidCoreAssignment = false
-
         println("Checking assignments for core $reportedCore")
         println(
             "Base assignments before rotation: ${
@@ -421,20 +442,22 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 }
             }")
 
+        var matchCount = 0
         // Verify signatures and core assignments
         for (signature in guarantee.signatures) {
             val validatorIndex = signature.validatorIndex.toInt()
-            val assignedCore = assignments[validatorIndex]
-
             if (validatorIndex < 0 || validatorIndex >= validators.size) {
                 println("ERROR: Invalid validator index: $validatorIndex")
                 return ReportErrorCode.BAD_VALIDATOR_INDEX
             }
 
-            println("Validator $validatorIndex assigned to core $assignedCore")
-            if (assignedCore == reportedCore) {
-                println("Found valid core assignment for validator $validatorIndex")
-                hasValidCoreAssignment = true
+            val assignedCoreInCurrent = if (validatorIndex < currValidators.size)
+                assignmentsCurrent[validatorIndex] else -1
+            val assignedCoreInPrevious = if (validatorIndex < prevValidators.size)
+                assignmentsPrevious[validatorIndex] else -1
+
+            if (assignedCoreInCurrent == reportedCore || assignedCoreInPrevious == reportedCore) {
+                matchCount++
             }
 
             // Validate signature
@@ -458,8 +481,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
         }
 
-        if (!hasValidCoreAssignment) {
-            println("ERROR: No valid core assignment found for any guarantor")
+        if (matchCount < 2) {
             return ReportErrorCode.WRONG_ASSIGNMENT
         }
 
