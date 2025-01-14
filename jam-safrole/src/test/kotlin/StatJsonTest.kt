@@ -9,7 +9,6 @@ import kotlin.test.assertEquals
 
 class StatJsonTest {
     private fun assertStatStateEquals(expected: StatState, actual: StatState, testCase: String) {
-
         assertEquals(expected.tau, actual.tau, "tau values should match")
         assertEquals(expected.kappaPrime.size, actual.kappaPrime.size, "kappaPrime list sizes should match")
 
