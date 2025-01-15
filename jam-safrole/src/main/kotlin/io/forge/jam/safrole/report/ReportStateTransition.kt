@@ -1,10 +1,7 @@
 package io.forge.jam.safrole.report
 
 import blakeHash
-import io.forge.jam.core.GuaranteeExtrinsic
-import io.forge.jam.core.JamByteArray
-import io.forge.jam.core.WorkReport
-import io.forge.jam.core.jamComputeShuffle
+import io.forge.jam.core.*
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.historical.HistoricalBeta
@@ -330,32 +327,56 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         validators: List<ValidatorKey>,
         randomness: JamByteArray
     ): List<Int> {
-        println("Calculating assignments for ${validators.size} validators")
+        // Base assignments grouped in 3s
+        val baseAssignments = (0 until validators.size).map { i -> i / 3 }
 
-        // Base assignments grouped in 3s according to equation 133
-        val baseAssignments = (0 until validators.size).map { i ->
-            i / 3
-        }
-        println("Initial base assignments: ${baseAssignments.take(10)}")
-
-        // Get shuffled indices according to equation 134
+        // Get shuffled indices
         val shuffledIndices = jamComputeShuffle(validators.size, randomness)
-        println("Shuffled indices: ${shuffledIndices.take(10)}")
 
-        // Calculate rotation according to equation 135
-        val rotationIndex = (slot / config.ROTATION_PERIOD).toInt()
-        println("Rotation index: $rotationIndex")
+        // Calculate rotation
+        val rotationIndex = Math.floorMod(slot, config.ROTATION_PERIOD).toInt()
 
-        // According to equation 136, for each validator:
-        // 1. Use their position after shuffling to get base core assignment
-        // 2. Add rotation and wrap around MAX_CORES
+        // Calculate final assignments with rotation
         return List(validators.size) { validatorIndex ->
             val shuffledPos = shuffledIndices[validatorIndex].toInt()
             val baseCore = baseAssignments[shuffledPos]
             val finalCore = Math.floorMod(baseCore + rotationIndex, config.MAX_CORES)
-            println("Validator $validatorIndex: shuffled to $shuffledPos, base core $baseCore, final core $finalCore")
+
+            // Log assignment calculation
+            println(
+                """Core assignment calculation for ${if (isCurrent) "current" else "previous"} rotation:
+            |Validator: $validatorIndex
+            |Shuffled position: $shuffledPos
+            |Base core: $baseCore
+            |Rotation index: $rotationIndex
+            |Final core: $finalCore""".trimMargin()
+            )
+
             finalCore
         }
+    }
+
+    private fun verifySignature(
+        validatorKey: JamByteArray,
+        guarantee: GuaranteeExtrinsic,
+        signature: GuaranteeSignature
+    ): ReportErrorCode? {
+        val signaturePrefix = "jam_guarantee".toByteArray()
+        val signatureMessage = signaturePrefix + blakeHash(guarantee.report.encode())
+
+        try {
+            val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
+            val signer = Ed25519Signer()
+            signer.init(false, publicKey)
+            signer.update(signatureMessage, 0, signatureMessage.size)
+
+            if (!signer.verifySignature(signature.signature.bytes)) {
+                return ReportErrorCode.BAD_SIGNATURE
+            }
+        } catch (e: Exception) {
+            return ReportErrorCode.BAD_SIGNATURE
+        }
+        return null
     }
 
     fun validateGuarantorSignatures(
@@ -365,127 +386,95 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         currentSlot: Long,
         entropyPool: List<JamByteArray>
     ): ReportErrorCode? {
-        println("Validating guarantor signatures")
-        println("Report core: ${guarantee.report.coreIndex}")
-        println("Guarantee slot: ${guarantee.slot}")
-        println("Current slot: $currentSlot")
-
         val reportRotation = guarantee.slot / config.ROTATION_PERIOD
         val currentRotation = currentSlot / config.ROTATION_PERIOD
 
-        println("Report Rotation: $reportRotation")
-        println("Current Rotation: $currentRotation")
-
         if (reportRotation < currentRotation - 1) {
-            println("ERROR: Report from rotation before last")
             return ReportErrorCode.REPORT_EPOCH_BEFORE_LAST
         }
 
         if (guarantee.signatures.size !in 2..3) {
-            println("ERROR: Invalid signature count: ${guarantee.signatures.size}")
             return ReportErrorCode.INSUFFICIENT_GUARANTEES
         }
 
         val validatorIndices = guarantee.signatures.map { it.validatorIndex }
-        println("Validator Indices: $validatorIndices")
 
         if (!validatorIndices.isSortedAndUnique()) {
-            println("ERROR: Validator indices not sorted or unique")
             return ReportErrorCode.NOT_SORTED_OR_UNIQUE_GUARANTORS
         }
 
         val reportedCore = guarantee.report.coreIndex.toInt()
-        println("Reported Core: $reportedCore")
 
-        // Calculate and log assignments
+        // Calculate if we're using current or previous rotation
         val isCurrent = (guarantee.slot / config.ROTATION_PERIOD) == (currentSlot / config.ROTATION_PERIOD)
-        println("Using Current Rotation: $isCurrent")
 
-        val assignmentsCurrent = calculateCoreAssignments(
-            true,
-            guarantee.slot,
-            currValidators,
-            entropyPool[3]
-        )
-
-        val assignmentsPrevious = calculateCoreAssignments(
-            false,
-            guarantee.slot,
-            prevValidators,
-            entropyPool[2]
-        )
-
-        val assignments = calculateCoreAssignments(
-            isCurrent,
-            guarantee.slot,
-            if (isCurrent) currValidators else prevValidators,
-            if (isCurrent) entropyPool[3] else entropyPool[2]
-        )
-        val validators = if (isCurrent) currValidators else prevValidators
-
-        val coreToValidators = assignments.withIndex()
-            .groupBy({ it.value }, { it.index })
-        println("Core assignments: ${coreToValidators[reportedCore]}")
-
-        println("Assignments for signatures:")
-        guarantee.signatures.forEach { sig ->
-            val validatorIndex = sig.validatorIndex.toInt()
-            val assignedCore = assignments.getOrNull(validatorIndex)
-            println("Validator $validatorIndex assigned to core: $assignedCore")
+        // Get the appropriate validator set and entropy
+        val (validators, entropy) = if (isCurrent) {
+            Pair(currValidators, entropyPool[3])  // Current rotation
+        } else {
+            Pair(prevValidators, entropyPool[2])  // Previous rotation
         }
 
-        println("Checking assignments for core $reportedCore")
-        println(
-            "Base assignments before rotation: ${
-                (0 until validators.size).map { i ->
-                    (config.MAX_CORES.toDouble() * i / validators.size).toInt()
-                }
-            }")
+        // Calculate assignments for both current and previous rotations
+        val currentAssignments = mutableMapOf<Int, MutableList<Int>>()
+        val previousAssignments = mutableMapOf<Int, MutableList<Int>>()
 
-        var matchCount = 0
-        // Verify signatures and core assignments
+        // Calculate and log current assignments with details
+        calculateCoreAssignments(true, guarantee.slot, currValidators, entropyPool[3])
+            .forEachIndexed { validatorIndex, coreIndex ->
+                println("Current Assignment - Validator $validatorIndex -> Core $coreIndex")
+                currentAssignments.getOrPut(coreIndex) { mutableListOf() }.add(validatorIndex)
+            }
+
+        // Calculate and log previous assignments with details
+        calculateCoreAssignments(false, guarantee.slot, prevValidators, entropyPool[2])
+            .forEachIndexed { validatorIndex, coreIndex ->
+                println("Previous Assignment - Validator $validatorIndex -> Core $coreIndex")
+                previousAssignments.getOrPut(coreIndex) { mutableListOf() }.add(validatorIndex)
+            }
+
+        // Log complete assignment maps
+        println("Complete Current Assignments Map: $currentAssignments")
+        println("Complete Previous Assignments Map: $previousAssignments")
+        // Track signature counts per core
+        val signatureCountsByCore = mutableMapOf<Int, Int>()
+
+        // Verify signatures and track core assignments
         for (signature in guarantee.signatures) {
             val validatorIndex = signature.validatorIndex.toInt()
             if (validatorIndex < 0 || validatorIndex >= validators.size) {
-                println("ERROR: Invalid validator index: $validatorIndex")
                 return ReportErrorCode.BAD_VALIDATOR_INDEX
             }
 
-            val assignedCoreInCurrent = if (validatorIndex < currValidators.size)
-                assignmentsCurrent[validatorIndex] else -1
-            val assignedCoreInPrevious = if (validatorIndex < prevValidators.size)
-                assignmentsPrevious[validatorIndex] else -1
+            // Check both current and previous assignments for this validator
+            val isAssignedInCurrent = currentAssignments[reportedCore]?.contains(validatorIndex) == true
+            val isAssignedInPrevious = previousAssignments[reportedCore]?.contains(validatorIndex) == true
+            println("Assignment Check for validator $validatorIndex:")
+            println("  Current Assignment Check - Core $reportedCore contains validator? $isAssignedInCurrent")
+            println("  Previous Assignment Check - Core $reportedCore contains validator? $isAssignedInPrevious")
 
-            if (assignedCoreInCurrent == reportedCore || assignedCoreInPrevious == reportedCore) {
-                matchCount++
+            val validatorKey = if (isCurrent) {
+                currValidators[validatorIndex].ed25519
+            } else {
+                prevValidators[validatorIndex].ed25519
             }
 
-            // Validate signature
-            val validatorKey = validators[validatorIndex].ed25519
-            val signaturePrefix = "jam_guarantee".toByteArray()
-            val signatureMessage = signaturePrefix + blakeHash(guarantee.report.encode())
-
-            try {
-                val publicKey = Ed25519PublicKeyParameters(validatorKey.bytes, 0)
-                val signer = Ed25519Signer()
-                signer.init(false, publicKey)
-                signer.update(signatureMessage, 0, signatureMessage.size)
-
-                if (!signer.verifySignature(signature.signature.bytes)) {
-                    println("ERROR: Invalid signature for validator $validatorIndex")
-                    return ReportErrorCode.BAD_SIGNATURE
+            if (isAssignedInCurrent || isAssignedInPrevious) {
+                verifySignature(validatorKey, guarantee, signature)?.let {
+                    return it
                 }
-            } catch (e: Exception) {
-                println("ERROR: Signature verification failed with exception: ${e.message}")
-                return ReportErrorCode.BAD_SIGNATURE
+                // Increment signature count for this core
+                signatureCountsByCore[reportedCore] = signatureCountsByCore.getOrDefault(reportedCore, 0) + 1
             }
         }
 
-        if (matchCount < 2) {
+        // Check if we have at least 2 valid signatures for the reported core
+        val validSignaturesForCore = signatureCountsByCore.getOrDefault(reportedCore, 0)
+        println("Core $reportedCore validation complete: $validSignaturesForCore valid signatures (${if (isCurrent) "current" else "previous"} rotation)")
+        if (validSignaturesForCore < 2) {
             return ReportErrorCode.WRONG_ASSIGNMENT
         }
 
-        println("=== Signature Validation Successful ===")
         return null
     }
 
