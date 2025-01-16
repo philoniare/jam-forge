@@ -9,7 +9,7 @@ class TestCaseEncoding {
     @Test
     fun testEncodeWorkReport() {
         // Load JSON data from resources using the class loader
-        val (testCase, expectedOutputBytes) = TestFileLoader.loadTestData<ReportCase>("reports/tiny/big_work_report_output-1")
+        val (testCase, expectedOutputBytes) = TestFileLoader.loadTestData<ReportCase>("reports/tiny/reports_with_dependencies-3")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(
