@@ -14,7 +14,7 @@ class InstructionsTest {
     )
 
     @Test
-    fun `test instructions iterator with implicit trap`() {
+    fun `test instructions iterator with implicit panic`() {
         listOf(false, true).forEach { isBounded ->
             val instructions = Instructions.new(
                 instructionSet = defaultInstructionSet,
@@ -49,11 +49,11 @@ class InstructionsTest {
     }
 
     @Test
-    fun `test instructions iterator without implicit trap`() {
+    fun `test instructions iterator without implicit panic`() {
         listOf(false, true).forEach { isBounded ->
             val instructions = Instructions.new(
                 instructionSet = defaultInstructionSet,
-                code = byteArrayOf(Opcode.trap.value.toByte()),
+                code = byteArrayOf(Opcode.panic.value.toByte()),
                 bitmask = byteArrayOf(0b00000001),
                 offset = 0u,
                 isBounded = isBounded
@@ -62,7 +62,7 @@ class InstructionsTest {
             // First instruction
             assertEquals(
                 expected = ParsedInstruction(
-                    kind = Instruction.Trap,
+                    kind = Instruction.Panic,
                     offset = ProgramCounter(0u),
                     nextOffset = ProgramCounter(1u)
                 ),
@@ -151,7 +151,7 @@ class InstructionsTest {
 
         assertEquals(
             expected = ParsedInstruction(
-                kind = Instruction.Trap,
+                kind = Instruction.Panic,
                 offset = ProgramCounter(63u),
                 nextOffset = ProgramCounter(64u)
             ),
@@ -166,7 +166,7 @@ class InstructionsTest {
         val instructions = Instructions.new(
             instructionSet = defaultInstructionSet,
             code = ByteArray(8) {
-                Opcode.trap.value.toByte()
+                Opcode.panic.value.toByte()
             },
             bitmask = byteArrayOf(0b10000001.toByte()),
             offset = 1u,
@@ -189,7 +189,7 @@ class InstructionsTest {
     fun `test instructions iterator start at invalid offset unbounded`() {
         val instructions = Instructions.new(
             instructionSet = defaultInstructionSet,
-            code = ByteArray(8) { Opcode.trap.value.toByte() },
+            code = ByteArray(8) { Opcode.panic.value.toByte() },
             bitmask = byteArrayOf(0b10000001.toByte()),
             offset = 1u,
             isBounded = false
@@ -206,7 +206,7 @@ class InstructionsTest {
 
         assertEquals(
             expected = ParsedInstruction(
-                kind = Instruction.Trap,
+                kind = Instruction.Panic,
                 offset = ProgramCounter(7u),
                 nextOffset = ProgramCounter(8u)
             ),
@@ -217,8 +217,8 @@ class InstructionsTest {
     }
 
     @Test
-    fun `test instructions iterator does not emit unnecessary invalid instructions if bounded and ends with trap`() {
-        val code = ByteArray(32) { Opcode.trap.value.toByte() }
+    fun `test instructions iterator does not emit unnecessary invalid instructions if bounded and ends with panic`() {
+        val code = ByteArray(32) { Opcode.panic.value.toByte() }
         val bitmask = byteArrayOf(0b00000001, 0b00000000, 0b00000000, 0b00000100)
 
         val instructions = Instructions.new(
@@ -232,7 +232,7 @@ class InstructionsTest {
         assertEquals(0u, instructions.offset)
         assertEquals(
             expected = ParsedInstruction(
-                kind = Instruction.Trap,
+                kind = Instruction.Panic,
                 offset = ProgramCounter(0u),
                 nextOffset = ProgramCounter(25u)
             ),
@@ -243,8 +243,8 @@ class InstructionsTest {
     }
 
     @Test
-    fun `test instructions iterator does not emit unnecessary invalid instructions if unbounded and ends with trap`() {
-        val code = ByteArray(32) { Opcode.trap.value.toByte() }
+    fun `test instructions iterator does not emit unnecessary invalid instructions if unbounded and ends with panic`() {
+        val code = ByteArray(32) { Opcode.panic.value.toByte() }
         val bitmask = byteArrayOf(0b00000001, 0b00000000, 0b00000000, 0b00000100)
 
         val instructions = Instructions.new(
@@ -258,7 +258,7 @@ class InstructionsTest {
         assertEquals(0u, instructions.offset)
         assertEquals(
             expected = ParsedInstruction(
-                kind = Instruction.Trap,
+                kind = Instruction.Panic,
                 offset = ProgramCounter(0u),
                 nextOffset = ProgramCounter(25u)
             ),
@@ -267,7 +267,7 @@ class InstructionsTest {
         assertEquals(26u, instructions.offset)
         assertEquals(
             expected = ParsedInstruction(
-                kind = Instruction.Trap,
+                kind = Instruction.Panic,
                 offset = ProgramCounter(26u),
                 nextOffset = ProgramCounter(32u)
             ),

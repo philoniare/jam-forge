@@ -5,17 +5,17 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 enum class PvmStatus {
-    @SerialName("trap")
-    TRAP,
+    @SerialName("panic")
+    PANIC,
 
     @SerialName("halt")
     HALT;
 
     companion object {
         fun fromString(value: String): PvmStatus = when (value.lowercase()) {
-            "trap" -> TRAP
+            "panic" -> PANIC
             "halt" -> HALT
-            else -> throw IllegalArgumentException("Invalid status: $value. Must be either 'trap' or 'halt'")
+            else -> throw IllegalArgumentException("Invalid status: $value. Must be either 'panic' or 'halt'")
         }
     }
 }

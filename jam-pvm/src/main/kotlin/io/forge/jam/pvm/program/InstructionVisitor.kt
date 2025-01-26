@@ -8,7 +8,7 @@ package io.forge.jam.pvm.program
  */
 interface InstructionVisitor<R> {
 
-    fun trap(): R
+    fun panic(): R
     fun fallthrough(): R
     fun jumpIndirect(reg: RawReg, imm: UInt): R
     fun loadImm(reg: RawReg, imm: UInt): R

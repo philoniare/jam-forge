@@ -8,7 +8,7 @@ package io.forge.jam.pvm.program
  */
 interface ParsingVisitor<R> {
     // Zero-operand instructions
-    fun trap(offset: UInt, argsLength: UInt): R
+    fun panic(offset: UInt, argsLength: UInt): R
     fun fallthrough(offset: UInt, argsLength: UInt): R
     fun invalid(offset: UInt, argsLength: UInt): R
 

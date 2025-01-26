@@ -78,7 +78,7 @@ class ModuleConfig private constructor(
     /**
      * Sets whether sbrk instruction is allowed.
      *
-     * When enabled sbrk instruction is not allowed it will lead to a trap, otherwise
+     * When enabled sbrk instruction is not allowed it will lead to a panic, otherwise
      * sbrk instruction is emulated.
      *
      * Default: `true`

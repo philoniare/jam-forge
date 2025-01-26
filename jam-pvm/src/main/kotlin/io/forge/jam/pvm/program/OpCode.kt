@@ -5,7 +5,7 @@ package io.forge.jam.pvm.program
  */
 @Suppress("EnumEntryName")
 enum class Opcode(val value: UByte) {
-    trap(0u),
+    panic(0u),
     fallthrough(17u),
     jump_indirect(19u),
     load_imm(4u),
@@ -141,7 +141,7 @@ enum class Opcode(val value: UByte) {
     override fun toString(): String = name
 
     fun canFallthrough(): Boolean = when (this) {
-        trap,
+        panic,
         jump,
         jump_indirect,
         load_imm_and_jump,
@@ -151,7 +151,7 @@ enum class Opcode(val value: UByte) {
     }
 
     fun startsNewBasicBlock(): Boolean = when (this) {
-        trap,
+        panic,
         fallthrough,
         jump,
         jump_indirect,

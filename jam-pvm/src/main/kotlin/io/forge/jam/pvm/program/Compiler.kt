@@ -41,13 +41,13 @@ class Compiler(
     fun nextProgramCounter(): ProgramCounter = nextProgramCounter
 
     override fun invalid() {
-        trap()
+        panic()
     }
 
-    override fun trap() {
+    override fun panic() {
         instance.emit(
-            RawHandlers.trap,
-            Args.trap(programCounter), "trap"
+            RawHandlers.panic,
+            Args.panic(programCounter), "panic"
         )
     }
 

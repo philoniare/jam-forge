@@ -16,7 +16,7 @@ data class EnumVisitor<I : InstructionSet>(override val instructionSet: I) :
         }
 
         return when (opcode.toInt()) {
-            0 -> Instruction.Trap
+            0 -> Instruction.Panic
             17 -> Instruction.Fallthrough
             19 -> {
                 val (reg, imm) = Program.readArgsRegImm(chunk, skip)

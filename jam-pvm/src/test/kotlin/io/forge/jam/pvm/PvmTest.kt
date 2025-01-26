@@ -117,7 +117,7 @@ class PvmTest {
                     val result = instance.run().getOrThrow()
                     when (result) {
                         InterruptKind.Finished -> return@run PvmStatus.HALT
-                        InterruptKind.Trap -> return@run PvmStatus.TRAP
+                        InterruptKind.Panic -> return@run PvmStatus.PANIC
                         InterruptKind.NotEnoughGas -> return@run "out-of-gas"
                         InterruptKind.Step -> {
                             finalPc = instance.programCounter()!!.value

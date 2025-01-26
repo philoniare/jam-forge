@@ -302,7 +302,7 @@ class Program {
                 val previousOffset = offset - skip - 1u
                 val opcode = instructionSet.opcodeFromU8(
                     code[previousOffset.toInt()].toUByte()
-                ) ?: Opcode.trap
+                ) ?: Opcode.panic
                 if (opcode.startsNewBasicBlock()) {
                     return offset
                 }

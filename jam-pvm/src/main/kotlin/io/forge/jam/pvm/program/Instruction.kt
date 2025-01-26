@@ -8,7 +8,7 @@ import io.forge.jam.pvm.writeSimpleVarint64
  * Each variant contains the instruction type and its associated parameters.
  */
 sealed class Instruction {
-    data object Trap : Instruction()
+    data object Panic : Instruction()
     data object Fallthrough : Instruction()
     data class JumpIndirect(val reg: RawReg, val imm: UInt) : Instruction()
     data class LoadImm(val reg: RawReg, val imm: UInt) : Instruction()
@@ -133,7 +133,7 @@ sealed class Instruction {
      * Visits the instruction with a visitor implementation
      */
     fun <T> visit(visitor: InstructionVisitor<T>): T = when (this) {
-        is Trap -> visitor.trap()
+        is Panic -> visitor.panic()
         is Fallthrough -> visitor.fallthrough()
         is JumpIndirect -> visitor.jumpIndirect(reg, imm)
         is LoadImm -> visitor.loadImm(reg, imm)
@@ -254,7 +254,7 @@ sealed class Instruction {
      * Gets the opcode for this instruction
      */
     fun opcode(): Opcode = when (this) {
-        is Trap -> Opcode.trap
+        is Panic -> Opcode.panic
         is Fallthrough -> Opcode.fallthrough
         is JumpIndirect -> Opcode.jump_indirect
         is LoadImm -> Opcode.load_imm
@@ -368,7 +368,7 @@ sealed class Instruction {
         is LoadImm64 -> Opcode.load_imm_64
         is ShiftArithmeticRightImm32 -> Opcode.shift_arithmetic_right_imm_32
         is ShiftArithmeticRightImm64 -> Opcode.shift_arithmetic_right_imm_64
-        is Invalid -> Opcode.trap
+        is Invalid -> Opcode.panic
     }
 
     /**
@@ -376,7 +376,7 @@ sealed class Instruction {
      */
     fun serializeInto(position: UInt, buffer: ByteArray): UInt {
         return when (this) {
-            is Trap -> serializeArgless(buffer, Opcode.trap)
+            is Panic -> serializeArgless(buffer, Opcode.panic)
             is Fallthrough -> serializeArgless(buffer, Opcode.fallthrough)
             is JumpIndirect -> serializeRegImm(buffer, Opcode.jump_indirect, reg, imm)
             is LoadImm -> serializeRegImm(buffer, Opcode.load_imm, reg, imm)
@@ -676,7 +676,7 @@ sealed class Instruction {
             )
 
             is LoadImm64 -> serializeImm64(buffer, Opcode.load_imm_64, reg, imm)
-            is Invalid -> serializeArgless(buffer, Opcode.trap)
+            is Invalid -> serializeArgless(buffer, Opcode.panic)
             is ShiftArithmeticRightImm32 -> serializeRegRegImm(
                 buffer,
                 Opcode.shift_arithmetic_right_imm_32,

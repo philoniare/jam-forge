@@ -8,13 +8,13 @@ import io.forge.jam.pvm.program.Reg
 
 typealias Target = UInt
 
-fun trapImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
+fun panicImpl(visitor: Visitor, programCounter: ProgramCounter): Target? {
     with(visitor.inner) {
         this.programCounter = programCounter
         this.programCounterValid = true
         this.nextProgramCounter = null
         this.nextProgramCounterChanged = true
-        this.interrupt = InterruptKind.Trap
+        this.interrupt = InterruptKind.Panic
     }
     return null
 }
@@ -305,12 +305,12 @@ class Visitor(
                 logger.debug("Memory  $dst = $loadTy [0x${address}] = 0x${value}")
                 set64(dst, value)
                 return goToNextInstruction()
-            } ?: return trapImpl(this, programCounter)
+            } ?: return panicImpl(this, programCounter)
         } else {
             // Dynamic memory mode
             val addressEnd = address.plus(size)
             if (addressEnd < address) {
-                return trapImpl(this, programCounter)
+                return panicImpl(this, programCounter)
             }
 
             val pageAddressLo = inner.module.roundToPageSizeDown(address)
@@ -421,12 +421,12 @@ class Visitor(
             inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
                 bytes.copyInto(slice)
                 return goToNextInstruction()
-            } ?: return trapImpl(this, programCounter)
+            } ?: return panicImpl(this, programCounter)
         } else {
             // Dynamic memory mode
             val addressEnd = address.plus(length)
             if (addressEnd < address) {
-                return trapImpl(this, programCounter)
+                return panicImpl(this, programCounter)
             }
 
             val pageAddressLo = inner.module.roundToPageSizeDown(address)
@@ -478,11 +478,11 @@ class Visitor(
             return null
         }
 
-        val target = inner.module.jumpTable().getByAddress(dynamicAddress) ?: return trapImpl(
+        val target = inner.module.jumpTable().getByAddress(dynamicAddress) ?: return panicImpl(
             this,
             programCounter,
         )
 
-        return inner.resolveJump(target) ?: trapImpl(this, programCounter)
+        return inner.resolveJump(target) ?: panicImpl(this, programCounter)
     }
 }

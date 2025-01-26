@@ -20,7 +20,7 @@ data class Args(
          */
         fun default(): Args = Args()
 
-        fun trap(programCounter: ProgramCounter) = Args(a0 = programCounter.value)
+        fun panic(programCounter: ProgramCounter) = Args(a0 = programCounter.value)
 
         fun step(programCounter: ProgramCounter) = Args(a0 = programCounter.value)
 

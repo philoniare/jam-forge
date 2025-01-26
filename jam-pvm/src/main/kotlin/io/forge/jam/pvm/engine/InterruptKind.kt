@@ -12,15 +12,15 @@ sealed class InterruptKind {
     object Finished : InterruptKind()
 
     /**
-     * The execution finished abnormally with a trap.
+     * The execution finished abnormally with a panic.
      *
      * This can happen for a few reasons:
-     *   - if the `trap` instruction is executed,
+     *   - if the `panic` instruction is executed,
      *   - if an invalid instruction is executed,
      *   - if a jump to an invalid address is made,
      *   - if a segmentation fault is triggered (when dynamic paging is not enabled for this VM)
      */
-    object Trap : InterruptKind()
+    object Panic : InterruptKind()
 
     /**
      * The execution triggered an external call with an `ecalli` instruction.
@@ -59,7 +59,7 @@ sealed class InterruptKind {
         if (other !is InterruptKind) return false
         return when (this) {
             is Finished -> other is Finished
-            is Trap -> other is Trap
+            is Panic -> other is Panic
             is Ecalli -> other is Ecalli && value == other.value
             is Segfault -> other is Segfault && fault == other.fault
             is NotEnoughGas -> other is NotEnoughGas
@@ -70,7 +70,7 @@ sealed class InterruptKind {
     override fun hashCode(): Int {
         return when (this) {
             is Finished -> 1
-            is Trap -> 2
+            is Panic -> 2
             is Ecalli -> 31 * 3 + value.hashCode()
             is Segfault -> 31 * 4 + fault.hashCode()
             is NotEnoughGas -> 5
@@ -81,7 +81,7 @@ sealed class InterruptKind {
     override fun toString(): String {
         return when (this) {
             is Finished -> "Finished"
-            is Trap -> "Trap"
+            is Panic -> "Panic"
             is Ecalli -> "Ecalli(value=$value)"
             is Segfault -> "Segfault(fault=$fault)"
             is NotEnoughGas -> "NotEnoughGas"

@@ -10,9 +10,9 @@ class GasVisitor : InstructionVisitor<Unit> {
 
     companion object {
         private val logger = PvmLogger(GasVisitor::class.java)
-        fun trapCost(): UInt {
+        fun panicCost(): UInt {
             val gasVisitor = GasVisitor()
-            gasVisitor.trap()
+            gasVisitor.panic()
             return gasVisitor.takeBlockCost()!!
         }
     }
@@ -29,10 +29,10 @@ class GasVisitor : InstructionVisitor<Unit> {
     }
 
     override fun invalid() {
-        trap()
+        panic()
     }
 
-    override fun trap() {
+    override fun panic() {
         cost += 1u
         startNewBasicBlock()
     }

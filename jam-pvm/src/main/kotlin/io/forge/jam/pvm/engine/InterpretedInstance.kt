@@ -2,7 +2,7 @@ package io.forge.jam.pvm.engine
 
 import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.RawHandlers
-import io.forge.jam.pvm.engine.GasVisitor.Companion.trapCost
+import io.forge.jam.pvm.engine.GasVisitor.Companion.panicCost
 import io.forge.jam.pvm.program.Compiler
 import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.Reg
@@ -149,7 +149,7 @@ class InterpretedInstance private constructor(
             emit(RawHandlers.stepOutOfRange, Args.stepOutOfRange(), "step_out_of_range")
         }
         val gasCost = if (module.gasMetering() != null) {
-            trapCost()
+            panicCost()
         } else {
             0u
         }

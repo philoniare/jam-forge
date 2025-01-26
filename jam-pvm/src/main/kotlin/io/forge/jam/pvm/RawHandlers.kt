@@ -27,11 +27,11 @@ fun getArgs(visitor: Visitor): Args =
 object RawHandlers {
     val logger = PvmLogger(RawHandlers::class.java)
 
-    val trap: Handler = { visitor ->
+    val panic: Handler = { visitor ->
         val args = getArgs(visitor)
         val programCounter = ProgramCounter(args.a0)
-        logger.debug("Trap at ${programCounter.value}: explicit trap")
-        trapImpl(visitor, programCounter)
+        logger.debug("Panic at ${programCounter.value}: explicit panic")
+        panicImpl(visitor, programCounter)
     }
 
     val chargeGas: Handler = { visitor ->
@@ -81,7 +81,7 @@ object RawHandlers {
             notEnoughGasImpl(visitor, programCounter, newGas)
         } else {
             visitor.inner.gas = newGas.toLong()
-            trapImpl(visitor, programCounter)
+            panicImpl(visitor, programCounter)
         }
     }
 
@@ -202,7 +202,7 @@ object RawHandlers {
     val invalidBranch: Handler = { visitor ->
         val args = getArgs(visitor)
         val programCounter = ProgramCounter(args.a0)
-        trapImpl(visitor, programCounter)
+        panicImpl(visitor, programCounter)
     }
 
     val xorImm: Handler = { visitor ->
@@ -1356,8 +1356,8 @@ object RawHandlers {
             }
             target
         } ?: run {
-            logger.debug("  -> resolved to trap")
-            trapImpl(visitor, programCounter)
+            logger.debug("  -> resolved to panic")
+            panicImpl(visitor, programCounter)
         }
     }
 
@@ -1370,7 +1370,7 @@ object RawHandlers {
 
         visitor.inner.resolveFallthrough(jumpTo)?.let { target ->
             logger.debug("Resolved fallthrough: ${target}")
-            trapImpl(visitor, jumpTo)
+            panicImpl(visitor, jumpTo)
             if (offset + 1u == target) {
                 logger.debug("  -> resolved to fallthrough")
                 visitor.inner.compiledHandlers[offset.toInt()] = fallthrough
@@ -1383,7 +1383,7 @@ object RawHandlers {
             target
         } ?: run {
             logger.debug("UNIResolved fallthrough: ${jumpTo}")
-            trapImpl(visitor, jumpTo)
+            panicImpl(visitor, jumpTo)
             visitor.inner.compiledHandlers[offset.toInt()] = jump
             visitor.inner.compiledArgs[offset.toInt()] = Args.jump(TARGET_OUT_OF_RANGE)
             TARGET_OUT_OF_RANGE
