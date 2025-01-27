@@ -164,6 +164,7 @@ sealed class Instruction {
      */
     fun <T> visit(visitor: InstructionVisitor<T>): T = when (this) {
         is Panic -> visitor.panic()
+        is Memset -> visitor.memset()
         is Fallthrough -> visitor.fallthrough()
         is JumpIndirect -> visitor.jumpIndirect(reg, imm)
         is LoadImm -> visitor.loadImm(reg, imm)
@@ -234,6 +235,12 @@ sealed class Instruction {
         is ShiftLogicalLeftImmAlt64 -> visitor.shiftLogicalLeftImmAlt64(reg1, reg2, imm)
         is CmovIfZeroImm -> visitor.cmovIfZeroImm(reg1, reg2, imm)
         is CmovIfNotZeroImm -> visitor.cmovIfNotZeroImm(reg1, reg2, imm)
+
+        is RotateRightImm32 -> visitor.rotateRightImm32(reg1, reg2, imm)
+        is RotateRightImm64 -> visitor.rotateRightImm64(reg1, reg2, imm)
+        is RotateRightImmAlt32 -> visitor.rotateRightImmAlt32(reg1, reg2, imm)
+        is RotateRightImmAlt64 -> visitor.rotateRightImmAlt64(reg1, reg2, imm)
+
         is BranchEq -> visitor.branchEq(reg1, reg2, imm)
         is BranchNotEq -> visitor.branchNotEq(reg1, reg2, imm)
         is BranchLessUnsigned -> visitor.branchLessUnsigned(reg1, reg2, imm)
@@ -261,6 +268,19 @@ sealed class Instruction {
         is RemSigned64 -> visitor.remSigned64(reg1, reg2, reg3)
         is CmovIfZero -> visitor.cmovIfZero(reg1, reg2, reg3)
         is CmovIfNotZero -> visitor.cmovIfNotZero(reg1, reg2, reg3)
+
+        is AndInverted -> visitor.andInverted(reg1, reg2, reg3)
+        is OrInverted -> visitor.orInverted(reg1, reg2, reg3)
+        is Xnor -> visitor.xnor(reg1, reg2, reg3)
+        is Maximum -> visitor.maximum(reg1, reg2, reg3)
+        is MaximumUnsigned -> visitor.maximumUnsigned(reg1, reg2, reg3)
+        is Minimum -> visitor.minimum(reg1, reg2, reg3)
+        is MinimumUnsigned -> visitor.minimumUnsigned(reg1, reg2, reg3)
+        is RotateLeft32 -> visitor.rotateLeft32(reg1, reg2, reg3)
+        is RotateLeft64 -> visitor.rotateLeft64(reg1, reg2, reg3)
+        is RotateRight32 -> visitor.rotateRight32(reg1, reg2, reg3)
+        is RotateRight64 -> visitor.rotateRight64(reg1, reg2, reg3)
+
         is Jump -> visitor.jump(imm)
         is Ecalli -> visitor.ecalli(imm)
         is StoreImmU8 -> visitor.storeImmU8(imm1, imm2)
@@ -269,6 +289,18 @@ sealed class Instruction {
         is StoreImmU64 -> visitor.storeImmU64(imm1, imm2)
         is MoveReg -> visitor.moveReg(reg1, reg2)
         is Sbrk -> visitor.sbrk(reg1, reg2)
+
+        is CountLeadingZeroBits32 -> visitor.countLeadingZeroBits32(reg1, reg2)
+        is CountLeadingZeroBits64 -> visitor.countLeadingZeroBits64(reg1, reg2)
+        is CountTrailingZeroBits32 -> visitor.countTrailingZeroBits32(reg1, reg2)
+        is CountTrailingZeroBits64 -> visitor.countTrailingZeroBits64(reg1, reg2)
+        is CountSetBits32 -> visitor.countSetBits32(reg1, reg2)
+        is CountSetBits64 -> visitor.countSetBits64(reg1, reg2)
+        is SignExtend8 -> visitor.signExtend8(reg1, reg2)
+        is SignExtend16 -> visitor.signExtend16(reg1, reg2)
+        is ZeroExtend16 -> visitor.zeroExtend16(reg1, reg2)
+        is ReverseByte -> visitor.reverseByte(reg1, reg2)
+
         is LoadImmAndJumpIndirect -> visitor.loadImmAndJumpIndirect(reg1, reg2, imm1, imm2)
         is Invalid -> visitor.invalid()
         is ShiftArithmeticRightImm32 -> visitor.shiftArithmeticRightImm32(reg1, reg2, imm)
@@ -350,6 +382,7 @@ sealed class Instruction {
         is ShiftLogicalLeftImmAlt64 -> Opcode.shift_logical_left_imm_alt_64
         is CmovIfZeroImm -> Opcode.cmov_if_zero_imm
         is CmovIfNotZeroImm -> Opcode.cmov_if_not_zero_imm
+
         is BranchEq -> Opcode.branch_eq
         is BranchNotEq -> Opcode.branch_not_eq
         is BranchLessUnsigned -> Opcode.branch_less_unsigned
@@ -399,6 +432,32 @@ sealed class Instruction {
         is ShiftArithmeticRightImm32 -> Opcode.shift_arithmetic_right_imm_32
         is ShiftArithmeticRightImm64 -> Opcode.shift_arithmetic_right_imm_64
         is Invalid -> Opcode.panic
+        is AndInverted -> TODO()
+        is CountLeadingZeroBits32 -> TODO()
+        is CountLeadingZeroBits64 -> TODO()
+        is CountSetBits32 -> TODO()
+        is CountSetBits64 -> TODO()
+        is CountTrailingZeroBits32 -> TODO()
+        is CountTrailingZeroBits64 -> TODO()
+        is Maximum -> TODO()
+        is MaximumUnsigned -> TODO()
+        Memset -> TODO()
+        is Minimum -> TODO()
+        is MinimumUnsigned -> TODO()
+        is OrInverted -> TODO()
+        is ReverseByte -> TODO()
+        is RotateLeft32 -> TODO()
+        is RotateLeft64 -> TODO()
+        is RotateRight32 -> TODO()
+        is RotateRight64 -> TODO()
+        is RotateRightImm32 -> TODO()
+        is RotateRightImm64 -> TODO()
+        is RotateRightImmAlt32 -> TODO()
+        is RotateRightImmAlt64 -> TODO()
+        is SignExtend16 -> TODO()
+        is SignExtend8 -> TODO()
+        is Xnor -> TODO()
+        is ZeroExtend16 -> TODO()
     }
 
     /**
@@ -722,6 +781,33 @@ sealed class Instruction {
                 reg2,
                 imm
             )
+
+            is AndInverted -> TODO()
+            is CountLeadingZeroBits32 -> TODO()
+            is CountLeadingZeroBits64 -> TODO()
+            is CountSetBits32 -> TODO()
+            is CountSetBits64 -> TODO()
+            is CountTrailingZeroBits32 -> TODO()
+            is CountTrailingZeroBits64 -> TODO()
+            is Maximum -> TODO()
+            is MaximumUnsigned -> TODO()
+            is Memset -> TODO()
+            is Minimum -> TODO()
+            is MinimumUnsigned -> TODO()
+            is OrInverted -> TODO()
+            is ReverseByte -> TODO()
+            is RotateLeft32 -> TODO()
+            is RotateLeft64 -> TODO()
+            is RotateRight32 -> TODO()
+            is RotateRight64 -> TODO()
+            is RotateRightImm32 -> TODO()
+            is RotateRightImm64 -> TODO()
+            is RotateRightImmAlt32 -> TODO()
+            is RotateRightImmAlt64 -> TODO()
+            is SignExtend16 -> TODO()
+            is SignExtend8 -> TODO()
+            is Xnor -> TODO()
+            is ZeroExtend16 -> TODO()
         }
     }
 

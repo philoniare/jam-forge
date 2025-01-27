@@ -9,6 +9,7 @@ package io.forge.jam.pvm.program
 interface InstructionVisitor<R> {
 
     fun panic(): R
+    fun memset(): R
     fun fallthrough(): R
     fun jumpIndirect(reg: RawReg, imm: UInt): R
     fun loadImm(reg: RawReg, imm: UInt): R
@@ -76,6 +77,10 @@ interface InstructionVisitor<R> {
     fun shiftLogicalLeftImmAlt64(reg1: RawReg, reg2: RawReg, imm: UInt): R
     fun cmovIfZeroImm(reg1: RawReg, reg2: RawReg, imm: UInt): R
     fun cmovIfNotZeroImm(reg1: RawReg, reg2: RawReg, imm: UInt): R
+    fun rotateRightImm32(reg1: RawReg, reg2: RawReg, imm: UInt): R
+    fun rotateRightImmAlt32(reg1: RawReg, reg2: RawReg, imm: UInt): R
+    fun rotateRightImm64(reg1: RawReg, reg2: RawReg, imm: UInt): R
+    fun rotateRightImmAlt64(reg1: RawReg, reg2: RawReg, imm: UInt): R
     fun branchEq(reg1: RawReg, reg2: RawReg, imm: UInt): R
     fun branchNotEq(reg1: RawReg, reg2: RawReg, imm: UInt): R
     fun branchLessUnsigned(reg1: RawReg, reg2: RawReg, imm: UInt): R
@@ -110,6 +115,19 @@ interface InstructionVisitor<R> {
     fun remUnsigned64(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
     fun remSigned32(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
     fun remSigned64(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun andInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun orInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun xnor(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun maximum(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun maximumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun minimum(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun minimumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun rotateLeft32(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun rotateLeft64(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun rotateRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+    fun rotateRight64(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
+
+
     fun cmovIfZero(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
     fun cmovIfNotZero(reg1: RawReg, reg2: RawReg, reg3: RawReg): R
     fun jump(imm: UInt): R
@@ -120,6 +138,18 @@ interface InstructionVisitor<R> {
     fun storeImmU64(imm1: UInt, imm2: UInt): R
     fun moveReg(reg1: RawReg, reg2: RawReg): R
     fun sbrk(reg1: RawReg, reg2: RawReg): R
+
+    fun countLeadingZeroBits32(reg1: RawReg, reg2: RawReg): R
+    fun countLeadingZeroBits64(reg1: RawReg, reg2: RawReg): R
+    fun countTrailingZeroBits32(reg1: RawReg, reg2: RawReg): R
+    fun countTrailingZeroBits64(reg1: RawReg, reg2: RawReg): R
+    fun countSetBits32(reg1: RawReg, reg2: RawReg): R
+    fun countSetBits64(reg1: RawReg, reg2: RawReg): R
+    fun signExtend8(reg1: RawReg, reg2: RawReg): R
+    fun signExtend16(reg1: RawReg, reg2: RawReg): R
+    fun zeroExtend16(reg1: RawReg, reg2: RawReg): R
+    fun reverseByte(reg1: RawReg, reg2: RawReg): R
+
     fun loadImmAndJumpIndirect(reg1: RawReg, reg2: RawReg, imm1: UInt, imm2: UInt): R
     fun loadImm64(reg: RawReg, imm: ULong): R
 

@@ -62,8 +62,6 @@ class PvmTest {
             }
 
             // Handle RW data pages
-            // Handle RW data pages
-            // Handle RW data pages
             val rwPages = pageGroups[true] ?: emptyList()
             if (rwPages.isNotEmpty()) {
                 // Find RW memory contents
@@ -142,7 +140,6 @@ class PvmTest {
             inputCase.expectedRegs.forEachIndexed { index, value ->
                 assertEquals(value, instance.reg(Reg.fromRaw(index)!!), "Register $index mismatch.")
             }
-            // Validate memory update
             // Validate memory update
             inputCase.initialMemory.forEachIndexed { _, memory ->
                 // Create a buffer big enough for the expected memory contents
