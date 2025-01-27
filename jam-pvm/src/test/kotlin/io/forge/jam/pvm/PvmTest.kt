@@ -31,7 +31,7 @@ class PvmTest {
             val config = Config.new()
             val engine = Engine.new(config).getOrThrow()
 
-            val parts = ProgramParts()
+            val parts = ProgramParts(is64Bit = true)
             parts.setCodeJumpTable(inputCase.program.toByteArray())
 
             val pageGroups = inputCase.initialPageMap.groupBy { it.isWritable }
@@ -42,7 +42,7 @@ class PvmTest {
                 val roMemory = inputCase.initialMemory.filter { mem ->
                     roPages.any { page ->
                         mem.address >= page.address &&
-                            mem.address + mem.contents.size <= page.address + page.length
+                            mem.address.toInt() + mem.contents.size <= (page.address + page.length).toInt()
                     }
                 }
 
@@ -68,7 +68,7 @@ class PvmTest {
                 val rwMemory = inputCase.initialMemory.filter { mem ->
                     rwPages.any { page ->
                         mem.address >= page.address &&
-                            mem.address + mem.contents.size <= page.address + page.length
+                            mem.address.toInt() + mem.contents.size <= (page.address + page.length).toInt()
                     }
                 }
 
@@ -106,8 +106,10 @@ class PvmTest {
             instance.setNextProgramCounter(programCounter)
 
             inputCase.initialRegs.forEachIndexed { index, value ->
+                println("Actual regs: ${instance.reg(Reg.fromRaw(7)!!)} ${value.toULong()}")
                 instance.setReg(Reg.fromRaw(index)!!, value.toULong())
             }
+
 
             var finalPc = inputCase.initialPc
             val actualStatus = run {
@@ -137,7 +139,9 @@ class PvmTest {
             // Validate output state
             assertEquals(inputCase.expectedPc, finalPc, "Program counter mismatch.")
             // Validate reg values
+            println("ExpectedRegs: ${inputCase.expectedRegs}")
             inputCase.expectedRegs.forEachIndexed { index, value ->
+                println("Actual regs: $index ${instance.reg(Reg.fromRaw(index)!!)}")
                 assertEquals(value, instance.reg(Reg.fromRaw(index)!!), "Register $index mismatch.")
             }
             // Validate memory update

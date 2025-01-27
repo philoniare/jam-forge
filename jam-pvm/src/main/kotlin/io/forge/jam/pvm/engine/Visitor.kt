@@ -165,7 +165,7 @@ class Visitor(
      */
     @Suppress("NOTHING_TO_INLINE")
     inline fun get32(regimm: RegImm): UInt = when (regimm) {
-        is RegImm.RegValue -> inner.regs[regimm.reg.toIndex()].toUInt()
+        is RegImm.RegValue -> Cast(inner.regs[regimm.reg.toIndex()]).ulongTruncateToU32()
         is RegImm.ImmValue -> regimm.value
     }
 

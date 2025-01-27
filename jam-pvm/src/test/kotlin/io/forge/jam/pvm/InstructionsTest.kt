@@ -10,7 +10,7 @@ class InstructionsTest {
 
     private val defaultInstructionSet = RuntimeInstructionSet(
         allowSbrk = true,
-        is64Bit = false
+        is64Bit = true
     )
 
     @Test

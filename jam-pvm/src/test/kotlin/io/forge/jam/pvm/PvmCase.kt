@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 data class PvmCase(
     val name: String,
     @SerialName("initial-regs")
-    val initialRegs: List<UInt>,
+    val initialRegs: List<ULong>,
     @SerialName("initial-pc")
     val initialPc: UInt,
     @SerialName("initial-page-map")

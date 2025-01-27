@@ -11,7 +11,7 @@ data class EnumVisitor<I : InstructionSet>(override val instructionSet: I) :
 
     override fun dispatch(opcode: UInt, chunk: ULong, offset: UInt, skip: UInt): Instruction {
         if (instructionSet.opcodeFromU8(opcode.toUByte()) == null) {
-            logger.debug("Opcode: ${opcode}, ${opcode.toUByte()}")
+            logger.debug("Invalid Opcode: ${opcode}, ${opcode.toUByte()}")
             return Instruction.Invalid
         }
 
