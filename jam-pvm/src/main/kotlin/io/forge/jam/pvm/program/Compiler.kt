@@ -51,6 +51,10 @@ class Compiler(
         )
     }
 
+    override fun memset() {
+        TODO("Not yet implemented")
+    }
+
     override fun fallthrough() {
         val target = nextProgramCounter()
         logger.debug("Target: $target")
@@ -757,6 +761,22 @@ class Compiler(
         TODO("Not yet implemented")
     }
 
+    override fun rotateRightImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImmAlt32(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImm64(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImmAlt64(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
     override fun branchNotEq(s1: RawReg, s2: RawReg, i: UInt) {
         val targetTrue = ProgramCounter(i)
         if (!module.isJumpTargetValid(targetTrue)) {
@@ -1062,6 +1082,50 @@ class Compiler(
         )
     }
 
+    override fun andInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun orInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun xnor(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun maximum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun maximumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun minimum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun minimumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateLeft32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateLeft64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRight64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
     override fun cmovIfZero(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
         instance.emit(
             RawHandlers.cmovIfZero,
@@ -1157,6 +1221,46 @@ class Compiler(
     }
 
     override fun sbrk(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countLeadingZeroBits32(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countLeadingZeroBits64(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countTrailingZeroBits32(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countTrailingZeroBits64(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countSetBits32(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun countSetBits64(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun signExtend8(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun signExtend16(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun zeroExtend16(reg1: RawReg, reg2: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun reverseByte(reg1: RawReg, reg2: RawReg) {
         TODO("Not yet implemented")
     }
 

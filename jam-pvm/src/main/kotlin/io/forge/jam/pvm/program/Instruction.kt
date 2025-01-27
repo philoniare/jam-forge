@@ -317,6 +317,7 @@ sealed class Instruction {
      */
     fun opcode(): Opcode = when (this) {
         is Panic -> Opcode.panic
+        is Memset -> Opcode.memset
         is Fallthrough -> Opcode.fallthrough
         is JumpIndirect -> Opcode.jump_indirect
         is LoadImm -> Opcode.load_imm
@@ -432,32 +433,31 @@ sealed class Instruction {
         is ShiftArithmeticRightImm32 -> Opcode.shift_arithmetic_right_imm_32
         is ShiftArithmeticRightImm64 -> Opcode.shift_arithmetic_right_imm_64
         is Invalid -> Opcode.panic
-        is AndInverted -> TODO()
-        is CountLeadingZeroBits32 -> TODO()
-        is CountLeadingZeroBits64 -> TODO()
-        is CountSetBits32 -> TODO()
-        is CountSetBits64 -> TODO()
-        is CountTrailingZeroBits32 -> TODO()
-        is CountTrailingZeroBits64 -> TODO()
-        is Maximum -> TODO()
-        is MaximumUnsigned -> TODO()
-        Memset -> TODO()
-        is Minimum -> TODO()
-        is MinimumUnsigned -> TODO()
-        is OrInverted -> TODO()
-        is ReverseByte -> TODO()
-        is RotateLeft32 -> TODO()
-        is RotateLeft64 -> TODO()
-        is RotateRight32 -> TODO()
-        is RotateRight64 -> TODO()
-        is RotateRightImm32 -> TODO()
-        is RotateRightImm64 -> TODO()
-        is RotateRightImmAlt32 -> TODO()
-        is RotateRightImmAlt64 -> TODO()
-        is SignExtend16 -> TODO()
-        is SignExtend8 -> TODO()
-        is Xnor -> TODO()
-        is ZeroExtend16 -> TODO()
+        is AndInverted -> Opcode.and_inverted
+        is CountLeadingZeroBits32 -> Opcode.count_leading_zero_bits_32
+        is CountLeadingZeroBits64 -> Opcode.count_leading_zero_bits_64
+        is CountSetBits32 -> Opcode.count_set_bits_32
+        is CountSetBits64 -> Opcode.count_set_bits_64
+        is CountTrailingZeroBits32 -> Opcode.count_trailing_zero_bits_32
+        is CountTrailingZeroBits64 -> Opcode.count_trailing_zero_bits_64
+        is Maximum -> Opcode.maximum
+        is MaximumUnsigned -> Opcode.maximum_unsigned
+        is Minimum -> Opcode.minimum
+        is MinimumUnsigned -> Opcode.minimum_unsigned
+        is OrInverted -> Opcode.or_inverted
+        is ReverseByte -> Opcode.reverse_byte
+        is RotateLeft32 -> Opcode.rotate_left_32
+        is RotateLeft64 -> Opcode.rotate_left_64
+        is RotateRight32 -> Opcode.rotate_right_32
+        is RotateRight64 -> Opcode.rotate_right_64
+        is RotateRightImm32 -> Opcode.rotate_right_imm_32
+        is RotateRightImm64 -> Opcode.rotate_right_imm_64
+        is RotateRightImmAlt32 -> Opcode.rotate_right_imm_alt_32
+        is RotateRightImmAlt64 -> Opcode.rotate_right_imm_alt_64
+        is SignExtend16 -> Opcode.sign_extend_16
+        is SignExtend8 -> Opcode.sign_extend_8
+        is Xnor -> Opcode.xnor
+        is ZeroExtend16 -> Opcode.zero_extend_16
     }
 
     /**

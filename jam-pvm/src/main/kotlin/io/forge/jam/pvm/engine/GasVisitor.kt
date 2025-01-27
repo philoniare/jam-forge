@@ -37,12 +37,56 @@ class GasVisitor : InstructionVisitor<Unit> {
         startNewBasicBlock()
     }
 
+    override fun memset() {
+        TODO("Not yet implemented")
+    }
+
     override fun fallthrough() {
         cost += 1u
         startNewBasicBlock()
     }
 
     override fun sbrk(_d: RawReg, _s: RawReg) {
+        cost += 1u
+    }
+
+    override fun countLeadingZeroBits32(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun countLeadingZeroBits64(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun countTrailingZeroBits32(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun countTrailingZeroBits64(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun countSetBits32(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun countSetBits64(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun signExtend8(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun signExtend16(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun zeroExtend16(reg1: RawReg, reg2: RawReg) {
+        cost += 1u
+    }
+
+    override fun reverseByte(reg1: RawReg, reg2: RawReg) {
         cost += 1u
     }
 
@@ -162,6 +206,50 @@ class GasVisitor : InstructionVisitor<Unit> {
         cost += 1u
     }
 
+    override fun andInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun orInverted(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun xnor(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun maximum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun maximumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun minimum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun minimumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateLeft32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateLeft64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRight64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
+        TODO("Not yet implemented")
+    }
+
     override fun mulImm32(d: RawReg, s1: RawReg, s2: UInt) {
         cost += 1u
     }
@@ -264,6 +352,22 @@ class GasVisitor : InstructionVisitor<Unit> {
 
     override fun cmovIfNotZeroImm(d: RawReg, c: RawReg, s: UInt) {
         cost += 1u
+    }
+
+    override fun rotateRightImm32(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImmAlt32(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImm64(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
+    }
+
+    override fun rotateRightImmAlt64(reg1: RawReg, reg2: RawReg, imm: UInt) {
+        TODO("Not yet implemented")
     }
 
     override fun addImm32(d: RawReg, s: RawReg, imm: UInt) {
