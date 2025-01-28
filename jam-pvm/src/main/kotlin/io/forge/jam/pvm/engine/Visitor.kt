@@ -285,14 +285,11 @@ class Visitor(
         length: UInt,
         isDynamic: Boolean
     ): Target? {
-        println("Base: ${base}")
         val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
         val pageAddressLo = inner.module.roundToPageSizeDown(address)
-        println("Address: ${address}")
 
         if (!isDynamic) {
             // Basic memory mode
-            println("Before reading: $address, $length")
             try {
                 val slice = inner.basicMemory.getMemorySlice(inner.module, address, length) ?: run {
                     logger.debug("Load of $length bytes from 0x${address.toString(16)} failed! (pc = $programCounter, cycle = ${inner.cycleCounter})")
@@ -402,6 +399,9 @@ class Visitor(
         offset: UInt,
         isDynamic: Boolean
     ): Target? {
+        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
+        val pageAddressLo = inner.module.roundToPageSizeDown(address)
+
         // Get the source value
         val value = when (src) {
             is RegImm.RegValue -> {
@@ -412,7 +412,6 @@ class Visitor(
             }
 
             is RegImm.ImmValue -> {
-                // Convert immediate value to ULong with sign extension
                 val immValue = Cast(Cast(src.value).uintToSigned())
                     .intToI64SignExtend()
                     .let { Cast(it) }
@@ -421,9 +420,6 @@ class Visitor(
                 immValue
             }
         }
-
-        // Calculate target address
-        val address = base?.let { get32(RegImm.RegValue(it)) }?.let { it.plus(offset) and 0xFFFFFFFFu } ?: offset
 
         // Get the StoreTy implementation
         val storeTy = when (T::class) {
@@ -437,21 +433,24 @@ class Visitor(
         // Convert value to bytes
         val bytes = storeTy.intoBytes(value)
         val length = bytes.size.toUInt()
+        println("Length: ${length}")
 
         if (!isDynamic) {
             // Basic memory mode
-            inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
-                bytes.copyInto(slice)
-                return goToNextInstruction()
-            } ?: return panicImpl(this, programCounter)
+            try {
+                inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
+                    bytes.copyInto(slice)
+                    return goToNextInstruction()
+                } ?: return panicImpl(this, programCounter)
+            } catch (e: ArrayIndexOutOfBoundsException) {
+                return segfaultImpl(programCounter, pageAddressLo)
+            }
         } else {
             // Dynamic memory mode
             val addressEnd = address.plus(length)
             if (addressEnd < address) {
                 return panicImpl(this, programCounter)
             }
-
-            val pageAddressLo = inner.module.roundToPageSizeDown(address)
             val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
 
             if (pageAddressLo == pageAddressHi) {

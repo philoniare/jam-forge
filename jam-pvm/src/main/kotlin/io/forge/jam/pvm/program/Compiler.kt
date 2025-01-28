@@ -415,7 +415,19 @@ class Compiler(
     }
 
     override fun storeImmIndirectU8(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmIndirectU8Basic,
+                Args.storeImmIndirectU8Basic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU8Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmIndirectU8Dynamic,
+                Args.storeImmIndirectU8Dynamic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU8Dynamic"
+            )
+        }
     }
 
     override fun storeImmIndirectU16(reg: RawReg, imm1: UInt, imm2: UInt) {

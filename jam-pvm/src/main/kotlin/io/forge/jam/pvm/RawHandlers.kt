@@ -2008,4 +2008,26 @@ object RawHandlers {
         visitor.store<U8StoreTy>(programCounter, src.toRegImm(), null, offset, true)
     }
 
+    val storeImmIndirectU8Basic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u8_basic [${base} + 0x${offset.toString(16)}] = $value")
+        visitor.store<U8StoreTy>(programCounter, value.intoRegImm(), base, offset, false)
+    }
+
+    val storeImmIndirectU8Dynamic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u8_dynamic [${base} + 0x${offset.toString(16)}] = $value")
+        visitor.store<U8StoreTy>(programCounter, value.intoRegImm(), base, offset, true)
+    }
+
 }

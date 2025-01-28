@@ -925,5 +925,19 @@ data class Args(
             a1 = src.toU32(),
             a2 = offset
         )
+
+        fun storeImmIndirectU8Basic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU8Dynamic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
     }
 }
