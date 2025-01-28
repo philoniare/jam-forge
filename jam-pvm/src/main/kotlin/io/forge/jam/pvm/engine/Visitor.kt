@@ -285,13 +285,19 @@ class Visitor(
         length: UInt,
         isDynamic: Boolean
     ): Target? {
-
-        val address = base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() }?.let { it.plus(offset) } ?: 0u
-        println("Offset: ${address}")
+        println("Base: ${base}")
+        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
+        val pageAddressLo = inner.module.roundToPageSizeDown(address)
+        println("Address: ${address}")
 
         if (!isDynamic) {
             // Basic memory mode
-            inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
+            println("Before reading: $address, $length")
+            try {
+                val slice = inner.basicMemory.getMemorySlice(inner.module, address, length) ?: run {
+                    logger.debug("Load of $length bytes from 0x${address.toString(16)} failed! (pc = $programCounter, cycle = ${inner.cycleCounter})")
+                    return panicImpl(this, programCounter)
+                }
                 val loadTy = when (T::class) {
                     U8LoadTy::class -> U8LoadTy
                     I8LoadTy::class -> I8LoadTy
@@ -307,7 +313,9 @@ class Visitor(
                 logger.debug("Memory  $dst = $loadTy [0x${address}] = 0x${value}")
                 set64(dst, value)
                 return goToNextInstruction()
-            } ?: return panicImpl(this, programCounter)
+            } catch (e: ArrayIndexOutOfBoundsException) {
+                return segfaultImpl(programCounter, pageAddressLo)
+            }
         } else {
             // Dynamic memory mode
             val addressEnd = address.plus(length)
@@ -315,9 +323,7 @@ class Visitor(
                 return panicImpl(this, programCounter)
             }
 
-            val pageAddressLo = inner.module.roundToPageSizeDown(address)
             val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
-
             if (pageAddressLo == pageAddressHi) {
                 // Single page access
                 val page =

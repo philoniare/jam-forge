@@ -109,13 +109,17 @@ class PvmTest {
 
 
             var finalPc = inputCase.initialPc
+            var pageFaultAddress = 0u
             val actualStatus = run {
                 while (true) {
-                    val result = instance.run().getOrThrow()
-                    when (result) {
+                    when (val result = instance.run().getOrThrow()) {
                         InterruptKind.Finished -> return@run PvmStatus.HALT
                         InterruptKind.Panic -> return@run PvmStatus.PANIC
-                        is InterruptKind.Segfault -> return@run PvmStatus.PAGE_FAULT
+                        is InterruptKind.Segfault -> {
+                            pageFaultAddress = result.fault.pageAddress
+                            return@run PvmStatus.PAGE_FAULT
+                        }
+
                         InterruptKind.NotEnoughGas -> return@run "out-of-gas"
                         InterruptKind.Step -> {
                             finalPc = instance.programCounter()!!.value
@@ -149,6 +153,11 @@ class PvmTest {
                 assertUIntListMatchesBytes(memory.contents, actualMemory)
             }
             assertEquals(inputCase.expectedGas, instance.gas(), "Gas mismatch.")
+            inputCase.expectedPageFaultAddress?.let {
+                if (it != 0u) {
+                    assertEquals(it, pageFaultAddress, "Page fault address mismatch.")
+                }
+            }
         }
     }
 }

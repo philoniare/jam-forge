@@ -26,5 +26,7 @@ data class PvmCase(
     @SerialName("expected-memory")
     val expectedMemory: List<Memory>,
     @SerialName("expected-gas")
-    val expectedGas: Long
+    val expectedGas: Long,
+    @SerialName("expected-page-fault-address")
+    val expectedPageFaultAddress: UInt? = 0u
 )
