@@ -2030,4 +2030,90 @@ object RawHandlers {
         visitor.store<U8StoreTy>(programCounter, value.intoRegImm(), base, offset, true)
     }
 
+    val storeImmIndirectU16Basic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u16_basic [${base} + 0x${offset.toString(16)}] = $value")
+        visitor.store<U16StoreTy>(programCounter, value.intoRegImm(), base, offset, false)
+    }
+
+    val storeImmIndirectU16Dynamic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug(
+            "[${visitor.inner.compiledOffset}]: store_imm_indirect_u16_dynamic [${base} + 0x${
+                offset.toString(
+                    16
+                )
+            }] = $value"
+        )
+        visitor.store<U16StoreTy>(programCounter, value.intoRegImm(), base, offset, true)
+    }
+
+    // U32 handlers
+    val storeImmIndirectU32Basic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u32_basic [${base} + 0x${offset.toString(16)}] = $value")
+        visitor.store<U32StoreTy>(programCounter, value.intoRegImm(), base, offset, false)
+    }
+
+    val storeImmIndirectU32Dynamic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug(
+            "[${visitor.inner.compiledOffset}]: store_imm_indirect_u32_dynamic [${base} + 0x${
+                offset.toString(
+                    16
+                )
+            }] = $value"
+        )
+        visitor.store<U32StoreTy>(programCounter, value.intoRegImm(), base, offset, true)
+    }
+
+    // U64 handlers
+    val storeImmIndirectU64Basic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u64_basic [${base} + 0x${offset.toString(16)}] = $value")
+        visitor.store<U64StoreTy>(programCounter, value.intoRegImm(), base, offset, false)
+    }
+
+    val storeImmIndirectU64Dynamic: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val programCounter = ProgramCounter(args.a0)
+        val base = transmuteReg(args.a1)
+        val offset = args.a2
+        val value = args.a3
+
+        logger.debug(
+            "[${visitor.inner.compiledOffset}]: store_imm_indirect_u64_dynamic [${base} + 0x${
+                offset.toString(
+                    16
+                )
+            }] = $value"
+        )
+        visitor.store<U64StoreTy>(programCounter, value.intoRegImm(), base, offset, true)
+    }
+
 }

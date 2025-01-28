@@ -431,15 +431,51 @@ class Compiler(
     }
 
     override fun storeImmIndirectU16(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmIndirectU16Basic,
+                Args.storeImmIndirectU16Basic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU16Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmIndirectU16Dynamic,
+                Args.storeImmIndirectU16Dynamic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU16Dynamic"
+            )
+        }
     }
 
     override fun storeImmIndirectU32(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmIndirectU32Basic,
+                Args.storeImmIndirectU32Basic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU32Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmIndirectU32Dynamic,
+                Args.storeImmIndirectU32Dynamic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU32Dynamic"
+            )
+        }
     }
 
     override fun storeImmIndirectU64(reg: RawReg, imm1: UInt, imm2: UInt) {
-        TODO("Not yet implemented")
+        if (!module.isDynamicPaging()) {
+            instance.emit(
+                RawHandlers.storeImmIndirectU64Basic,
+                Args.storeImmIndirectU64Basic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU64Basic"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.storeImmIndirectU64Dynamic,
+                Args.storeImmIndirectU64Dynamic(programCounter, reg, imm1, imm2),
+                "storeImmIndirectU64Dynamic"
+            )
+        }
     }
 
     override fun storeIndirectU8(reg1: RawReg, reg2: RawReg, imm: UInt) {

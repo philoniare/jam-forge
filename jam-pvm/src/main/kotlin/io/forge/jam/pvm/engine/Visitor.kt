@@ -399,9 +399,6 @@ class Visitor(
         offset: UInt,
         isDynamic: Boolean
     ): Target? {
-        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
-        val pageAddressLo = inner.module.roundToPageSizeDown(address)
-
         // Get the source value
         val value = when (src) {
             is RegImm.RegValue -> {
@@ -433,7 +430,11 @@ class Visitor(
         // Convert value to bytes
         val bytes = storeTy.intoBytes(value)
         val length = bytes.size.toUInt()
-        println("Length: ${length}")
+
+        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
+        val pageAddressLo = inner.module.roundToPageSizeDown(address)
+        val addressEnd = address.plus(length)
+        val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
 
         if (!isDynamic) {
             // Basic memory mode
@@ -443,15 +444,13 @@ class Visitor(
                     return goToNextInstruction()
                 } ?: return panicImpl(this, programCounter)
             } catch (e: ArrayIndexOutOfBoundsException) {
-                return segfaultImpl(programCounter, pageAddressLo)
+                return segfaultImpl(programCounter, pageAddressHi)
             }
         } else {
             // Dynamic memory mode
-            val addressEnd = address.plus(length)
             if (addressEnd < address) {
                 return panicImpl(this, programCounter)
             }
-            val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
 
             if (pageAddressLo == pageAddressHi) {
                 println("Single page")

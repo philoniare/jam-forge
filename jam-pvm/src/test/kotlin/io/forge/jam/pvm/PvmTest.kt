@@ -141,7 +141,6 @@ class PvmTest {
             // Validate output state
             assertEquals(inputCase.expectedPc, finalPc, "Program counter mismatch.")
             // Validate reg values
-            println("ExpectedRegs: ${inputCase.expectedRegs}")
             inputCase.expectedRegs.forEachIndexed { index, value ->
                 assertEquals(value, instance.reg(Reg.fromRaw(index)!!), "Register $index mismatch.")
             }

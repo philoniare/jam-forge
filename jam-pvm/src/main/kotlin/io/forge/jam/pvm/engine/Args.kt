@@ -939,5 +939,47 @@ data class Args(
             a2 = offset,
             a3 = value
         )
+
+        fun storeImmIndirectU16Basic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU16Dynamic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU32Basic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU32Dynamic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU64Basic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
+
+        fun storeImmIndirectU64Dynamic(programCounter: ProgramCounter, base: RawReg, offset: UInt, value: UInt) = Args(
+            a0 = programCounter.value,
+            a1 = base.toU32(),
+            a2 = offset,
+            a3 = value
+        )
     }
 }
