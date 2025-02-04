@@ -50,6 +50,16 @@ data class Args(
             a1 = s.toU32()
         )
 
+        fun countTrailingZeroBits32(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
+        fun countTrailingZeroBits64(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
         fun countSetBits32(d: RawReg, s: RawReg) = Args(
             a0 = d.toU32(),
             a1 = s.toU32()

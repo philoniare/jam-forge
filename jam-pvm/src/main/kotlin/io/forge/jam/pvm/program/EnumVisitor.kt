@@ -662,7 +662,7 @@ data class EnumVisitor<I : InstructionSet>(override val instructionSet: I) :
 
             106 -> {
                 val (reg1, reg2) = Program.readArgsRegs2(chunk)
-                Instruction.CountLeadingZeroBits64(reg1, reg2)
+                Instruction.CountTrailingZeroBits64(reg1, reg2)
             }
 
             103 -> {

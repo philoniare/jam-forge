@@ -1346,11 +1346,19 @@ class Compiler(
     }
 
     override fun countTrailingZeroBits32(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.countTrailingZeroBits32,
+            Args.countTrailingZeroBits32(reg1, reg2),
+            "countTrailingZeroBits32"
+        )
     }
 
     override fun countTrailingZeroBits64(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented")
+        instance.emit(
+            RawHandlers.countTrailingZeroBits64,
+            Args.countTrailingZeroBits64(reg1, reg2),
+            "countTrailingZeroBits64"
+        )
     }
 
     override fun countSetBits32(reg1: RawReg, reg2: RawReg) {
