@@ -33,7 +33,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             else -> {
                 val subPeaks = peaks.dropLast(1)
                 val lastPeak = peaks.last()
-                val prefix = "node".toByteArray()
+                val prefix = "peak".toByteArray()
                 val recursiveResult = calculatePeak(subPeaks)
                 keccakHash(prefix + recursiveResult + lastPeak.bytes)
             }
