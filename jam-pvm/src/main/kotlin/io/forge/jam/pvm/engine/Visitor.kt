@@ -207,7 +207,9 @@ class Visitor(
      */
     @Suppress("NOTHING_TO_INLINE")
     inline fun set64(dst: Reg, value: ULong) {
+        println("Calling set64: $dst = $value")
         inner.regs[dst.toIndex()] = value
+        println("Registers: ${inner.regs.toList()}")
     }
 
     /**
@@ -285,112 +287,78 @@ class Visitor(
         length: UInt,
         isDynamic: Boolean
     ): Target? {
-        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
-        val pageAddressLo = inner.module.roundToPageSizeDown(address)
-
-        if (!isDynamic) {
-            // Basic memory mode
-            try {
-                val slice = inner.basicMemory.getMemorySlice(inner.module, address, length) ?: run {
-                    logger.debug("Load of $length bytes from 0x${address.toString(16)} failed! (pc = $programCounter, cycle = ${inner.cycleCounter})")
-                    return panicImpl(this, programCounter)
-                }
-                val loadTy = when (T::class) {
-                    U8LoadTy::class -> U8LoadTy
-                    I8LoadTy::class -> I8LoadTy
-                    U16LoadTy::class -> U16LoadTy
-                    I16LoadTy::class -> I16LoadTy
-                    U32LoadTy::class -> U32LoadTy
-                    I32LoadTy::class -> I32LoadTy
-                    U64LoadTy::class -> U64LoadTy
-                    else -> throw IllegalArgumentException("Unknown LoadTy type")
-                }
-                logger.debug("Slice: ${slice.toHex()}")
-                val value = loadTy.fromSlice(slice)
-                logger.debug("Memory  $dst = $loadTy [0x${address}] = 0x${value}")
-                set64(dst, value)
-                return goToNextInstruction()
-            } catch (e: ArrayIndexOutOfBoundsException) {
-                return segfaultImpl(programCounter, pageAddressLo)
-            }
+        val rawBase: ULong = if (base != null) {
+            val regValue = inner.regs[base.toIndex()]
+            PvmLogger(Visitor::class.java).debug("Load: base $base raw value = 0x${regValue.toString(16)}")
+            regValue
         } else {
-            // Dynamic memory mode
-            val addressEnd = address.plus(length)
-            if (addressEnd < address) {
+            0u
+        }
+        val truncatedBase: UInt = Cast(rawBase).ulongTruncateToU32()
+        PvmLogger(Visitor::class.java).debug(
+            "Load: truncated base value = 0x${truncatedBase.toString(16)}; offset = 0x${
+                offset.toString(
+                    16
+                )
+            }"
+        )
+        val effectiveAddress = truncatedBase.plus(offset)
+        PvmLogger(Visitor::class.java).debug("Load: effective address = 0x${effectiveAddress.toString(16)}")
+
+        val pageBase = inner.module.roundToPageSizeDown(effectiveAddress)
+        val offsetInPage = effectiveAddress - pageBase
+        PvmLogger(Visitor::class.java).debug(
+            "Load: pageBase = 0x${pageBase.toString(16)}, offsetInPage = 0x${
+                offsetInPage.toString(
+                    16
+                )
+            }"
+        )
+
+        try {
+            val slice = inner.basicMemory.getMemorySlice(inner.module, effectiveAddress, length) ?: run {
+                PvmLogger(Visitor::class.java).debug(
+                    "Load: getMemorySlice returned null for address 0x${
+                        effectiveAddress.toString(
+                            16
+                        )
+                    } and length $length"
+                )
                 return panicImpl(this, programCounter)
             }
-
-            val pageAddressHi = inner.module.roundToPageSizeDown(addressEnd - 1u)
-            if (pageAddressLo == pageAddressHi) {
-                // Single page access
-                val page =
-                    inner.dynamicMemory.pages[pageAddressLo]
-                        ?: return segfaultImpl(programCounter, pageAddressLo)
-
-                try {
-                    val offset = Cast(address).uintToUSize() - Cast(pageAddressLo).uintToUSize()
-                    val slice = page.sliceArray(offset.toInt() until offset.toInt() + length.toInt())
-
-                    val loadTy = when (T::class) {
-                        U8LoadTy::class -> U8LoadTy
-                        I8LoadTy::class -> I8LoadTy
-                        U16LoadTy::class -> U16LoadTy
-                        I16LoadTy::class -> I16LoadTy
-                        U32LoadTy::class -> U32LoadTy
-                        I32LoadTy::class -> I32LoadTy
-                        U64LoadTy::class -> U64LoadTy
-                        else -> throw IllegalArgumentException("Unknown LoadTy type")
-                    }
-
-                    val value = loadTy.fromSlice(slice)
-                    set64(dst, value)
-                    return goToNextInstruction()
-
-                } catch (e: IndexOutOfBoundsException) {
-                    return panicImpl(this, programCounter)
-                }
-            } else {
-                // Cross-page access
-                val pages = inner.dynamicMemory.pages
-                val lo = pages[pageAddressLo]
-                val hi = pages[pageAddressHi]
-
-                when {
-                    lo != null && hi != null -> {
-                        try {
-                            val pageSize = inner.module.memoryMap().pageSize.toInt()
-                            val loLen = (pageAddressHi - address).toInt()
-                            val hiLen = length.toInt() - loLen
-                            val buffer = ByteArray(length.toInt())
-
-                            System.arraycopy(lo, pageSize - loLen, buffer, 0, loLen)
-                            System.arraycopy(hi, 0, buffer, loLen, hiLen)
-
-                            val loadTy = when (T::class) {
-                                U8LoadTy::class -> U8LoadTy
-                                I8LoadTy::class -> I8LoadTy
-                                U16LoadTy::class -> U16LoadTy
-                                I16LoadTy::class -> I16LoadTy
-                                U32LoadTy::class -> U32LoadTy
-                                I32LoadTy::class -> I32LoadTy
-                                U64LoadTy::class -> U64LoadTy
-                                else -> throw IllegalArgumentException("Unknown LoadTy type")
-                            }
-                            val value = loadTy.fromSlice(buffer)
-                            set64(dst, value)
-                            return goToNextInstruction()
-                        } catch (e: ArrayIndexOutOfBoundsException) {
-                            return segfaultImpl(programCounter, pageAddressLo)
-                        }
-                    }
-
-                    lo == null -> return segfaultImpl(programCounter, pageAddressLo)
-                    else -> return segfaultImpl(programCounter, pageAddressHi)
-                }
+            PvmLogger(Visitor::class.java).debug(
+                "Load: got memory slice of length ${slice.size} for address 0x${
+                    effectiveAddress.toString(
+                        16
+                    )
+                }; offsetInPage = $offsetInPage"
+            )
+            val loadTy = when (T::class) {
+                U8LoadTy::class -> U8LoadTy
+                I8LoadTy::class -> I8LoadTy
+                U16LoadTy::class -> U16LoadTy
+                I16LoadTy::class -> I16LoadTy
+                U32LoadTy::class -> U32LoadTy
+                I32LoadTy::class -> I32LoadTy
+                U64LoadTy::class -> U64LoadTy
+                else -> throw IllegalArgumentException("Unknown LoadTy type")
             }
+            PvmLogger(Visitor::class.java).debug("Load: Slice: ${slice.toHex()}")
+            val value = loadTy.fromSlice(slice)
+            PvmLogger(Visitor::class.java).debug(
+                "Load: setting $dst = $loadTy [0x${effectiveAddress.toString(16)}] = 0x${
+                    value.toString(
+                        16
+                    )
+                }"
+            )
+            set64(dst, value)
+            return goToNextInstruction()
+        } catch (e: ArrayIndexOutOfBoundsException) {
+            return segfaultImpl(programCounter, inner.module.roundToPageSizeDown(effectiveAddress))
         }
-
     }
+
 
     inline fun <reified T : StoreTy> store(
         programCounter: ProgramCounter,
@@ -399,16 +367,43 @@ class Visitor(
         offset: UInt,
         isDynamic: Boolean
     ): Target? {
-        val address = (base?.let { Cast(inner.regs[base.toIndex()]).ulongTruncateToU32() } ?: 0u).plus(offset)
-        val pageAddressLo = inner.module.roundToPageSizeDown(address)
+        // Compute effective address:
+        val rawBase: ULong = if (base != null) {
+            val regValue = inner.regs[base.toIndex()]
+            PvmLogger(Visitor::class.java).debug("Store: base $base raw value = 0x${regValue.toString(16)}")
+            regValue
+        } else {
+            0u
+        }
+        val truncatedBase: UInt = Cast(rawBase).ulongTruncateToU32()
+        PvmLogger(Visitor::class.java).debug(
+            "Store: truncated base value = 0x${truncatedBase.toString(16)}; offset = 0x${
+                offset.toString(
+                    16
+                )
+            }"
+        )
+        val effectiveAddress = truncatedBase.plus(offset)
+        PvmLogger(Visitor::class.java).debug("Store: effective address = 0x${effectiveAddress.toString(16)}")
+
+        // Compute page info:
+        val pageBase = inner.module.roundToPageSizeDown(effectiveAddress)
+        val offsetInPage = effectiveAddress - pageBase
+        PvmLogger(Visitor::class.java).debug(
+            "Store: pageBase = 0x${pageBase.toString(16)}, offsetInPage = 0x${
+                offsetInPage.toString(
+                    16
+                )
+            }"
+        )
+
         val pageSize = inner.module.memoryMap().pageSize
 
         // Get the source value
         val value = when (src) {
             is RegImm.RegValue -> {
-                // Get value from register
                 val regValue = inner.regs[src.reg.toIndex()]
-                logger.debug("Memory [0x${offset.toString(16)}] = ${src.reg} = 0x${regValue.toString(16)}")
+                PvmLogger(Visitor::class.java).debug("Store: source from reg ${src.reg} = 0x${regValue.toString(16)}")
                 regValue
             }
 
@@ -417,12 +412,10 @@ class Visitor(
                     .intToI64SignExtend()
                     .let { Cast(it) }
                     .longToUnsigned()
-                logger.debug("Memory [0x${offset.toString(16)}] = 0x${immValue.toString(16)}")
+                PvmLogger(Visitor::class.java).debug("Store: source immediate = 0x${immValue.toString(16)}")
                 immValue
             }
         }
-
-        // Get the StoreTy implementation
         val storeTy = when (T::class) {
             U8StoreTy::class -> U8StoreTy
             U16StoreTy::class -> U16StoreTy
@@ -430,83 +423,55 @@ class Visitor(
             U64StoreTy::class -> U64StoreTy
             else -> throw IllegalArgumentException("Unknown StoreTy type")
         }
-
-        // Convert value to bytes
         val bytes = storeTy.intoBytes(value)
         val length = bytes.size.toUInt()
 
-        val endAddress = address.plus(length)
-        if (endAddress < address) {
+        val endAddress = effectiveAddress.plus(length)
+        if (endAddress < effectiveAddress) {
             return panicImpl(this, programCounter)
         }
         val pageAddressHi = inner.module.roundToPageSizeDown(endAddress - 1u)
 
         if (!isDynamic) {
-            // Basic memory mode
             try {
-                val startPage = inner.module.roundToPageSizeDown(address)
+                val startPage = inner.module.roundToPageSizeDown(effectiveAddress)
                 val endPage = inner.module.roundToPageSizeDown(endAddress - 1u)
-
-                // Check if all pages in range are mapped
+                PvmLogger(Visitor::class.java).debug(
+                    "Store: startPage = 0x${startPage.toString(16)}, endPage = 0x${
+                        endPage.toString(
+                            16
+                        )
+                    }"
+                )
                 for (currentPage in startPage..endPage step pageSize.toInt()) {
                     if (!inner.basicMemory.isPageMapped(inner.module, currentPage)) {
                         return segfaultImpl(programCounter, currentPage)
                     }
                 }
 
-                if (!inner.basicMemory.isWritable(inner.module, address, length)) {
-                    logger.debug("Attempt to write to read-only memory at 0x${address.toString(16)}")
+                if (!inner.basicMemory.isWritable(inner.module, effectiveAddress, length)) {
+                    PvmLogger(Visitor::class.java).debug(
+                        "Store: Attempt to write to read-only memory at 0x${
+                            effectiveAddress.toString(
+                                16
+                            )
+                        }"
+                    )
                     return panicImpl(this, programCounter)
                 }
-
-                if (!inner.basicMemory.isWritable(inner.module, address, length)) {
-                    logger.debug("Attempt to write to read-only memory at 0x${address.toString(16)}")
-                    return panicImpl(this, programCounter)
-                }
-
-                inner.basicMemory.getMemorySlice(inner.module, address, length)?.let { slice ->
-                    bytes.copyInto(slice)
+                // Update the RW mutable slice
+                inner.basicMemory.getMemorySliceMut(inner.module, effectiveAddress, length)?.let { mutableSlice ->
+                    for (i in 0 until bytes.size) {
+                        mutableSlice[i] = bytes[i].toUByte()
+                    }
                     return goToNextInstruction()
                 } ?: return panicImpl(this, programCounter)
+
             } catch (e: ArrayIndexOutOfBoundsException) {
                 return segfaultImpl(programCounter, pageAddressHi)
             }
-        } else {
-            // Dynamic memory mode
-            if (pageAddressLo == pageAddressHi) {
-                println("Single page")
-                // Single page access
-                inner.dynamicMemory.pages[pageAddressLo]?.let { page ->
-                    val pageOffset = (address - pageAddressLo).toInt()
-                    bytes.copyInto(page, pageOffset)
-                    return goToNextInstruction()
-                } ?: return panicImpl(this, programCounter)
-            } else {
-                println("Single page")
-                // Cross-page access
-                val pages = inner.dynamicMemory.pages
-                val lo = pages[pageAddressLo]
-                val hi = pages[pageAddressHi]
-
-                when {
-                    lo != null && hi != null -> {
-                        val pageSize = inner.module.memoryMap().pageSize.toInt()
-                        val loLen = (pageAddressHi - address).toInt()
-                        val hiLen = bytes.size - loLen
-
-                        // Copy to low page
-                        bytes.copyInto(lo, pageSize - loLen, 0, loLen)
-                        // Copy to high page
-                        bytes.copyInto(hi, 0, loLen, loLen + hiLen)
-
-                        return goToNextInstruction()
-                    }
-
-                    lo == null -> return segfaultImpl(programCounter, pageAddressLo)
-                    else -> return segfaultImpl(programCounter, pageAddressHi)
-                }
-            }
         }
+        return panicImpl(this, programCounter)
     }
 
     fun jumpIndirectImpl(programCounter: ProgramCounter, dynamicAddress: UInt): Target? {
