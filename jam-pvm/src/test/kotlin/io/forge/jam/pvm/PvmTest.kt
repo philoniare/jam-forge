@@ -81,9 +81,8 @@ class PvmTest {
 
                     // Copy contents from each memory segment
                     rwMemory.forEach { mem ->
-                        val offset = (mem.address - rwPages[0].address).toInt()
+                        val offset = (mem.address - minAddress).toInt()
                         mem.contents.forEachIndexed { index, value ->
-                            println("Offset: $offset, index: $index, rwData: ${mem.address}")
                             rwData[offset + index] = value.toByte()
                         }
                     }
