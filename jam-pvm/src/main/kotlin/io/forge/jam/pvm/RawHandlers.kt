@@ -492,6 +492,26 @@ object RawHandlers {
         visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a xor b }
     }
 
+    val xnor32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            (a xor b).inv()
+        }
+    }
+
+    val xnor64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b ->
+            (a xor b).inv()
+        }
+    }
+
     val sub32: Handler = { visitor ->
         val args = getArgs(visitor)
         val d = transmuteReg(args.a0)

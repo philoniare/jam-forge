@@ -1227,7 +1227,19 @@ class Compiler(
     }
 
     override fun xnor(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: xnor")
+        if (module.blob().is64Bit) {
+            instance.emit(
+                RawHandlers.xnor64,
+                Args.xnor64(reg1, reg2, reg3),
+                "xnor64"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.xnor32,
+                Args.xnor32(reg1, reg2, reg3),
+                "xnor32"
+            )
+        }
     }
 
     override fun maximum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
