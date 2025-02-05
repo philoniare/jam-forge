@@ -74,12 +74,16 @@ class PvmTest {
                 // Initialize memory based on rwMemory contents
                 if (rwMemory.isNotEmpty()) {
                     // Calculate size needed for memory contents
-                    val rwData = ByteArray(rwMemory.sumOf { it.contents.size })
+                    val minAddress = rwMemory.minOf { it.address }
+                    val maxAddress = rwMemory.maxOf { it.address.toInt() + it.contents.size }
+                    val totalSize = maxAddress - minAddress.toInt()
+                    val rwData = ByteArray(totalSize.toInt())
 
                     // Copy contents from each memory segment
                     rwMemory.forEach { mem ->
                         val offset = (mem.address - rwPages[0].address).toInt()
                         mem.contents.forEachIndexed { index, value ->
+                            println("Offset: $offset, index: $index, rwData: ${mem.address}")
                             rwData[offset + index] = value.toByte()
                         }
                     }
