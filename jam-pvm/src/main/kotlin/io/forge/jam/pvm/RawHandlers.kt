@@ -903,6 +903,17 @@ object RawHandlers {
         visitor.goToNextInstruction()
     }
 
+    val cmovIfNotZero: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val c = transmuteReg(args.a2)
+        if (visitor.get64(c.toRegImm()) != 0uL) {
+            visitor.set64(d, visitor.get64(s.toRegImm()))
+        }
+        visitor.goToNextInstruction()
+    }
+
     val divSigned32: Handler = { visitor ->
         val args = getArgs(visitor)
         val d = transmuteReg(args.a0)

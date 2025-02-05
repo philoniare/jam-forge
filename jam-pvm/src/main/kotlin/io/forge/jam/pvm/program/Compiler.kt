@@ -1287,7 +1287,10 @@ class Compiler(
     }
 
     override fun cmovIfNotZero(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: cmovIfNotZero")
+        instance.emit(
+            RawHandlers.cmovIfNotZero,
+            Args.cmovIfNotZero(reg1, reg2, reg3), "cmovIfNotZero"
+        )
     }
 
     override fun jump(imm: UInt) {
