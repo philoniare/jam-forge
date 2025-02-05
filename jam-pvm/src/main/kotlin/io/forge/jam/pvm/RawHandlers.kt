@@ -223,6 +223,27 @@ object RawHandlers {
         visitor.goToNextInstruction()
     }
 
+    val zeroExtend32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+
+        val hword = Cast(visitor.get32(s.toRegImm()))
+            .uintTruncateToU16()
+
+        visitor.set32(d, Cast(hword).ushortToU32())
+        visitor.goToNextInstruction()
+    }
+
+    val zeroExtend64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val hword = Cast(visitor.get64(s.toRegImm())).ulongTruncateToU16()
+        visitor.set64(d, Cast(hword).ushortToU64())
+        visitor.goToNextInstruction()
+    }
+
     val add32: Handler = { visitor ->
         val args = getArgs(visitor)
         logger.debug("Args: $args")

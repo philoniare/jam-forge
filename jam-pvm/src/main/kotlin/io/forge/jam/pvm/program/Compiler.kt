@@ -1508,7 +1508,19 @@ class Compiler(
     }
 
     override fun zeroExtend16(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented: zeroExtend16")
+        if (module.blob().is64Bit) {
+            instance.emit(
+                RawHandlers.zeroExtend64,
+                Args.zeroExtend64(reg1, reg2),
+                "zeroExtend64"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.zeroExtend32,
+                Args.zeroExtend32(reg1, reg2),
+                "zeroExtend32"
+            )
+        }
     }
 
     override fun reverseByte(reg1: RawReg, reg2: RawReg) {
