@@ -45,6 +45,16 @@ data class Args(
             a1 = s.toU32()
         )
 
+        fun reverseByte32(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
+        fun reverseByte64(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
         fun countLeadingZeroBits64(d: RawReg, s: RawReg) = Args(
             a0 = d.toU32(),
             a1 = s.toU32()
@@ -440,6 +450,18 @@ data class Args(
         )
 
         fun rotateLeft64(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2.toU32()
+        )
+
+        fun rotateRight32(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
+            a0 = a0.toU32(),
+            a1 = a1.toU32(),
+            a2 = a2.toU32()
+        )
+
+        fun rotateRight64(a0: RawReg, a1: RawReg, a2: RawReg) = Args(
             a0 = a0.toU32(),
             a1 = a1.toU32(),
             a2 = a2.toU32()

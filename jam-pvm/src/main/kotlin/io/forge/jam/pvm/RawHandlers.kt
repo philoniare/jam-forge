@@ -21,6 +21,23 @@ fun transmuteReg(value: UInt): Reg {
 
 fun wrappingAddUInt(a: UInt, b: UInt): UInt = a.plus(b).toUInt()
 fun wrappingAddULong(a: ULong, b: ULong): ULong = a.plus(b).toULong()
+fun swapBytes(value: UInt): UInt {
+    return ((value and 0xFFu) shl 24) or
+        (((value shr 8) and 0xFFu) shl 16) or
+        (((value shr 16) and 0xFFu) shl 8) or
+        ((value shr 24) and 0xFFu)
+}
+
+fun swapBytes64(value: ULong): ULong {
+    return ((value and 0xFFuL) shl 56) or
+        (((value shr 8) and 0xFFuL) shl 48) or
+        (((value shr 16) and 0xFFuL) shl 40) or
+        (((value shr 24) and 0xFFuL) shl 32) or
+        (((value shr 32) and 0xFFuL) shl 24) or
+        (((value shr 40) and 0xFFuL) shl 16) or
+        (((value shr 48) and 0xFFuL) shl 8) or
+        ((value shr 56) and 0xFFuL)
+}
 
 fun getArgs(visitor: Visitor): Args =
     visitor.inner.compiledArgs[visitor.inner.compiledOffset.toInt()]
@@ -285,6 +302,22 @@ object RawHandlers {
         visitor.set3_64(d, s1.toRegImm(), s2.intoRegImm(), ::wrappingAddULong)
     }
 
+    val reverseByte32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        visitor.set32(d, swapBytes(visitor.get32(s.toRegImm())))
+        visitor.goToNextInstruction()
+    }
+
+    val reverseByte64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        visitor.set64(d, swapBytes64(visitor.get64(s.toRegImm())))
+        visitor.goToNextInstruction()
+    }
+
     val and: Handler = { visitor ->
         val args = getArgs(visitor)
         val d = transmuteReg(args.a0)
@@ -426,6 +459,26 @@ object RawHandlers {
         val s2 = transmuteReg(args.a2)
         visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { value, shift ->
             value.rotateLeft(
+                Cast(shift).ulongTruncateToU32().toInt() and 63
+            )
+        }
+    }
+
+    val rotateRight32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { value, shift -> value.rotateRight(shift.toInt() and 31) }
+    }
+
+    val rotateRight64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { value, shift ->
+            value.rotateRight(
                 Cast(shift).ulongTruncateToU32().toInt() and 63
             )
         }

@@ -1292,11 +1292,19 @@ class Compiler(
     }
 
     override fun rotateRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: rotateRight32")
+        instance.emit(
+            RawHandlers.rotateRight32,
+            Args.rotateRight32(reg1, reg2, reg3),
+            "rotateRight32"
+        )
     }
 
     override fun rotateRight64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: rotateRight64")
+        instance.emit(
+            RawHandlers.rotateRight64,
+            Args.rotateRight64(reg1, reg2, reg3),
+            "rotateRight64"
+        )
     }
 
     override fun cmovIfZero(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
@@ -1461,7 +1469,19 @@ class Compiler(
     }
 
     override fun reverseByte(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented: reverseByte")
+        if (module.blob().is64Bit) {
+            instance.emit(
+                RawHandlers.reverseByte64,
+                Args.reverseByte64(reg1, reg2),
+                "reverseByte64"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.reverseByte32,
+                Args.reverseByte32(reg1, reg2),
+                "reverseByte32"
+            )
+        }
     }
 
     override fun loadImmAndJumpIndirect(ra: RawReg, base: RawReg, value: UInt, offset: UInt) {
