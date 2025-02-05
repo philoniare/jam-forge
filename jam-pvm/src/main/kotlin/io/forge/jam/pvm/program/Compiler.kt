@@ -1276,11 +1276,19 @@ class Compiler(
     }
 
     override fun rotateLeft32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: rotateLeft32")
+        instance.emit(
+            RawHandlers.rotateLeft32,
+            Args.rotateLeft32(reg1, reg2, reg3),
+            "rotateLeft32"
+        )
     }
 
     override fun rotateLeft64(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: rotateLeft64")
+        instance.emit(
+            RawHandlers.rotateLeft64,
+            Args.rotateLeft64(reg1, reg2, reg3),
+            "rotateLeft64"
+        )
     }
 
     override fun rotateRight32(reg1: RawReg, reg2: RawReg, reg3: RawReg) {

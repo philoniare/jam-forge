@@ -411,6 +411,26 @@ object RawHandlers {
         visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { a, b -> a - b }
     }
 
+    val rotateLeft32: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_32(d, s1.toRegImm(), s2.toRegImm()) { value, shift -> value.rotateLeft(shift.toInt() and 31) }
+    }
+
+    val rotateLeft64: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s1 = transmuteReg(args.a1)
+        val s2 = transmuteReg(args.a2)
+        visitor.set3_64(d, s1.toRegImm(), s2.toRegImm()) { value, shift ->
+            value.rotateLeft(
+                Cast(shift).ulongTruncateToU32().toInt() and 63
+            )
+        }
+    }
+
     val branchGreaterOrEqualSignedImm: Handler = { visitor ->
         val args = getArgs(visitor)
         val s1 = transmuteReg(args.a0)
