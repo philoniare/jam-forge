@@ -7,10 +7,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class PreimageAccount(
     val id: Long,
-    val info: AccountInfo
+    val data: AccountInfo
 ) : Encodable {
     override fun encode(): ByteArray {
         val idBytes = encodeFixedWidthInteger(id, 4, false)
-        return idBytes + info.encode()
+        return idBytes + data.encode()
     }
 }

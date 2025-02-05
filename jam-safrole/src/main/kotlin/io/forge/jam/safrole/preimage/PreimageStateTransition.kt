@@ -16,7 +16,7 @@ class PreimageStateTransition {
             val length = submission.blob.size.toLong()
 
             // Verify this preimage was solicited and not already available
-            val historyEntry = account.info.history.find { historyItem ->
+            val historyEntry = account.data.lookupMeta.find { historyItem ->
                 historyItem.key.hash.bytes.contentEquals(hash) &&
                     historyItem.key.length == length &&
                     historyItem.value.isEmpty()
@@ -33,7 +33,7 @@ class PreimageStateTransition {
             val length = submission.blob.size.toLong()
 
             // Update history and preimages
-            val updatedHistory = account.info.history.map { item ->
+            val updatedHistory = account.data.lookupMeta.map { item ->
                 if (item.key.hash.bytes.contentEquals(hash) &&
                     item.key.length == length
                 ) {
@@ -43,14 +43,14 @@ class PreimageStateTransition {
                 }
             }.sortedBy { it.key.hash.toHex() }
 
-            val updatedPreimages = (account.info.preimages + PreimageHash(
+            val updatedPreimages = (account.data.preimages + PreimageHash(
                 hash = JamByteArray(hash),
                 blob = submission.blob
             )).sortedBy { it.hash.toHex() }
 
             // Update account state
-            account.info.history = updatedHistory
-            account.info.preimages = updatedPreimages
+            account.data.lookupMeta = updatedHistory
+            account.data.preimages = updatedPreimages
         }
 
         return Pair(postState, PreimageOutput(ok = null))
