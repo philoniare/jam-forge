@@ -180,6 +180,26 @@ object RawHandlers {
         visitor.goToNextInstruction()
     }
 
+    val signExtend832: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val byte = Cast(
+            Cast(visitor.get32(s.toRegImm())).uintTruncateToU8()
+        ).ubyteToSigned()
+        visitor.set32(d, Cast(Cast(byte).byteToI32SignExtend()).intToUnsigned())
+        visitor.goToNextInstruction()
+    }
+
+    val signExtend864: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val byte = Cast(Cast(visitor.get64(s.toRegImm())).ulongTruncateToU8()).ubyteToSigned()
+        visitor.set64(d, Cast(Cast(byte).byteToI64SignExtend()).longToUnsigned())
+        visitor.goToNextInstruction()
+    }
+
     val add32: Handler = { visitor ->
         val args = getArgs(visitor)
         logger.debug("Args: $args")

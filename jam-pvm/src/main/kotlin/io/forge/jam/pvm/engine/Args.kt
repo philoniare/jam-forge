@@ -45,6 +45,16 @@ data class Args(
             a1 = s.toU32()
         )
 
+        fun signExtend832(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
+        fun signExtend864(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
+        )
+
         fun reverseByte32(d: RawReg, s: RawReg) = Args(
             a0 = d.toU32(),
             a1 = s.toU32()
