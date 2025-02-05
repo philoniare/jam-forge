@@ -113,7 +113,6 @@ class Program {
                 opcodeVisitor.instructionSet.opcodeFromU8(opcode.toUByte()) != null ||
                     !isJumpTargetValid(opcodeVisitor.instructionSet, code, bitmask, offset + skip + 1u)
             )
-
             return Triple(
                 offset + skip + 1u,
                 opcodeVisitor.dispatch(opcode.toUInt(), chunkValue, offset, skip),
@@ -381,7 +380,7 @@ class Program {
             skip: UInt
         ): Triple<RawReg, UInt, UInt> {
             val (reg, imm1, imm2) = readArgsRegImm2(chunk, skip)
-            return Triple(reg, imm1, instructionOffset + imm2)
+            return Triple(reg, imm1, instructionOffset.plus(imm2))
         }
 
         /**

@@ -141,22 +141,22 @@ data class EnumVisitor<I : InstructionSet>(override val instructionSet: I) :
             }
 
             70 -> {
-                val (reg, imm1, imm2) = Program.readArgsRegImmOffset(chunk, offset, skip)
+                val (reg, imm1, imm2) = Program.readArgsRegImm2(chunk, skip)
                 Instruction.StoreImmIndirectU8(reg, imm1, imm2)
             }
 
             71 -> {
-                val (reg, imm1, imm2) = Program.readArgsRegImmOffset(chunk, offset, skip)
+                val (reg, imm1, imm2) = Program.readArgsRegImm2(chunk, skip)
                 Instruction.StoreImmIndirectU16(reg, imm1, imm2)
             }
 
             72 -> {
-                val (reg, imm1, imm2) = Program.readArgsRegImmOffset(chunk, offset, skip)
+                val (reg, imm1, imm2) = Program.readArgsRegImm2(chunk, skip)
                 Instruction.StoreImmIndirectU32(reg, imm1, imm2)
             }
 
             73 -> {
-                val (reg, imm1, imm2) = Program.readArgsRegImmOffset(chunk, offset, skip)
+                val (reg, imm1, imm2) = Program.readArgsRegImm2(chunk, skip)
                 Instruction.StoreImmIndirectU64(reg, imm1, imm2)
             }
 

@@ -408,17 +408,19 @@ class Visitor(
             is RegImm.RegValue -> {
                 // Get value from register
                 val regValue = inner.regs[src.reg.toIndex()]
-                logger.debug("Memory [0x${offset.toString(16)}] = ${src.reg} = 0x${regValue.toString(16)}")
+                logger.debug("Memory RegValue [0x${offset.toString(16)}] = ${src.reg} = 0x${regValue.toString(16)}")
                 regValue
             }
 
             is RegImm.ImmValue -> {
-                val immValue = Cast(Cast(src.value).uintToSigned())
+                val finalValue = Cast(src.value)
+                    .uintToSigned()
+                    .let { Cast(it) }
                     .intToI64SignExtend()
                     .let { Cast(it) }
                     .longToUnsigned()
-                logger.debug("Memory [0x${offset.toString(16)}] = 0x${immValue.toString(16)}")
-                immValue
+                logger.debug("Memory ImmValue [0x${offset.toString(16)}] = 0x${finalValue.toString(16)}")
+                finalValue
             }
         }
 

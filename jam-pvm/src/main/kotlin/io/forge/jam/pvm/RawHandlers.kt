@@ -2497,6 +2497,7 @@ object RawHandlers {
         val base = transmuteReg(args.a1)
         val offset = args.a2
         val value = args.a3
+        print("Basic args: ${args}")
 
         logger.debug("[${visitor.inner.compiledOffset}]: store_imm_indirect_u64_basic [${base} + 0x${offset.toString(16)}] = $value")
         visitor.store<U64StoreTy>(programCounter, value.intoRegImm(), base, offset, false)
@@ -2633,6 +2634,8 @@ object RawHandlers {
         val src = transmuteReg(args.a1)
         val base = transmuteReg(args.a2)
         val offset = args.a3
+
+        println("Args: ${args}")
 
         logger.debug("[${visitor.inner.compiledOffset}]: store_indirect_u64_basic [$base + 0x${offset.toString(16)}] = $src")
 
