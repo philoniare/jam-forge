@@ -95,8 +95,10 @@ object ArithmeticOps {
         return ((lhs.toLong() * rhs.toLong()) shr 32).toInt()
     }
 
-    fun mulhsu64(lhs: Long, rhs: ULong): Long {
-        return ((BigInteger.valueOf(lhs) * BigInteger.valueOf(rhs.toLong())) shr 64).toLong()
+    fun mulhsu64(a: Long, b: ULong): Long {
+        val aWide = a.toBigInteger()
+        val bWide = b.toString().toBigInteger()
+        return (aWide * bWide shr 64).toLong()
     }
 
     fun mulhu(lhs: UInt, rhs: UInt): UInt {
