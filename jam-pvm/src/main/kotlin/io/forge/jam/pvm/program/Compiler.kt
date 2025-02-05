@@ -1216,7 +1216,19 @@ class Compiler(
     }
 
     override fun maximumUnsigned(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
-        TODO("Not yet implemented: maximumUnsigned")
+        if (module.blob().is64Bit) {
+            instance.emit(
+                RawHandlers.maximumUnsigned64,
+                Args.maximumUnsigned64(reg1, reg2, reg3),
+                "maximumUnsigned64"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.maximumUnsigned32,
+                Args.maximumUnsigned32(reg1, reg2, reg3),
+                "maximumUnsigned32"
+            )
+        }
     }
 
     override fun minimum(reg1: RawReg, reg2: RawReg, reg3: RawReg) {
