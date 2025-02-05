@@ -8,10 +8,10 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class PvmTest {
-    fun assertUIntListMatchesBytes(expected: UByteArray, actual: Result<ByteArray>) {
+    fun assertUIntListMatchesBytes(expected: ByteArray, actual: ByteArray) {
         assertContentEquals(
             expected = expected,
-            actual = actual.getOrThrow().map { it.toUByte() },
+            actual = actual,
             message = "Memory mismatch."
         )
     }
@@ -149,7 +149,7 @@ class PvmTest {
                 // Create a buffer big enough for the expected memory contents
                 val buffer = ByteArray(memory.contents.size)
                 val actualMemory = instance.readMemoryInto(memory.address.toUInt(), buffer)
-                assertUIntListMatchesBytes(memory.contents, actualMemory)
+                assertUIntListMatchesBytes(buffer, actualMemory.getOrThrow())
             }
             assertEquals(inputCase.expectedGas, instance.gas(), "Gas mismatch.")
             inputCase.expectedPageFaultAddress?.let {
