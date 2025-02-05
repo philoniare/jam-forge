@@ -1492,7 +1492,19 @@ class Compiler(
     }
 
     override fun signExtend16(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented: signExtend16")
+        if (module.blob().is64Bit) {
+            instance.emit(
+                RawHandlers.signExtend1664,
+                Args.signExtend1664(reg1, reg2),
+                "signExtend1664"
+            )
+        } else {
+            instance.emit(
+                RawHandlers.signExtend1632,
+                Args.signExtend1632(reg1, reg2),
+                "signExtend1632"
+            )
+        }
     }
 
     override fun zeroExtend16(reg1: RawReg, reg2: RawReg) {

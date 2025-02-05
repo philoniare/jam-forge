@@ -200,6 +200,29 @@ object RawHandlers {
         visitor.goToNextInstruction()
     }
 
+    val signExtend1632: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+
+        val hword = Cast(
+            Cast(visitor.get32(s.toRegImm()))
+                .uintTruncateToU16()
+        ).ushortToSigned()
+
+        visitor.set32(d, Cast(Cast(hword).shortToI32SignExtend()).intToUnsigned())
+        visitor.goToNextInstruction()
+    }
+
+    val signExtend1664: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val hword = Cast(Cast(visitor.get64(s.toRegImm())).ulongTruncateToU16()).ushortToSigned()
+        visitor.set64(d, Cast(Cast(hword).shortToI64SignExtend()).longToUnsigned())
+        visitor.goToNextInstruction()
+    }
+
     val add32: Handler = { visitor ->
         val args = getArgs(visitor)
         logger.debug("Args: $args")

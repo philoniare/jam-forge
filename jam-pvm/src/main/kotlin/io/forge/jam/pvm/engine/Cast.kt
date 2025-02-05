@@ -59,6 +59,9 @@ inline fun Cast<UByte>.ubyteToU64(): ULong = value.toULong()
  * UShort (u16) extensions
  */
 @Suppress("NOTHING_TO_INLINE")
+inline fun Cast<UShort>.ushortToSigned(): Short = value.toShort()
+
+@Suppress("NOTHING_TO_INLINE")
 inline fun Cast<UShort>.ushortToU64(): ULong = value.toULong()
 
 /**
