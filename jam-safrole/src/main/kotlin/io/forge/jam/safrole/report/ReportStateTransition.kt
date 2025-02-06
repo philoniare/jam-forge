@@ -294,12 +294,12 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             val service = services.find { it.id == result.serviceId } ?: return ReportErrorCode.BAD_SERVICE_ID
 
             // Validate code hash matches service state (eq. 156)
-            if (!result.codeHash.contentEquals(service.info.codeHash)) {
+            if (!result.codeHash.contentEquals(service.data.service.codeHash)) {
                 return ReportErrorCode.BAD_CODE_HASH
             }
 
             // Validate gas requirements (eq. 144)
-            if (result.accumulateGas < service.info.minItemGas) {
+            if (result.accumulateGas < service.data.service.minItemGas) {
                 return ReportErrorCode.SERVICE_ITEM_GAS_TOO_LOW
             }
         }
@@ -512,7 +512,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 guarantee.report,
                 guarantee.slot,
                 currentSlot,
-                preState.services,
+                preState.accounts,
                 preState.authPools,
                 preState.availAssignments
             )?.let {

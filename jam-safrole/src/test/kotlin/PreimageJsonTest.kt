@@ -57,8 +57,8 @@ class PreimageJsonTest {
                 "Account ID mismatch at index $index in test case: $testCase"
             )
 
-            val expectedInfo = expectedAccount.info
-            val actualInfo = actualAccount.info
+            val expectedInfo = expectedAccount.data
+            val actualInfo = actualAccount.data
 
             // Compare preimages
             assertEquals(
@@ -83,13 +83,13 @@ class PreimageJsonTest {
 
             // Compare history
             assertEquals(
-                expectedInfo.history.size,
-                actualInfo.history.size,
+                expectedInfo.lookupMeta.size,
+                actualInfo.lookupMeta.size,
                 "History size mismatch for account ${expectedAccount.id} in test case: $testCase"
             )
 
-            expectedInfo.history.forEachIndexed { historyIndex, expectedHistory ->
-                val actualHistory = actualInfo.history[historyIndex]
+            expectedInfo.lookupMeta.forEachIndexed { historyIndex, expectedHistory ->
+                val actualHistory = actualInfo.lookupMeta[historyIndex]
 
                 // Compare history key
                 assertEquals(

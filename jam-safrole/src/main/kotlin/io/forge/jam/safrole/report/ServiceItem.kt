@@ -7,34 +7,34 @@ import kotlinx.serialization.Serializable
 @Serializable
 class ServiceItem(
     val id: Long,
-    val info: ServiceInfo
+    val data: ServiceData
 ) : Encodable {
     override fun encode(): ByteArray {
         val idBytes = encodeFixedWidthInteger(id, 4, false)
-        return idBytes + info.encode()
+        return idBytes + data.encode()
     }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ServiceItem) return false
 
-        return id == other.id && info == other.info
+        return id == other.id && data == other.data
     }
 
     override fun hashCode(): Int {
         var result = id.hashCode()
-        result = 31 * result + info.hashCode()
+        result = 31 * result + data.hashCode()
         return result
     }
 
     override fun toString(): String {
-        return "ServiceItem(id=$id, info=$info)"
+        return "ServiceItem(id=$id, info=$data)"
     }
 
     fun copy(
         id: Long = this.id,
-        info: ServiceInfo = this.info
+        data: ServiceData = this.data
     ): ServiceItem {
-        return ServiceItem(id, info)
+        return ServiceItem(id, data)
     }
 }

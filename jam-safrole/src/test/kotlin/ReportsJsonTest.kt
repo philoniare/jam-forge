@@ -167,15 +167,15 @@ class ReportsJsonTest {
 
         // Assert services
         assertEquals(
-            expected.services.size,
-            actual.services.size,
-            "$testCase: Mismatch in services size"
+            expected.accounts.size,
+            actual.accounts.size,
+            "$testCase: Mismatch in accounts size"
         )
-        for (i in expected.services.indices) {
+        for (i in expected.accounts.indices) {
             assertEquals(
-                expected.services[i],
-                actual.services[i],
-                "$testCase: Mismatch in service at index $i"
+                expected.accounts[i],
+                actual.accounts[i],
+                "$testCase: Mismatch in account at index $i"
             )
         }
     }

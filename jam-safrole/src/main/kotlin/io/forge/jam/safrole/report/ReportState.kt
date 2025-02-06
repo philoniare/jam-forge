@@ -30,8 +30,8 @@ data class ReportState(
     @SerialName("auth_pools")
     @Serializable(with = ByteArrayNestedListSerializer::class)
     val authPools: List<List<JamByteArray>>,
-    @SerialName("services")
-    val services: List<ServiceItem>
+    @SerialName("accounts")
+    val accounts: List<ServiceItem>
 ) : Encodable {
     override fun encode(): ByteArray {
         val availAssignmentsBytes = encodeOptionalList(availAssignments, false)
@@ -41,8 +41,8 @@ data class ReportState(
         val offenderBytes = encodeList(offenders)
         val recentBlocksBytes = encodeList(recentBlocks)
         val authPoolBytes = encodeNestedList(authPools, includeLength = false)
-        val servicesBytes = encodeList(services)
-        return availAssignmentsBytes + currValidatorsBytes + prevValidatorsBytes + entropyBytes + offenderBytes + recentBlocksBytes + authPoolBytes + servicesBytes
+        val accountsBytes = encodeList(accounts)
+        return availAssignmentsBytes + currValidatorsBytes + prevValidatorsBytes + entropyBytes + offenderBytes + recentBlocksBytes + authPoolBytes + accountsBytes
     }
 
     fun deepCopy(): ReportState {
@@ -56,7 +56,7 @@ data class ReportState(
             },
             entropy = entropy.map { it.copy() },
             offenders = offenders.map({ it.copy() }),
-            services = services.map { it.copy() }
+            accounts = accounts.map { it.copy() }
         )
     }
 }
