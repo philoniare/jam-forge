@@ -22,12 +22,10 @@ class ServiceInfo(
 ) : Encodable {
     override fun encode(): ByteArray {
         val balanceBytes = encodeFixedWidthInteger(balance, 8, false)
-
         val minItemGasBytes = encodeFixedWidthInteger(minItemGas, 8, false)
         val minMemoGasBytes = encodeFixedWidthInteger(minMemoGas, 8, false)
         val bytesBytes = encodeFixedWidthInteger(bytes, 8, false)
         val itemsBytes = encodeFixedWidthInteger(items, 4, false)
-        println("Balance: ${itemsBytes.toList()}")
         return codeHash.bytes + balanceBytes + minItemGasBytes + minMemoGasBytes + bytesBytes + itemsBytes
     }
 

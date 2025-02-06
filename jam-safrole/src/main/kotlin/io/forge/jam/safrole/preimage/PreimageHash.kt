@@ -2,6 +2,7 @@ package io.forge.jam.safrole.preimage
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.encodeCompactInteger
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.Serializable
 
@@ -13,6 +14,7 @@ data class PreimageHash(
     val blob: JamByteArray
 ) : Encodable {
     override fun encode(): ByteArray {
-        return hash.bytes + blob.bytes
+        val lengthBytes = encodeCompactInteger(blob.bytes.size.toLong())
+        return hash.bytes + lengthBytes + blob.bytes
     }
 }

@@ -22,7 +22,10 @@ data class AccumulationState(
 ) : Encodable {
     override fun encode(): ByteArray {
         val slotBytes = encodeFixedWidthInteger(slot, 4, false)
-        return slotBytes + entropy.bytes + encodeNestedList(readyQueue) + encodeNestedList(accumulated) + privileges.encode() + encodeList(
+        return slotBytes + entropy.bytes + encodeNestedList(readyQueue, false) + encodeNestedList(
+            accumulated,
+            false
+        ) + privileges.encode() + encodeList(
             accounts
         )
     }

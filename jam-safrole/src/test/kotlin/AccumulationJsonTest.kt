@@ -18,6 +18,7 @@ class AccumulationJsonTest {
 
         expected.readyQueue.forEachIndexed { queueIndex, expectedQueue ->
             val actualQueue = actual.readyQueue[queueIndex]
+            println("actualQueue: $actualQueue")
             assertEquals(
                 expectedQueue.size,
                 actualQueue.size,

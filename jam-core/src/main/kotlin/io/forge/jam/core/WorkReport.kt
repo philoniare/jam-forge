@@ -33,7 +33,6 @@ data class WorkReport(
         val segmentRootLookupBytes = encodeFixedWidthInteger(segmentRootLookup.size.toLong(), 1, false)
         val segmentRootLookupListBytes = encodeList(segmentRootLookup, false)
         
-
         // Results - 1 byte length prefix
         val resultsLengthBytes = encodeFixedWidthInteger(results.size.toLong(), 1, false)
         val resultsListBytes = encodeList(results, false)
