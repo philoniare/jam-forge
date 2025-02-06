@@ -118,6 +118,7 @@ class AccumulationJsonTest {
                 AccumulationConfig(EPOCH_LENGTH = 12)
             )
             val (postState, output) = report.transition(inputCase.input, inputCase.preState)
+            println("Running test case: $testCase")
             assertAccumulationStateEquals(inputCase.postState, postState, testCase)
             assertAccumulationOutputEquals(inputCase.output, output, testCase)
         }

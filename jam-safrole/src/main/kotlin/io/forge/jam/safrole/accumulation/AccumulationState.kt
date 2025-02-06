@@ -16,7 +16,7 @@ data class AccumulationState(
     var readyQueue: MutableList<List<ReadyRecord>>,
     @SerialName("accumulated")
     @Serializable(with = ByteArrayNestedListSerializer::class)
-    val accumulated: MutableList<List<JamByteArray>>,
+    var accumulated: MutableList<List<JamByteArray>>,
     val privileges: Privileges,
     val accounts: List<ServiceItem>
 ) : Encodable {
