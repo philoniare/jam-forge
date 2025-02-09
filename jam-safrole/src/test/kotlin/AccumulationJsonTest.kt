@@ -125,4 +125,24 @@ class AccumulationJsonTest {
             assertAccumulationOutputEquals(inputCase.output, output, testCase)
         }
     }
+
+    @Test
+    fun testFullAccumulations() {
+        val folderName = "accumulation/full"
+        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+
+        for (testCase in testCases) {
+            val (inputCase) = TestFileLoader.loadTestData<AccumulationCase>(
+                "$folderName/$testCase",
+                ".bin"
+            )
+
+            val report = AccumulationStateTransition(
+                AccumulationConfig(EPOCH_LENGTH = 600, MAX_BLOCK_HISTORY = 8, AUTH_QUEUE_SIZE = 80)
+            )
+            val (postState, output) = report.transition(inputCase.input, inputCase.preState)
+            assertAccumulationStateEquals(inputCase.postState, postState, testCase)
+            assertAccumulationOutputEquals(inputCase.output, output, testCase)
+        }
+    }
 }
