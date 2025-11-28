@@ -30,6 +30,9 @@ enum class ReportErrorCode : Encodable {
     @SerialName("bad_validator_index")
     BAD_VALIDATOR_INDEX,
 
+    @SerialName("banned_validator")
+    BANNED_VALIDATOR,
+
     @SerialName("service_item_gas_too_low")
     SERVICE_ITEM_GAS_TOO_LOW,
 

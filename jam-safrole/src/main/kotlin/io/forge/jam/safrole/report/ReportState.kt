@@ -5,7 +5,7 @@ import io.forge.jam.core.serializers.ByteArrayNestedListSerializer
 import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
-import io.forge.jam.safrole.historical.HistoricalBeta
+import io.forge.jam.safrole.historical.HistoricalBetaContainer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -26,7 +26,7 @@ data class ReportState(
     val offenders: List<JamByteArray>,
 
     @SerialName("recent_blocks")
-    val recentBlocks: List<HistoricalBeta>,
+    val recentBlocks: HistoricalBetaContainer,
     @SerialName("auth_pools")
     @Serializable(with = ByteArrayNestedListSerializer::class)
     val authPools: List<List<JamByteArray>>,
@@ -39,7 +39,7 @@ data class ReportState(
         val prevValidatorsBytes = encodeList(prevValidators, false)
         val entropyBytes = encodeList(entropy, false)
         val offenderBytes = encodeList(offenders)
-        val recentBlocksBytes = encodeList(recentBlocks)
+        val recentBlocksBytes = encodeList(recentBlocks.history) + recentBlocks.mmr.encode()
         val authPoolBytes = encodeNestedList(authPools, includeLength = false)
         val accountsBytes = encodeList(accounts)
         return availAssignmentsBytes + currValidatorsBytes + prevValidatorsBytes + entropyBytes + offenderBytes + recentBlocksBytes + authPoolBytes + accountsBytes
@@ -50,7 +50,10 @@ data class ReportState(
             availAssignments = availAssignments.map { it?.copy() },
             currValidators = currValidators.map { it.copy() },
             prevValidators = prevValidators.map { it.copy() },
-            recentBlocks = recentBlocks.map { it.copy() },
+            recentBlocks = HistoricalBetaContainer(
+                history = recentBlocks.history.map { it.copy() },
+                mmr = recentBlocks.mmr.copy()
+            ),
             authPools = authPools.map { innerList ->
                 innerList.map { it.clone() }
             },

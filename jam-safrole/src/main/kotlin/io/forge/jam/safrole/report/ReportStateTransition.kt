@@ -5,6 +5,7 @@ import io.forge.jam.core.*
 import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.historical.HistoricalBeta
+import io.forge.jam.safrole.historical.HistoricalBetaContainer
 import keccakHash
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
@@ -68,7 +69,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
      */
     fun validateAnchor(
         guarantees: List<GuaranteeExtrinsic>,
-        recentBlocks: List<HistoricalBeta>,
+        recentBlocks: HistoricalBetaContainer,
         currentSlot: Long
     ): ReportErrorCode? {
         val currentBatchReports = guarantees.associate { guarantee ->
@@ -83,12 +84,12 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
 
             // Find anchor block and lookup anchor block
-            val lookupAnchorBlock = recentBlocks.find { it.headerHash.contentEquals(context.lookupAnchor) }
+            val lookupAnchorBlock = recentBlocks.history.find { it.headerHash.contentEquals(context.lookupAnchor) }
             if (lookupAnchorBlock == null) {
                 return ReportErrorCode.ANCHOR_NOT_RECENT
             }
 
-            val anchorBlock = recentBlocks.find { it.headerHash.contentEquals(context.anchor) }
+            val anchorBlock = recentBlocks.history.find { it.headerHash.contentEquals(context.anchor) }
             if (anchorBlock == null) {
                 return ReportErrorCode.ANCHOR_NOT_RECENT
             }
@@ -117,7 +118,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                     }
 
                     // If not in current batch, check recent blocks
-                    val existsInHistory = recentBlocks.any { block ->
+                    val existsInHistory = recentBlocks.history.any { block ->
                         block.reported.any { reported ->
                             reported.hash.contentEquals(prerequisite.bytes) &&
                                 guarantee.report.segmentRootLookup.all { lookup ->
@@ -167,7 +168,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
      */
     private fun validateNoDuplicatePackages(
         guarantees: List<GuaranteeExtrinsic>,
-        recentBlocks: List<HistoricalBeta>
+        recentBlocks: HistoricalBetaContainer
     ): ReportErrorCode? {
         val seenHashes = mutableSetOf<String>() // Using String to avoid ByteArray equality issues
 
@@ -181,7 +182,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             }
 
             // Check if package exists in recent history
-            if (recentBlocks.any { block ->
+            if (recentBlocks.history.any { block ->
                     block.reported.any { report ->
                         report.hash.contentEquals(guarantee.report.packageSpec.hash)
                     }
@@ -208,7 +209,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                     }
                 } else {
                     // If not in current batch, check history
-                    val foundInHistory = recentBlocks.any { block ->
+                    val foundInHistory = recentBlocks.history.any { block ->
                         block.reported.any { report ->
                             report.hash.contentEquals(lookup.workPackageHash) &&
                                 report.exportsRoot.contentEquals(lookup.segmentTreeRoot)
@@ -224,7 +225,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             for (prerequisite in guarantee.report.context.prerequisites) {
                 val prerequisiteHex = prerequisite.toHex()
                 val existsInCurrentBatch = seenHashes.contains(prerequisiteHex)
-                val existsInHistory = recentBlocks.any { block ->
+                val existsInHistory = recentBlocks.history.any { block ->
                     block.reported.any { report ->
                         report.hash.contentEquals(prerequisite)
                     }
@@ -395,7 +396,8 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         currValidators: List<ValidatorKey>,
         prevValidators: List<ValidatorKey>,
         currentSlot: Long,
-        entropyPool: List<JamByteArray>
+        entropyPool: List<JamByteArray>,
+        offenders: List<JamByteArray>
     ): ReportErrorCode? {
         validateSufficientGuarantees(guarantee)?.let {
             return it
@@ -424,8 +426,19 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             randomness = prevRandomness
         )
         val reportedCore = guarantee.report.coreIndex.toInt()
-        val validatorKeys = if (isCurrent) currValidators else prevValidators
+        // Determine which validator set to use based on spec equations 217-228:
+        // - M (current): uses activeset' (currValidators)
+        // - M* (previous rotation): uses activeset' if same epoch, previousset' if epoch changed
+        val validatorKeys = if (isCurrent) {
+            currValidators
+        } else {
+            // For previous rotation, check if epoch changed
+            if (isEpochChanging) prevValidators else currValidators
+        }
         val signatureCountsByCore = mutableMapOf<Int, Int>()
+
+        // Convert offenders to a set of hex strings for efficient lookup
+        val offendersSet = offenders.map { it.toHex() }.toSet()
 
         for (signature in guarantee.signatures) {
             val validatorIndex = signature.validatorIndex.toInt()
@@ -433,8 +446,15 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 return ReportErrorCode.BAD_VALIDATOR_INDEX
             }
 
+            val validatorEd25519 = validatorKeys[validatorIndex].ed25519
+
+            // Check if validator is banned (in offenders set)
+            if (offendersSet.contains(validatorEd25519.toHex())) {
+                return ReportErrorCode.BANNED_VALIDATOR
+            }
+
             val sigCheck =
-                verifySignature(validatorKeys[validatorIndex].ed25519, guarantee, signature)
+                verifySignature(validatorEd25519, guarantee, signature)
             if (sigCheck != null) {
                 return sigCheck
             }
@@ -522,7 +542,8 @@ class ReportStateTransition(private val config: ReportStateConfig) {
                 preState.currValidators,
                 preState.prevValidators,
                 currentSlot,
-                preState.entropy
+                preState.entropy,
+                preState.offenders
             )?.let {
                 return Pair(postState, ReportOutput(err = it))
             }
@@ -543,15 +564,20 @@ class ReportStateTransition(private val config: ReportStateConfig) {
             )
 
             // Collect valid guarantor Ed25519 keys
+            // Use same logic as validateGuarantorSignatures for determining validator set
+            val reportRotation = guarantee.slot / config.ROTATION_PERIOD
+            val currentRotation = currentSlot / config.ROTATION_PERIOD
+            val isEpochChanging = Math.floorMod(currentSlot, config.EPOCH_LENGTH) < config.ROTATION_PERIOD
+            val isCurrent = reportRotation == currentRotation
+
+            val validatorKeys = if (isCurrent) {
+                preState.currValidators
+            } else {
+                if (isEpochChanging) preState.prevValidators else preState.currValidators
+            }
+
             guarantee.signatures.forEach { signature ->
-                val validatorKey = if ((currentSlot / config.ROTATION_PERIOD) ==
-                    (guarantee.slot / config.ROTATION_PERIOD)
-                ) {
-                    preState.currValidators[signature.validatorIndex.toInt()].ed25519
-                } else {
-                    preState.prevValidators[signature.validatorIndex.toInt()].ed25519
-                }
-                validGuarantors.add(validatorKey)
+                validGuarantors.add(validatorKeys[signature.validatorIndex.toInt()].ed25519)
             }
         }
 
@@ -559,7 +585,7 @@ class ReportStateTransition(private val config: ReportStateConfig) {
         updateStateWithReports(postState, pendingReports, currentSlot)
 
         val sortedReportPackages = reportPackages.sortedBy { it.workPackageHash.toHex() }
-        val sortedGuarantors = validGuarantors.distinct().sortedBy { it.toHex() }
+        val sortedGuarantors = validGuarantors.distinctBy { it.toHex() }.sortedBy { it.toHex() }
 
         return Pair(
             postState,

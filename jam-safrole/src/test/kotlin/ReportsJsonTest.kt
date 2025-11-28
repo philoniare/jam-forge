@@ -132,15 +132,15 @@ class ReportsJsonTest {
 
         // Assert recent blocks
         assertEquals(
-            expected.recentBlocks.size,
-            actual.recentBlocks.size,
-            "$testCase: Mismatch in recentBlocks size"
+            expected.recentBlocks.history.size,
+            actual.recentBlocks.history.size,
+            "$testCase: Mismatch in recentBlocks history size"
         )
-        for (i in expected.recentBlocks.indices) {
+        for (i in expected.recentBlocks.history.indices) {
             assertEquals(
-                expected.recentBlocks[i],
-                actual.recentBlocks[i],
-                "$testCase: Mismatch in recentBlocks at index $i"
+                expected.recentBlocks.history[i],
+                actual.recentBlocks.history[i],
+                "$testCase: Mismatch in recentBlocks history at index $i"
             )
         }
 
@@ -183,14 +183,11 @@ class ReportsJsonTest {
 
     @Test
     fun testTinyReports() {
-        val folderName = "reports/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        val folderPath = "stf/reports/tiny"
+        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
         for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<ReportCase>(
-                "$folderName/$testCase",
-                ".bin"
-            )
+            val inputCase = TestFileLoader.loadJsonFromTestVectors<ReportCase>(folderPath, testCase)
 
             val report = ReportStateTransition(
                 ReportStateConfig(
@@ -211,14 +208,11 @@ class ReportsJsonTest {
 
     @Test
     fun testFullReports() {
-        val folderName = "reports/full"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        val folderPath = "stf/reports/full"
+        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
         for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<ReportCase>(
-                "$folderName/$testCase",
-                ".bin"
-            )
+            val inputCase = TestFileLoader.loadJsonFromTestVectors<ReportCase>(folderPath, testCase)
 
             val report = ReportStateTransition(
                 ReportStateConfig(
