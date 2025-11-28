@@ -5,19 +5,24 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class WorkItemTest {
-    @Test
-    fun testEncodeWorkItem() {
-        // Load JSON data from resources using the class loader
-        val (inputWorkItem, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkItem>("codec/tiny", "work_item")
 
-        // Compare the concatenated encoded bytes with the expected output bytes
+    private fun testEncodeWorkItem(configPath: String) {
+        val (inputWorkItem, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkItem>(configPath, "work_item")
+
         assertContentEquals(
             expectedOutputBytes,
             inputWorkItem.encode(),
             "Encoded bytes do not match expected output"
         )
     }
+
+    @Test
+    fun testEncodeWorkItemTiny() {
+        testEncodeWorkItem("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeWorkItemFull() {
+        testEncodeWorkItem("codec/full")
+    }
 }
-
-
-

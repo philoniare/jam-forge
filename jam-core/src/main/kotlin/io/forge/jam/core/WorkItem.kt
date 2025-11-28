@@ -26,10 +26,10 @@ data class WorkItem(
         val serviceBytes = encodeFixedWidthInteger(service, 4, false)
         val refineGasLimitBytes = encodeFixedWidthInteger(refineGasLimit, 8, false)
         val accumulateGasLimitBytes = encodeFixedWidthInteger(accumulateGasLimit, 8, false)
+        val exportCountBytes = encodeFixedWidthInteger(exportCount, 2, false)
+        val payloadLengthBytes = encodeCompactInteger(payload.size.toLong())
         val importSegmentsBytes = encodeList(importSegments)
         val extrinsicBytes = encodeList(extrinsic)
-        val exportCountBytes = encodeFixedWidthInteger(exportCount, 2, false)
-        val payloadLengthBytes = encodeFixedWidthInteger(payload.size, 1, false)
-        return serviceBytes + codeHash.bytes + payloadLengthBytes + payload.bytes + refineGasLimitBytes + accumulateGasLimitBytes + importSegmentsBytes + extrinsicBytes + exportCountBytes
+        return serviceBytes + codeHash.bytes + refineGasLimitBytes + accumulateGasLimitBytes + exportCountBytes + payloadLengthBytes + payload.bytes + importSegmentsBytes + extrinsicBytes
     }
 }

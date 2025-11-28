@@ -40,12 +40,13 @@ data class Header(
             if (epochMark != null) byteArrayOf(1) + epochMark.encode() else byteArrayOf(0)
         val ticketsMarkBytes =
             if (ticketsMark != null) byteArrayOf(1) + encodeList(ticketsMark, false) else byteArrayOf(0)
-        val offendersMarkBytes =
-            offendersMark.fold(encodeFixedWidthInteger(offendersMark.size, 1, false)) { acc, offender ->
-                acc + offender.bytes
-            }
         val authorIndexBytes = encodeFixedWidthInteger(authorIndex, 2, false)
         val entropySourceBytes = entropySource.bytes
+        val offendersMarkLengthBytes = encodeCompactInteger(offendersMark.size.toLong())
+        val offendersMarkBytes =
+            offendersMark.fold(offendersMarkLengthBytes) { acc, offender ->
+                acc + offender.bytes
+            }
         val sealBytes = seal.bytes
         return parentBytes +
             parentStateRootBytes +
@@ -53,9 +54,9 @@ data class Header(
             slotBytes +
             epochMarkBytes +
             ticketsMarkBytes +
-            offendersMarkBytes +
             authorIndexBytes +
             entropySourceBytes +
+            offendersMarkBytes +
             sealBytes
     }
 }

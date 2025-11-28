@@ -5,16 +5,24 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class BlockTest {
-    @Test
-    fun testEncodeBlock() {
-        // Load JSON data from resources using the class loader
-        val (inputBlock, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Block>("codec/tiny", "block")
 
-        // Compare the concatenated encoded bytes with the expected output bytes
+    private fun testEncodeBlock(configPath: String) {
+        val (inputBlock, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Block>(configPath, "block")
+
         assertContentEquals(
             expectedOutputBytes,
             inputBlock.encode(),
             "Encoded bytes do not match expected output"
         )
+    }
+
+    @Test
+    fun testEncodeBlockTiny() {
+        testEncodeBlock("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeBlockFull() {
+        testEncodeBlock("codec/full")
     }
 }

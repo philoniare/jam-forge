@@ -5,12 +5,20 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class WorkResultTest {
-    @Test
-    fun testEncodeWorkResultOk() {
-        // Load JSON data from resources using the class loader
-        val (inputWorkResult, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkResult>("codec/tiny", "work_result_0")
 
-        // Compare the concatenated encoded bytes with the expected output bytes
+    private fun testEncodeWorkResultOk(configPath: String) {
+        val (inputWorkResult, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkResult>(configPath, "work_result_0")
+
+        assertContentEquals(
+            expectedOutputBytes,
+            inputWorkResult.encode(),
+            "Encoded bytes do not match expected output"
+        )
+    }
+
+    private fun testEncodeWorkResultPanic(configPath: String) {
+        val (inputWorkResult, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkResult>(configPath, "work_result_1")
+
         assertContentEquals(
             expectedOutputBytes,
             inputWorkResult.encode(),
@@ -19,17 +27,22 @@ class WorkResultTest {
     }
 
     @Test
-    fun testEncodeWorkResultPanic() {
-        // Load JSON data from resources using the class loader
-        val (inputWorkResult, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkResult>("codec/tiny", "work_result_1")
+    fun testEncodeWorkResultOkTiny() {
+        testEncodeWorkResultOk("codec/tiny")
+    }
 
-        // Compare the concatenated encoded bytes with the expected output bytes
-        assertContentEquals(
-            expectedOutputBytes,
-            inputWorkResult.encode(),
-            "Encoded bytes do not match expected output"
-        )
+    @Test
+    fun testEncodeWorkResultOkFull() {
+        testEncodeWorkResultOk("codec/full")
+    }
+
+    @Test
+    fun testEncodeWorkResultPanicTiny() {
+        testEncodeWorkResultPanic("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeWorkResultPanicFull() {
+        testEncodeWorkResultPanic("codec/full")
     }
 }
-
-

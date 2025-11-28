@@ -5,9 +5,9 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class AssuranceExtrinsicTest {
-    @Test
-    fun testEncodeAssuranceExtrinsics() {
-        val (inputAssurances, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<List<AssuranceExtrinsic>>("codec/tiny", "assurances_extrinsic")
+
+    private fun testEncodeAssuranceExtrinsics(configPath: String) {
+        val (inputAssurances, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<List<AssuranceExtrinsic>>(configPath, "assurances_extrinsic")
 
         // Process each assurance
         val encodedAssurances = inputAssurances.map { assurance ->
@@ -28,5 +28,15 @@ class AssuranceExtrinsicTest {
             concatenatedEncodedAssurances,
             "Encoded bytes do not match expected output"
         )
+    }
+
+    @Test
+    fun testEncodeAssuranceExtrinsicsTiny() {
+        testEncodeAssuranceExtrinsics("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeAssuranceExtrinsicsFull() {
+        testEncodeAssuranceExtrinsics("codec/full")
     }
 }

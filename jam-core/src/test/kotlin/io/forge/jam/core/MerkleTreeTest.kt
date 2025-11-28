@@ -8,7 +8,7 @@ import kotlin.test.assertContentEquals
 class MerkleTreeTest {
     @Test
     fun testTrie() {
-        val testVectors = TestFileLoader.loadJsonData<List<TrieTestVector>>("trie")
+        val testVectors = TestFileLoader.loadJsonFromTestVectors<List<TrieTestVector>>("trie", "trie")
         for (vector in testVectors) {
             val actualOutput = merkle(vector.input)
             assertContentEquals(vector.output.bytes, actualOutput.bytes, "The trie bytes do not match")

@@ -5,19 +5,26 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class DisputeTest {
-    @Test
-    fun testEncodeDispute() {
-        // Load JSON data from resources using the class loader
-        val (inputDispute, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Dispute>("codec/tiny", "disputes_extrinsic")
 
-        // Process each assurance
+    private fun testEncodeDispute(configPath: String) {
+        val (inputDispute, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Dispute>(configPath, "disputes_extrinsic")
+
         val encodedDispute = inputDispute.encode()
 
-        // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(
             expectedOutputBytes,
             encodedDispute,
             "Encoded bytes do not match expected output"
         )
+    }
+
+    @Test
+    fun testEncodeDisputeTiny() {
+        testEncodeDispute("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeDisputeFull() {
+        testEncodeDispute("codec/full")
     }
 }

@@ -6,19 +6,25 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class WorkPackage(
-    @Serializable(with = JamByteArrayHexSerializer::class)
-    val authorization: JamByteArray,
     @SerialName("auth_code_host")
     val authCodeHost: Long,
-    val authorizer: WorkAuthorizer,
+    @SerialName("auth_code_hash")
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val authCodeHash: JamByteArray,
     val context: Context,
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val authorization: JamByteArray,
+    @SerialName("authorizer_config")
+    @Serializable(with = JamByteArrayHexSerializer::class)
+    val authorizerConfig: JamByteArray,
     val items: List<WorkItem>,
 ) : Encodable {
     override fun encode(): ByteArray {
-        val authorizationLengthBytes = encodeFixedWidthInteger(authorization.size, 1, false)
-        val workItemsBytes = encodeList(items)
         val authCodeHostBytes = encodeFixedWidthInteger(authCodeHost, 4, false)
-        return authorizationLengthBytes + authorization.bytes + authCodeHostBytes + authorizer.encode() + context.encode() + workItemsBytes
+        val authorizationLengthBytes = encodeCompactInteger(authorization.size.toLong())
+        val authorizerConfigLengthBytes = encodeCompactInteger(authorizerConfig.size.toLong())
+        val workItemsBytes = encodeList(items)
+        return authCodeHostBytes + authCodeHash.bytes + context.encode() + authorizationLengthBytes + authorization.bytes + authorizerConfigLengthBytes + authorizerConfig.bytes + workItemsBytes
     }
 }
 

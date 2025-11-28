@@ -5,12 +5,20 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 
 class HeaderTest {
-    @Test
-    fun testEncodeHeaderEpochMark() {
-        // Load JSON data from resources using the class loader
-        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>("codec/tiny", "header_0")
 
-        // Compare the concatenated encoded bytes with the expected output bytes
+    private fun testEncodeHeaderEpochMark(configPath: String) {
+        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>(configPath, "header_0")
+
+        assertContentEquals(
+            expectedOutputBytes,
+            inputHeader.encode(),
+            "Encoded bytes do not match expected output"
+        )
+    }
+
+    private fun testEncodeHeaderTicketsMark(configPath: String) {
+        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>(configPath, "header_1")
+
         assertContentEquals(
             expectedOutputBytes,
             inputHeader.encode(),
@@ -19,15 +27,22 @@ class HeaderTest {
     }
 
     @Test
-    fun testEncodeHeaderTicketsMark() {
-        // Load JSON data from resources using the class loader
-        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>("codec/tiny", "header_1")
+    fun testEncodeHeaderEpochMarkTiny() {
+        testEncodeHeaderEpochMark("codec/tiny")
+    }
 
-        // Compare the concatenated encoded bytes with the expected output bytes
-        assertContentEquals(
-            expectedOutputBytes,
-            inputHeader.encode(),
-            "Encoded bytes do not match expected output"
-        )
+    @Test
+    fun testEncodeHeaderEpochMarkFull() {
+        testEncodeHeaderEpochMark("codec/full")
+    }
+
+    @Test
+    fun testEncodeHeaderTicketsMarkTiny() {
+        testEncodeHeaderTicketsMark("codec/tiny")
+    }
+
+    @Test
+    fun testEncodeHeaderTicketsMarkFull() {
+        testEncodeHeaderTicketsMark("codec/full")
     }
 }
