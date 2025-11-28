@@ -9,19 +9,23 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class StatState(
-    val pi: StatPi,
-    val tau: Long,
-    @SerialName("kappa_prime")
-    val kappaPrime: List<ValidatorKey>,
+    @SerialName("vals_curr_stats")
+    var valsCurrStats: List<StatCount>,
+    @SerialName("vals_last_stats")
+    var valsLastStats: List<StatCount>,
+    val slot: Long,
+    @SerialName("curr_validators")
+    val currValidators: List<ValidatorKey>,
 ) : Encodable {
     fun copy() = StatState(
-        pi = pi.copy(),
-        tau = tau,
-        kappaPrime = kappaPrime.map { it.copy() }
+        valsCurrStats = valsCurrStats.map { it.copy() },
+        valsLastStats = valsLastStats.map { it.copy() },
+        slot = slot,
+        currValidators = currValidators.map { it.copy() }
     )
 
     override fun encode(): ByteArray {
-        val tauBytes = encodeFixedWidthInteger(tau, 4, false)
-        return pi.encode() + tauBytes + encodeList(kappaPrime)
+        val slotBytes = encodeFixedWidthInteger(slot, 4, false)
+        return encodeList(valsCurrStats) + encodeList(valsLastStats) + slotBytes + encodeList(currValidators)
     }
 }
