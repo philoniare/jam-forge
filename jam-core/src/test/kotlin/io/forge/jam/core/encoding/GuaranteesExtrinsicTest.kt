@@ -7,7 +7,7 @@ import kotlin.test.assertContentEquals
 class GuaranteesExtrinsicTest {
     @Test
     fun testEncodeGuaranteesExtrinsics() {
-        val (inputGuarantees, expectedOutputBytes) = TestFileLoader.loadTestData<List<GuaranteeExtrinsic>>("guarantees_extrinsic")
+        val (inputGuarantees, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<List<GuaranteeExtrinsic>>("codec/tiny", "guarantees_extrinsic")
 
         // Process each guarantee
         val encodedGuarantees = inputGuarantees.map { guarantee ->

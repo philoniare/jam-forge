@@ -8,7 +8,7 @@ class HeaderTest {
     @Test
     fun testEncodeHeaderEpochMark() {
         // Load JSON data from resources using the class loader
-        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestData<Header>("header_0")
+        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>("codec/tiny", "header_0")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(
@@ -21,7 +21,7 @@ class HeaderTest {
     @Test
     fun testEncodeHeaderTicketsMark() {
         // Load JSON data from resources using the class loader
-        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestData<Header>("header_1")
+        val (inputHeader, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Header>("codec/tiny", "header_1")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(

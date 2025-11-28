@@ -8,7 +8,7 @@ class TicketEnvelopeTest {
     @Test
     fun testEncodeTicket() {
         // Load JSON data from resources using the class loader
-        val (inputTickets, expectedOutputBytes) = TestFileLoader.loadTestData<List<TicketEnvelope>>("tickets_extrinsic")
+        val (inputTickets, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<List<TicketEnvelope>>("codec/tiny", "tickets_extrinsic")
 
         val encodedTickets = inputTickets.map { ticket ->
             val extrinsic =

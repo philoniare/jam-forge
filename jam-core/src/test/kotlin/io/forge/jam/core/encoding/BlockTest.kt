@@ -8,7 +8,7 @@ class BlockTest {
     @Test
     fun testEncodeBlock() {
         // Load JSON data from resources using the class loader
-        val (inputBlock, expectedOutputBytes) = TestFileLoader.loadTestData<Block>("block")
+        val (inputBlock, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Block>("codec/tiny", "block")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(

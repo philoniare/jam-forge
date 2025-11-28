@@ -14,6 +14,8 @@ data class WorkReport(
     @SerialName("authorizer_hash")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val authorizerHash: JamByteArray,
+    @SerialName("auth_gas_used")
+    val authGasUsed: Long,
     @SerialName("auth_output")
     @Serializable(with = JamByteArrayHexSerializer::class)
     val authOutput: JamByteArray,
@@ -24,22 +26,25 @@ data class WorkReport(
     override fun encode(): ByteArray {
         val packageSpecBytes = packageSpec.encode()
         val contextBytes = context.encode()
-        val coreIndexBytes = encodeFixedWidthInteger(coreIndex, 2, false)
+        val coreIndexBytes = encodeCompactInteger(coreIndex)
         val authorizerHashBytes = authorizerHash.bytes
-        // Auth output - 1 byte length prefix
+        // Auth gas used - compact integer encoding
+        val authGasUsedBytes = encodeCompactInteger(authGasUsed)
+        // Auth output - variable length with length prefix
         val authOutputLengthBytes = encodeCompactInteger(authOutput.size.toLong())
         val authOutputBytes = authOutput.bytes
-        // Segment root lookup - 1 byte length prefix
-        val segmentRootLookupBytes = encodeFixedWidthInteger(segmentRootLookup.size.toLong(), 1, false)
+        // Segment root lookup - variable length with length prefix
+        val segmentRootLookupBytes = encodeCompactInteger(segmentRootLookup.size.toLong())
         val segmentRootLookupListBytes = encodeList(segmentRootLookup, false)
-        
-        // Results - 1 byte length prefix
-        val resultsLengthBytes = encodeFixedWidthInteger(results.size.toLong(), 1, false)
+
+        // Results - variable length with length prefix
+        val resultsLengthBytes = encodeCompactInteger(results.size.toLong())
         val resultsListBytes = encodeList(results, false)
         return packageSpecBytes +
             contextBytes +
             coreIndexBytes +
             authorizerHashBytes +
+            authGasUsedBytes +
             authOutputLengthBytes + authOutputBytes +
             segmentRootLookupBytes + segmentRootLookupListBytes +
             resultsLengthBytes + resultsListBytes

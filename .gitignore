@@ -47,3 +47,4 @@ bin/
 **/*.dylib
 
 .editorconfig
+*.md

@@ -8,7 +8,7 @@ class PreimageTest {
     @Test
     fun testEncodePreimage() {
         // Load JSON data from resources using the class loader
-        val (inputPreimages, expectedOutputBytes) = TestFileLoader.loadTestData<List<Preimage>>("preimages_extrinsic")
+        val (inputPreimages, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<List<Preimage>>("codec/tiny", "preimages_extrinsic")
 
         val encodedPreimages = inputPreimages.map { preimage ->
             val extrinsic =

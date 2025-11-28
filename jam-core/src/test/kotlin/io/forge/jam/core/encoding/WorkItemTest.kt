@@ -8,7 +8,7 @@ class WorkItemTest {
     @Test
     fun testEncodeWorkItem() {
         // Load JSON data from resources using the class loader
-        val (inputWorkItem, expectedOutputBytes) = TestFileLoader.loadTestData<WorkItem>("work_item")
+        val (inputWorkItem, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<WorkItem>("codec/tiny", "work_item")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(

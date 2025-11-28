@@ -8,7 +8,7 @@ class ExtrinsicTest {
     @Test
     fun testEncodeExtrinsic() {
         // Load JSON data from resources using the class loader
-        val (inputExtrinsic, expectedOutputBytes) = TestFileLoader.loadTestData<Extrinsic>("extrinsic")
+        val (inputExtrinsic, expectedOutputBytes) = TestFileLoader.loadTestDataFromTestVectors<Extrinsic>("codec/tiny", "extrinsic")
 
         // Compare the concatenated encoded bytes with the expected output bytes
         assertContentEquals(
