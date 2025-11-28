@@ -5,7 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class SafroleJsonTest {
-    fun assertSafroleOutputEquals(expected: SafroleOutput, actual: SafroleOutput, testCase: String) {
+    private fun assertSafroleOutputEquals(expected: SafroleOutput, actual: SafroleOutput, testCase: String) {
         if (expected.err != null) {
             assertEquals(expected.err, actual.err, "$testCase: Mismatch in error")
         }
@@ -16,35 +16,36 @@ class SafroleJsonTest {
         }
     }
 
-    fun assertSafroleStateEquals(expected: SafroleState, actual: SafroleState, testCase: String) {
-        assertEquals(expected.tau, actual.tau, "Mismatch in tau.  TestCase: $testCase")
+    private fun assertSafroleStateEquals(expected: SafroleState, actual: SafroleState, testCase: String) {
+        assertEquals(expected.tau, actual.tau, "Mismatch in tau. TestCase: $testCase")
 
-        assertEquals(expected.eta.size, actual.eta.size, "Mismatch in eta size")
+        assertEquals(expected.eta.size, actual.eta.size, "Mismatch in eta size. TestCase: $testCase")
         for (i in expected.eta.indices) {
             assertEquals(
                 expected.eta[i],
                 actual.eta[i],
-                "Mismatch in eta at index $i. Expected: ${expected.eta[i].toHex()}, Actual: ${actual.eta[i].toHex()}"
+                "Mismatch in eta at index $i. Expected: ${expected.eta[i].toHex()}, Actual: ${actual.eta[i].toHex()}. TestCase: $testCase"
             )
         }
 
-        assertEquals(expected.lambda, actual.lambda, "Mismatch in lambda")
-        assertEquals(expected.kappa, actual.kappa, "Mismatch in kappa")
-        assertEquals(expected.gammaK, actual.gammaK, "Mismatch in gammaK")
-        assertEquals(expected.iota, actual.iota, "Mismatch in iota")
-        assertEquals(expected.gammaA, actual.gammaA, "Mismatch in gammaA")
-        assertEquals(expected.gammaS, actual.gammaS, "Mismatch in gammaS")
-        assertEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ")
+        assertEquals(expected.lambda, actual.lambda, "Mismatch in lambda. TestCase: $testCase")
+        assertEquals(expected.kappa, actual.kappa, "Mismatch in kappa. TestCase: $testCase")
+        assertEquals(expected.gammaK, actual.gammaK, "Mismatch in gammaK. TestCase: $testCase")
+        assertEquals(expected.iota, actual.iota, "Mismatch in iota. TestCase: $testCase")
+        assertEquals(expected.gammaA, actual.gammaA, "Mismatch in gammaA. TestCase: $testCase")
+        assertEquals(expected.gammaS, actual.gammaS, "Mismatch in gammaS. TestCase: $testCase")
+        assertEquals(expected.gammaZ, actual.gammaZ, "Mismatch in gammaZ. TestCase: $testCase")
     }
 
     @Test
     fun testTinySafrole() {
-        val folderName = "safrole/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        val folderName = "stf/safrole/tiny"
+        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
         for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
-                "$folderName/$testCase",
+            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
+                folderName,
+                testCase,
                 ".bin"
             )
 
@@ -74,12 +75,13 @@ class SafroleJsonTest {
 
     @Test
     fun testFullSafrole() {
-        val folderName = "safrole/full"
-        val testCases = TestFileLoader.getTestFilenamesFromResources(folderName)
+        val folderName = "stf/safrole/full"
+        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
         for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestData<SafroleCase>(
-                "$folderName/$testCase",
+            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
+                folderName,
+                testCase,
                 ".bin"
             )
 
