@@ -4,6 +4,7 @@ import io.forge.jam.safrole.AvailabilityAssignment
 import io.forge.jam.safrole.ValidatorKey
 import io.forge.jam.safrole.assurance.*
 import kotlin.test.*
+import kotlin.test.assertContentEquals
 
 class AssuranceJsonTest {
 
@@ -114,30 +115,32 @@ class AssuranceJsonTest {
     @Test
     fun testTinyAssurances() {
         val folderPath = "stf/assurances/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<AssuranceCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<AssuranceCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = AssuranceStateTransition(AssuranceConfig(VALIDATOR_COUNT = 6, CORE_COUNT = 2))
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertAssuranceOutputEquals(inputCase.output, output, testCase)
-            assertAssuranceStateEquals(inputCase.postState, postState, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertAssuranceOutputEquals(testCase.output, output, testCaseName)
+            assertAssuranceStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 
     @Test
     fun testFullAssurances() {
         val folderPath = "stf/assurances/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<AssuranceCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<AssuranceCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = AssuranceStateTransition(AssuranceConfig(VALIDATOR_COUNT = 1023, CORE_COUNT = 341))
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertAssuranceStateEquals(inputCase.postState, postState, testCase)
-            assertAssuranceOutputEquals(inputCase.output, output, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertAssuranceStateEquals(testCase.postState, postState, testCaseName)
+            assertAssuranceOutputEquals(testCase.output, output, testCaseName)
         }
     }
 }

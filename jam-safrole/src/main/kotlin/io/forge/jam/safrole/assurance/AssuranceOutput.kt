@@ -14,8 +14,8 @@ data class AssuranceOutput(
             // Prepend a 0 byte to indicate "ok" choice
             byteArrayOf(0) + ok.encode()
         } else {
-            // For error case, encode without the 0 byte prefix
-            err!!.encode()
+            // Prepend a 1 byte to indicate "err" choice
+            byteArrayOf(1) + err!!.encode()
         }
     }
 }

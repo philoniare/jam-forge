@@ -11,12 +11,19 @@ data class PreimageOutput(
     val err: PreimageErrorCode? = null
 ) : Encodable {
     override fun encode(): ByteArray {
-        return if (ok != null) {
-            // Prepend a 0 byte to indicate "ok" choice
-            byteArrayOf(0) + ok.encode()
-        } else {
-            // For error case, encode without the 0 byte prefix
-            err!!.encode()
+        return when {
+            err != null -> {
+                // For error case, prepend a 1 byte to indicate "err" choice
+                byteArrayOf(1) + err.encode()
+            }
+            ok != null -> {
+                // ok with content, prepend a 0 byte to indicate "ok" choice
+                byteArrayOf(0) + ok.encode()
+            }
+            else -> {
+                // ok with null content (no marks)
+                byteArrayOf(0)
+            }
         }
     }
 }

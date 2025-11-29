@@ -16,7 +16,8 @@ data class AuthCase(
     override fun encode(): ByteArray {
         val inputBytes = input.encode()
         val preStateBytes = preState.encode()
-        val outputBytes = byteArrayOf(0)
+        // NULL output encodes to empty byte array
+        val outputBytes = output?.encode() ?: ByteArray(0)
         val postStateBytes = postState.encode()
         return inputBytes + preStateBytes + outputBytes + postStateBytes
     }

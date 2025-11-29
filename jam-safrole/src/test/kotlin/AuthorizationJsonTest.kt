@@ -64,28 +64,30 @@ class AuthorizationJsonTest {
     @Test
     fun testTinyAuthorizations() {
         val folderPath = "stf/authorizations/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<AuthCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<AuthCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = AuthorizationStateTransition(AuthConfig(CORE_COUNT = 2))
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertAuthStateEquals(inputCase.postState, postState, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertAuthStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 
     @Test
     fun testFullAuthorizations() {
         val folderPath = "stf/authorizations/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<AuthCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<AuthCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = AuthorizationStateTransition(AuthConfig(CORE_COUNT = 341))
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertAuthStateEquals(inputCase.postState, postState, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertAuthStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 }

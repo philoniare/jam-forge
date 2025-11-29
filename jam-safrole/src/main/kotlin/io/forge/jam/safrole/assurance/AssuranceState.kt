@@ -16,6 +16,8 @@ data class AssuranceState(
     val currValidators: List<ValidatorKey>,
 ) : Encodable {
     override fun encode(): ByteArray {
-        return encodeOptionalList(availAssignments) + encodeList(currValidators)
+        // AvailabilityAssignments has fixed size (core-count), so no length prefix
+        // ValidatorsData has fixed size (validators-count), so no length prefix
+        return encodeOptionalList(availAssignments, includeLength = false) + encodeList(currValidators, includeLength = false)
     }
 }

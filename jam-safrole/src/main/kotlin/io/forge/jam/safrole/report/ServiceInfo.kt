@@ -33,8 +33,12 @@ class ServiceInfo(
         val minItemGasBytes = encodeFixedWidthInteger(minItemGas, 8, false)
         val minMemoGasBytes = encodeFixedWidthInteger(minMemoGas, 8, false)
         val bytesBytes = encodeFixedWidthInteger(bytes, 8, false)
+        val depositOffsetBytes = encodeFixedWidthInteger(depositOffset, 8, false)
         val itemsBytes = encodeFixedWidthInteger(items, 4, false)
-        return codeHash.bytes + balanceBytes + minItemGasBytes + minMemoGasBytes + bytesBytes + itemsBytes
+        val creationSlotBytes = encodeFixedWidthInteger(creationSlot, 4, false)
+        val lastAccumulationSlotBytes = encodeFixedWidthInteger(lastAccumulationSlot, 4, false)
+        val parentServiceBytes = encodeFixedWidthInteger(parentService, 4, false)
+        return codeHash.bytes + balanceBytes + minItemGasBytes + minMemoGasBytes + bytesBytes + depositOffsetBytes + itemsBytes + creationSlotBytes + lastAccumulationSlotBytes + parentServiceBytes
     }
 
     override fun equals(other: Any?): Boolean {

@@ -20,5 +20,15 @@ data class ReportCase(
         val postStateBytes = postState.encode()
         return inputBytes + preStateBytes + outputBytes + postStateBytes
     }
+
+    fun encodeDebug(): Map<String, Int> {
+        return mapOf(
+            "input" to input.encode().size,
+            "preState" to preState.encode().size,
+            "output" to output.encode().size,
+            "postState" to postState.encode().size,
+            "total" to encode().size
+        )
+    }
 }
 

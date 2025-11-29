@@ -5,6 +5,7 @@ import io.forge.jam.safrole.preimage.PreimageOutput
 import io.forge.jam.safrole.preimage.PreimageState
 import io.forge.jam.safrole.preimage.PreimageStateTransition
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.fail
 
@@ -122,18 +123,19 @@ class PreimageJsonTest {
     @Test
     fun testTinyPreimages() {
         val folderPath = "stf/preimages/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<PreimageCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<PreimageCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = PreimageStateTransition()
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertPreimageOutputEquals(inputCase.output, output, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertPreimageOutputEquals(testCase.output, output, testCaseName)
             assertPreimageStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
-                testCase
+                testCaseName
             )
         }
     }
@@ -141,18 +143,19 @@ class PreimageJsonTest {
     @Test
     fun testFullPreimages() {
         val folderPath = "stf/preimages/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<PreimageCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<PreimageCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = PreimageStateTransition()
-            val (postState, output) = stf.transition(inputCase.input, inputCase.preState)
-            assertPreimageOutputEquals(inputCase.output, output, testCase)
+            val (postState, output) = stf.transition(testCase.input, testCase.preState)
+            assertPreimageOutputEquals(testCase.output, output, testCaseName)
             assertPreimageStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
-                testCase
+                testCaseName
             )
         }
     }

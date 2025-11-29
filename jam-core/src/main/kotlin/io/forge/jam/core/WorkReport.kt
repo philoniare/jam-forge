@@ -26,18 +26,19 @@ data class WorkReport(
     override fun encode(): ByteArray {
         val packageSpecBytes = packageSpec.encode()
         val contextBytes = context.encode()
+        // CoreIndex uses compact integer encoding
         val coreIndexBytes = encodeCompactInteger(coreIndex)
         val authorizerHashBytes = authorizerHash.bytes
         // Auth gas used - compact integer encoding
         val authGasUsedBytes = encodeCompactInteger(authGasUsed)
-        // Auth output - variable length with length prefix
+        // Auth output is ByteSequence - variable length with compact integer length prefix
         val authOutputLengthBytes = encodeCompactInteger(authOutput.size.toLong())
         val authOutputBytes = authOutput.bytes
-        // Segment root lookup - variable length with length prefix
+        // Segment root lookup is SEQUENCE OF - variable length with compact integer length prefix
         val segmentRootLookupBytes = encodeCompactInteger(segmentRootLookup.size.toLong())
         val segmentRootLookupListBytes = encodeList(segmentRootLookup, false)
 
-        // Results - variable length with length prefix
+        // Results is SEQUENCE (SIZE(1..16)) - variable size, needs compact integer length
         val resultsLengthBytes = encodeCompactInteger(results.size.toLong())
         val resultsListBytes = encodeList(results, false)
         return packageSpecBytes +

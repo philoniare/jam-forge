@@ -29,7 +29,9 @@ data class Context(
         val beefyRootBytes = beefyRoot.bytes
         val lookupAnchorBytes = lookupAnchor.bytes
         val lookupAnchorSlotBytes = encodeFixedWidthInteger(lookupAnchorSlot, 4, false)
-        val prerequisiteBytes = encodeList(prerequisites)
-        return anchorBytes + stateRootBytes + beefyRootBytes + lookupAnchorBytes + lookupAnchorSlotBytes + prerequisiteBytes
+        // prerequisites is SEQUENCE OF OpaqueHash - variable size, compact integer length
+        val prerequisiteLengthBytes = encodeCompactInteger(prerequisites.size.toLong())
+        val prerequisiteBytes = encodeList(prerequisites, includeLength = false)
+        return anchorBytes + stateRootBytes + beefyRootBytes + lookupAnchorBytes + lookupAnchorSlotBytes + prerequisiteLengthBytes + prerequisiteBytes
     }
 }

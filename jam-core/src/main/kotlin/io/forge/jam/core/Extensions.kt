@@ -37,7 +37,9 @@ fun <T : Encodable> encodeNullable(item: T?): ByteArray {
 }
 
 /**
- * Encode a list of non-optional Encodable items
+ * Encode a list of non-optional Encodable items.
+ * When includeLength is true, uses 1-byte fixed length prefix (for small fixed-max lists).
+ * For variable-size lists that may exceed 255 elements, use encodeListWithCompactLength instead.
  */
 fun <T : Encodable> encodeList(list: List<T>, includeLength: Boolean = true): ByteArray {
     val itemsBytes = list.fold(ByteArray(0)) { acc, item ->
@@ -52,9 +54,21 @@ fun <T : Encodable> encodeList(list: List<T>, includeLength: Boolean = true): By
 }
 
 /**
+ * Encode a list of non-optional Encodable items with compact integer length prefix.
+ * Use this for variable-size SEQUENCE OF types.
+ */
+fun <T : Encodable> encodeListWithCompactLength(list: List<T>): ByteArray {
+    val itemsBytes = list.fold(ByteArray(0)) { acc, item ->
+        acc + item.encode()
+    }
+    val lengthBytes = encodeCompactInteger(list.size.toLong())
+    return lengthBytes + itemsBytes
+}
+
+/**
  * Encodes nested lists according to JAM protocol specification.
- * For lists of variable length, includes a length prefix.
- * Recursively handles nested structures.
+ * The outer list length is included if includeLength is true (1-byte fixed).
+ * Inner lists use compact integer length prefix.
  */
 fun <T : Encodable> encodeNestedList(list: List<List<T>>, includeLength: Boolean = true): ByteArray {
     val outerLengthBytes = if (includeLength) {

@@ -30,7 +30,7 @@ data class AccumulationState(
         return slotBytes + entropy.bytes + encodeNestedList(readyQueue, false) + encodeNestedList(
             accumulated,
             false
-        ) + privileges.encode() + encodeList(
+        ) + privileges.encode() + encodeList(statistics) + encodeList(
             accounts
         )
     }

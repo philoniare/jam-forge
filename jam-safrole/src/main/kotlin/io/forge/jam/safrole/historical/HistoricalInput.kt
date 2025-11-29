@@ -1,7 +1,9 @@
 package io.forge.jam.safrole.historical
 
+import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.ReportedWorkPackage
+import io.forge.jam.core.encodeList
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -22,4 +24,8 @@ data class HistoricalInput(
 
     @SerialName("work_packages")
     val workPackages: List<ReportedWorkPackage>
-)
+) : Encodable {
+    override fun encode(): ByteArray {
+        return headerHash.bytes + parentStateRoot.bytes + accumulateRoot.bytes + encodeList(workPackages)
+    }
+}

@@ -2,6 +2,7 @@ package io.forge.jam.core.encoding
 
 import io.forge.jam.safrole.report.*
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -184,10 +185,73 @@ class ReportsJsonTest {
     @Test
     fun testTinyReports() {
         val folderPath = "stf/reports/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<ReportCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<ReportCase>(folderPath, testCaseName)
+            if (testCaseName == "reports_with_dependencies-3") {
+                println("DEBUG: Top-level encoding sizes:")
+                testCase.encodeDebug().forEach { (k, v) -> println("  $k: $v") }
+                println("DEBUG: Pre-state encoding sizes:")
+                testCase.preState.encodeDebug().forEach { (k, v) -> println("  $k: $v") }
+                println("DEBUG: Post-state encoding sizes:")
+                testCase.postState.encodeDebug().forEach { (k, v) -> println("  $k: $v") }
+
+                // Find first byte difference
+                val inputBytes = testCase.input.encode()
+                println("DEBUG: Input size: ${inputBytes.size}")
+
+                // Debug guarantee encoding
+                val guarantees = testCase.input.guarantees
+                println("DEBUG: ${guarantees.size} guarantees")
+                var offset = 1 // compact length for guarantees
+                for ((gi, g) in guarantees.withIndex()) {
+                    val gBytes = g.encode()
+                    println("DEBUG: Guarantee $gi size: ${gBytes.size}, starts at offset $offset")
+
+                    val reportBytes = g.report.encode()
+                    println("DEBUG:   Report size: ${reportBytes.size}")
+
+                    // Check where in report the difference might be
+                    val pkgSpecBytes = g.report.packageSpec.encode()
+                    val contextBytes = g.report.context.encode()
+                    val coreIndexBytes = io.forge.jam.core.encodeCompactInteger(g.report.coreIndex)
+                    val authHashBytes = g.report.authorizerHash.bytes
+                    val authGasBytes = io.forge.jam.core.encodeCompactInteger(g.report.authGasUsed)
+
+                    println("DEBUG:     packageSpec: ${pkgSpecBytes.size}")
+                    println("DEBUG:     context: ${contextBytes.size}")
+                    println("DEBUG:     coreIndex: ${coreIndexBytes.size}")
+                    println("DEBUG:     authHash: ${authHashBytes.size}")
+                    println("DEBUG:     authGas: ${authGasBytes.size} (value=${g.report.authGasUsed})")
+
+                    offset += gBytes.size
+                }
+
+                // Check overall difference
+                val actual = testCase.encode()
+                for (i in actual.indices) {
+                    if (i >= expectedBinaryData.size || actual[i] != expectedBinaryData[i]) {
+                        println("DEBUG: First byte difference at index $i")
+                        val inputSize = inputBytes.size
+                        val preStateSize = testCase.preState.encode().size
+                        val outputSize = testCase.output.encode().size
+                        val section = when {
+                            i < inputSize -> "INPUT"
+                            i < inputSize + preStateSize -> "PRE_STATE (offset ${i - inputSize})"
+                            i < inputSize + preStateSize + outputSize -> "OUTPUT (offset ${i - inputSize - preStateSize})"
+                            else -> "POST_STATE (offset ${i - inputSize - preStateSize - outputSize})"
+                        }
+                        println("  Section: $section")
+                        println("  Expected: ${if (i < expectedBinaryData.size) "%02x".format(expectedBinaryData[i]) else "N/A"}")
+                        println("  Actual: ${"%02x".format(actual[i])}")
+                        println("  Context (expected): ${expectedBinaryData.drop(maxOf(0, i-10)).take(30).map { "%02x".format(it) }}")
+                        println("  Context (actual): ${actual.drop(maxOf(0, i-10)).take(30).map { "%02x".format(it) }}")
+                        break
+                    }
+                }
+            }
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val report = ReportStateTransition(
                 ReportStateConfig(
@@ -199,20 +263,21 @@ class ReportsJsonTest {
                     EPOCH_LENGTH = 12
                 )
             )
-            val (postState, output) = report.transition(inputCase.input, inputCase.preState)
-            assertReportOutputEquals(inputCase.output, output, testCase)
+            val (postState, output) = report.transition(testCase.input, testCase.preState)
+            assertReportOutputEquals(testCase.output, output, testCaseName)
 
-            assertReportStateEquals(inputCase.postState, postState, testCase)
+            assertReportStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 
     @Test
     fun testFullReports() {
         val folderPath = "stf/reports/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<ReportCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<ReportCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val report = ReportStateTransition(
                 ReportStateConfig(
@@ -224,9 +289,9 @@ class ReportsJsonTest {
                     EPOCH_LENGTH = 600
                 )
             )
-            val (postState, output) = report.transition(inputCase.input, inputCase.preState)
-            assertReportOutputEquals(inputCase.output, output, testCase)
-            assertReportStateEquals(inputCase.postState, postState, testCase)
+            val (postState, output) = report.transition(testCase.input, testCase.preState)
+            assertReportOutputEquals(testCase.output, output, testCaseName)
+            assertReportStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 }

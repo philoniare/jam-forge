@@ -11,7 +11,9 @@ data class GuaranteeExtrinsic(
     override fun encode(): ByteArray {
         val reportBytes = report.encode()
         val slotBytes = encodeFixedWidthInteger(slot, 4, false)
-        val signaturesBytes = encodeList(signatures)
-        return reportBytes + slotBytes + signaturesBytes
+        // signatures is SEQUENCE OF ValidatorSignature - variable size, compact integer length
+        val signaturesLengthBytes = encodeCompactInteger(signatures.size.toLong())
+        val signaturesBytes = encodeList(signatures, includeLength = false)
+        return reportBytes + slotBytes + signaturesLengthBytes + signaturesBytes
     }
 }

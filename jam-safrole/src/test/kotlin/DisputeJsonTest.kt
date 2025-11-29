@@ -4,13 +4,15 @@ import io.forge.jam.safrole.dispute.DisputeCase
 import io.forge.jam.safrole.dispute.DisputeOutput
 import io.forge.jam.safrole.safrole.*
 import kotlin.test.*
+import kotlin.test.assertContentEquals
 
 class DisputeJsonTest {
 
     private fun assertDisputeOutputEquals(expected: DisputeOutput, actual: SafroleOutput, testCase: String) {
         if (expected.err != null) {
             assertNotNull(actual.err, "$testCase: Expected error but got OK")
-            assertEquals(expected.err, actual.err, "$testCase: Mismatch in error")
+            // Compare error names since DisputeErrorCode and SafroleErrorCode are separate enums
+            assertEquals(expected.err.name, actual.err!!.name, "$testCase: Mismatch in error")
         }
 
         if (expected.ok != null) {
@@ -82,10 +84,11 @@ class DisputeJsonTest {
     @Test
     fun testTinyDisputes() {
         val folderPath = "stf/disputes/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<DisputeCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<DisputeCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
@@ -98,22 +101,23 @@ class DisputeJsonTest {
                 )
             )
 
-            val safroleInput = disputeInputToSafroleInput(inputCase.input)
-            val safrolePreState = disputeStateToSafroleState(inputCase.preState)
+            val safroleInput = disputeInputToSafroleInput(testCase.input)
+            val safrolePreState = disputeStateToSafroleState(testCase.preState)
             val (postState, output) = safrole.transition(safroleInput, safrolePreState)
 
-            assertDisputeOutputEquals(inputCase.output, output, testCase)
-            assertDisputeStateEquals(inputCase.postState, postState, testCase)
+            assertDisputeOutputEquals(testCase.output, output, testCaseName)
+            assertDisputeStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 
     @Test
     fun testFullDisputes() {
         val folderPath = "stf/disputes/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<DisputeCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<DisputeCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
@@ -126,12 +130,12 @@ class DisputeJsonTest {
                 )
             )
 
-            val safroleInput = disputeInputToSafroleInput(inputCase.input)
-            val safrolePreState = disputeStateToSafroleState(inputCase.preState)
+            val safroleInput = disputeInputToSafroleInput(testCase.input)
+            val safrolePreState = disputeStateToSafroleState(testCase.preState)
             val (postState, output) = safrole.transition(safroleInput, safrolePreState)
 
-            assertDisputeOutputEquals(inputCase.output, output, testCase)
-            assertDisputeStateEquals(inputCase.postState, postState, testCase)
+            assertDisputeOutputEquals(testCase.output, output, testCaseName)
+            assertDisputeStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 }

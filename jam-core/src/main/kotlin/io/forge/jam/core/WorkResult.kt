@@ -16,6 +16,7 @@ data class RefineLoad(
     val exports: Long
 ) : Encodable {
     override fun encode(): ByteArray {
+        // All fields use compact integer encoding
         return encodeCompactInteger(gasUsed) +
             encodeCompactInteger(imports) +
             encodeCompactInteger(extrinsicCount) +

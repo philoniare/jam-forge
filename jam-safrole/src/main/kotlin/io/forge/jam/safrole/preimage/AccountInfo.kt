@@ -12,6 +12,6 @@ data class AccountInfo(
     var lookupMeta: List<PreimageHistory>,
 ) : Encodable {
     override fun encode(): ByteArray {
-        return encodeList(preimages)
+        return encodeList(preimages) + encodeList(lookupMeta)
     }
 }

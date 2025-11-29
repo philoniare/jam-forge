@@ -2,6 +2,7 @@ package io.forge.jam.core.encoding
 
 import io.forge.jam.safrole.safrole.*
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class SafroleJsonTest {
@@ -40,14 +41,15 @@ class SafroleJsonTest {
     @Test
     fun testTinySafrole() {
         val folderName = "stf/safrole/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
-        for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
                 folderName,
-                testCase,
+                testCaseName,
                 ".bin"
             )
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
@@ -59,16 +61,16 @@ class SafroleJsonTest {
                     coresCount = 2
                 )
             )
-            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
+            val (postState, output) = safrole.transition(testCase.input, testCase.preState)
 
             // Compare the expected and actual output
-            assertSafroleOutputEquals(inputCase.output, output, testCase)
+            assertSafroleOutputEquals(testCase.output, output, testCaseName)
 
             // Compare the expected and actual post_state
             assertSafroleStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
-                testCase,
+                testCaseName,
             )
         }
     }
@@ -76,14 +78,15 @@ class SafroleJsonTest {
     @Test
     fun testFullSafrole() {
         val folderName = "stf/safrole/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
-        for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<SafroleCase>(
                 folderName,
-                testCase,
+                testCaseName,
                 ".bin"
             )
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val safrole = SafroleStateTransition(
                 SafroleConfig(
@@ -95,16 +98,16 @@ class SafroleJsonTest {
                     maxTicketAttempts = 2,
                 )
             )
-            val (postState, output) = safrole.transition(inputCase.input, inputCase.preState)
+            val (postState, output) = safrole.transition(testCase.input, testCase.preState)
 
             // Compare the expected and actual output
-            assertSafroleOutputEquals(inputCase.output, output, testCase)
+            assertSafroleOutputEquals(testCase.output, output, testCaseName)
 
             // Compare the expected and actual post_state
             assertSafroleStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
-                testCase
+                testCaseName
             )
         }
     }

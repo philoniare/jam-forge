@@ -2,6 +2,7 @@ package io.forge.jam.core.encoding
 
 import io.forge.jam.safrole.historical.*
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class HistoryJsonTest {
@@ -79,15 +80,16 @@ class HistoryJsonTest {
     @Test
     fun testTinyHistory() {
         val folderPath = "stf/history/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<HistoricalCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<HistoricalCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val transition = HistoryTransition()
-            val postState = transition.stf(inputCase.input, inputCase.preState)
+            val postState = transition.stf(testCase.input, testCase.preState)
             assertHistoryStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
             )
         }
@@ -96,15 +98,16 @@ class HistoryJsonTest {
     @Test
     fun testFullHistory() {
         val folderPath = "stf/history/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
 
-        for (testCase in testCases) {
-            val inputCase = TestFileLoader.loadJsonFromTestVectors<HistoricalCase>(folderPath, testCase)
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<HistoricalCase>(folderPath, testCaseName)
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val transition = HistoryTransition()
-            val postState = transition.stf(inputCase.input, inputCase.preState)
+            val postState = transition.stf(testCase.input, testCase.preState)
             assertHistoryStateEquals(
-                inputCase.postState,
+                testCase.postState,
                 postState,
             )
         }

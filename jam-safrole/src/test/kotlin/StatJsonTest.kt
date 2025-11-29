@@ -5,6 +5,7 @@ import io.forge.jam.safrole.stats.StatConfig
 import io.forge.jam.safrole.stats.StatState
 import io.forge.jam.safrole.stats.StatStateTransition
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 class StatJsonTest {
@@ -52,36 +53,38 @@ class StatJsonTest {
     @Test
     fun testTinyStats() {
         val folderName = "stf/statistics/tiny"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
-        for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
                 folderName,
-                testCase,
+                testCaseName,
                 ".bin"
             )
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = StatStateTransition(StatConfig(EPOCH_LENGTH = 12))
-            val (postState, _) = stf.transition(inputCase.input, inputCase.preState)
-            assertStatStateEquals(inputCase.postState, postState, testCase)
+            val (postState, _) = stf.transition(testCase.input, testCase.preState)
+            assertStatStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 
     @Test
     fun testFullStats() {
         val folderName = "stf/statistics/full"
-        val testCases = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
 
-        for (testCase in testCases) {
-            val (inputCase) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
+        for (testCaseName in testCaseNames) {
+            val (testCase, expectedBinaryData) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
                 folderName,
-                testCase,
+                testCaseName,
                 ".bin"
             )
+            assertContentEquals(expectedBinaryData, testCase.encode(), "Encoding mismatch for $testCaseName")
 
             val stf = StatStateTransition(StatConfig(EPOCH_LENGTH = 600))
-            val (postState, _) = stf.transition(inputCase.input, inputCase.preState)
-            assertStatStateEquals(inputCase.postState, postState, testCase)
+            val (postState, _) = stf.transition(testCase.input, testCase.preState)
+            assertStatStateEquals(testCase.postState, postState, testCaseName)
         }
     }
 }
