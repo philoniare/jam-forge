@@ -1375,7 +1375,7 @@ class Compiler(
     override fun ecalli(imm: UInt) {
         instance.emit(
             RawHandlers.ecalli,
-            Args.ecalli(programCounter, imm),
+            Args.ecalli(programCounter, imm, nextProgramCounter),
             "ecalli"
         )
     }
@@ -1452,7 +1452,11 @@ class Compiler(
     }
 
     override fun sbrk(reg1: RawReg, reg2: RawReg) {
-        TODO("Not yet implemented: sbrk")
+        instance.emit(
+            RawHandlers.sbrk,
+            Args.sbrk(reg1, reg2),
+            "sbrk"
+        )
     }
 
     override fun countLeadingZeroBits32(reg1: RawReg, reg2: RawReg) {

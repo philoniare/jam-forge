@@ -1,7 +1,6 @@
 package io.forge.jam.core
 
 import io.forge.jam.core.encoding.TestFileLoader
-import merkle
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 

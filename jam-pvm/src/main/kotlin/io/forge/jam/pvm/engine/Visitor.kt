@@ -529,4 +529,23 @@ class Visitor(
 
         return inner.resolveJump(target) ?: panicImpl(this, programCounter)
     }
+
+    fun sbrk(d: Reg, size: UInt): Target? {
+        println("[DEBUG-SBRK] sbrk called with size=$size")
+        val result = inner.sbrk(size)
+        if (result != null) {
+            // sbrk returns the new break. The instruction expects the old break.
+            val oldBreak = result - size
+            println("[DEBUG-SBRK] sbrk success: oldBreak=$oldBreak, newBreak=$result")
+            set32(d, oldBreak)
+            return goToNextInstruction()
+        } else {
+            println("[DEBUG-SBRK] sbrk failed")
+            // sbrk failed. Return 0? Or Panic?
+            // Usually sbrk failure returns (void*)-1.
+            // But here we are in PVM.
+            // Let's assume panic for now as failure is catastrophic for allocator.
+            return panicImpl(this, inner.programCounter)
+        }
+    }
 }

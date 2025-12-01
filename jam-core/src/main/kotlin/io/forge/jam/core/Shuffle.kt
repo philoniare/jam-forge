@@ -1,7 +1,5 @@
 package io.forge.jam.core
 
-import blakeHash
-
 fun jamShuffleList(list: List<Int>, entropy: JamByteArray): List<Int> {
     val entropyNumbers = computeQ(entropy, list.size)
     return computeShuffleEq329(list, entropyNumbers)

@@ -1,4 +1,5 @@
-import io.forge.jam.core.JamByteArray
+package io.forge.jam.core
+
 import org.bouncycastle.crypto.digests.KeccakDigest
 import org.bouncycastle.jcajce.provider.digest.Blake2b
 

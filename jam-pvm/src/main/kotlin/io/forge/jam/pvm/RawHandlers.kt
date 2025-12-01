@@ -56,11 +56,12 @@ object RawHandlers {
         val args = getArgs(visitor)
         val programCounter = ProgramCounter(args.a0)
         val imm = args.a1
+        val nextProgramCounter = ProgramCounter(args.a2)
         logger.debug("Ecalli at ${programCounter.value}: host call $imm")
         with(visitor.inner) {
             this.programCounter = programCounter
             this.programCounterValid = true
-            this.nextProgramCounter = null
+            this.nextProgramCounter = nextProgramCounter
             this.nextProgramCounterChanged = true
             this.interrupt = InterruptKind.Ecalli(imm)
         }
@@ -1967,7 +1968,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<U8LoadTy>(
+        val result = visitor.load<U8LoadTy>(
             programCounter,
             dst,
             base,
@@ -1975,6 +1976,12 @@ object RawHandlers {
             1u,
             false
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            val baseVal = visitor.get64(base.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectU8Basic: base=$base($baseVal), offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadIndirectU8Dynamic: Handler = { visitor ->
@@ -1984,7 +1991,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<U8LoadTy>(
+        val result = visitor.load<U8LoadTy>(
             programCounter,
             dst,
             base,
@@ -1992,6 +1999,12 @@ object RawHandlers {
             1u,
             true
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            val baseVal = visitor.get64(base.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectU8Dynamic: base=$base($baseVal), offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadIndirectU32Basic: Handler = { visitor ->
@@ -2035,7 +2048,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<U64LoadTy>(
+        val result = visitor.load<U64LoadTy>(
             programCounter,
             dst,
             base,
@@ -2043,6 +2056,12 @@ object RawHandlers {
             8u,
             false
         )
+        if (result != null) {
+            val value = visitor.get64(dst.toRegImm())
+            val baseVal = visitor.get64(base.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectU64Basic: base=$base($baseVal), offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadIndirectU64Dynamic: Handler = { visitor ->
@@ -2052,7 +2071,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<U64LoadTy>(
+        val result = visitor.load<U64LoadTy>(
             programCounter,
             dst,
             base,
@@ -2060,6 +2079,11 @@ object RawHandlers {
             8u,
             true
         )
+        if (result != null) {
+            val value = visitor.get64(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectU64Dynamic: base=$base, offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU8Basic: Handler = { visitor ->
@@ -2068,7 +2092,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U8LoadTy>(
+        val result = visitor.load<U8LoadTy>(
             programCounter,
             dst,
             null,
@@ -2076,6 +2100,11 @@ object RawHandlers {
             1u,
             false
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm()) // U8 loaded into 32-bit reg
+            println("[DEBUG-LOAD] LoadU8Basic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU8Dynamic: Handler = { visitor ->
@@ -2084,7 +2113,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U8LoadTy>(
+        val result = visitor.load<U8LoadTy>(
             programCounter,
             dst,
             null,
@@ -2092,6 +2121,11 @@ object RawHandlers {
             1u,
             true
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadU8Dynamic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU16Basic: Handler = { visitor ->
@@ -2132,7 +2166,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U32LoadTy>(
+        val result = visitor.load<U32LoadTy>(
             programCounter,
             dst,
             null,
@@ -2140,6 +2174,11 @@ object RawHandlers {
             4u,
             false
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadU32Basic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU32Dynamic: Handler = { visitor ->
@@ -2148,7 +2187,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U32LoadTy>(
+        val result = visitor.load<U32LoadTy>(
             programCounter,
             dst,
             null,
@@ -2156,6 +2195,11 @@ object RawHandlers {
             4u,
             true
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadU32Dynamic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadI32Basic: Handler = { visitor ->
@@ -2164,7 +2208,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<I32LoadTy>(
+        val result = visitor.load<I32LoadTy>(
             programCounter,
             dst,
             null,
@@ -2172,6 +2216,11 @@ object RawHandlers {
             4u,
             false
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadI32Basic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadI32Dynamic: Handler = { visitor ->
@@ -2180,7 +2229,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<I32LoadTy>(
+        val result = visitor.load<I32LoadTy>(
             programCounter,
             dst,
             null,
@@ -2188,6 +2237,11 @@ object RawHandlers {
             4u,
             true
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadI32Dynamic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU64Basic: Handler = { visitor ->
@@ -2196,7 +2250,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U64LoadTy>(
+        val result = visitor.load<U64LoadTy>(
             programCounter,
             dst,
             null,
@@ -2204,6 +2258,11 @@ object RawHandlers {
             8u,
             false
         )
+        if (result != null) {
+            val value = visitor.get64(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadU64Basic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadU64Dynamic: Handler = { visitor ->
@@ -2212,7 +2271,7 @@ object RawHandlers {
         val dst = transmuteReg(args.a1)
         val offset = args.a2
 
-        visitor.load<U64LoadTy>(
+        val result = visitor.load<U64LoadTy>(
             programCounter,
             dst,
             null,
@@ -2220,6 +2279,11 @@ object RawHandlers {
             8u,
             true
         )
+        if (result != null) {
+            val value = visitor.get64(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadU64Dynamic: offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadIndirectI32Basic: Handler = { visitor ->
@@ -2229,7 +2293,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<I32LoadTy>(
+        val result = visitor.load<I32LoadTy>(
             programCounter,
             dst,
             base,
@@ -2237,6 +2301,11 @@ object RawHandlers {
             4u,
             false
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectI32Basic: base=$base, offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadIndirectI32Dynamic: Handler = { visitor ->
@@ -2246,7 +2315,7 @@ object RawHandlers {
         val base = transmuteReg(args.a2)
         val offset = args.a3
 
-        visitor.load<I32LoadTy>(
+        val result = visitor.load<I32LoadTy>(
             programCounter,
             dst,
             base,
@@ -2254,6 +2323,11 @@ object RawHandlers {
             4u,
             true
         )
+        if (result != null) {
+            val value = visitor.get32(dst.toRegImm())
+            println("[DEBUG-LOAD] LoadIndirectI32Dynamic: base=$base, offset=$offset, value=$value")
+        }
+        result
     }
 
     val loadImm64: Handler = { visitor ->
@@ -2679,5 +2753,13 @@ object RawHandlers {
             offset,
             true
         )
+    }
+
+    val sbrk: Handler = { visitor ->
+        val args = getArgs(visitor)
+        val d = transmuteReg(args.a0)
+        val s = transmuteReg(args.a1)
+        val size = visitor.get32(s.toRegImm())
+        visitor.sbrk(d, size)
     }
 }

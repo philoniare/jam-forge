@@ -125,6 +125,7 @@ class BasicMemory private constructor(
      * Gets a read-only slice of memory
      */
     fun getMemorySlice(module: Module, address: UInt, length: UInt): ByteArray? {
+        println("[DEBUG-MEM] Reading memory at $address, length $length")
         val memoryMap = module.memoryMap()
         val (start, memorySlice) = when {
             address >= memoryMap.auxDataAddress ->

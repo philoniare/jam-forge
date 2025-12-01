@@ -1258,9 +1258,15 @@ data class Args(
             a3 = offset
         )
 
-        fun ecalli(programCounter: ProgramCounter, imm: UInt) = Args(
+        fun ecalli(programCounter: ProgramCounter, imm: UInt, nextProgramCounter: ProgramCounter) = Args(
             a0 = programCounter.value,
-            a1 = imm
+            a1 = imm,
+            a2 = nextProgramCounter.value
+        )
+
+        fun sbrk(d: RawReg, s: RawReg) = Args(
+            a0 = d.toU32(),
+            a1 = s.toU32()
         )
     }
 }

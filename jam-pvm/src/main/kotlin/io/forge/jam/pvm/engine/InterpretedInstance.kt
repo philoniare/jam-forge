@@ -401,12 +401,12 @@ class InterpretedInstance private constructor(
         }
     }
 
-    fun writeMemory(address: UInt, data: ByteArray): Result<Unit> {
+    fun writeMemory(address: UInt, data: ByteArray, isExternal: Boolean = false): Result<Unit> {
         return try {
             if (!module.isDynamicPaging()) {
                 // Handle basic memory case
                 val length = Cast(data.size.toUInt()).uintAssertAlwaysFitsInU32()
-                val slice = basicMemory.getMemorySliceMut(module, address, length)
+                val slice = basicMemory.getMemorySliceMut(module, address, length, isExternal)
                     ?: return Result.failure(
                         MemoryAccessError.outOfRangeAccess(
                             address = address,

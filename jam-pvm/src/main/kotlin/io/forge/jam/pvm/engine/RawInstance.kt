@@ -137,7 +137,7 @@ class RawInstance(
         return result
     }
 
-    fun writeMemory(address: UInt, data: ByteArray): Result<Unit> {
+    fun writeMemory(address: UInt, data: ByteArray, isExternal: Boolean = false): Result<Unit> {
         if (data.isEmpty()) {
             return Result.success(Unit)
         }
@@ -150,10 +150,10 @@ class RawInstance(
             return Result.failure(MemoryAccessError.outOfRangeAccess(address, data.size.toULong()))
         }
 
-        val result = backend.access { backend -> backend.writeMemory(address, data) }
+        val result = backend.access { backend -> backend.writeMemory(address, data, isExternal) }
 
         crosscheckInstance?.let { crosscheck ->
-            val expectedResult = crosscheck.writeMemory(address, data)
+            val expectedResult = crosscheck.writeMemory(address, data, isExternal)
             val expected = expectedResult.isSuccess
             val actual = result.isSuccess
 

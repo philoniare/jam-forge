@@ -10,16 +10,53 @@ interface InstructionSet {
 }
 
 /**
+ * Represents the different instruction set variants supported by the VM.
+ * Matches polkavm's InstructionSetKind enum.
+ */
+enum class InstructionSetKind {
+    Latest32,   // blob_version = 1, 32-bit
+    Latest64,   // blob_version = 2, 64-bit, includes all instructions
+    JamV1;      // blob_version = 3, 64-bit, excludes memset/unlikely
+
+    companion object {
+        fun fromBlobVersion(version: Byte): InstructionSetKind? = when (version.toInt()) {
+            1 -> Latest32
+            2 -> Latest64
+            3 -> JamV1
+            else -> null
+        }
+    }
+
+    fun blobVersion(): Byte = when (this) {
+        Latest32 -> 1
+        Latest64 -> 2
+        JamV1 -> 3
+    }
+
+    fun displayName(): String = when (this) {
+        JamV1 -> "jam_v1"
+        Latest32 -> "latest32"
+        Latest64 -> "latest64"
+    }
+
+    fun is64Bit(): Boolean = this != Latest32
+}
+
+/**
  * Runtime instruction set configuration that determines the instruction set version and capabilities
  */
 data class RuntimeInstructionSet(
     val allowSbrk: Boolean,
-    val is64Bit: Boolean
+    val is64Bit: Boolean,
+    val isaKind: InstructionSetKind? = null  // Optional for backward compatibility
 ) : InstructionSet {
     companion object {
         private const val I_32 = 0
         private const val I_64 = 1
         private const val I_SBRK = 2
+
+        // Opcodes excluded from JamV1 and ReviveV1: memset (2), unlikely (3)
+        private val JAM_V1_EXCLUDED_OPCODES = setOf(2, 3)
 
         fun isInstructionValid(instruction: Int, supportedInstructions: Array<Int>): Boolean {
             return when (instruction) {
@@ -43,46 +80,87 @@ data class RuntimeInstructionSet(
             }.any { it in supportedInstructions }
         }
 
-        object ISA32_V1 : InstructionSet {
-            val validSet = arrayOf(I_32, I_SBRK)
+        object Latest32 : InstructionSet {
+            private val validSet = arrayOf(I_32, I_SBRK)
             override fun opcodeFromU8(byte: UByte): Opcode? {
-                if (!isInstructionValid(byte.toInt(), validSet)) {
-                    return null
-                }
+                if (!isInstructionValid(byte.toInt(), validSet)) return null
                 return Opcode.fromUByteAny(byte)
             }
         }
 
-        private object ISA32_V1_NoSbrk : InstructionSet {
-            val validSet = arrayOf(I_32)
+        private object Latest32NoSbrk : InstructionSet {
+            private val validSet = arrayOf(I_32)
             override fun opcodeFromU8(byte: UByte): Opcode? {
-                if (!isInstructionValid(byte.toInt(), validSet)) {
-                    return null
-                }
+                if (!isInstructionValid(byte.toInt(), validSet)) return null
                 return Opcode.fromUByteAny(byte)
             }
         }
 
-        private object ISA64_V1 : InstructionSet {
-            val validSet = arrayOf(I_64, I_SBRK)
+        object Latest64 : InstructionSet {
+            private val validSet = arrayOf(I_64, I_SBRK)
             override fun opcodeFromU8(byte: UByte): Opcode? {
-                if (!isInstructionValid(byte.toInt(), validSet)) {
-                    return null
-                }
+                if (!isInstructionValid(byte.toInt(), validSet)) return null
                 return Opcode.fromUByteAny(byte)
             }
         }
+
+        object JamV1 : InstructionSet {
+            private val validSet = arrayOf(I_64, I_SBRK)
+            override fun opcodeFromU8(byte: UByte): Opcode? {
+                val value = byte.toInt()
+                if (value in JAM_V1_EXCLUDED_OPCODES) return null
+                if (!isInstructionValid(value, validSet)) return null
+                return Opcode.fromUByteAny(byte)
+            }
+        }
+
+        /**
+         * Helper function to validate JamV1 opcodes.
+         * JamV1 excludes memset (2) and unlikely (3).
+         */
+        private fun isJamV1OpcodeValid(value: Int, allowSbrk: Boolean): Boolean {
+            if (value in JAM_V1_EXCLUDED_OPCODES) return false
+            val validSet = if (allowSbrk) arrayOf(I_64, I_SBRK) else arrayOf(I_64)
+            return isInstructionValid(value, validSet)
+        }
+
+        /**
+         * Create RuntimeInstructionSet from ISA kind
+         */
+        fun fromKind(kind: InstructionSetKind, allowSbrk: Boolean = true): RuntimeInstructionSet =
+            RuntimeInstructionSet(allowSbrk, kind.is64Bit(), kind)
+
+        /**
+         * Create JamV1 instruction set
+         */
+        fun jamV1(allowSbrk: Boolean = true): RuntimeInstructionSet =
+            fromKind(InstructionSetKind.JamV1, allowSbrk)
     }
 
     override fun opcodeFromU8(byte: UByte): Opcode? {
+        // Use explicit ISA kind if provided
+        isaKind?.let { kind ->
+            return when (kind) {
+                InstructionSetKind.JamV1 -> {
+                    val value = byte.toInt()
+                    if (!isJamV1OpcodeValid(value, allowSbrk)) return null
+                    Opcode.fromUByteAny(byte)
+                }
+                InstructionSetKind.Latest64 -> Latest64.opcodeFromU8(byte)
+                InstructionSetKind.Latest32 -> when {
+                    allowSbrk -> Latest32.opcodeFromU8(byte)
+                    else -> Latest32NoSbrk.opcodeFromU8(byte)
+                }
+            }
+        }
+
+        // Fall back to legacy behavior for backward compatibility
         return when {
             !is64Bit -> when {
-                allowSbrk -> ISA32_V1.opcodeFromU8(byte)
-                else -> ISA32_V1_NoSbrk.opcodeFromU8(byte)
+                allowSbrk -> Latest32.opcodeFromU8(byte)
+                else -> Latest32NoSbrk.opcodeFromU8(byte)
             }
-
-            else -> ISA64_V1.opcodeFromU8(byte)
+            else -> Latest64.opcodeFromU8(byte)
         }
     }
-
 }
