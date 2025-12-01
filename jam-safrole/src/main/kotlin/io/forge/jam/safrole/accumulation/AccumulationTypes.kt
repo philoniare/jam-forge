@@ -3,7 +3,6 @@ package io.forge.jam.safrole.accumulation
 import io.forge.jam.core.ExecutionResult
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
-import io.forge.jam.safrole.report.ServiceData
 import io.forge.jam.safrole.report.ServiceInfo
 
 /**
@@ -41,8 +40,81 @@ data class DeferredTransfer(
  * as defined in Gray Paper equation 126.
  */
 sealed class AccumulationOperand {
-    data class WorkItem(val operand: OperandTuple) : AccumulationOperand()
-    data class Transfer(val transfer: DeferredTransfer) : AccumulationOperand()
+    abstract fun encode(): ByteArray
+
+    data class WorkItem(val operand: OperandTuple) : AccumulationOperand() {
+        override fun encode(): ByteArray {
+            val op = operand
+
+            // AccumulationInput::OperandTuple (Variant 0)
+            // Standard JAM enum encoding (1 byte).
+            val variant = byteArrayOf(0)
+
+            // GasLimit (u64)
+            val gasLimitBytes = encodeLong(op.gasLimit)
+
+            // AuthTrace (Compact(len) + bytes)
+            val authTraceLen = encodeScaleCompactInteger(op.authTrace.bytes.size.toLong())
+
+            // Result (Variant 0 + Compact(len) + bytes for success, or variant for error)
+            val ok = op.result.ok
+            val resultBytes = if (ok != null) {
+                val len = encodeScaleCompactInteger(ok.bytes.size.toLong())
+                byteArrayOf(0) + len + ok.bytes // Tag 0 for Success
+            } else {
+                byteArrayOf(2) // Tag 2 for Panic (or other error)
+            }
+
+            // Order per Gray Paper: package, segRoot, authorizer, payload, gasLimit, authTrace, result
+            return variant + op.packageHash.bytes + op.segmentRoot.bytes + op.authorizerHash.bytes +
+                op.payloadHash.bytes + gasLimitBytes + authTraceLen + op.authTrace.bytes + resultBytes
+        }
+
+        private fun encodeScaleCompactInteger(value: Long): ByteArray {
+            var x = value
+            if (x < 1 shl 6) {
+                return byteArrayOf((x shl 2).toByte())
+            }
+            if (x < 1 shl 14) {
+                return byteArrayOf(((x shl 2) or 1).toByte(), (x shr 6).toByte())
+            }
+            if (x < 1 shl 30) {
+                return byteArrayOf(
+                    ((x shl 2) or 2).toByte(),
+                    (x shr 6).toByte(),
+                    (x shr 14).toByte(),
+                    (x shr 22).toByte()
+                )
+            }
+            var bytesNeeded = 0
+            var v = x
+            while (v > 0) {
+                bytesNeeded++
+                v = v shr 8
+            }
+            val code = ((bytesNeeded - 4) shl 2) or 3
+            val result = ByteArray(1 + bytesNeeded)
+            result[0] = code.toByte()
+            for (i in 0 until bytesNeeded) {
+                result[i + 1] = ((x shr (8 * i)) and 0xFF).toByte()
+            }
+            return result
+        }
+    }
+
+    data class Transfer(val transfer: DeferredTransfer) : AccumulationOperand() {
+        override fun encode(): ByteArray {
+            // Prepend tag 1 for Transfer
+            return byteArrayOf(1) + encodeLong(transfer.source) + encodeLong(transfer.destination) + encodeLong(transfer.amount) +
+                transfer.memo.bytes + encodeLong(transfer.gasLimit)
+        }
+    }
+
+    companion object {
+        fun encodeLong(value: Long): ByteArray {
+            return ByteArray(8) { i -> ((value shr (i * 8)) and 0xFF).toByte() }
+        }
+    }
 }
 
 /**
