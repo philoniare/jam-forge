@@ -1,6 +1,7 @@
 package io.forge.jam.safrole.stats
 
 import io.forge.jam.core.Encodable
+import io.forge.jam.core.decodeFixedWidthInteger
 import io.forge.jam.core.encodeFixedWidthInteger
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -16,6 +17,26 @@ data class StatCount(
     var guarantees: Long = 0,
     var assurances: Long = 0
 ) : Encodable {
+    companion object {
+        const val SIZE = 24 // 6 * 4 bytes
+
+        fun fromBytes(data: ByteArray, offset: Int = 0): StatCount {
+            var currentOffset = offset
+            val blocks = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+            val tickets = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+            val preImages = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+            val preImagesSize = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+            val guarantees = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+            val assurances = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            return StatCount(blocks, tickets, preImages, preImagesSize, guarantees, assurances)
+        }
+    }
+
     override fun encode(): ByteArray {
         val blocksBytes = encodeFixedWidthInteger(blocks, 4, false)
         val ticketsBytes = encodeFixedWidthInteger(tickets, 4, false)

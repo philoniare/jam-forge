@@ -7,6 +7,20 @@ import kotlinx.serialization.Serializable
 class JamByteArrayList : AbstractMutableList<JamByteArray>(), Encodable, Cloneable {
     private val items = mutableListOf<JamByteArray>()
 
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0, itemSize: Int = 32): Pair<JamByteArrayList, Int> {
+            var currentOffset = offset
+            val (length, lengthBytes) = decodeCompactInteger(data, currentOffset)
+            currentOffset += lengthBytes
+            val list = JamByteArrayList()
+            for (i in 0 until length.toInt()) {
+                list.add(JamByteArray(data.copyOfRange(currentOffset, currentOffset + itemSize)))
+                currentOffset += itemSize
+            }
+            return Pair(list, currentOffset - offset)
+        }
+    }
+
     public override fun clone(): JamByteArrayList {
         val clone = JamByteArrayList()
         clone.items.addAll(items.map { it.clone() })

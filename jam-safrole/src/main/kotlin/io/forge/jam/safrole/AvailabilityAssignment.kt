@@ -2,6 +2,7 @@ package io.forge.jam.safrole
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.WorkReport
+import io.forge.jam.core.decodeFixedWidthInteger
 import io.forge.jam.core.encodeFixedWidthInteger
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -13,6 +14,20 @@ data class AvailabilityAssignment(
 
     val timeout: Long
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<AvailabilityAssignment, Int> {
+            var currentOffset = offset
+
+            val (report, reportBytes) = WorkReport.fromBytes(data, currentOffset)
+            currentOffset += reportBytes
+
+            val timeout = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+
+            return Pair(AvailabilityAssignment(report, timeout), currentOffset - offset)
+        }
+    }
+
     override fun encode(): ByteArray {
         val reportBytes = report.encode()
         val timeoutBytes = encodeFixedWidthInteger(timeout, 4, false)

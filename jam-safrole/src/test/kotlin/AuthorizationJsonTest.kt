@@ -90,4 +90,46 @@ class AuthorizationJsonTest {
             assertAuthStateEquals(testCase.postState, postState, testCaseName)
         }
     }
+
+    @Test
+    fun testTinyAuthorizationsDecoding() {
+        val folderPath = "stf/authorizations/tiny"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<AuthCase>(folderPath, testCaseName)
+
+            // Decode from binary (tiny: 2 cores)
+            val (decodedCase, bytesConsumed) = AuthCase.fromBytes(binaryData, 0, coresCount = 2)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+            assertEquals(testCase.preState.authPools.size, decodedCase.preState.authPools.size, "PreState authPools size mismatch for $testCaseName")
+            assertEquals(testCase.postState.authPools.size, decodedCase.postState.authPools.size, "PostState authPools size mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
+
+    @Test
+    fun testFullAuthorizationsDecoding() {
+        val folderPath = "stf/authorizations/full"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<AuthCase>(folderPath, testCaseName)
+
+            // Decode from binary (full: 341 cores)
+            val (decodedCase, bytesConsumed) = AuthCase.fromBytes(binaryData, 0, coresCount = 341)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+            assertEquals(testCase.preState.authPools.size, decodedCase.preState.authPools.size, "PreState authPools size mismatch for $testCaseName")
+            assertEquals(testCase.postState.authPools.size, decodedCase.postState.authPools.size, "PostState authPools size mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
 }

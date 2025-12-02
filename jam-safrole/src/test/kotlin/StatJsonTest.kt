@@ -87,4 +87,54 @@ class StatJsonTest {
             assertStatStateEquals(testCase.postState, postState, testCaseName)
         }
     }
+
+    @Test
+    fun testTinyStatsDecoding() {
+        val folderName = "stf/statistics/tiny"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
+                folderName,
+                testCaseName,
+                ".bin"
+            )
+
+            // Decode from binary (tiny: 2 cores, 6 validators)
+            val (decodedCase, bytesConsumed) = StatCase.fromBytes(binaryData, 0, coresCount = 2, validatorsCount = 6)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+            assertEquals(testCase.preState.slot, decodedCase.preState.slot, "PreState slot mismatch for $testCaseName")
+            assertEquals(testCase.postState.slot, decodedCase.postState.slot, "PostState slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
+
+    @Test
+    fun testFullStatsDecoding() {
+        val folderName = "stf/statistics/full"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderName)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<StatCase>(
+                folderName,
+                testCaseName,
+                ".bin"
+            )
+
+            // Decode from binary (full: 341 cores, 1023 validators)
+            val (decodedCase, bytesConsumed) = StatCase.fromBytes(binaryData, 0, coresCount = 341, validatorsCount = 1023)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+            assertEquals(testCase.preState.slot, decodedCase.preState.slot, "PreState slot mismatch for $testCaseName")
+            assertEquals(testCase.postState.slot, decodedCase.postState.slot, "PostState slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
 }

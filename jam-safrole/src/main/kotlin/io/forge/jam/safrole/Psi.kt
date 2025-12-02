@@ -23,6 +23,20 @@ data class Psi(
     @SerialName("offenders")
     val offenders: JamByteArrayList = JamByteArrayList(),
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<Psi, Int> {
+            var currentOffset = offset
+            val (good, goodBytes) = JamByteArrayList.fromBytes(data, currentOffset, 32)
+            currentOffset += goodBytes
+            val (bad, badBytes) = JamByteArrayList.fromBytes(data, currentOffset, 32)
+            currentOffset += badBytes
+            val (wonky, wonkyBytes) = JamByteArrayList.fromBytes(data, currentOffset, 32)
+            currentOffset += wonkyBytes
+            val (offenders, offendersBytes) = JamByteArrayList.fromBytes(data, currentOffset, 32)
+            currentOffset += offendersBytes
+            return Pair(Psi(good, bad, wonky, offenders), currentOffset - offset)
+        }
+    }
 
     fun copy(): Psi = Psi(
         good = JamByteArrayList().apply { addAll(good) },
