@@ -112,4 +112,42 @@ class HistoryJsonTest {
             )
         }
     }
+
+    @Test
+    fun testTinyHistoryDecoding() {
+        val folderPath = "stf/history/tiny"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<HistoricalCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = HistoricalCase.fromBytes(binaryData, 0)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.headerHash, decodedCase.input.headerHash, "Input headerHash mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
+
+    @Test
+    fun testFullHistoryDecoding() {
+        val folderPath = "stf/history/full"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<HistoricalCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = HistoricalCase.fromBytes(binaryData, 0)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.headerHash, decodedCase.input.headerHash, "Input headerHash mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
 }

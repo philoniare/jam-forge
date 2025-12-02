@@ -159,4 +159,42 @@ class PreimageJsonTest {
             )
         }
     }
+
+    @Test
+    fun testTinyPreimagesDecoding() {
+        val folderPath = "stf/preimages/tiny"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<PreimageCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = PreimageCase.fromBytes(binaryData, 0)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
+
+    @Test
+    fun testFullPreimagesDecoding() {
+        val folderPath = "stf/preimages/full"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<PreimageCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = PreimageCase.fromBytes(binaryData, 0)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
 }

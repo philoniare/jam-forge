@@ -2,6 +2,7 @@ package io.forge.jam.safrole.report
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.decodeFixedWidthInteger
 import io.forge.jam.core.encodeFixedWidthInteger
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
@@ -30,6 +31,53 @@ class ServiceInfo(
     @SerialName("parent_service")
     val parentService: Long = 0
 ) : Encodable {
+    companion object {
+        // 1 (version) + 32 (codeHash) + 8 (balance) + 8 (minItemGas) + 8 (minMemoGas)
+        // + 8 (bytes) + 8 (depositOffset) + 4 (items) + 4 (creationSlot) + 4 (lastAccumulationSlot) + 4 (parentService) = 89
+        const val SIZE = 89
+
+        fun fromBytes(data: ByteArray, offset: Int = 0): ServiceInfo {
+            var currentOffset = offset
+
+            val version = (data[currentOffset].toInt() and 0xFF)
+            currentOffset += 1
+
+            val codeHash = JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32))
+            currentOffset += 32
+
+            val balance = decodeFixedWidthInteger(data, currentOffset, 8, false)
+            currentOffset += 8
+
+            val minItemGas = decodeFixedWidthInteger(data, currentOffset, 8, false)
+            currentOffset += 8
+
+            val minMemoGas = decodeFixedWidthInteger(data, currentOffset, 8, false)
+            currentOffset += 8
+
+            val bytes = decodeFixedWidthInteger(data, currentOffset, 8, false)
+            currentOffset += 8
+
+            val depositOffset = decodeFixedWidthInteger(data, currentOffset, 8, false)
+            currentOffset += 8
+
+            val items = decodeFixedWidthInteger(data, currentOffset, 4, false).toInt()
+            currentOffset += 4
+
+            val creationSlot = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+
+            val lastAccumulationSlot = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+
+            val parentService = decodeFixedWidthInteger(data, currentOffset, 4, false)
+
+            return ServiceInfo(
+                version, codeHash, balance, minItemGas, minMemoGas, bytes,
+                depositOffset, items, creationSlot, lastAccumulationSlot, parentService
+            )
+        }
+    }
+
     override fun encode(): ByteArray {
         val versionBytes = encodeFixedWidthInteger(version, 1, false)
         val balanceBytes = encodeFixedWidthInteger(balance, 8, false)

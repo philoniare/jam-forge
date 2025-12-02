@@ -232,4 +232,42 @@ class ReportsJsonTest {
             assertReportStateEquals(testCase.postState, postState, testCaseName)
         }
     }
+
+    @Test
+    fun testTinyReportsDecoding() {
+        val folderPath = "stf/reports/tiny"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<ReportCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = ReportCase.fromBytes(binaryData, 0, coresCount = 2, validatorsCount = 6)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
+
+    @Test
+    fun testFullReportsDecoding() {
+        val folderPath = "stf/reports/full"
+        val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
+
+        for (testCaseName in testCaseNames) {
+            val (testCase, binaryData) = TestFileLoader.loadTestDataFromTestVectors<ReportCase>(folderPath, testCaseName)
+
+            // Decode from binary
+            val (decodedCase, bytesConsumed) = ReportCase.fromBytes(binaryData, 0, coresCount = 341, validatorsCount = 1023)
+
+            assertEquals(binaryData.size, bytesConsumed, "Bytes consumed mismatch for $testCaseName")
+            assertEquals(testCase.input.slot, decodedCase.input.slot, "Input slot mismatch for $testCaseName")
+
+            // Verify round-trip
+            assertContentEquals(binaryData, decodedCase.encode(), "Round-trip encoding mismatch for $testCaseName")
+        }
+    }
 }

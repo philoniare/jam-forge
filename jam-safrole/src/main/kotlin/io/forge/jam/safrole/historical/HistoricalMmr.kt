@@ -2,6 +2,7 @@ package io.forge.jam.safrole.historical
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.decodeCompactInteger
 import io.forge.jam.core.encodeOptionalList
 import io.forge.jam.core.serializers.NullableJamByteArrayListSerializer
 import kotlinx.serialization.Serializable
@@ -11,6 +12,25 @@ data class HistoricalMmr(
     @Serializable(with = NullableJamByteArrayListSerializer::class)
     val peaks: List<JamByteArray?>
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<HistoricalMmr, Int> {
+            var currentOffset = offset
+            val (length, lengthBytes) = decodeCompactInteger(data, currentOffset)
+            currentOffset += lengthBytes
+            val peaks = mutableListOf<JamByteArray?>()
+            for (i in 0 until length.toInt()) {
+                val optionByte = data[currentOffset].toInt() and 0xFF
+                currentOffset += 1
+                if (optionByte == 0) {
+                    peaks.add(null)
+                } else {
+                    peaks.add(JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32)))
+                    currentOffset += 32
+                }
+            }
+            return Pair(HistoricalMmr(peaks), currentOffset - offset)
+        }
+    }
     override fun encode(): ByteArray {
         return encodeOptionalList(peaks)
     }

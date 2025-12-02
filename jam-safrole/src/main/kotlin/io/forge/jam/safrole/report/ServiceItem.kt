@@ -1,6 +1,7 @@
 package io.forge.jam.safrole.report
 
 import io.forge.jam.core.Encodable
+import io.forge.jam.core.decodeFixedWidthInteger
 import io.forge.jam.core.encodeFixedWidthInteger
 import kotlinx.serialization.Serializable
 
@@ -12,6 +13,16 @@ class ServiceItem(
     val id: Long,
     val data: ServiceData
 ) : Encodable {
+    companion object {
+        const val SIZE = 4 + ServiceData.SIZE // 4 (id) + 89 (ServiceData) = 93
+
+        fun fromBytes(data: ByteArray, offset: Int = 0): ServiceItem {
+            val id = decodeFixedWidthInteger(data, offset, 4, false)
+            val serviceData = ServiceData.fromBytes(data, offset + 4)
+            return ServiceItem(id, serviceData)
+        }
+    }
+
     override fun encode(): ByteArray {
         val idBytes = encodeFixedWidthInteger(id, 4, false)
         return idBytes + data.encode()
@@ -50,6 +61,20 @@ class AccumulationServiceItem(
     val id: Long,
     val data: AccumulationServiceData
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<AccumulationServiceItem, Int> {
+            var currentOffset = offset
+
+            val id = decodeFixedWidthInteger(data, currentOffset, 4, false)
+            currentOffset += 4
+
+            val (serviceData, serviceDataBytes) = AccumulationServiceData.fromBytes(data, currentOffset)
+            currentOffset += serviceDataBytes
+
+            return Pair(AccumulationServiceItem(id, serviceData), currentOffset - offset)
+        }
+    }
+
     override fun encode(): ByteArray {
         val idBytes = encodeFixedWidthInteger(id, 4, false)
         return idBytes + data.encode()

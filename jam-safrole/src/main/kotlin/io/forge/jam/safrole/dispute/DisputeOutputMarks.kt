@@ -2,6 +2,7 @@ package io.forge.jam.safrole.dispute
 
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.decodeCompactInteger
 import io.forge.jam.core.encodeCompactInteger
 import io.forge.jam.core.encodeList
 import io.forge.jam.core.serializers.JamByteArrayListHexSerializer
@@ -14,6 +15,19 @@ data class DisputeOutputMarks(
     @Serializable(with = JamByteArrayListHexSerializer::class)
     val offendersMark: List<JamByteArray>? = null,
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<DisputeOutputMarks, Int> {
+            var currentOffset = offset
+            val (length, lengthBytes) = decodeCompactInteger(data, currentOffset)
+            currentOffset += lengthBytes
+            val offendersMark = mutableListOf<JamByteArray>()
+            for (i in 0 until length.toInt()) {
+                offendersMark.add(JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32)))
+                currentOffset += 32
+            }
+            return Pair(DisputeOutputMarks(offendersMark), currentOffset - offset)
+        }
+    }
     override fun encode(): ByteArray {
         // OffendersMark is SEQUENCE OF Ed25519Public - variable-size, needs compact integer length
         val offendersMarkBytes = if (offendersMark != null) {

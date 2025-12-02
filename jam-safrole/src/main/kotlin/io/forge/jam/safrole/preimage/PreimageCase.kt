@@ -13,6 +13,21 @@ data class PreimageCase(
     @SerialName("post_state")
     val postState: PreimageState
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<PreimageCase, Int> {
+            var currentOffset = offset
+            val (input, inputBytes) = PreimageInput.fromBytes(data, currentOffset)
+            currentOffset += inputBytes
+            val (preState, preStateBytes) = PreimageState.fromBytes(data, currentOffset)
+            currentOffset += preStateBytes
+            val (output, outputBytes) = PreimageOutput.fromBytes(data, currentOffset)
+            currentOffset += outputBytes
+            val (postState, postStateBytes) = PreimageState.fromBytes(data, currentOffset)
+            currentOffset += postStateBytes
+            return Pair(PreimageCase(input, preState, output, postState), currentOffset - offset)
+        }
+    }
+
     override fun encode(): ByteArray {
         val inputBytes = input.encode()
         val preStateBytes = preState.encode()

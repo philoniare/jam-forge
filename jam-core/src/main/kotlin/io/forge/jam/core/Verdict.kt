@@ -13,6 +13,8 @@ data class Verdict(
     companion object {
         const val VOTES_COUNT = 1023 // 2/3 of 1023 validators + 1
 
+        fun votesPerVerdict(validatorsCount: Int): Int = (2 * validatorsCount) / 3 + 1
+
         fun fromBytes(data: ByteArray, offset: Int = 0, votesCount: Int = VOTES_COUNT): Pair<Verdict, Int> {
             val target = JamByteArray(data.copyOfRange(offset, offset + 32))
             val age = decodeFixedWidthInteger(data, offset + 32, 4, false)

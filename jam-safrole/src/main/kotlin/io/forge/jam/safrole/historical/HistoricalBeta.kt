@@ -3,6 +3,7 @@ package io.forge.jam.safrole.historical
 import io.forge.jam.core.Encodable
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.ReportedWorkPackage
+import io.forge.jam.core.decodeCompactInteger
 import io.forge.jam.core.encodeList
 import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import kotlinx.serialization.SerialName
@@ -25,6 +26,26 @@ data class HistoricalBeta(
     @SerialName("reported")
     val reported: List<ReportedWorkPackage>
 ) : Encodable {
+    companion object {
+        fun fromBytes(data: ByteArray, offset: Int = 0): Pair<HistoricalBeta, Int> {
+            var currentOffset = offset
+            val headerHash = JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32))
+            currentOffset += 32
+            val beefyRoot = JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32))
+            currentOffset += 32
+            val stateRoot = JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32))
+            currentOffset += 32
+            // reported - variable-size list with compact integer length
+            val (reportedLength, reportedLengthBytes) = decodeCompactInteger(data, currentOffset)
+            currentOffset += reportedLengthBytes
+            val reported = mutableListOf<ReportedWorkPackage>()
+            for (i in 0 until reportedLength.toInt()) {
+                reported.add(ReportedWorkPackage.fromBytes(data, currentOffset))
+                currentOffset += ReportedWorkPackage.SIZE
+            }
+            return Pair(HistoricalBeta(headerHash, beefyRoot, stateRoot, reported), currentOffset - offset)
+        }
+    }
     override fun encode(): ByteArray {
         val reportedBytes = encodeList(reported)
         return headerHash.bytes + beefyRoot.bytes + stateRoot.bytes + reportedBytes
