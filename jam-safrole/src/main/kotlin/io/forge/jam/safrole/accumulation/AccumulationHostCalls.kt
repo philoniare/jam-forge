@@ -134,11 +134,15 @@ class AccumulationHostCalls(
         val offset = instance.getReg8().toInt()
         val length = instance.getReg9().toInt()
         val index = instance.getReg11().toInt()
+        println("[FETCH] service=${context.serviceIndex}, selector=$selector, index=$index, offset=$offset, len=$length, totalOperands=${operands.size}")
 
 
         val data: ByteArray? = when (selector) {
             0 -> getConstantsBlob()
-            14 -> encodeOperandsList()
+            14 -> {
+                encodeOperandsList()
+            }
+
             15 -> {
                 if (index < operands.size) {
                     val encoded = encodeOperand(operands[index])
@@ -763,6 +767,8 @@ class AccumulationHostCalls(
             return
         }
 
+        // Store the yield in the context
+        context.yield = JamByteArray(hashBuffer)
         instance.setReg7(HostCallResult.OK)
     }
 

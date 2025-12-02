@@ -37,14 +37,18 @@ class AccumulationExecutor(
         operands: List<AccumulationOperand>
     ): AccumulationOneResult {
         val account = partialState.accounts[serviceId]
-            ?: return createEmptyResult(partialState)
+            ?: return createEmptyResult(partialState, serviceId, timeslot)
 
+        // Use the account's codeHash
         val codeHash = account.info.codeHash
+
         val code = account.preimages[codeHash]?.bytes
-            ?: return createEmptyResult(partialState)
+        if (code == null) {
+            return createEmptyResult(partialState, serviceId, timeslot)
+        }
 
         if (code.size > MAX_SERVICE_CODE_SIZE) {
-            return createEmptyResult(partialState)
+            return createEmptyResult(partialState, serviceId, timeslot)
         }
 
         // Apply incoming transfers to balance
@@ -68,6 +72,7 @@ class AccumulationExecutor(
 
         // Execute PVM
         val (exitReason, gasUsed) = executePvm(context, code, gasLimit, operands)
+        println("[EXEC-DONE] service=$serviceId, exitReason=$exitReason, gasUsed=$gasUsed")
 
         // Collapse state based on exit reason
         val finalState = context.collapse(exitReason)
@@ -83,7 +88,7 @@ class AccumulationExecutor(
         return AccumulationOneResult(
             postState = finalState,
             deferredTransfers = context.deferredTransfers.toList(),
-            yield = null, // TODO: Capture yield from PVM execution
+            yield = context.yield,  // Captured from YIELD host call
             gasUsed = gasUsed,
             provisions = context.provisions.toSet()
         )
@@ -178,6 +183,14 @@ class AccumulationExecutor(
                 }
 
                 is InterruptKind.Segfault -> {
+                    val segfault = interrupt as InterruptKind.Segfault
+                    println(
+                        "[SEGFAULT] service=${context.serviceIndex}, pageAddress=0x${
+                            segfault.fault.pageAddress.toString(
+                                16
+                            )
+                        }, pageSize=${segfault.fault.pageSize}"
+                    )
                     exitReason = ExitReason.PAGE_FAULT
                     break
                 }
@@ -225,6 +238,11 @@ class AccumulationExecutor(
                 if (parts.stackSize < 65536u) {
                     parts.stackSize = 65536u
                 }
+                // Ensure enough heap space for large operand lists (at least 256KB total RW)
+                val minRwDataSize = 262144u // 256KB
+                if (parts.rwDataSize < minRwDataSize) {
+                    parts.rwDataSize = minRwDataSize
+                }
 
                 val actualRwLen =
                     if (parts.actualRwDataLen > 0u) parts.actualRwDataLen else parts.rwData.toByteArray().size.toUInt()
@@ -257,9 +275,26 @@ class AccumulationExecutor(
     /**
      * Create empty result when service code cannot be executed.
      */
-    private fun createEmptyResult(state: PartialState): AccumulationOneResult {
+    private fun createEmptyResult(
+        state: PartialState,
+        serviceId: Long? = null,
+        timeslot: Long? = null
+    ): AccumulationOneResult {
+        val finalState = if (serviceId != null && timeslot != null) {
+            val stateCopy = state.deepCopy()
+            val account = stateCopy.accounts[serviceId]
+            if (account != null) {
+                stateCopy.accounts[serviceId] = account.copy(
+                    info = account.info.copy(lastAccumulationSlot = timeslot)
+                )
+            }
+            stateCopy
+        } else {
+            state
+        }
+
         return AccumulationOneResult(
-            postState = state,
+            postState = finalState,
             deferredTransfers = emptyList(),
             yield = null,
             gasUsed = 0L,

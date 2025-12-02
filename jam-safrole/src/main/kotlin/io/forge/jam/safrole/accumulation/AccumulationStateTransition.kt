@@ -2,6 +2,9 @@ package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
+import org.bouncycastle.jcajce.provider.digest.Keccak
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * Accumulation state transition implementing Gray Paper equations 25-90, 417-424.
@@ -16,7 +19,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         preState: AccumulationState
     ): Pair<AccumulationState, AccumulationOutput> {
         val m = (input.slot % config.EPOCH_LENGTH).toInt()
-        val prevM = (preState.slot % config.EPOCH_LENGTH).toInt()
+        (preState.slot % config.EPOCH_LENGTH).toInt()
         val deltaT = (input.slot - preState.slot).toInt().coerceAtLeast(1)
 
         // 1. Collect all historically accumulated hashes (for dependency checking)
@@ -39,23 +42,14 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             historicallyAccumulated.add(report.packageSpec.hash)
         }
 
-        // 4. Build the new ready queue with proper ring buffer management
-        // First, copy all slots from pre_state and edit dependencies
-        val newReadyQueue = MutableList<List<ReadyRecord>>(config.EPOCH_LENGTH) { slotIdx ->
+        // 4. Build working copy of ready queue with edited dependencies
+        // This preserves all existing records so we can extract accumulatable ones first
+        val workingReadyQueue = MutableList<List<ReadyRecord>>(config.EPOCH_LENGTH) { slotIdx ->
             val oldRecords = preState.readyQueue.getOrNull(slotIdx) ?: emptyList()
             editReadyQueue(oldRecords, historicallyAccumulated)
         }
 
-        // Clear slots that were skipped (from prevM+1 to m, modulo EPOCH_LENGTH)
-        // These are slots older than one epoch that should be dropped
-        if (deltaT >= 1) {
-            for (offset in 1..deltaT.coerceAtMost(config.EPOCH_LENGTH)) {
-                val clearIdx = ((prevM + offset) % config.EPOCH_LENGTH + config.EPOCH_LENGTH) % config.EPOCH_LENGTH
-                newReadyQueue[clearIdx] = emptyList()
-            }
-        }
-
-        // Add new queued reports to the current slot m
+        // Add new queued reports to the current slot m (BEFORE extraction)
         val newRecords = queuedReports.map { report ->
             ReadyRecord(
                 report = report,
@@ -64,12 +58,10 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
                     .filter { it !in historicallyAccumulated }
             )
         }
-        // Append to existing records at current slot
-        newReadyQueue[m] = newReadyQueue[m] + newRecords
+        workingReadyQueue[m] = workingReadyQueue[m] + newRecords
 
-        // 5. Extract accumulatable reports from ready queue (Q function - topological sort)
-        // Flatten and process all queued records
-        val allQueuedWithSlots = newReadyQueue.flatMapIndexed { slotIdx, records ->
+        // 5. Extract accumulatable reports from ready queue
+        val allQueuedWithSlots = workingReadyQueue.flatMapIndexed { slotIdx, records ->
             records.map { record -> Pair(slotIdx, record) }
         }
 
@@ -84,33 +76,56 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             historicallyAccumulated.add(report.packageSpec.hash)
         }
 
-        // 7. Rebuild ready queue with remaining records (preserving slot positions)
-        val finalReadyQueue = MutableList<List<ReadyRecord>>(config.EPOCH_LENGTH) { emptyList() }
-        stillQueuedWithSlots.groupBy { it.first }.forEach { (slotIdx, pairs) ->
-            finalReadyQueue[slotIdx] = pairs.map { it.second }
+
+        // 7. Rebuild ready queue with remaining records
+        val newQueuedReportsNotAccumulated = stillQueuedWithSlots
+            .filter { it.first == m && newRecords.any { nr -> nr.report.packageSpec.hash == it.second.report.packageSpec.hash } }
+            .map { it.second }
+
+        val finalReadyQueue = MutableList<List<ReadyRecord>>(config.EPOCH_LENGTH) { idx ->
+            val i = ((m - idx) % config.EPOCH_LENGTH + config.EPOCH_LENGTH) % config.EPOCH_LENGTH
+            when {
+                i == 0 -> {
+                    // Current slot: ONLY new queued reports from this block (old items at this slot are dropped)
+                    newQueuedReportsNotAccumulated
+                }
+
+                i >= 1 && i < deltaT -> {
+                    // Slots that wrapped around - clear them
+                    emptyList()
+                }
+
+                else -> {
+                    // Other slots: keep remaining items that weren't accumulated
+                    stillQueuedWithSlots.filter { it.first == idx }.map { it.second }
+                }
+            }
         }
 
         // 8. Execute PVM for all accumulated reports
         val allToAccumulate = immediateReports + readyToAccumulate
         val partialState = preState.toPartialState()
 
-        val (newPartialState, gasUsedPerService) = executeAccumulation(
+        val execResult = executeAccumulation(
             partialState = partialState,
             reports = allToAccumulate,
             timeslot = input.slot,
             entropy = preState.entropy
         )
+        val newPartialState = execResult.postState
+        val gasUsedPerService = execResult.gasUsedMap
+        val commitments = execResult.commitments
 
-        // 9. Rotate accumulated array (sliding window: drop oldest, add new at end)
-        // For multi-slot gaps, shift by deltaT positions (clear intermediate slots)
+        // 9. Rotate accumulated array (sliding window: always shift by 1, add new at end)
         val newAccumulatedList = newAccumulated.toList().sortedBy { it.toHex() }
-        val newAccumulatedArray = if (deltaT >= config.EPOCH_LENGTH) {
-            // If we jumped an entire epoch, clear everything except new items
-            MutableList(config.EPOCH_LENGTH) { if (it == config.EPOCH_LENGTH - 1) newAccumulatedList else emptyList() }
-        } else {
-            // Shift left by deltaT, padding with empty lists, then add new at end
-            val shifted = preState.accumulated.drop(deltaT) + List(deltaT - 1) { emptyList<JamByteArray>() } + listOf(newAccumulatedList)
-            shifted.toMutableList()
+        val newAccumulatedArray = MutableList(config.EPOCH_LENGTH) { idx ->
+            if (idx == config.EPOCH_LENGTH - 1) {
+                // New items at last position
+                newAccumulatedList
+            } else {
+                // Shift left by 1: position i gets what was at position i+1
+                preState.accumulated.getOrNull(idx + 1) ?: emptyList()
+            }
         }
 
         // 10. Update statistics
@@ -129,12 +144,76 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             accumulated = newAccumulatedArray,
             privileges = preState.privileges.copy(),
             statistics = newStatistics,
-            accounts = newPartialState.toAccumulationServiceItems().filter { item ->
-                !item.data.service.codeHash.bytes.all { it == 0.toByte() }
-            }
+            accounts = newPartialState.toAccumulationServiceItems()
         )
 
-        return Pair(finalState, AccumulationOutput(ok = JamByteArray(ByteArray(32) { 0 })))
+        // 12. Compute commitment root from yields
+        val outputHash = computeCommitmentRoot(commitments)
+
+        return Pair(finalState, AccumulationOutput(ok = outputHash))
+    }
+
+    /**
+     * Compute the Keccak Merkle root of service commitments.
+     * Sorted by service index, then Merklized with Keccak.
+     */
+    private fun computeCommitmentRoot(commitments: Map<Long, JamByteArray>): JamByteArray {
+        if (commitments.isEmpty()) {
+            return JamByteArray(ByteArray(32) { 0 })
+        }
+
+        // Sort by service index and encode each commitment
+        val sortedCommitments = commitments.entries.sortedBy { it.key }
+        val nodes = sortedCommitments.map { (serviceId, hash) ->
+            // Encode service index as 4-byte LE + 32-byte hash
+            val buffer = ByteBuffer.allocate(4 + 32).order(ByteOrder.LITTLE_ENDIAN)
+            buffer.putInt(serviceId.toInt())
+            buffer.put(hash.bytes)
+            buffer.array()
+        }
+
+        // Binary Merkle tree with Keccak-256
+        return JamByteArray(binaryMerklize(nodes))
+    }
+
+    /**
+     * Binary Merkle tree with Keccak-256.
+     */
+    private fun binaryMerklize(leaves: List<ByteArray>): ByteArray {
+        if (leaves.isEmpty()) {
+            return ByteArray(32) { 0 }
+        }
+        if (leaves.size == 1) {
+            return keccak256(leaves[0])
+        }
+
+        // Pad to power of 2
+        val paddedLeaves = leaves.toMutableList()
+        while (paddedLeaves.size and (paddedLeaves.size - 1) != 0) {
+            paddedLeaves.add(ByteArray(32) { 0 })
+        }
+
+        // Hash leaves
+        var currentLevel = paddedLeaves.map { keccak256(it) }
+
+        // Build tree upward
+        while (currentLevel.size > 1) {
+            val nextLevel = mutableListOf<ByteArray>()
+            for (i in currentLevel.indices step 2) {
+                val left = currentLevel[i]
+                val right = if (i + 1 < currentLevel.size) currentLevel[i + 1] else ByteArray(32) { 0 }
+                nextLevel.add(keccak256(left + right))
+            }
+            currentLevel = nextLevel
+        }
+
+        return currentLevel[0]
+    }
+
+    private fun keccak256(data: ByteArray): ByteArray {
+        val digest = Keccak.Digest256()
+        digest.update(data, 0, data.size)
+        return digest.digest()
     }
 
     /**
@@ -165,6 +244,15 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
     }
 
     /**
+     * Result of accumulation execution including yields for commitment calculation.
+     */
+    data class AccumulationExecResult(
+        val postState: PartialState,
+        val gasUsedMap: Map<Long, Long>,
+        val commitments: Map<Long, JamByteArray>  // service -> yield hash
+    )
+
+    /**
      * Execute PVM accumulation for all reports.
      */
     private fun executeAccumulation(
@@ -172,18 +260,21 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         reports: List<WorkReport>,
         timeslot: Long,
         entropy: JamByteArray
-    ): Pair<PartialState, Map<Long, Long>> {
+    ): AccumulationExecResult {
         if (reports.isEmpty()) {
-            return Pair(partialState, emptyMap())
+            return AccumulationExecResult(partialState, emptyMap(), emptyMap())
         }
 
         val gasUsedMap = mutableMapOf<Long, Long>()
+        val commitments = mutableMapOf<Long, JamByteArray>()
         var currentState = partialState
 
         // Group work items by service, preserving report order
         val serviceOperands = mutableMapOf<Long, MutableList<AccumulationOperand>>()
-        
+
+        println("[ACCUMULATE] slot=$timeslot Processing ${reports.size} reports")
         for (report in reports) {
+            println("[ACCUMULATE] slot=$timeslot Report results: ${report.results.map { "${it.serviceId}" }}")
             for (result in report.results) {
                 val operand = OperandTuple(
                     packageHash = report.packageSpec.hash,
@@ -192,7 +283,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
                     payloadHash = result.payloadHash,
                     gasLimit = result.accumulateGas,
                     authTrace = report.authOutput,
-                    result = result.result
+                    result = result.result,
+                    codeHash = result.codeHash
                 )
                 serviceOperands.computeIfAbsent(result.serviceId) { mutableListOf() }
                     .add(AccumulationOperand.WorkItem(operand))
@@ -216,9 +308,12 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
             currentState = execResult.postState
             gasUsedMap[serviceId] = (gasUsedMap[serviceId] ?: 0L) + execResult.gasUsed
+
+            // Collect yield/commitment if present
+            execResult.yield?.let { commitments[serviceId] = it }
         }
 
-        return Pair(currentState, gasUsedMap)
+        return AccumulationExecResult(currentState, gasUsedMap, commitments)
     }
 
     /**

@@ -16,7 +16,8 @@ data class OperandTuple(
     val payloadHash: JamByteArray,     // Work item payload hash
     val gasLimit: Long,                // Gas limit for accumulation
     val authTrace: JamByteArray,       // Authorizer trace output
-    val result: ExecutionResult        // Refinement result (blob or error)
+    val result: ExecutionResult,       // Refinement result (blob or error)
+    val codeHash: JamByteArray         // Code hash from work result (for preimage lookup)
 )
 
 /**
@@ -212,7 +213,8 @@ class AccumulationContext(
     val timeslot: Long,
     val entropy: JamByteArray,
     val deferredTransfers: MutableList<DeferredTransfer> = mutableListOf(),
-    val provisions: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf()
+    val provisions: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf(),
+    var yield: JamByteArray? = null  // Accumulation output (32-byte hash)
 ) {
     /**
      * Checkpoint: copy current state x to checkpoint y.
@@ -228,10 +230,7 @@ class AccumulationContext(
     fun collapse(exitReason: ExitReason): PartialState {
         return when (exitReason) {
             ExitReason.PANIC -> y
-            ExitReason.INVALID_CODE -> {
-                x.accounts.remove(serviceIndex)
-                x
-            }
+            ExitReason.INVALID_CODE -> y
             else -> x
         }
     }
@@ -252,7 +251,8 @@ fun extractOperandTuples(reports: List<WorkReport>, serviceId: Long): List<Opera
                     payloadHash = result.payloadHash,
                     gasLimit = result.accumulateGas,
                     authTrace = report.authOutput,
-                    result = result.result
+                    result = result.result,
+                    codeHash = result.codeHash
                 )
             }
     }

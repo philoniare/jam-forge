@@ -32,8 +32,9 @@ data class ProgramParts(
         private val BLOB_MAGIC = byteArrayOf(0x50, 0x56, 0x4D, 0x00)
         private const val BLOB_MAGIC_SIZE = 4
 
-        // Generic blob magic byte: 'G' (0x47)
-        private const val GENERIC_MAGIC: Byte = 0x47
+        // Generic blob magic bytes: 'G' (0x47) or 'P' (0x50)
+        private const val GENERIC_MAGIC_G: Byte = 0x47  // 'G'
+        private const val GENERIC_MAGIC_P: Byte = 0x50  // 'P'
 
         private const val BLOB_LEN_SIZE: Int = Long.SIZE_BYTES
         private const val VM_MAXIMUM_IMPORT_COUNT: UInt = 1024u
@@ -114,7 +115,7 @@ data class ProgramParts(
         
         fun fromGenericBytes(blob: ArcBytes): Result<ProgramParts> = runCatching {
             val bytes = blob.toByteArray()
-            if (bytes.isEmpty() || bytes[0] != GENERIC_MAGIC) {
+            if (bytes.isEmpty() || (bytes[0] != GENERIC_MAGIC_G && bytes[0] != GENERIC_MAGIC_P)) {
                 throw ProgramParseError(ProgramParseErrorKind.Other("Not a Generic blob format"))
             }
 
