@@ -253,14 +253,19 @@ class MemoryTest {
         }
 
         @Test
-        fun `sbrk returns heap top address`() {
+        fun `sbrk returns previous heap end address`() {
             val heapBase = memoryMap.heapBase
             val allocSize = 4096u
 
-            val heapTop = instance.sbrk(allocSize)
+            // sbrk returns the PREVIOUS heap end (start of newly allocated memory)
+            // Following POSIX sbrk semantics and Boka implementation
+            val prevHeapEnd = instance.sbrk(allocSize)
 
-            assertNotNull(heapTop)
-            assertEquals(heapBase + allocSize, heapTop)
+            assertNotNull(prevHeapEnd)
+            // Initial heapSize was 0, so previous heap end equals heapBase
+            assertEquals(heapBase, prevHeapEnd)
+            // After allocation, heapSize should be updated
+            assertEquals(allocSize, instance.heapSize())
         }
 
         @Test

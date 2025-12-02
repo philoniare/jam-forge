@@ -2,13 +2,12 @@ package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
+import io.forge.jam.core.encodeCompactInteger
 import io.forge.jam.pvm.engine.*
 import io.forge.jam.pvm.program.ArcBytes
 import io.forge.jam.pvm.program.ProgramBlob
-import io.forge.jam.pvm.program.ProgramCounter
 import io.forge.jam.pvm.program.ProgramParts
 import io.forge.jam.pvm.program.Reg
-import io.forge.jam.safrole.report.ServiceInfo
 
 /**
  * Orchestrates PVM execution for accumulation.
@@ -37,18 +36,28 @@ class AccumulationExecutor(
         entropy: JamByteArray,
         operands: List<AccumulationOperand>
     ): AccumulationOneResult {
+        println("[EXEC] executeService called for service $serviceId")
         val account = partialState.accounts[serviceId]
-            ?: return createEmptyResult(partialState)
-
-        // Get service code from preimages
-        val codeHash = account.info.codeHash
-        val code = account.preimages[codeHash]?.bytes
-            ?: return createEmptyResult(partialState)
-
-        // Check code size limit
-        if (code.size > MAX_SERVICE_CODE_SIZE) {
+        if (account == null) {
+            println("[EXEC] Account $serviceId not found!")
             return createEmptyResult(partialState)
         }
+
+        val codeHash = account.info.codeHash
+        println("[EXEC] Service $serviceId code_hash=${codeHash.toHex().take(40)}...")
+        println("[EXEC] Service $serviceId preimages count=${account.preimages.size}")
+        val code = account.preimages[codeHash]?.bytes
+        if (code == null) {
+            println("[EXEC] Code not found in preimages for service $serviceId!")
+            return createEmptyResult(partialState)
+        }
+        println("[EXEC] Code found for service $serviceId, size=${code.size}")
+
+        if (code.size > MAX_SERVICE_CODE_SIZE) {
+            println("[EXEC] Service $serviceId code too large!")
+            return createEmptyResult(partialState)
+        }
+        println("[EXEC] Service $serviceId about to execute PVM")
 
         // Apply incoming transfers to balance
         val transferBalance = operands.filterIsInstance<AccumulationOperand.Transfer>()
@@ -101,11 +110,23 @@ class AccumulationExecutor(
         gasLimit: Long,
         operands: List<AccumulationOperand>
     ): Pair<ExitReason, Long> {
+        println("[EXEC-PVM] executePvm called for service ${context.serviceIndex}, codeSize=${code.size}, gasLimit=$gasLimit")
         val module = getOrCompileModule(code)
-            ?: return Pair(ExitReason.PANIC, 0L)
+        if (module == null) {
+            println("[EXEC-PVM] Module compilation failed for service ${context.serviceIndex}!")
+            return Pair(ExitReason.PANIC, 0L)
+        }
+        println("[EXEC-PVM] Module compiled for service ${context.serviceIndex}")
 
-        val instance = module.instantiate().getOrNull()
-            ?: return Pair(ExitReason.PANIC, 0L)
+        // val instance = module.instantiate().getOrNull()
+        // Manually instantiate with step tracing
+        val interpreted = InterpretedInstance.newFromModule(module, true)
+        val backend = InstanceBackend.Interpreted(interpreted)
+        val instance = RawInstance(module, backend, null)
+
+        if (instance == null) {
+            return Pair(ExitReason.PANIC, 0L)
+        }
 
         // Set up host call handler
         val hostCalls = AccumulationHostCalls(context, operands, config)
@@ -114,46 +135,103 @@ class AccumulationExecutor(
         instance.setGas(gasLimit)
         val initialGas = gasLimit
 
-        // Prepare call - entry point 5 for accumulate, args: (timeslot, service_id, operand_count)
-        instance.prepareCallUntyped(
-            ProgramCounter(5u), // Accumulate entry point
-            listOf(
-                context.timeslot.toULong(),
-                context.serviceIndex.toULong(),
-                operands.size.toULong()
-            )
-        )
+        val entryPointPc = io.forge.jam.pvm.program.ProgramCounter(5u)
+
+        // Encode operands
+
+        operands.forEachIndexed { index, op ->
+            if (op is AccumulationOperand.WorkItem) {
+                val gasLimit = op.operand.gasLimit
+                op.operand.authTrace.bytes.size
+                op.operand.result.ok?.bytes?.size ?: -1
+                // Log encoded gasLimit
+                val encodedGas = encodeCompactInteger(gasLimit)
+                encodedGas.joinToString("") { "%02x".format(it) }
+            }
+        }
+
+        // Encode input as 3 SCALE-compact integers: timeslot, serviceIndex, itemCount
+        val inputData = java.io.ByteArrayOutputStream().use { stream ->
+            stream.write(encodeCompactInteger(context.timeslot))
+            stream.write(encodeCompactInteger(context.serviceIndex))
+            stream.write(encodeCompactInteger(operands.size.toLong()))
+            stream.toByteArray()
+        }
+
+        val RA_INIT = 0xFFFF0000uL
+        val SP_INIT = 0xFEFE0000uL
+        val INPUT_ADDR = 0xFEFF0000u
+
+        val writeResult = instance.writeMemory(INPUT_ADDR, inputData, isExternal = true)
+        if (writeResult.isFailure) {
+        } else {
+        }
+
+        instance.setReg(Reg.RA, RA_INIT)
+        instance.setReg(Reg.SP, SP_INIT)
+        instance.setReg(Reg.A0, INPUT_ADDR.toULong())
+        instance.setReg(Reg.A1, inputData.size.toULong())
+
+        // GP standard does not initialize A2-A5 - leave as 0
+        instance.setReg(Reg.A2, 0uL)
+        instance.setReg(Reg.A3, 0uL)
+        instance.setReg(Reg.A4, 0uL)
+        instance.setReg(Reg.A5, 0uL)
+
+
+        // Set initial PC
+        instance.setNextProgramCounter(entryPointPc)
+
+        println("[PVM] Starting execution for service ${context.serviceIndex}")
 
         // Execute until completion
         var exitReason = ExitReason.HALT
+        var hostCallCount = 0
         while (true) {
-            when (val interrupt = instance.run().getOrNull()) {
+            val result = instance.run()
+            if (result.isFailure) {
+                val e = result.exceptionOrNull()
+                println("[PVM] Service ${context.serviceIndex} run() failed: ${e?.message}")
+                exitReason = ExitReason.PANIC
+                break
+            }
+
+            when (val interrupt = result.getOrNull()) {
                 InterruptKind.Finished -> {
+                    println("[PVM] Service ${context.serviceIndex} FINISHED, hostCalls=$hostCallCount")
                     exitReason = ExitReason.HALT
                     break
                 }
+
                 InterruptKind.Panic -> {
+                    println("[PVM] Service ${context.serviceIndex} PANIC, hostCalls=$hostCallCount")
                     exitReason = ExitReason.PANIC
                     break
                 }
+
                 InterruptKind.NotEnoughGas -> {
+                    println("[PVM] Service ${context.serviceIndex} OUT_OF_GAS, hostCalls=$hostCallCount")
                     exitReason = ExitReason.OUT_OF_GAS
                     break
                 }
+
                 is InterruptKind.Ecalli -> {
-                    // Handle host call
-                    val hostCallGas = hostCalls.dispatch(interrupt.value, instance)
-                    // Gas is already deducted by the handler
-                    // Continue execution
+                    hostCallCount++
+                    hostCalls.dispatch(interrupt.value, instance)
                 }
+
                 is InterruptKind.Segfault -> {
+                    println("[PVM] Service ${context.serviceIndex} SEGFAULT, hostCalls=$hostCallCount")
                     exitReason = ExitReason.PAGE_FAULT
                     break
                 }
+
                 InterruptKind.Step -> {
                     // Continue for step tracing
                 }
+
                 null -> {
+                    println("[PVM] Service ${context.serviceIndex} null interrupt, hostCalls=$hostCallCount")
                     exitReason = ExitReason.PANIC
                     break
                 }
@@ -161,6 +239,12 @@ class AccumulationExecutor(
         }
 
         val gasUsed = initialGas - instance.gas()
+        println("[PVM] Service ${context.serviceIndex} done, gasUsed=$gasUsed, exitReason=$exitReason")
+
+        if (exitReason == ExitReason.PANIC) {
+            throw RuntimeException("PVM Panic! Host calls: $hostCallCount")
+        }
+
         return Pair(exitReason, gasUsed)
     }
 
@@ -169,17 +253,44 @@ class AccumulationExecutor(
      */
     private fun getOrCompileModule(code: ByteArray): Module? {
         val codeHash = JamByteArray(blake2b256(code))
+        println("[COMPILE] Compiling module with codeHash=${codeHash.toHex().take(20)}..., size=${code.size}")
 
         return moduleCache.getOrPut(codeHash) {
             try {
-                val parts = ProgramParts.fromBytes(ArcBytes.fromStatic(code)).getOrNull()
-                    ?: return null
-                val blob = ProgramBlob.fromParts(parts).getOrNull()
-                    ?: return null
+                var partsResult = ProgramParts.fromGenericBytes(ArcBytes.fromStatic(code))
+                println("[COMPILE] Generic format result: ${partsResult.isSuccess}")
+                if (partsResult.isFailure) {
+                    partsResult = ProgramParts.fromJamBytes(ArcBytes.fromStatic(code))
+                    println("[COMPILE] JAM format result: ${partsResult.isSuccess}")
+                }
+                if (partsResult.isFailure) {
+                    partsResult = ProgramParts.fromBytes(ArcBytes.fromStatic(code))
+                    println("[COMPILE] PolkaVM format result: ${partsResult.isSuccess}")
+                }
+                if (partsResult.isFailure) {
+                    println("[COMPILE] All format parsing failed! Error: ${partsResult.exceptionOrNull()}")
+                    return null
+                }
+                val parts = partsResult.getOrNull() ?: return null
+                if (parts.stackSize < 65536u) {
+                    parts.stackSize = 65536u
+                }
+
+                val actualRwLen =
+                    if (parts.actualRwDataLen > 0u) parts.actualRwDataLen else parts.rwData.toByteArray().size.toUInt()
+                parts.rwDataSize - actualRwLen
+
+                val blobResult = ProgramBlob.fromParts(parts)
+                if (blobResult.isFailure) {
+                    return null
+                }
+                val blob = blobResult.getOrNull() ?: return null
 
                 val moduleConfig = ModuleConfig.new(dynamicPaging = false)
                 moduleConfig.setGasMetering(GasMeteringKind.Sync)
                 moduleConfig.setPageSize(4096u)
+                moduleConfig.setStepTracing(true)
+                moduleConfig.setAuxDataSize(16908288u)
 
                 Module.fromBlob(engine, moduleConfig, blob).getOrNull()
                     ?: return null
@@ -206,22 +317,30 @@ class AccumulationExecutor(
         const val MAX_SERVICE_CODE_SIZE = 4 * 1024 * 1024 // 4MB
 
         /**
-         * Simple Blake2b-256 hash (placeholder - should use proper implementation).
+         * Simple Blake2b-256 hash.
          */
         private fun blake2b256(data: ByteArray): ByteArray {
-            // Use the crypto implementation from jam-core
-            return org.bouncycastle.crypto.digests.Blake2bDigest(256).let { digest ->
-                digest.update(data, 0, data.size)
-                val result = ByteArray(32)
-                digest.doFinal(result, 0)
-                result
-            }
+            val digest = org.bouncycastle.jcajce.provider.digest.Blake2b.Blake2b256()
+            digest.update(data, 0, data.size)
+            return digest.digest()
+        }
+
+        /**
+         * Encode accumulate arguments in JAM format.
+         */
+        private fun encodeAccumulateArguments(timeslot: Long, serviceId: Long, operandCount: Int): ByteArray {
+            val buffer = java.nio.ByteBuffer.allocate(24) // 3 * 8 bytes
+            buffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            buffer.putLong(serviceId)
+            buffer.putLong(timeslot)
+            buffer.putLong(operandCount.toLong())
+            return buffer.array()
         }
     }
 }
 
 /**
- * Execute sequential accumulation (accseq from Gray Paper).
+ * Execute sequential accumulation
  * Processes work reports sequentially, respecting gas budget.
  */
 fun accumulateSequential(
@@ -302,7 +421,7 @@ fun accumulateSequential(
 }
 
 /**
- * Execute parallel accumulation (accpar from Gray Paper).
+ * Execute parallel accumulation
  * Aggregates work items per service and executes in parallel.
  */
 fun accumulateParallel(

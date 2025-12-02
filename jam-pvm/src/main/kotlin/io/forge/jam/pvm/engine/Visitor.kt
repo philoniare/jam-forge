@@ -458,11 +458,6 @@ class Visitor(
                     return panicImpl(this, programCounter)
                 }
 
-                if (!inner.basicMemory.isWritable(inner.module, address, length)) {
-                    logger.debug("Attempt to write to read-only memory at 0x${address.toString(16)}")
-                    return panicImpl(this, programCounter)
-                }
-
                 inner.basicMemory.getMemorySliceMut(inner.module, address, length)?.let { mutableSlice ->
                     for (i in 0 until bytes.size) {
                         mutableSlice[i] = bytes[i].toUByte()
@@ -475,7 +470,6 @@ class Visitor(
         } else {
             // Dynamic memory mode
             if (pageAddressLo == pageAddressHi) {
-                println("Single page")
                 // Single page access
                 inner.dynamicMemory.pages[pageAddressLo]?.let { page ->
                     val pageOffset = (address - pageAddressLo).toInt()
@@ -483,7 +477,6 @@ class Visitor(
                     return goToNextInstruction()
                 } ?: return panicImpl(this, programCounter)
             } else {
-                println("Single page")
                 // Cross-page access
                 val pages = inner.dynamicMemory.pages
                 val lo = pages[pageAddressLo]
@@ -531,20 +524,13 @@ class Visitor(
     }
 
     fun sbrk(d: Reg, size: UInt): Target? {
-        println("[DEBUG-SBRK] sbrk called with size=$size")
         val result = inner.sbrk(size)
         if (result != null) {
-            // sbrk returns the new break. The instruction expects the old break.
-            val oldBreak = result - size
-            println("[DEBUG-SBRK] sbrk success: oldBreak=$oldBreak, newBreak=$result")
-            set32(d, oldBreak)
+            // sbrk returns the previous break (base of newly allocated memory)
+            set32(d, result)
             return goToNextInstruction()
         } else {
-            println("[DEBUG-SBRK] sbrk failed")
-            // sbrk failed. Return 0? Or Panic?
-            // Usually sbrk failure returns (void*)-1.
-            // But here we are in PVM.
-            // Let's assume panic for now as failure is catastrophic for allocator.
+            // sbrk failed - panic as allocation failure is catastrophic
             return panicImpl(this, inner.programCounter)
         }
     }

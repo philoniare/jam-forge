@@ -37,6 +37,7 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
             Abi.MemoryMapBuilder.new(config.pageSize)
                 .roDataSize(blob.roDataSize)
                 .rwDataSize(blob.rwDataSize)
+                .actualRwDataLen(blob.actualRwDataLen)
                 .stackSize(blob.stackSize).build().getOrThrow()
 
             val init = GuestInit(
@@ -45,14 +46,12 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
                 rwData = blob.rwData.toByteArray(),
                 roDataSize = blob.roDataSize,
                 rwDataSize = blob.rwDataSize,
+                actualRwDataLen = blob.actualRwDataLen,
                 stackSize = blob.stackSize,
                 auxDataSize = config.auxDataSize
             )
 
-            val instructionSet = RuntimeInstructionSet(
-                allowSbrk = config.allowSbrk,
-                is64Bit = blob.is64Bit
-            )
+            val instructionSet = blob.instructionSet(allowSbrk = config.allowSbrk)
 
             // Compilation and module setup
             val interpretedModule = if (engine.interpreterEnabled) {
@@ -191,6 +190,6 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
     }
 
     fun defaultSp(): ULong {
-        return state().memoryMap.stackAddressHigh.toULong()
+        return state().memoryMap.stackAddressLow().toULong()
     }
 }

@@ -109,14 +109,18 @@ class InterpretedInstance private constructor(
         if (!module.isDynamicPaging()) {
             basicMemory.heapSize()
         } else {
-            TODO("Dynamic paging heap size not implemented")
+            dynamicMemory.generalMemory().heapSize()
         }
 
     fun sbrk(size: UInt): UInt? =
         if (!module.isDynamicPaging()) {
             basicMemory.sbrk(module, size)
         } else {
-            TODO("Dynamic paging sbrk not implemented")
+            try {
+                dynamicMemory.generalMemory().sbrk(size)
+            } catch (e: MemoryError.OutOfMemory) {
+                null
+            }
         }
 
     fun pid(): UInt? = null

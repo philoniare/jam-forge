@@ -12,6 +12,7 @@ data class GuestInit(
     val rwData: ByteArray,
     val roDataSize: UInt,
     val rwDataSize: UInt,
+    val actualRwDataLen: UInt,  // The actual rwData content length (without heap pages)
     val stackSize: UInt,
     val auxDataSize: UInt
 ) {
@@ -23,6 +24,7 @@ data class GuestInit(
         Abi.MemoryMapBuilder.new(pageSize)
             .roDataSize(roDataSize)
             .rwDataSize(rwDataSize)
+            .actualRwDataLen(actualRwDataLen)
             .stackSize(stackSize)
             .auxDataSize(auxDataSize)
             .build()
@@ -36,6 +38,7 @@ data class GuestInit(
             rwData = ByteArray(0),
             roDataSize = 0u,
             rwDataSize = 0u,
+            actualRwDataLen = 0u,
             stackSize = 0u,
             auxDataSize = 0u
         )
@@ -50,6 +53,7 @@ data class GuestInit(
             rwData.contentEquals(other.rwData) &&
             roDataSize == other.roDataSize &&
             rwDataSize == other.rwDataSize &&
+            actualRwDataLen == other.actualRwDataLen &&
             stackSize == other.stackSize &&
             auxDataSize == other.auxDataSize
     }
@@ -60,6 +64,7 @@ data class GuestInit(
         result = 31 * result + rwData.contentHashCode()
         result = 31 * result + roDataSize.hashCode()
         result = 31 * result + rwDataSize.hashCode()
+        result = 31 * result + actualRwDataLen.hashCode()
         result = 31 * result + stackSize.hashCode()
         result = 31 * result + auxDataSize.hashCode()
         return result
@@ -72,6 +77,7 @@ data class GuestInit(
         append("rwData.size=").append(rwData.size).append(", ")
         append("roDataSize=").append(roDataSize).append(", ")
         append("rwDataSize=").append(rwDataSize).append(", ")
+        append("actualRwDataLen=").append(actualRwDataLen).append(", ")
         append("stackSize=").append(stackSize).append(", ")
         append("auxDataSize=").append(auxDataSize)
         append(")")

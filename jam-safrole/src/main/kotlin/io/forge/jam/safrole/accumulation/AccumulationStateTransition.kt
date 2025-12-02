@@ -48,8 +48,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
         // Clear slots that were skipped (from prevM+1 to m, modulo EPOCH_LENGTH)
         // These are slots older than one epoch that should be dropped
-        if (deltaT > 1) {
-            for (offset in 1 until deltaT.coerceAtMost(config.EPOCH_LENGTH)) {
+        if (deltaT >= 1) {
+            for (offset in 1..deltaT.coerceAtMost(config.EPOCH_LENGTH)) {
                 val clearIdx = ((prevM + offset) % config.EPOCH_LENGTH + config.EPOCH_LENGTH) % config.EPOCH_LENGTH
                 newReadyQueue[clearIdx] = emptyList()
             }
@@ -101,9 +101,17 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             entropy = preState.entropy
         )
 
-        // 9. Rotate accumulated array (drop oldest, add new at end)
+        // 9. Rotate accumulated array (sliding window: drop oldest, add new at end)
+        // For multi-slot gaps, shift by deltaT positions (clear intermediate slots)
         val newAccumulatedList = newAccumulated.toList().sortedBy { it.toHex() }
-        val newAccumulatedArray = (preState.accumulated.drop(1) + listOf(newAccumulatedList)).toMutableList()
+        val newAccumulatedArray = if (deltaT >= config.EPOCH_LENGTH) {
+            // If we jumped an entire epoch, clear everything except new items
+            MutableList(config.EPOCH_LENGTH) { if (it == config.EPOCH_LENGTH - 1) newAccumulatedList else emptyList() }
+        } else {
+            // Shift left by deltaT, padding with empty lists, then add new at end
+            val shifted = preState.accumulated.drop(deltaT) + List(deltaT - 1) { emptyList<JamByteArray>() } + listOf(newAccumulatedList)
+            shifted.toMutableList()
+        }
 
         // 10. Update statistics
         val workItemsPerService = countWorkItemsPerService(allToAccumulate)
@@ -189,8 +197,11 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             }
         }
 
+        println("[ACC] Services to accumulate: ${serviceOperands.keys}")
+
         // Execute for each service
         for ((serviceId, operands) in serviceOperands) {
+            println("[ACC] Processing service $serviceId with ${operands.size} operands")
             // Calculate total gas limit for this service batch
             val totalGasLimit = operands.filterIsInstance<AccumulationOperand.WorkItem>()
                 .sumOf { it.operand.gasLimit }

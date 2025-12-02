@@ -9,6 +9,7 @@ import io.forge.jam.safrole.report.AccumulationServiceItem
 import io.forge.jam.safrole.report.ServiceInfo
 import io.forge.jam.safrole.report.StorageMapEntry
 import io.forge.jam.safrole.report.PreimagesStatusMapEntry
+import io.forge.jam.safrole.report.PreimageStatusKey
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -63,7 +64,7 @@ data class AccumulationState(
                         preimage.hash to preimage.blob
                     }.toMutableMap(),
                     preimageRequests = item.data.preimagesStatus.associate { status ->
-                        PreimageKey(status.hash, status.status.size) to PreimageRequest(status.status)
+                        PreimageKey(status.hash, status.length) to PreimageRequest(status.status)
                     }.toMutableMap(),
                     lastAccumulated = item.data.service.lastAccumulationSlot
                 )
@@ -97,7 +98,10 @@ fun PartialState.toAccumulationServiceItems(): List<AccumulationServiceItem> {
                 preimagesStatus = account.preimageRequests.entries
                     .sortedBy { it.key.hash.toHex() }
                     .map { (key, request) ->
-                        PreimagesStatusMapEntry(hash = key.hash, status = request.requestedAt)
+                        PreimagesStatusMapEntry(
+                            key = PreimageStatusKey(hash = key.hash, length = key.length),
+                            value = request.requestedAt
+                        )
                     }
             )
         )

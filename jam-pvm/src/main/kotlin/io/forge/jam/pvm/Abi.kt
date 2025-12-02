@@ -60,6 +60,7 @@ object Abi {
         private var pageSize: UInt = 0U
         private var roDataSize: UInt = 0U
         private var rwDataSize: UInt = 0U
+        private var actualRwDataLen: UInt = 0U  // The actual rwData content length (without heap pages)
         private var stackSize: UInt = 0U
         private var auxDataSize: UInt = 0U
 
@@ -71,6 +72,7 @@ object Abi {
 
         fun roDataSize(value: UInt) = apply { roDataSize = value }
         fun rwDataSize(value: UInt) = apply { rwDataSize = value }
+        fun actualRwDataLen(value: UInt) = apply { actualRwDataLen = value }
         fun stackSize(value: UInt) = apply { stackSize = value }
         fun auxDataSize(value: UInt) = apply { auxDataSize = value }
 
@@ -132,7 +134,10 @@ object Abi {
             addressLow += VM_MAX_PAGE_SIZE.toULong()
 
             val rwDataAddress = addressLow.toUInt()
-            val heapBase = addressLow + originalRwDataSize.toULong()
+            // heapBase should point to the start of the heap (right after actual rwData content)
+            // Use actualRwDataLen if set, otherwise fall back to originalRwDataSize for PolkaVM format
+            val effectiveRwDataLen = if (actualRwDataLen > 0u) actualRwDataLen else originalRwDataSize
+            val heapBase = addressLow + effectiveRwDataLen.toULong()
             addressLow += rwDataAddressSpace
             val heapSlack = addressLow - heapBase
             addressLow += VM_MAX_PAGE_SIZE.toULong()

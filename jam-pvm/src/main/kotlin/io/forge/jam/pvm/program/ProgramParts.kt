@@ -9,6 +9,7 @@ data class ProgramParts(
     var is64Bit: Boolean = false,
     var roDataSize: UInt = 0u,
     var rwDataSize: UInt = 0u,
+    var actualRwDataLen: UInt = 0u,  // The actual rwData content length (without heap pages)
     var stackSize: UInt = 0u,
     var roData: ArcBytes = ArcBytes.empty(),
     var rwData: ArcBytes = ArcBytes.empty(),
@@ -103,6 +104,7 @@ data class ProgramParts(
                 is64Bit = true,  // JamV1 uses 64-bit registers (though 32-bit addressing)
                 roDataSize = roDataLen.toUInt(),
                 rwDataSize = rwDataLen.toUInt() + heapSize,
+                actualRwDataLen = rwDataLen.toUInt(),  // Store the actual rwData length (without heap)
                 stackSize = stackSize.toUInt(),
                 roData = ArcBytes.fromStatic(roData),
                 rwData = ArcBytes.fromStatic(rwData),
@@ -250,6 +252,7 @@ data class ProgramParts(
 
                 parts.roDataSize = reader.readVarintInternal().getOrThrow()
                 parts.rwDataSize = reader.readVarintInternal().getOrThrow()
+                parts.actualRwDataLen = parts.rwDataSize  // For PolkaVM format, no separate heap pages
                 parts.stackSize = reader.readVarintInternal().getOrThrow()
 
                 if (position + sectionLength.toInt() != reader.position) {

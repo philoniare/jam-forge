@@ -2,6 +2,7 @@ package io.forge.jam.pvm.program
 
 import io.forge.jam.pvm.PvmLogger
 import io.forge.jam.pvm.engine.InstructionSet
+import io.forge.jam.pvm.engine.InstructionSetKind
 import io.forge.jam.pvm.engine.JumpTable
 import io.forge.jam.pvm.engine.RuntimeInstructionSet
 
@@ -9,9 +10,11 @@ import io.forge.jam.pvm.engine.RuntimeInstructionSet
  * A partially deserialized PolkaVM program.
  */
 data class ProgramBlob(
+    var isaKind: InstructionSetKind? = null,  // Track the ISA kind for proper instruction validation
     var is64Bit: Boolean = false,
     var roDataSize: UInt = 0u,
     var rwDataSize: UInt = 0u,
+    var actualRwDataLen: UInt = 0u,  // The actual rwData content length (without heap pages)
     var stackSize: UInt = 0u,
     var roData: ArcBytes = ArcBytes.empty(),
     var rwData: ArcBytes = ArcBytes.empty(),
@@ -45,6 +48,13 @@ data class ProgramBlob(
         return Program.isJumpTargetValid(instructionSet, code.toByteArray(), bitmask.asRef(), offset.value)
     }
 
+    /**
+     * Get the instruction set for this program blob.
+     * Uses the ISA kind if available, otherwise falls back to legacy is64Bit-based selection.
+     */
+    fun instructionSet(allowSbrk: Boolean = true): RuntimeInstructionSet =
+        isaKind?.let { RuntimeInstructionSet.fromKind(it, allowSbrk) }
+            ?: RuntimeInstructionSet(allowSbrk, is64Bit)
 
     companion object {
         private val logger = PvmLogger(ProgramBlob::class.java)
@@ -53,11 +63,12 @@ data class ProgramBlob(
         private const val VERSION_DEBUG_LINE_PROGRAM_V1: Byte = 1
 
         fun fromParts(parts: ProgramParts): Result<ProgramBlob> = runCatching {
-
             val blob = ProgramBlob(
+                isaKind = parts.isaKind,
                 is64Bit = parts.is64Bit,
                 roDataSize = parts.roDataSize,
                 rwDataSize = parts.rwDataSize,
+                actualRwDataLen = parts.actualRwDataLen,
                 stackSize = parts.stackSize,
                 roData = parts.roData,
                 rwData = parts.rwData,
@@ -84,6 +95,96 @@ data class ProgramBlob(
                 throw ProgramParseError(ProgramParseErrorKind.Other("no code found"))
             }
 
+            // Use JAM-specific parsing for JamV1 ISA
+            if (parts.isaKind == InstructionSetKind.JamV1) {
+                parseJamCodeSection(parts, blob)
+            } else {
+                parsePolkavmCodeSection(parts, blob)
+            }
+
+            blob
+        }
+
+        /**
+         * Parse JAM format code section
+         */
+        private fun parseJamCodeSection(parts: ProgramParts, blob: ProgramBlob) {
+            val data = parts.codeAndJumpTable.toByteArray()
+
+            if (data.size < 6) {
+                throw ProgramParseError(ProgramParseErrorKind.Other("JAM code section too short"))
+            }
+
+            // Check for JAM-specific header (0x80)
+            // If not present, try parsing as standard PolkaVM code section
+            if ((data[0].toInt() and 0xFF) != 0x80) {
+                parsePolkavmCodeSection(parts, blob)
+                return
+            }
+
+            // Parse JAM header
+            // byte 0 is format indicator (0x80 = 2-byte entries), currently unused
+            val jumpTableEntryCount = data[1].toInt() and 0xFF
+            // bytes 2-3 are reserved/unknown
+            val codeLength = ((data[4].toInt() and 0xFF) or ((data[5].toInt() and 0xFF) shl 8))
+
+            // JAM format uses 2-byte entries
+            val jumpTableEntrySize: Byte = 2
+            val jumpTableLength = jumpTableEntryCount * jumpTableEntrySize
+
+            // Calculate offsets
+            val headerSize = 6
+            val jumpTableStart = headerSize
+            val jumpTableEnd = jumpTableStart + jumpTableLength
+            val codeStart = jumpTableEnd
+            val codeEnd = codeStart + codeLength
+
+            if (codeEnd > data.size) {
+                throw ProgramParseError(
+                    ProgramParseErrorKind.Other("JAM code section truncated: code extends beyond end")
+                )
+            }
+
+            val bitmaskStart = codeEnd
+            val bitmaskLength = data.size - bitmaskStart
+
+            // Extract sections
+            blob.jumpTableEntrySize = jumpTableEntrySize
+            blob.jumpTable = ArcBytes.fromStatic(data.copyOfRange(jumpTableStart, jumpTableEnd))
+            blob.code = ArcBytes.fromStatic(data.copyOfRange(codeStart, codeEnd))
+            blob.bitmask = ArcBytes.fromStatic(data.copyOfRange(bitmaskStart, data.size))
+
+            // Validate bitmask length
+            var expectedBitmaskLength = codeLength / 8
+            val isBitmaskPadded = codeLength % 8 != 0
+            if (isBitmaskPadded) expectedBitmaskLength++
+
+            if (bitmaskLength != expectedBitmaskLength) {
+                throw ProgramParseError(
+                    ProgramParseErrorKind.Other(
+                        "JAM bitmask length mismatch: expected $expectedBitmaskLength, got $bitmaskLength"
+                    )
+                )
+            }
+
+            // Validate bitmask padding
+            if (isBitmaskPadded && blob.bitmask.asRef().isNotEmpty()) {
+                val lastByte = blob.bitmask.asRef().last()
+                val paddingBits = bitmaskLength * 8 - codeLength
+                val paddingMask = (0b10000000.toByte().toInt() shr (paddingBits - 1)).toByte()
+
+                if ((lastByte.toInt() and paddingMask.toInt()) != 0) {
+                    throw ProgramParseError(
+                        ProgramParseErrorKind.Other("JAM bitmask is padded with non-zero bits")
+                    )
+                }
+            }
+        }
+
+        /**
+         * Parse standard PolkaVM format code section.
+         */
+        private fun parsePolkavmCodeSection(parts: ProgramParts, blob: ProgramBlob) {
             val reader = ArcBytesReader(parts.codeAndJumpTable)
             val initialPosition = reader.position
 
@@ -131,8 +232,6 @@ data class ProgramBlob(
                     )
                 }
             }
-
-            blob
         }
     }
 }

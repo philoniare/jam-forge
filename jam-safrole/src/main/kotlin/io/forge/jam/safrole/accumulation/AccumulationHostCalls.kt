@@ -1,6 +1,7 @@
 package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.encodeCompactInteger
 import io.forge.jam.pvm.engine.RawInstance
 import io.forge.jam.pvm.program.Reg
 
@@ -43,6 +44,7 @@ object HostCall {
     const val FORGET = 24u
     const val YIELD = 25u
     const val PROVIDE = 26u
+    const val LOG = 100u  // Debug logging (JIP-1), gas cost = 0
 }
 
 /**
@@ -67,7 +69,6 @@ private fun RawInstance.setReg7(value: ULong) = setReg(Reg.A0, value)
 
 /**
  * Handles host calls during accumulation PVM execution.
- * Implements the accumulation-specific host functions from Gray Paper Appendix B.
  */
 class AccumulationHostCalls(
     private val context: AccumulationContext,
@@ -79,6 +80,12 @@ class AccumulationHostCalls(
      * Returns the gas cost for the operation.
      */
     fun dispatch(hostCallId: UInt, instance: RawInstance): Long {
+        // LOG host call has 0 gas cost per JIP-1
+        if (hostCallId == HostCall.LOG) {
+            handleLog(instance)
+            return 0L
+        }
+
         val gasCost = 10L // Default gas cost for most host calls
 
         when (hostCallId) {
@@ -126,15 +133,24 @@ class AccumulationHostCalls(
         val outputAddr = instance.getReg7().toUInt()
         val offset = instance.getReg8().toInt()
         val length = instance.getReg9().toInt()
+        val index = instance.getReg11().toInt()
+
 
         val data: ByteArray? = when (selector) {
             0 -> getConstantsBlob()
             14 -> encodeOperandsList()
             15 -> {
-                val index = instance.getReg11().toInt()
-                if (index < operands.size) encodeOperand(operands[index]) else null
+                if (index < operands.size) {
+                    val encoded = encodeOperand(operands[index])
+                    encoded
+                } else {
+                    null
+                }
             }
-            else -> null
+
+            else -> {
+                null
+            }
         }
 
         if (data == null) {
@@ -145,6 +161,7 @@ class AccumulationHostCalls(
         val actualOffset = minOf(offset, data.size)
         val actualLength = minOf(length, data.size - actualOffset)
         val slice = data.copyOfRange(actualOffset, actualOffset + actualLength)
+
 
         val writeResult = instance.writeMemory(outputAddr, slice)
         if (writeResult.isFailure) {
@@ -269,6 +286,7 @@ class AccumulationHostCalls(
         val keyLen = instance.getReg8().toInt()
         val valueAddr = instance.getReg9().toUInt()
         val valueLen = instance.getReg10().toInt()
+
 
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
@@ -552,30 +570,81 @@ class AccumulationHostCalls(
     }
 
     /**
-     * eject (21): Delete service account (self-destruct).
+     * eject (21): Eject (remove) another service account.
      */
     private fun handleEject(instance: RawInstance) {
-        val beneficiary = instance.getReg7().toLong()
+        val ejectServiceId = instance.getReg7().toLong()
+        val preimageHashAddr = instance.getReg8().toUInt()
 
-        val account = context.x.accounts[context.serviceIndex]
-        if (account == null) {
+        // 1. Read 32-byte preimage hash from memory - PANIC on failure
+        val hashBuffer = ByteArray(32)
+        val readResult = instance.readMemoryInto(preimageHashAddr, hashBuffer)
+        if (readResult.isFailure) {
+            throw RuntimeException("Eject PANIC: Failed to read preimage hash from memory")
+        }
+        val preimageHash = JamByteArray(hashBuffer)
+
+        // 2. Get target service account
+        val ejectAccount = context.x.accounts[ejectServiceId]
+
+        // 3. Validate: target exists AND target != caller AND codeHash matches caller's ID
+        val expectedCodeHash = encodeServiceIdAsCodeHash(context.serviceIndex)
+        if (ejectServiceId == context.serviceIndex ||
+            ejectAccount == null ||
+            ejectAccount.info.codeHash != expectedCodeHash
+        ) {
             instance.setReg7(HostCallResult.WHO)
             return
         }
 
-        // Transfer remaining balance to beneficiary if exists
-        val beneficiaryAccount = context.x.accounts[beneficiary]
-        if (beneficiaryAccount != null && account.info.balance > 0) {
-            val updatedBeneficiaryInfo = beneficiaryAccount.info.copy(
-                balance = beneficiaryAccount.info.balance + account.info.balance
-            )
-            context.x.accounts[beneficiary] = beneficiaryAccount.copy(info = updatedBeneficiaryInfo)
+        // 4. Validate item count is exactly 2
+        if (ejectAccount.info.items != 2) {
+            instance.setReg7(HostCallResult.HUH)
+            return
         }
 
-        // Remove this service
-        context.x.accounts.remove(context.serviceIndex)
+        // 5. Calculate length: l = max(81, d.bytes) - 81
+        val length = (maxOf(81L, ejectAccount.info.bytes) - 81).toInt()
+        val preimageKey = PreimageKey(preimageHash, length)
+
+        // 6. Validate preimage request exists with exactly 2 timestamps
+        val preimageRequest = ejectAccount.preimageRequests[preimageKey]
+        if (preimageRequest == null || preimageRequest.requestedAt.size != 2) {
+            instance.setReg7(HostCallResult.HUH)
+            return
+        }
+
+        // 7. Validate expunge period: requestedAt[1] < timeslot - expungePeriod
+        val expungePeriod = config.PREIMAGE_PURGE_PERIOD
+        val minHoldSlot = maxOf(0L, context.timeslot - expungePeriod)
+        if (preimageRequest.requestedAt[1] >= minHoldSlot) {
+            instance.setReg7(HostCallResult.HUH)
+            return
+        }
+
+        // 8. SUCCESS: Transfer balance to caller and remove ejected service
+        val callerAccount = context.x.accounts[context.serviceIndex]!!
+        val updatedCallerInfo = callerAccount.info.copy(
+            balance = callerAccount.info.balance + ejectAccount.info.balance
+        )
+        context.x.accounts[context.serviceIndex] = callerAccount.copy(info = updatedCallerInfo)
+        context.x.accounts.remove(ejectServiceId)
 
         instance.setReg7(HostCallResult.OK)
+    }
+
+    /**
+     * Encode service ID as a 32-byte code hash (fixed-width little-endian encoding).
+     * Used for parent-child relationship verification in eject.
+     */
+    private fun encodeServiceIdAsCodeHash(serviceId: Long): JamByteArray {
+        val bytes = ByteArray(32)
+        // Little-endian encoding of service ID in first 4 bytes
+        bytes[0] = (serviceId and 0xFF).toByte()
+        bytes[1] = ((serviceId shr 8) and 0xFF).toByte()
+        bytes[2] = ((serviceId shr 16) and 0xFF).toByte()
+        bytes[3] = ((serviceId shr 24) and 0xFF).toByte()
+        return JamByteArray(bytes)
     }
 
     /**
@@ -710,32 +779,100 @@ class AccumulationHostCalls(
         instance.setReg7(HostCallResult.OK)
     }
 
-    // Helper methods
+    /**
+     * log (100): Debug logging host call
+     * This is a no-op for production but allows the test service to output debug info.
+     */
+    private fun handleLog(instance: RawInstance) {
+        // Log is a no-op - just for debugging purposes
+        // No return value set, execution continues
+        instance.getReg7()
+        instance.getReg8()
+        val ptr = instance.getReg10().toUInt()
+        val len = instance.getReg11().toInt()
 
-    private fun getConstantsBlob(): ByteArray {
-        return ByteArray(128)
+        val buffer = ByteArray(len)
+        val result = instance.readMemoryInto(ptr, buffer)
+        if (result.isSuccess) {
+            String(buffer)
+        } else {
+        }
     }
 
+    // Helper methods
+
+    /**
+     * Encode protocol configuration as expected by the guest.
+     */
+    private fun getConstantsBlob(): ByteArray {
+        val buffer = java.io.ByteArrayOutputStream()
+
+        // Tiny config values
+        buffer.write(encodeLong(10L))                   // additionalMinBalancePerStateItem (UInt64)
+        buffer.write(encodeLong(1L))                    // additionalMinBalancePerStateByte (UInt64)
+        buffer.write(encodeLong(100L))                  // serviceMinBalance (UInt64)
+        buffer.write(encodeShort(2))                    // totalNumberOfCores (UInt16)
+        buffer.write(encodeIntLE(32))                   // preimagePurgePeriod (UInt32) - tiny is 32
+        buffer.write(encodeIntLE(12))                   // epochLength (UInt32)
+        buffer.write(encodeLong(10_000_000L))           // workReportAccumulationGas (UInt64) - tiny
+        buffer.write(encodeLong(50_000_000L))           // workPackageIsAuthorizedGas (UInt64) - tiny
+        buffer.write(encodeLong(1_000_000_000L))        // workPackageRefineGas (UInt64) - tiny
+        buffer.write(encodeLong(20_000_000L))           // totalAccumulationGas (UInt64) - tiny
+        buffer.write(encodeShort(8))                    // recentHistorySize (UInt16)
+        buffer.write(encodeShort(16))                   // maxWorkItems (UInt16) - tiny is 16
+        buffer.write(encodeShort(8))                    // maxDepsInWorkReport (UInt16)
+        buffer.write(encodeShort(3))                    // maxTicketsPerExtrinsic (UInt16) - tiny is 3
+        buffer.write(encodeIntLE(24))                   // maxLookupAnchorAge (UInt32) - tiny is 24
+        buffer.write(encodeShort(3))                    // ticketEntriesPerValidator (UInt16) - tiny is 3
+        buffer.write(encodeShort(8))                    // maxAuthorizationsPoolItems (UInt16) - tiny is 8
+        buffer.write(encodeShort(6))                    // slotPeriodSeconds (UInt16)
+        buffer.write(encodeShort(80))                   // maxAuthorizationsQueueItems (UInt16)
+        buffer.write(encodeShort(4))                    // coreAssignmentRotationPeriod (UInt16) - tiny is 4 (4 divides 12!)
+        buffer.write(encodeShort(128))                  // maxWorkPackageExtrinsics (UInt16) - tiny is 128
+        buffer.write(encodeShort(5))                    // preimageReplacementPeriod (UInt16) - tiny is 5
+        buffer.write(encodeShort(6))                    // totalNumberOfValidators (UInt16)
+        buffer.write(encodeIntLE(64000))                // maxIsAuthorizedCodeSize (UInt32) - tiny is 64000
+        buffer.write(encodeIntLE(13_794_305))           // maxEncodedWorkPackageSize (UInt32) - tiny
+        buffer.write(encodeIntLE(4_000_000))            // maxServiceCodeSize (UInt32) - tiny is 4_000_000
+        buffer.write(encodeIntLE(4))                    // erasureCodedPieceSize (UInt32) - tiny is 4
+        buffer.write(encodeIntLE(3072))                 // maxWorkPackageImports (UInt32)
+        buffer.write(encodeIntLE(1026))                 // erasureCodedSegmentSize (UInt32) - tiny is 1026
+        buffer.write(encodeIntLE(48 * 1024))            // maxWorkReportBlobSize (UInt32) 48KB
+        buffer.write(encodeIntLE(128))                  // transferMemoSize (UInt32)
+        buffer.write(encodeIntLE(3072))                 // maxWorkPackageExports (UInt32)
+        buffer.write(encodeIntLE(10))                   // ticketSubmissionEndSlot (UInt32) - tiny is 10
+
+        val result = buffer.toByteArray()
+        return result
+    }
+
+    private fun encodeShort(value: Int): ByteArray {
+        return ByteArray(2) { i -> ((value shr (i * 8)) and 0xFF).toByte() }
+    }
+
+    private fun encodeIntLE(value: Int): ByteArray {
+        return ByteArray(4) { i -> ((value shr (i * 8)) and 0xFF).toByte() }
+    }
+
+    /**
+     * Encode the full array of inputs
+     */
     private fun encodeOperandsList(): ByteArray {
         val buffer = mutableListOf<Byte>()
-        buffer.addAll(encodeInt(operands.size).toList())
+        // Compact-encode the array length
+        buffer.addAll(encodeCompactInteger(operands.size.toLong()).toList())
+        // Encode each operand using its existing encode() method (includes variant)
+        for (operand in operands) {
+            buffer.addAll(operand.encode().toList())
+        }
         return buffer.toByteArray()
     }
 
+    /**
+     * Encode a single operand
+     */
     private fun encodeOperand(operand: AccumulationOperand): ByteArray {
-        return when (operand) {
-            is AccumulationOperand.WorkItem -> {
-                val op = operand.operand
-                op.packageHash.bytes + op.segmentRoot.bytes + op.authorizerHash.bytes +
-                    op.payloadHash.bytes + encodeLong(op.gasLimit) + op.authTrace.bytes +
-                    op.result.encode()
-            }
-            is AccumulationOperand.Transfer -> {
-                val t = operand.transfer
-                encodeLong(t.source) + encodeLong(t.destination) + encodeLong(t.amount) +
-                    t.memo.bytes + encodeLong(t.gasLimit)
-            }
-        }
+        return operand.encode()
     }
 
     private fun encodeLong(value: Long): ByteArray {
