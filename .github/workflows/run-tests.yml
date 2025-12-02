@@ -1,38 +1,54 @@
 name: Run Tests
 
 on:
-    push:
-        branches:
-            - '*'
-    pull_request:
-        branches:
-            - '*'
+  push:
+    branches: ['*']
+  pull_request:
+    branches: ['*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-    test:
-        runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-latest
 
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@v3
-                with:
-                    submodules: recursive
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-            -   name: Set up JDK
-                uses: actions/setup-java@v3
-                with:
-                    distribution: 'temurin'
-                    java-version: '18'
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
 
-            -   name: Cache Gradle dependencies
-                uses: actions/cache@v3
-                with:
-                    path: |
-                        ~/.gradle/caches
-                        ~/.gradle/wrapper
-                    key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-                    restore-keys: |
-                        ${{ runner.os }}-gradle-
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-            -   name: Run tests
-                run: ./gradlew test
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            jam-vrfs/bandersnatch-vrfs-wrapper/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: ./gradlew test
