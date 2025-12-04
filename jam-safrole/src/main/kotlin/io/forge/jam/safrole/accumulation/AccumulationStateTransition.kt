@@ -116,6 +116,11 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         val gasUsedPerService = execResult.gasUsedMap
         val commitments = execResult.commitments
 
+        // Debug: print gas used per service
+        if (gasUsedPerService.isNotEmpty()) {
+            println("[DEBUG-GAS] slot=${input.slot}, gasUsedPerService=$gasUsedPerService, commitments=${commitments.mapValues { it.value.toHex() }}")
+        }
+
         // 9. Rotate accumulated array (sliding window: always shift by 1, add new at end)
         val newAccumulatedList = newAccumulated.toList().sortedBy { it.toHex() }
         val newAccumulatedArray = MutableList(config.EPOCH_LENGTH) { idx ->
@@ -128,7 +133,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             }
         }
 
-        // 10. Update statistics
+        // 10. Update statistics (for accumulated field tracking)
         val workItemsPerService = countWorkItemsPerService(allToAccumulate)
         val newStatistics = updateStatistics(
             preState.statistics,
@@ -136,7 +141,14 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             workItemsPerService
         )
 
-        // 11. Build final state (accounts and statistics are val, so need to create new state)
+        // 11. Build accumulation stats for fresh service statistics computation
+        // Must include ALL services that accumulated (including always-accumulate services)
+        val accumulationStats: AccumulationStats = gasUsedPerService.mapValues { (serviceId, gasUsed) ->
+            val count = workItemsPerService[serviceId] ?: 0
+            Pair(gasUsed, count)
+        }
+
+        // 12. Build final state (accounts and statistics are val, so need to create new state)
         val finalState = AccumulationState(
             slot = input.slot,
             entropy = preState.entropy.copy(),
@@ -147,10 +159,10 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             accounts = newPartialState.toAccumulationServiceItems()
         )
 
-        // 12. Compute commitment root from yields
+        // 13. Compute commitment root from yields
         val outputHash = computeCommitmentRoot(commitments)
 
-        return Pair(finalState, AccumulationOutput(ok = outputHash))
+        return Pair(finalState, AccumulationOutput(ok = outputHash, accumulationStats = accumulationStats))
     }
 
     /**
@@ -261,10 +273,6 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         timeslot: Long,
         entropy: JamByteArray
     ): AccumulationExecResult {
-        if (reports.isEmpty()) {
-            return AccumulationExecResult(partialState, emptyMap(), emptyMap())
-        }
-
         val gasUsedMap = mutableMapOf<Long, Long>()
         val commitments = mutableMapOf<Long, JamByteArray>()
         var currentState = partialState
@@ -272,13 +280,11 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         // Group work items by service, preserving report order
         val serviceOperands = mutableMapOf<Long, MutableList<AccumulationOperand>>()
 
-        println("[ACCUMULATE] slot=$timeslot Processing ${reports.size} reports")
         for (report in reports) {
-            println("[ACCUMULATE] slot=$timeslot Report results: ${report.results.map { "${it.serviceId}" }}")
             for (result in report.results) {
                 val operand = OperandTuple(
                     packageHash = report.packageSpec.hash,
-                    segmentRoot = report.packageSpec.erasureRoot,
+                    segmentRoot = report.packageSpec.exportsRoot,
                     authorizerHash = report.authorizerHash,
                     payloadHash = result.payloadHash,
                     gasLimit = result.accumulateGas,
@@ -291,11 +297,29 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             }
         }
 
-        // Execute for each service
-        for ((serviceId, operands) in serviceOperands) {
+        // Collect all services to accumulate (from reports + always-accumulate + transfers)
+        val servicesToAccumulate = mutableSetOf<Long>()
+        servicesToAccumulate.addAll(serviceOperands.keys)
+        servicesToAccumulate.addAll(partialState.alwaysAccers.keys)
+
+        // If no services to process, return empty result
+        if (servicesToAccumulate.isEmpty()) {
+            return AccumulationExecResult(partialState, emptyMap(), emptyMap())
+        }
+
+        // Execute for each service in sorted order
+        for (serviceId in servicesToAccumulate.sorted()) {
+            // Get operands for this service (may be empty for always-accumulate services)
+            val operands = serviceOperands[serviceId] ?: mutableListOf()
+
             // Calculate total gas limit for this service batch
-            val totalGasLimit = operands.filterIsInstance<AccumulationOperand.WorkItem>()
+            // Include always-accumulate gas + work item gas + transfer gas
+            val alwaysAccGas = partialState.alwaysAccers[serviceId] ?: 0L
+            val workItemGas = operands.filterIsInstance<AccumulationOperand.WorkItem>()
                 .sumOf { it.operand.gasLimit }
+            val transferGas = operands.filterIsInstance<AccumulationOperand.Transfer>()
+                .sumOf { it.transfer.gasLimit }
+            val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
             val execResult = executor.executeService(
                 partialState = currentState,

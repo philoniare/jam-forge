@@ -8,8 +8,7 @@ import io.forge.jam.pvm.PvmConstants
  */
 class GeneralMemory private constructor(
     override val pageMap: PageMap,
-    private val zone: MemoryZone,
-    private var allocatedHeapSize: UInt = 0u
+    private val zone: MemoryZone
 ) : Memory {
 
     companion object {
@@ -73,21 +72,17 @@ class GeneralMemory private constructor(
         zone.write(address, values)
     }
 
-    override fun heapSize(): UInt = allocatedHeapSize
+    override fun heapSize(): UInt = 0u
 
     /**
      * Allocates additional memory using sbrk.
      * Finds a gap in the PageMap and marks it as read-write.
      *
      * @param size Number of bytes to allocate
-     * @return The starting address of the allocated region
+     * @return The starting address of the allocated region (page-aligned)
      */
     override fun sbrk(size: UInt): UInt {
-        if (size == 0u) {
-            // Return current allocation end
-            return allocatedHeapSize
-        }
-
+        // It just finds a gap and allocates pages
         val pageSize = PvmConstants.ZP.toInt()
         val pagesNeeded = (size.toInt() + pageSize - 1) / pageSize
 
@@ -97,10 +92,6 @@ class GeneralMemory private constructor(
         // Mark pages as read-write
         pageMap.updatePages(pageIndex, pagesNeeded, PageAccess.READ_WRITE)
 
-        // Track allocated size
-        allocatedHeapSize += (pagesNeeded * pageSize).toUInt()
-
-        // Return the page-aligned address
         return pageIndex * pageSize.toUInt()
     }
 
@@ -134,7 +125,6 @@ class GeneralMemory private constructor(
      */
     fun clear() {
         zone.clear()
-        allocatedHeapSize = 0u
     }
 
     // ========== Private Helpers ==========

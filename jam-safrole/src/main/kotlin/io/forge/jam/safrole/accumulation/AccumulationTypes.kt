@@ -48,23 +48,22 @@ sealed class AccumulationOperand {
             val op = operand
 
             // AccumulationInput::OperandTuple (Variant 0)
-            // Standard JAM enum encoding (1 byte).
-            val variant = byteArrayOf(0)
+            val variant = encodeGrayPaperNatural(0)
 
-            // GasLimit - JAM compact encoded
-            val gasLimitBytes = io.forge.jam.core.encodeCompactInteger(op.gasLimit)
+            // GasLimit - Gray Paper natural number encoding (variableWidth)
+            val gasLimitBytes = encodeGrayPaperNatural(op.gasLimit)
 
-            // WorkResult - variant 0 + JAM-compact(len) + bytes for success, or variant for error
+            // WorkResult - variant (UInt8) + Gray Paper natural(len) + bytes for success, or variant for error
             val ok = op.result.ok
             val resultBytes = if (ok != null) {
-                val len = io.forge.jam.core.encodeCompactInteger(ok.bytes.size.toLong())
-                byteArrayOf(0) + len + ok.bytes // Tag 0 for Success
+                val len = encodeGrayPaperNatural(ok.bytes.size.toLong())
+                byteArrayOf(0) + len + ok.bytes // Tag 0 for Success (UInt8)
             } else {
-                byteArrayOf(2) // Tag 2 for Panic (or other error)
+                byteArrayOf(2) // Tag 2 for Panic (or other error, UInt8)
             }
 
-            // AuthTrace (JAM-compact(len) + bytes)
-            val authTraceLen = io.forge.jam.core.encodeCompactInteger(op.authTrace.bytes.size.toLong())
+            // AuthTrace (Gray Paper natural(len) + bytes)
+            val authTraceLen = encodeGrayPaperNatural(op.authTrace.bytes.size.toLong())
 
             // Order: package, segRoot, authorizer, payload, gasLimit, workResult, authorizerTrace
             return variant + op.packageHash.bytes + op.segmentRoot.bytes + op.authorizerHash.bytes +
@@ -74,9 +73,9 @@ sealed class AccumulationOperand {
 
     data class Transfer(val transfer: DeferredTransfer) : AccumulationOperand() {
         override fun encode(): ByteArray {
-            // Prepend tag 1 for Transfer
+            // Tag 1 for Transfer - uses compact/variableWidth encoding like OperandTuple
             // sender/destination are ServiceIndex (UInt32), amount/gasLimit are Balance/Gas (UInt64)
-            return byteArrayOf(1) +
+            return encodeGrayPaperNatural(1) +
                 encodeU32(transfer.source.toInt()) +
                 encodeU32(transfer.destination.toInt()) +
                 encodeLong(transfer.amount) +
@@ -92,6 +91,48 @@ sealed class AccumulationOperand {
     companion object {
         fun encodeLong(value: Long): ByteArray {
             return ByteArray(8) { i -> ((value shr (i * 8)) and 0xFF).toByte() }
+        }
+
+        /**
+         * Encode a non-negative integer using Gray Paper natural number format.
+         * This is different from SCALE compact encoding.
+         *
+         * Algorithm:
+         * - For value 0: returns [0x00]
+         * - For value 1-127: returns [value]
+         * - For larger values: first byte has prefix indicating length, followed by LE bytes
+         */
+        fun encodeGrayPaperNatural(value: Long): ByteArray {
+            if (value == 0L) return byteArrayOf(0)
+
+            // Find how many 7-bit groups we need
+            for (l in 0 until 8) {
+                if (value < (1L shl (7 * (l + 1)))) {
+                    // l is the number of additional bytes needed
+                    val prefix = (256 - (1 shl (8 - l))).toByte()
+                    val data = (value / (1L shl (8 * l))).toByte()
+                    val firstByte = ((prefix.toInt() and 0xFF) + (data.toInt() and 0xFF)).toByte()
+
+                    return if (l == 0) {
+                        byteArrayOf(firstByte)
+                    } else {
+                        val result = ByteArray(1 + l)
+                        result[0] = firstByte
+                        for (i in 0 until l) {
+                            result[1 + i] = ((value shr (8 * i)) and 0xFF).toByte()
+                        }
+                        result
+                    }
+                }
+            }
+
+            // 8 bytes needed (very large number)
+            val result = ByteArray(9)
+            result[0] = 0xFF.toByte()
+            for (i in 0 until 8) {
+                result[1 + i] = ((value shr (8 * i)) and 0xFF).toByte()
+            }
+            return result
         }
     }
 }
@@ -214,7 +255,8 @@ class AccumulationContext(
     val entropy: JamByteArray,
     val deferredTransfers: MutableList<DeferredTransfer> = mutableListOf(),
     val provisions: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf(),
-    var yield: JamByteArray? = null  // Accumulation output (32-byte hash)
+    var yield: JamByteArray? = null,  // Accumulation output (32-byte hash)
+    var nextAccountIndex: Long = 256  // Next available service account index
 ) {
     /**
      * Checkpoint: copy current state x to checkpoint y.
@@ -246,7 +288,7 @@ fun extractOperandTuples(reports: List<WorkReport>, serviceId: Long): List<Opera
             .map { result ->
                 OperandTuple(
                     packageHash = report.packageSpec.hash,
-                    segmentRoot = report.packageSpec.erasureRoot,
+                    segmentRoot = report.packageSpec.exportsRoot,
                     authorizerHash = report.authorizerHash,
                     payloadHash = result.payloadHash,
                     gasLimit = result.accumulateGas,

@@ -418,6 +418,241 @@ struct IetfVrfSignature {
     proof: IetfProof,
 }
 
+/// Create a secret key from a 32-byte seed
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed(
+    mut env: JNIEnv,
+    _class: JClass,
+    seed: JByteArray,
+) -> jbyteArray {
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        std::ptr::null_mut()
+    };
+
+    let seed_data = match env.convert_byte_array(&seed) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert seed data"),
+    };
+
+    if seed_data.len() != 32 {
+        return return_error_local(&mut env, "Seed must be exactly 32 bytes");
+    }
+
+    let secret = BanderSecret::from_seed(&seed_data);
+
+    // Serialize the secret key (scalar)
+    let mut buf = Vec::new();
+    if secret.serialize_compressed(&mut buf).is_err() {
+        return return_error_local(&mut env, "Failed to serialize secret key");
+    }
+
+    match env.byte_array_from_slice(&buf) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array")
+    }
+}
+
+/// Get the public key from a secret key (serialized)
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecret(
+    mut env: JNIEnv,
+    _class: JClass,
+    secret_bytes: JByteArray,
+) -> jbyteArray {
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        std::ptr::null_mut()
+    };
+
+    let secret_data = match env.convert_byte_array(&secret_bytes) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert secret data"),
+    };
+
+    let secret = match BanderSecret::deserialize_compressed(&secret_data[..]) {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
+    };
+
+    let public = secret.public();
+
+    let mut buf = Vec::new();
+    if public.serialize_compressed(&mut buf).is_err() {
+        return return_error_local(&mut env, "Failed to serialize public key");
+    }
+
+    match env.byte_array_from_slice(&buf) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array")
+    }
+}
+
+/// IETF VRF sign - creates a 96-byte signature
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
+    mut env: JNIEnv,
+    _class: JClass,
+    secret_bytes: JByteArray,
+    vrf_input: JByteArray,
+    aux_data: JByteArray,
+) -> jbyteArray {
+    use ark_ec_vrfs::ietf::Prover as _;
+
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        std::ptr::null_mut()
+    };
+
+    let secret_data = match env.convert_byte_array(&secret_bytes) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert secret data"),
+    };
+
+    let vrf_input_data = match env.convert_byte_array(&vrf_input) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert VRF input data"),
+    };
+
+    let aux = match env.convert_byte_array(&aux_data) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert aux data"),
+    };
+
+    let secret = match BanderSecret::deserialize_compressed(&secret_data[..]) {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
+    };
+
+    let input = vrf_input_point(&vrf_input_data);
+    let output = secret.output(input);
+    let proof = secret.prove(input, output, &aux);
+
+    // IETF signature structure: output (32 bytes) + proof (64 bytes) = 96 bytes
+    #[derive(CanonicalSerialize)]
+    struct IetfSig {
+        output: BanderOutput,
+        proof: IetfProof,
+    }
+
+    let signature = IetfSig { output, proof };
+    let mut buf = Vec::new();
+    if signature.serialize_compressed(&mut buf).is_err() {
+        return return_error_local(&mut env, "Failed to serialize signature");
+    }
+
+    match env.byte_array_from_slice(&buf) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array")
+    }
+}
+
+/// IETF VRF verify - verifies signature and returns 32-byte output hash
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
+    mut env: JNIEnv,
+    _class: JClass,
+    public_bytes: JByteArray,
+    vrf_input: JByteArray,
+    aux_data: JByteArray,
+    signature: JByteArray,
+) -> jbyteArray {
+    use ark_ec_vrfs::ietf::Verifier as _;
+
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        match env.byte_array_from_slice(&ERROR_RESULT) {
+            Ok(array) => array.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    };
+
+    let public_data = match env.convert_byte_array(&public_bytes) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert public key data"),
+    };
+
+    let vrf_input_data = match env.convert_byte_array(&vrf_input) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert VRF input data"),
+    };
+
+    let aux = match env.convert_byte_array(&aux_data) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert aux data"),
+    };
+
+    let sig_data = match env.convert_byte_array(&signature) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert signature data"),
+    };
+
+    let public = match BanderPublic::deserialize_compressed(&public_data[..]) {
+        Ok(p) => p,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize public key"),
+    };
+
+    let sig = match IetfVrfSignature::deserialize_compressed(&sig_data[..]) {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize signature"),
+    };
+
+    let input = vrf_input_point(&vrf_input_data);
+    let output = sig.output;
+
+    if public.verify(input, output, &aux, &sig.proof).is_err() {
+        return return_error_local(&mut env, "IETF VRF verification failed");
+    }
+
+    let output_hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
+
+    match env.byte_array_from_slice(&output_hash) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array")
+    }
+}
+
+/// Get VRF output directly from secret key and input (without creating signature)
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
+    mut env: JNIEnv,
+    _class: JClass,
+    secret_bytes: JByteArray,
+    vrf_input: JByteArray,
+) -> jbyteArray {
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        match env.byte_array_from_slice(&ERROR_RESULT) {
+            Ok(array) => array.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    };
+
+    let secret_data = match env.convert_byte_array(&secret_bytes) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert secret data"),
+    };
+
+    let vrf_input_data = match env.convert_byte_array(&vrf_input) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert VRF input data"),
+    };
+
+    let secret = match BanderSecret::deserialize_compressed(&secret_data[..]) {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
+    };
+
+    let input = vrf_input_point(&vrf_input_data);
+    let output = secret.output(input);
+    let output_hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
+
+    match env.byte_array_from_slice(&output_hash) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array")
+    }
+}
+
 /// Extract the VRF output from an IETF VRF signature.
 /// The signature is 96 bytes and the output is 32 bytes.
 #[no_mangle]

@@ -130,6 +130,64 @@ abstract class BaseTraceTest {
     }
 
     /**
+     * Runs a single block test for debugging.
+     * This validates that the STF produces correct post-state for a specific block.
+     */
+    protected fun runSingleBlockTest(blockNumber: Int) {
+        val allFilenames = TestFileLoader.getTraceStepFilenames(traceName)
+
+        require(blockNumber >= 1 && blockNumber <= allFilenames.size) {
+            "Block number $blockNumber is out of range. Valid range: 1-${allFilenames.size}"
+        }
+
+        val filename = allFilenames[blockNumber - 1]
+        println("[$traceName] Testing single block $blockNumber: $filename")
+
+        val (step, _) = TestFileLoader.loadTestDataFromTestVectors<TraceStep>(
+            "traces/$traceName", filename
+        )
+
+        val importer = BlockImporter(config)
+
+        // Run block import with full STF pipeline
+        val result = importer.importBlock(step.block, step.preState)
+
+        when (result) {
+            is ImportResult.Success -> {
+                // Compare computed state root with expected
+                val computedStateRoot = result.postState.stateRoot.toHex()
+                val expectedStateRoot = step.postState.stateRoot.toHex()
+
+                if (computedStateRoot != expectedStateRoot) {
+                    println("[$traceName] Block $blockNumber: State root mismatch")
+                    println("  Expected: $expectedStateRoot")
+                    println("  Computed: $computedStateRoot")
+
+                    // Compare keyvals for debugging
+                    compareKeyvals(step.postState.keyvals, result.postState.keyvals, "[$traceName] Block $blockNumber")
+
+                    // Also compare Safrole state for detailed debugging
+                    val expectedSafroleState = StateCodec.decodeSafroleState(step.postState.keyvals)
+                    if (result.safroleState != null) {
+                        assertSafroleStateEquals(
+                            expectedSafroleState,
+                            result.safroleState!!,
+                            "[$traceName] Block $blockNumber"
+                        )
+                    }
+
+                    fail("[$traceName] Block $blockNumber: State root mismatch - expected: $expectedStateRoot, computed: $computedStateRoot")
+                }
+
+                println("[$traceName] Block $blockNumber: PASSED")
+            }
+            is ImportResult.Failure -> {
+                fail("[$traceName] Block $blockNumber import failed: ${result.error} - ${result.message}")
+            }
+        }
+    }
+
+    /**
      * Compare keyvals for debugging.
      */
     private fun compareKeyvals(expected: List<KeyValue>, actual: List<KeyValue>, context: String) {

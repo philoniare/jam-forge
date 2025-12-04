@@ -169,8 +169,8 @@ fun PartialState.toAccumulationServiceItems(): List<AccumulationServiceItem> {
                     .sortedBy { it.key.hash.toHex() }
                     .map { (key, request) ->
                         PreimagesStatusMapEntry(
-                            key = PreimageStatusKey(hash = key.hash, length = key.length),
-                            value = request.requestedAt
+                            hash = key.hash,
+                            status = request.requestedAt
                         )
                     }
             )

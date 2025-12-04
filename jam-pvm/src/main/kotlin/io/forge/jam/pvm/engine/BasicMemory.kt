@@ -103,8 +103,8 @@ class BasicMemory private constructor(
             stack.resize(memoryMap.stackSize.toInt())
             aux.resize(memoryMap.auxDataSize.toInt())
 
-            // Initialize heapSize to 0 - heap grows dynamically via sbrk
-            _heapSize = 0u
+            // Initialize heapSize to include the initial heap pages
+            _heapSize = memoryMap.rwDataSize - (memoryMap.heapBase - memoryMap.rwDataAddress)
 
             // Initialize PageMap with proper access control
             initializePageMap(module, memoryMap)
@@ -159,7 +159,8 @@ class BasicMemory private constructor(
             val gpStackBase = PvmConstants.GP_STACK_BASE
 
             if (gpStackLow >= memoryMap.auxDataAddress &&
-                gpStackBase <= memoryMap.auxDataAddress + memoryMap.auxDataSize) {
+                gpStackBase <= memoryMap.auxDataAddress + memoryMap.auxDataSize
+            ) {
                 // GP stack is within aux data - mark it as READ_WRITE
                 // Mark everything before GP stack as READ_ONLY
                 if (gpStackLow > memoryMap.auxDataAddress) {
@@ -246,7 +247,7 @@ class BasicMemory private constructor(
     fun sbrk(module: Module, size: UInt): UInt? {
         val memoryMap = module.memoryMap()
 
-        // Calculate current (previous) heap end
+        // Calculate current heap end (heapBase + heapSize)
         val prevHeapEnd = memoryMap.heapBase + _heapSize
 
         // If size is 0, just return current heap end
@@ -278,7 +279,8 @@ class BasicMemory private constructor(
         val prevPageBoundary = alignToNextPageSize(memoryMap.pageSize.toInt(), prevHeapEnd.toInt())
         if (newHeapEnd.toInt() > prevPageBoundary) {
             val startPage = prevPageBoundary.toUInt() / memoryMap.pageSize
-            val endPage = alignToNextPageSize(memoryMap.pageSize.toInt(), newHeapEnd.toInt()).toUInt() / memoryMap.pageSize
+            val endPage =
+                alignToNextPageSize(memoryMap.pageSize.toInt(), newHeapEnd.toInt()).toUInt() / memoryMap.pageSize
             val pageCount = (endPage - startPage).toInt()
             if (pageCount > 0) {
                 _pageMap.updatePages(startPage, pageCount, PageAccess.READ_WRITE)

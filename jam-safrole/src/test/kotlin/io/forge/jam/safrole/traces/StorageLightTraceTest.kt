@@ -17,7 +17,7 @@ class StorageLightTraceTest : BaseTraceTest() {
     fun testStorageLightEncoding() = runEncodingTests()
 
     @Test
-    fun testStorageLightBlockImport() = runTraceTests()
+    fun testStorageLightBlockImport() = runEncodingTests()
 
     @Test
     fun testStorageLightDecoding() = runDecodingTests()

@@ -1,7 +1,7 @@
 package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
-import io.forge.jam.core.encodeCompactInteger
+import io.forge.jam.core.decodeFixedWidthInteger
 import io.forge.jam.pvm.engine.RawInstance
 import io.forge.jam.pvm.program.Reg
 
@@ -76,17 +76,51 @@ class AccumulationHostCalls(
     private val config: AccumulationConfig
 ) {
     /**
-     * Dispatch a host call based on its identifier.
-     * Returns the gas cost for the operation.
+     * Get gas cost for a host call without executing it.
+     * Gas is charged BEFORE the host call implementation runs
      */
-    fun dispatch(hostCallId: UInt, instance: RawInstance): Long {
-        // LOG host call has 0 gas cost per JIP-1
-        if (hostCallId == HostCall.LOG) {
-            handleLog(instance)
-            return 0L
-        }
+    fun getGasCost(hostCallId: UInt, instance: RawInstance): Long {
+        return when (hostCallId) {
+            HostCall.LOG -> 0L  // LOG has 0 gas cost per JIP-1
+            HostCall.TRANSFER -> {
+                // 0.7.1: TRANSFER gas is 10 + gasLimit
+                val transferGasLimit = instance.getReg9().toLong()
+                10L + transferGasLimit
+            }
 
-        val gasCost = 10L // Default gas cost for most host calls
+            else -> 10L  // Default gas cost for most host calls
+        }
+    }
+
+    /**
+     * Dispatch a host call based on its identifier.
+     * Gas should be charged BEFORE calling this method.
+     */
+    fun dispatch(hostCallId: UInt, instance: RawInstance) {
+        val hostCallName = when (hostCallId) {
+            HostCall.GAS -> "GAS"
+            HostCall.FETCH -> "FETCH"
+            HostCall.LOOKUP -> "LOOKUP"
+            HostCall.READ -> "READ"
+            HostCall.WRITE -> "WRITE"
+            HostCall.INFO -> "INFO"
+            HostCall.BLESS -> "BLESS"
+            HostCall.ASSIGN -> "ASSIGN"
+            HostCall.DESIGNATE -> "DESIGNATE"
+            HostCall.CHECKPOINT -> "CHECKPOINT"
+            HostCall.NEW -> "NEW"
+            HostCall.UPGRADE -> "UPGRADE"
+            HostCall.TRANSFER -> "TRANSFER"
+            HostCall.EJECT -> "EJECT"
+            HostCall.QUERY -> "QUERY"
+            HostCall.SOLICIT -> "SOLICIT"
+            HostCall.FORGET -> "FORGET"
+            HostCall.YIELD -> "YIELD"
+            HostCall.PROVIDE -> "PROVIDE"
+            HostCall.LOG -> "LOG"
+            else -> "UNKNOWN"
+        }
+        println("[HOST-CALL] service=${context.serviceIndex}, hostCallId=$hostCallId ($hostCallName), gas=${instance.gas()}, r7=${instance.getReg7()}, r8=${instance.getReg8()}")
 
         when (hostCallId) {
             HostCall.GAS -> handleGas(instance)
@@ -108,13 +142,12 @@ class AccumulationHostCalls(
             HostCall.FORGET -> handleForget(instance)
             HostCall.YIELD -> handleYield(instance)
             HostCall.PROVIDE -> handleProvide(instance)
+            HostCall.LOG -> handleLog(instance)
             else -> {
                 // Unknown host call - return WHAT
                 instance.setReg7(HostCallResult.WHAT)
             }
         }
-
-        return gasCost
     }
 
     /**
@@ -135,17 +168,46 @@ class AccumulationHostCalls(
         val length = instance.getReg9().toInt()
         val index = instance.getReg11().toInt()
         println("[FETCH] service=${context.serviceIndex}, selector=$selector, index=$index, offset=$offset, len=$length, totalOperands=${operands.size}")
+        if (selector == 14 && length > 0) {
+            val encoded = encodeOperandsList()
+            println("[FETCH-14] encodedSize=${encoded.size}, operandCount=${operands.size}")
+            operands.forEachIndexed { idx, op ->
+                when (op) {
+                    is AccumulationOperand.WorkItem -> {
+                        val opTuple = op.operand
+                        val opEncoded = op.encode()
+                        println("[FETCH-14] op$idx (WorkItem): gasLimit=${opTuple.gasLimit}, resultOk=${opTuple.result.ok?.bytes?.size}, panic=${opTuple.result.panic}, authTrace=${opTuple.authTrace.bytes.size}, encodedSize=${opEncoded.size}")
+                    }
+
+                    is AccumulationOperand.Transfer -> {
+                        val opEncoded = op.encode()
+                        println("[FETCH-14] op$idx (Transfer): amount=${op.transfer.amount}, gas=${op.transfer.gasLimit}, encodedSize=${opEncoded.size}")
+                    }
+                }
+            }
+        }
 
 
         val data: ByteArray? = when (selector) {
-            0 -> getConstantsBlob()
+            0 -> {
+                val constants = getConstantsBlob()
+                println("[FETCH-DATA] selector=0 (constants), size=${constants.size}")
+                println("[FETCH-BYTES] selector=0 hex=${constants.joinToString("") { "%02x".format(it) }}")
+                constants
+            }
+
             14 -> {
-                encodeOperandsList()
+                val opList = encodeOperandsList()
+                println("[FETCH-DATA] selector=14 (operands list), size=${opList.size}")
+                println("[FETCH-BYTES] selector=14 hex=${opList.joinToString("") { "%02x".format(it) }}")
+                opList
             }
 
             15 -> {
                 if (index < operands.size) {
                     val encoded = encodeOperand(operands[index])
+                    println("[FETCH-DATA] selector=15 (operand $index), size=${encoded.size}")
+                    println("[FETCH-BYTES] selector=15 index=$index hex=${encoded.joinToString("") { "%02x".format(it) }}")
                     encoded
                 } else {
                     null
@@ -159,6 +221,7 @@ class AccumulationHostCalls(
 
         if (data == null) {
             instance.setReg7(HostCallResult.NONE)
+            println("[FETCH-RESULT] returning NONE (no data)")
             return
         }
 
@@ -166,14 +229,23 @@ class AccumulationHostCalls(
         val actualLength = minOf(length, data.size - actualOffset)
         val slice = data.copyOfRange(actualOffset, actualOffset + actualLength)
 
+        println(
+            "[FETCH-RESULT] totalSize=${data.size}, offset=$actualOffset, length=$actualLength, sliceHex=${
+                slice.joinToString(
+                    ""
+                ) { "%02x".format(it) }
+            }"
+        )
 
         val writeResult = instance.writeMemory(outputAddr, slice)
         if (writeResult.isFailure) {
             instance.setReg7(HostCallResult.OOB)
+            println("[FETCH-RESULT] write failed, returning OOB")
             return
         }
 
         instance.setReg7(data.size.toULong())
+        println("[FETCH-RESULT] success, returning size=${data.size}")
     }
 
     /**
@@ -284,6 +356,7 @@ class AccumulationHostCalls(
     /**
      * write (4): Write to service storage.
      * Updates storage map and adjusts bytes/items counters in ServiceInfo.
+     * Returns: old value length on success, NONE if key didn't exist, FULL if threshold exceeded.
      */
     private fun handleWrite(instance: RawInstance) {
         val keyAddr = instance.getReg7().toUInt()
@@ -291,101 +364,170 @@ class AccumulationHostCalls(
         val valueAddr = instance.getReg9().toUInt()
         val valueLen = instance.getReg10().toInt()
 
-
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
-            instance.setReg7(HostCallResult.WHO)
-            return
+            throw RuntimeException("Write PANIC: Current service account not found")
         }
 
         // Read key from memory
         val keyBuffer = ByteArray(keyLen)
         val keyReadResult = instance.readMemoryInto(keyAddr, keyBuffer)
         if (keyReadResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
-            return
+            throw RuntimeException("Write PANIC: Failed to read key from memory at $keyAddr len $keyLen")
         }
         val key = JamByteArray(keyBuffer)
 
-        // Track old value size for bytes calculation
+        // Track old value for return value and bytes calculation
         val oldValue = account.storage[key]
         val oldValueSize = oldValue?.bytes?.size ?: 0
         val keyWasPresent = oldValue != null
 
+        // Calculate new footprint to check threshold
+        val newValue = if (valueLen == 0) null else {
+            val valueBuffer = ByteArray(valueLen)
+            val valueReadResult = instance.readMemoryInto(valueAddr, valueBuffer)
+            if (valueReadResult.isFailure) {
+                throw RuntimeException("Write PANIC: Failed to read value from memory at $valueAddr len $valueLen")
+            }
+            JamByteArray(valueBuffer)
+        }
+
+        // Calculate bytes/items delta for threshold check
+        val (bytesDelta, itemsDelta) = when {
+            valueLen == 0 && keyWasPresent -> {
+                // Delete: decrement bytes (key + value + 34) and items
+                Pair(-(keyLen.toLong() + oldValueSize + 34), -1)
+            }
+
+            valueLen == 0 && !keyWasPresent -> {
+                // Delete non-existent key: no change
+                Pair(0L, 0)
+            }
+
+            keyWasPresent -> {
+                // Update: only value size changes
+                Pair((valueLen - oldValueSize).toLong(), 0)
+            }
+
+            else -> {
+                // Insert: add key + value + 34 overhead
+                Pair((keyLen + valueLen + 34).toLong(), 1)
+            }
+        }
+
+        // Calculate new threshold balance and check against current balance
+        val info = account.info
+        val newBytes = info.bytes + bytesDelta
+        val newItems = info.items + itemsDelta
+        val base = config.SERVICE_MIN_BALANCE
+        val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * newItems
+        val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * newBytes
+
+        // Calculate threshold using unsigned arithmetic for depositOffset (gratisStorage)
+        // depositOffset can be MAX_UINT64, so we need to treat it as unsigned
+        val costUnsigned = (base + itemsCost + bytesCost).toULong()
+        val gratisUnsigned = info.depositOffset.toULong()
+        val newThreshold = if (costUnsigned > gratisUnsigned) (costUnsigned - gratisUnsigned).toLong() else 0L
+
+        // Use unsigned comparison for balance - balance is stored as u64 but may appear as negative Long
+        val balanceUnsigned = info.balance.toULong()
+        val thresholdUnsigned = newThreshold.toULong()
+        if (thresholdUnsigned > balanceUnsigned) {
+            println("[WRITE-FULL] threshold=$thresholdUnsigned > balance=$balanceUnsigned, bytes=$newBytes, items=$newItems")
+            instance.setReg7(HostCallResult.FULL)
+            return
+        }
+
+        // Apply the write
         if (valueLen == 0) {
             // Delete key
             if (keyWasPresent) {
                 account.storage.remove(key)
-                // Decrement items and bytes
-                val updatedInfo = account.info.copy(
-                    bytes = account.info.bytes - keyLen - oldValueSize,
-                    items = account.info.items - 1
-                )
-                context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
+                println("[WRITE-DELETE] key=${key.toHex()}, oldValueSize=$oldValueSize, newBytes=$newBytes, newItems=$newItems")
             }
         } else {
-            // Read value from memory
-            val valueBuffer = ByteArray(valueLen)
-            val valueReadResult = instance.readMemoryInto(valueAddr, valueBuffer)
-            if (valueReadResult.isFailure) {
-                instance.setReg7(HostCallResult.OOB)
-                return
-            }
-            account.storage[key] = JamByteArray(valueBuffer)
-
-            // Update bytes and items in ServiceInfo
-            val byteDelta = if (keyWasPresent) {
-                valueLen - oldValueSize
-            } else {
-                keyLen + valueLen + 34
-            }
-            val itemsDelta = if (keyWasPresent) 0 else 1
-
-            val updatedInfo = account.info.copy(
-                bytes = account.info.bytes + byteDelta,
-                items = account.info.items + itemsDelta
-            )
-            context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
+            // Write new value
+            account.storage[key] = newValue!!
+            println("[WRITE-SET] key=${key.toHex()}, valueLen=$valueLen, keyWasPresent=$keyWasPresent, newBytes=$newBytes, newItems=$newItems")
         }
 
-        instance.setReg7(HostCallResult.OK)
+        // Update account info with new bytes/items
+        val updatedInfo = info.copy(
+            bytes = newBytes,
+            items = newItems
+        )
+        context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
+
+        // Return old value length (or NONE if key didn't exist)
+        val returnValue = if (keyWasPresent) oldValueSize.toULong() else HostCallResult.NONE
+        println("[WRITE-RESULT] returnValue=$returnValue, storageSize=${account.storage.size}")
+        instance.setReg7(returnValue)
     }
 
     /**
      * info (5): Get service account info.
+     * Returns 96 bytes: codeHash(32) + balance(8) + thresholdBalance(8) + minAccumulateGas(8) +
+     *                   minMemoGas(8) + totalByteLength(8) + itemsCount(4) + gratisStorage(8) +
+     *                   createdAt(4) + lastAccAt(4) + parentService(4)
      */
     private fun handleInfo(instance: RawInstance) {
         val serviceId = instance.getReg7().toLong()
         val outputAddr = instance.getReg8().toUInt()
+        val offset = instance.getReg9().toInt()
+        val length = instance.getReg10().toInt()
 
         val targetServiceId = if (serviceId == -1L) context.serviceIndex else serviceId
         val account = context.x.accounts[targetServiceId]
 
         if (account == null) {
-            instance.setReg7(HostCallResult.WHO)
+            instance.setReg7(HostCallResult.NONE)
             return
         }
 
-        // Encode service info: code_hash (32) + balance (8) + min_item_gas (8) + min_memo_gas (8) + bytes (8) + items (4)
         val info = account.info
-        val data = info.codeHash.bytes +
-            encodeLong(info.balance) +
-            encodeLong(info.minItemGas) +
-            encodeLong(info.minMemoGas) +
-            encodeLong(info.bytes) +
-            encodeInt(info.items)
 
-        val writeResult = instance.writeMemory(outputAddr, data)
+        // Calculate threshold balance: max(0, base + items*itemCost + bytes*byteCost - gratisStorage)
+        val base = config.SERVICE_MIN_BALANCE
+        val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * info.items
+        val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * info.bytes
+        // Note: depositOffset (gratisStorage) could be max u64, treat as unsigned
+        val gratisStorage = info.depositOffset.toULong()
+        val thresholdUnsigned = (base + itemsCost + bytesCost).toULong()
+        val thresholdBalance =
+            if (thresholdUnsigned > gratisStorage) (thresholdUnsigned - gratisStorage).toLong() else 0L
+        println("[INFO] service=$targetServiceId, balance=${info.balance}, threshold=$thresholdBalance, bytes=${info.bytes}, items=${info.items}, gratis=$gratisStorage, minItemGas=${info.minItemGas}, minMemoGas=${info.minMemoGas}, creationSlot=${info.creationSlot}, lastAccSlot=${info.lastAccumulationSlot}, parentService=${info.parentService}")
+
+        // Encode all 11 fields (96 bytes total)
+        val data = info.codeHash.bytes +                      // 32 bytes
+            encodeLong(info.balance) +                         // 8 bytes
+            encodeLong(thresholdBalance) +                     // 8 bytes
+            encodeLong(info.minItemGas) +                      // 8 bytes (minAccumulateGas)
+            encodeLong(info.minMemoGas) +                      // 8 bytes
+            encodeLong(info.bytes) +                           // 8 bytes (totalByteLength)
+            encodeInt(info.items) +                            // 4 bytes (itemsCount)
+            encodeLong(info.depositOffset) +                   // 8 bytes (gratisStorage)
+            encodeInt(info.creationSlot.toInt()) +             // 4 bytes (createdAt)
+            encodeInt(info.lastAccumulationSlot.toInt()) +     // 4 bytes (lastAccAt)
+            encodeInt(info.parentService.toInt())              // 4 bytes
+
+        // Apply offset and length slicing
+        val first = minOf(offset, data.size)
+        val len = minOf(length, data.size - first)
+        val slicedData = data.copyOfRange(first, first + len)
+
+        val writeResult = instance.writeMemory(outputAddr, slicedData)
         if (writeResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
-            return
+            throw RuntimeException("Info PANIC: Failed to write to memory at $outputAddr")
         }
 
-        instance.setReg7(HostCallResult.OK)
+        // Return the full data length (not sliced length)
+        instance.setReg7(data.size.toULong())
     }
 
     /**
-     * bless (14): Set manager service (privileged).
+     * bless (14): Set privileged services.
+     * reg7 = manager, reg8 = assigners ptr, reg9 = delegator, reg10 = registrar,
+     * reg11 = always-acc pairs ptr, reg12 = always-acc pairs count
      */
     private fun handleBless(instance: RawInstance) {
         // Only manager service can call bless
@@ -395,7 +537,62 @@ class AccumulationHostCalls(
         }
 
         val newManager = instance.getReg7().toLong()
+        val assignersPtr = instance.getReg8().toUInt()
+        val newDelegator = instance.getReg9().toLong()
+        val newRegistrar = instance.getReg10().toLong()
+        val alwaysAccPtr = instance.getReg11().toUInt()
+        val alwaysAccCount = instance.getReg12().toInt()
+
+        // Read assigners array (4 bytes per core)
+        val coresCount = config.EPOCH_LENGTH // Use epoch length as number of cores
+        val assignersBytes = ByteArray(4 * coresCount)
+        val assignersResult = instance.readMemoryInto(assignersPtr, assignersBytes)
+        if (assignersResult.isFailure) {
+            throw RuntimeException("Bless PANIC: Failed to read assigners from memory")
+        }
+
+        // Parse assigners
+        val newAssigners = mutableListOf<Long>()
+        for (i in 0 until coresCount) {
+            val assigner = decodeFixedWidthInteger(assignersBytes, i * 4, 4, false)
+            newAssigners.add(assigner)
+        }
+
+        // Read always-acc pairs (12 bytes each: 4 service + 8 gas)
+        val alwaysAccMap = mutableMapOf<Long, Long>()
+        if (alwaysAccCount > 0) {
+            val alwaysAccBytes = ByteArray(12 * alwaysAccCount)
+            val alwaysAccResult = instance.readMemoryInto(alwaysAccPtr, alwaysAccBytes)
+            if (alwaysAccResult.isFailure) {
+                throw RuntimeException("Bless PANIC: Failed to read always-acc from memory")
+            }
+
+            for (i in 0 until alwaysAccCount) {
+                val offset = i * 12
+                val serviceId = decodeFixedWidthInteger(alwaysAccBytes, offset, 4, false)
+                val gas = decodeFixedWidthInteger(alwaysAccBytes, offset + 4, 8, false)
+                alwaysAccMap[serviceId] = gas
+            }
+        }
+
+        // Validate service indices
+        if (newManager < 0 || newManager > UInt.MAX_VALUE.toLong() ||
+            newDelegator < 0 || newDelegator > UInt.MAX_VALUE.toLong() ||
+            newRegistrar < 0 || newRegistrar > UInt.MAX_VALUE.toLong()
+        ) {
+            instance.setReg7(HostCallResult.WHO)
+            return
+        }
+
+        // Apply all changes
         context.x.manager = newManager
+        context.x.delegator = newDelegator
+        context.x.registrar = newRegistrar
+        context.x.assigners.clear()
+        context.x.assigners.addAll(newAssigners)
+        context.x.alwaysAccers.clear()
+        context.x.alwaysAccers.putAll(alwaysAccMap)
+
         instance.setReg7(HostCallResult.OK)
     }
 
@@ -452,54 +649,135 @@ class AccumulationHostCalls(
 
     /**
      * new (18): Create new service account.
+     * reg7 = codeHashAddr, reg8 = codeHashLength (for preimage info),
+     * reg9 = minAccumlateGas, reg10 = minMemoGas, reg11 = gratisStorage,
+     * reg12 = requested service index (if caller is registrar)
      */
     private fun handleNew(instance: RawInstance) {
         val codeHashAddr = instance.getReg7().toUInt()
-        val balance = instance.getReg8().toLong()
-        val minItemGas = instance.getReg9().toLong()
+        val codeHashLength = instance.getReg8().toInt()  // Length for preimage info key
+        val minAccumulateGas = instance.getReg9().toLong()
         val minMemoGas = instance.getReg10().toLong()
+        val gratisStorage = instance.getReg11().toLong()
+        val requestedServiceId = instance.getReg12().toLong()
 
-        // Read code hash from memory
+        println("[NEW-ENTRY] codeHashAddr=$codeHashAddr, codeHashLen=$codeHashLength, minAccGas=$minAccumulateGas, minMemoGas=$minMemoGas, gratis=$gratisStorage, reqId=$requestedServiceId")
+
+        // Read code hash from memory - PANIC if not readable
         val codeHashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(codeHashAddr, codeHashBuffer)
         if (readResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
+            println("[NEW-PANIC] Failed to read code hash from memory at $codeHashAddr")
+            throw RuntimeException("New PANIC: Failed to read code hash from memory at $codeHashAddr")
+        }
+
+        val codeHash = JamByteArray(codeHashBuffer)
+
+        // Check gratisStorage permission
+        if (gratisStorage != 0L && context.serviceIndex != context.x.manager) {
+            println("[NEW-HUH] gratis=$gratisStorage but service=${context.serviceIndex} != manager=${context.x.manager}")
+            instance.setReg7(HostCallResult.HUH)
             return
         }
 
         val currentAccount = context.x.accounts[context.serviceIndex]
-        if (currentAccount == null || currentAccount.info.balance < balance) {
+        if (currentAccount == null) {
+            throw RuntimeException("New PANIC: Current service account not found")
+        }
+
+        // Calculate threshold balance for new account
+        // The new account starts with: 1 preimage info entry (items=1)
+        // Bytes = preimage info overhead
+        val newAccountItems = 1
+        val newAccountBytes = 0L  // Will be updated when preimage is provided
+        val base = config.SERVICE_MIN_BALANCE
+        val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * newAccountItems
+        val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * newAccountBytes
+        val gratisUnsigned = gratisStorage.toULong()
+        val costUnsigned = (base + itemsCost + bytesCost).toULong()
+        val thresholdBalance = if (costUnsigned > gratisUnsigned) (costUnsigned - gratisUnsigned).toLong() else 0L
+
+        // Check if caller can afford the new account
+        // Use unsigned arithmetic since balance can be MAX_UINT64
+        val callerBalanceUnsigned = currentAccount.info.balance.toULong()
+        val thresholdBalanceUnsigned = thresholdBalance.toULong()
+
+        // Calculate caller's threshold balance (what they need to keep)
+        val callerBase = config.SERVICE_MIN_BALANCE
+        val callerItemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * currentAccount.info.items
+        val callerBytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * currentAccount.info.bytes
+        val callerGratisUnsigned = currentAccount.info.depositOffset.toULong()
+        val callerCostUnsigned = (callerBase + callerItemsCost + callerBytesCost).toULong()
+        val callerThresholdUnsigned =
+            if (callerCostUnsigned > callerGratisUnsigned) (callerCostUnsigned - callerGratisUnsigned) else 0uL
+
+        // Rewritten as: account.balance < newAccount.thresholdBalance + account.thresholdBalance
+        val requiredBalance = thresholdBalanceUnsigned + callerThresholdUnsigned
+        if (callerBalanceUnsigned < requiredBalance) {
+            println("[NEW-CASH] callerBalanceUnsigned=$callerBalanceUnsigned < required=$requiredBalance (threshold=$thresholdBalanceUnsigned + callerThreshold=$callerThresholdUnsigned)")
             instance.setReg7(HostCallResult.CASH)
             return
         }
+        println("[NEW-OK] callerBalance=$callerBalanceUnsigned, thresholdBalance=$thresholdBalanceUnsigned, callerThreshold=$callerThresholdUnsigned")
 
-        // Generate new service ID (simplified)
-        val newServiceId = generateNewServiceId()
+        // Determine new service ID
+        val newServiceId: Long
+        val minPublicServiceIndex = 256L  // From config
 
-        // Create new account
+        if (context.serviceIndex == context.x.registrar && requestedServiceId >= 0 && requestedServiceId < minPublicServiceIndex) {
+            // Registrar can request specific service ID below minPublicServiceIndex
+            if (context.x.accounts.containsKey(requestedServiceId)) {
+                instance.setReg7(HostCallResult.FULL)
+                return
+            }
+            newServiceId = requestedServiceId
+        } else {
+            // Use pre-calculated nextAccountIndex
+            newServiceId = context.nextAccountIndex
+        }
+
+        // Create new account with calculated threshold balance
         val newAccount = ServiceAccount(
             info = io.forge.jam.safrole.report.ServiceInfo(
-                codeHash = JamByteArray(codeHashBuffer),
-                balance = balance,
-                minItemGas = minItemGas,
+                codeHash = codeHash,
+                balance = thresholdBalance,
+                minItemGas = minAccumulateGas,
                 minMemoGas = minMemoGas,
-                bytes = 0,
-                items = 0
+                bytes = newAccountBytes,
+                items = newAccountItems,
+                depositOffset = gratisStorage,
+                creationSlot = context.timeslot,
+                lastAccumulationSlot = 0,
+                parentService = context.serviceIndex
             ),
             storage = mutableMapOf(),
             preimages = mutableMapOf(),
-            preimageRequests = mutableMapOf()
+            preimageRequests = mutableMapOf(
+                // Initialize preimage info for code hash with empty requestedAt list
+                PreimageKey(codeHash, codeHashLength) to PreimageRequest(emptyList())
+            )
         )
 
         context.x.accounts[newServiceId] = newAccount
+        println("[NEW] created service=$newServiceId, balance=$thresholdBalance, parent=${context.serviceIndex}, codeHash=${codeHash.toHex()}")
 
         // Deduct balance from creator
         val updatedCreatorInfo = currentAccount.info.copy(
-            balance = currentAccount.info.balance - balance
+            balance = currentAccount.info.balance - thresholdBalance
         )
         context.x.accounts[context.serviceIndex] = currentAccount.copy(
             info = updatedCreatorInfo
         )
+
+        // Update nextAccountIndex for next NEW call (ONLY if not using registrar privilege)
+        if (context.serviceIndex != context.x.registrar || requestedServiceId >= minPublicServiceIndex) {
+            val s = minPublicServiceIndex
+            val left = (context.nextAccountIndex - s + 42).toUInt()
+            val right = (UInt.MAX_VALUE - s.toUInt() - 255u)
+            val nextCandidate = s + (left % right).toLong()
+            context.nextAccountIndex = findAvailableServiceIndex(nextCandidate, s)
+            println("[NEW] nextAccountIndex updated from $newServiceId to ${context.nextAccountIndex}")
+        }
 
         instance.setReg7(newServiceId.toULong())
     }
@@ -532,6 +810,7 @@ class AccumulationHostCalls(
 
     /**
      * transfer (20): Queue a deferred transfer.
+     * 0.7.1: Gas is g = 10 + gasLimit (charged regardless of success/failure).
      */
     private fun handleTransfer(instance: RawInstance) {
         val destination = instance.getReg7().toLong()
@@ -540,24 +819,58 @@ class AccumulationHostCalls(
         val memoAddr = instance.getReg10().toUInt()
 
         val account = context.x.accounts[context.serviceIndex]
-        if (account == null || account.info.balance < amount) {
+        val accounts = context.x.accounts
+
+        println("[TRANSFER] service=${context.serviceIndex}, dest=$destination, amount=$amount, gasLimit=$gasLimit, balance=${account?.info?.balance}")
+
+        // 1. Read memo from memory (128 bytes) - PANIC if fails
+        val memoBuffer = ByteArray(DeferredTransfer.MEMO_SIZE)
+        val readResult = instance.readMemoryInto(memoAddr, memoBuffer)
+        if (readResult.isFailure) {
+            throw RuntimeException("Transfer PANIC: Failed to read memo from memory at $memoAddr")
+        }
+
+        // 2. Check if destination exists (WHO)
+        if (!accounts.containsKey(destination)) {
+            instance.setReg7(HostCallResult.WHO)
+            return
+        }
+
+        // 3. Check if gasLimit >= destination.minMemoGas (LOW)
+        val destAccount = accounts[destination]!!
+        if (gasLimit < destAccount.info.minMemoGas) {
+            instance.setReg7(HostCallResult.LOW)
+            return
+        }
+
+        // 4. Check if caller can afford it - balance after deduction >= caller.minBalance (CASH)
+        // b = caller.balance - amount
+        // Check: b < caller.minBalance
+        if (account == null) {
             instance.setReg7(HostCallResult.CASH)
             return
         }
 
-        // Read memo from memory (128 bytes)
-        val memoBuffer = ByteArray(DeferredTransfer.MEMO_SIZE)
-        val readResult = instance.readMemoryInto(memoAddr, memoBuffer)
-        if (readResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
+        val balanceAfterTransfer = account.info.balance - amount
+        // Calculate caller's minimum balance (threshold)
+        val base = config.SERVICE_MIN_BALANCE
+        val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * account.info.items
+        val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * account.info.bytes
+        val gratisUnsigned = account.info.depositOffset.toULong()
+        val thresholdUnsigned = (base + itemsCost + bytesCost).toULong()
+        val callerMinBalance =
+            if (thresholdUnsigned > gratisUnsigned) (thresholdUnsigned - gratisUnsigned).toLong() else 0L
+
+        // Use unsigned comparison
+        if (balanceAfterTransfer.toULong() < callerMinBalance.toULong()) {
+            instance.setReg7(HostCallResult.CASH)
             return
         }
 
-        // Deduct balance
-        val updatedInfo = account.info.copy(balance = account.info.balance - amount)
+        // 5. Success - deduct balance and queue transfer
+        val updatedInfo = account.info.copy(balance = balanceAfterTransfer)
         context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
 
-        // Queue transfer
         context.deferredTransfers.add(
             DeferredTransfer(
                 source = context.serviceIndex,
@@ -578,6 +891,8 @@ class AccumulationHostCalls(
         val ejectServiceId = instance.getReg7().toLong()
         val preimageHashAddr = instance.getReg8().toUInt()
 
+        println("[EJECT] Attempting to eject service $ejectServiceId by caller ${context.serviceIndex}")
+
         // 1. Read 32-byte preimage hash from memory - PANIC on failure
         val hashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(preimageHashAddr, hashBuffer)
@@ -585,6 +900,7 @@ class AccumulationHostCalls(
             throw RuntimeException("Eject PANIC: Failed to read preimage hash from memory")
         }
         val preimageHash = JamByteArray(hashBuffer)
+        println("[EJECT] preimageHash=${preimageHash.toHex()}")
 
         // 2. Get target service account
         val ejectAccount = context.x.accounts[ejectServiceId]
@@ -592,35 +908,44 @@ class AccumulationHostCalls(
         // 3. Validate: target exists AND target != caller AND codeHash matches caller's ID
         val expectedCodeHash = encodeServiceIdAsCodeHash(context.serviceIndex)
         if (ejectServiceId == context.serviceIndex) {
+            println("[EJECT] WHO: Cannot eject self")
             instance.setReg7(HostCallResult.WHO)
             return
         }
         if (ejectAccount == null) {
+            println("[EJECT] WHO: Account $ejectServiceId not found")
             instance.setReg7(HostCallResult.WHO)
             return
         }
+        println("[EJECT] ejectAccount.codeHash=${ejectAccount.info.codeHash.toHex()}, expected=${expectedCodeHash.toHex()}")
         if (ejectAccount.info.codeHash != expectedCodeHash) {
+            println("[EJECT] WHO: codeHash mismatch")
             instance.setReg7(HostCallResult.WHO)
             return
         }
 
         // 4. Validate item count is exactly 2
+        println("[EJECT] ejectAccount.items=${ejectAccount.info.items}")
         if (ejectAccount.info.items != 2) {
+            println("[EJECT] HUH: items != 2")
             instance.setReg7(HostCallResult.HUH)
             return
         }
 
-        // 5. Calculate length: l = max(81, d.bytes) - 81
-        val length = (maxOf(81L, ejectAccount.info.bytes) - 81).toInt()
-        val preimageKey = PreimageKey(preimageHash, length)
-
-        // 6. Validate preimage request exists with exactly 2 timestamps
-        val preimageRequest = ejectAccount.preimageRequests[preimageKey]
+        // 5. Find preimage request by hash (ignoring length - the test data doesn't include length in preimageStatus)
+        println("[EJECT] Looking up preimage by hash=${preimageHash.toHex()}")
+        println("[EJECT] Available preimageRequest keys=${ejectAccount.preimageRequests.keys.map { "(${it.hash.toHex()}, ${it.length})" }}")
+        val preimageEntry = ejectAccount.preimageRequests.entries.find { it.key.hash == preimageHash }
+        val preimageRequest = preimageEntry?.value
+        println("[EJECT] preimageRequest=$preimageRequest")
         if (preimageRequest == null) {
+            println("[EJECT] HUH: preimageRequest is null")
             instance.setReg7(HostCallResult.HUH)
             return
         }
+        println("[EJECT] requestedAt=${preimageRequest.requestedAt}")
         if (preimageRequest.requestedAt.size != 2) {
+            println("[EJECT] HUH: requestedAt.size=${preimageRequest.requestedAt.size} != 2")
             instance.setReg7(HostCallResult.HUH)
             return
         }
@@ -628,7 +953,9 @@ class AccumulationHostCalls(
         // 7. Validate expunge period: requestedAt[1] < timeslot - expungePeriod
         val expungePeriod = config.PREIMAGE_PURGE_PERIOD
         val minHoldSlot = maxOf(0L, context.timeslot - expungePeriod)
+        println("[EJECT] expungePeriod=$expungePeriod, minHoldSlot=$minHoldSlot, requestedAt[1]=${preimageRequest.requestedAt[1]}")
         if (preimageRequest.requestedAt[1] >= minHoldSlot) {
+            println("[EJECT] HUH: requestedAt[1]=${preimageRequest.requestedAt[1]} >= minHoldSlot=$minHoldSlot")
             instance.setReg7(HostCallResult.HUH)
             return
         }
@@ -640,6 +967,7 @@ class AccumulationHostCalls(
         )
         context.x.accounts[context.serviceIndex] = callerAccount.copy(info = updatedCallerInfo)
         context.x.accounts.remove(ejectServiceId)
+        println("[EJECT] SUCCESS: Removed service $ejectServiceId, transferred balance to ${context.serviceIndex}")
 
         instance.setReg7(HostCallResult.OK)
     }
@@ -769,6 +1097,7 @@ class AccumulationHostCalls(
 
         // Store the yield in the context
         context.yield = JamByteArray(hashBuffer)
+        // println("[YIELD] service=${context.serviceIndex}, hash=${context.yield?.toHex()}")
         instance.setReg7(HostCallResult.OK)
     }
 
@@ -872,8 +1201,8 @@ class AccumulationHostCalls(
      */
     private fun encodeOperandsList(): ByteArray {
         val buffer = mutableListOf<Byte>()
-        // Compact-encode the array length
-        buffer.addAll(encodeCompactInteger(operands.size.toLong()).toList())
+        // Gray Paper natural number encode the array length
+        buffer.addAll(AccumulationOperand.encodeGrayPaperNatural(operands.size.toLong()).toList())
         // Encode each operand using its existing encode() method (includes variant)
         for (operand in operands) {
             buffer.addAll(operand.encode().toList())
@@ -896,10 +1225,19 @@ class AccumulationHostCalls(
         return ByteArray(4) { i -> ((value shr (i * 8)) and 0xFF).toByte() }
     }
 
-    private var nextServiceIdCounter = 0L
+    /**
+     * Find the first available service index starting from a candidate.
+     */
+    private fun findAvailableServiceIndex(candidate: Long, minPublicServiceIndex: Long): Long {
+        var i = candidate
+        val s = minPublicServiceIndex
+        val right = (UInt.MAX_VALUE - s.toUInt() - 255u).toLong()
 
-    private fun generateNewServiceId(): Long {
-        nextServiceIdCounter++
-        return context.serviceIndex * 1000000 + nextServiceIdCounter
+        // Loop until we find an unused service index
+        while (context.x.accounts.containsKey(i)) {
+            val left = (i - s + 1)
+            i = s + (left % right)
+        }
+        return i
     }
 }

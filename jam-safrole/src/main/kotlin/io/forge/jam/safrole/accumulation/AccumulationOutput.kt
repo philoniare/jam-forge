@@ -8,12 +8,21 @@ import io.forge.jam.safrole.report.ReportErrorCode
 import io.forge.jam.safrole.report.ReportErrorCodeSerializer
 import kotlinx.serialization.Serializable
 
+/**
+ * Accumulation statistics per service - used for computing fresh service statistics.
+ * Contains gas used and work item count for each service accumulated in this block.
+ */
+typealias AccumulationStats = Map<Long, Pair<Long, Int>>  // serviceId -> (gasUsed, workItemCount)
+
 @Serializable
 data class AccumulationOutput(
     @Serializable(with = JamByteArrayHexSerializer::class)
     val ok: JamByteArray,
     @Serializable(with = ReportErrorCodeSerializer::class)
-    val err: ReportErrorCode? = null
+    val err: ReportErrorCode? = null,
+    // Transient field - not serialized, used for computing final service stats
+    @kotlinx.serialization.Transient
+    val accumulationStats: AccumulationStats = emptyMap()
 ) : Encodable {
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0): Pair<AccumulationOutput, Int> {

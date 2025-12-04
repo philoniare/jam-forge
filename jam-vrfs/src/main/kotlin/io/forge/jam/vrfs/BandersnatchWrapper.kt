@@ -1,4 +1,3 @@
-// src/main/kotlin/io/forge/jam/vrfs/RustLibrary.kt
 package io.forge.jam.vrfs
 
 import java.io.File
@@ -53,6 +52,26 @@ class BandersnatchWrapper(ringSize: Int) {
 
         @JvmStatic
         external fun getIetfVrfOutput(signature: ByteArray): ByteArray
+
+        @JvmStatic
+        external fun secretFromSeed(seed: ByteArray): ByteArray
+
+        @JvmStatic
+        external fun publicFromSecret(secretBytes: ByteArray): ByteArray
+
+        @JvmStatic
+        external fun ietfVrfSign(secretBytes: ByteArray, vrfInput: ByteArray, auxData: ByteArray): ByteArray
+
+        @JvmStatic
+        external fun ietfVrfVerify(
+            publicBytes: ByteArray,
+            vrfInput: ByteArray,
+            auxData: ByteArray,
+            signature: ByteArray
+        ): ByteArray
+
+        @JvmStatic
+        external fun getVrfOutput(secretBytes: ByteArray, vrfInput: ByteArray): ByteArray
     }
 
     init {

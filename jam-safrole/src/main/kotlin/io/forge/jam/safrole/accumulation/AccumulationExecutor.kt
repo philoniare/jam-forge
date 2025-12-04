@@ -2,12 +2,12 @@ package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
-import io.forge.jam.core.encodeCompactInteger
 import io.forge.jam.pvm.engine.*
 import io.forge.jam.pvm.program.ArcBytes
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.program.ProgramParts
 import io.forge.jam.pvm.program.Reg
+import org.bouncycastle.crypto.digests.Blake2bDigest
 
 /**
  * Orchestrates PVM execution for accumulation.
@@ -39,11 +39,19 @@ class AccumulationExecutor(
         val account = partialState.accounts[serviceId]
             ?: return createEmptyResult(partialState, serviceId, timeslot)
 
+        println("[EXEC-START] service=$serviceId, initialBalance=${account.info.balance}, bytes=${account.info.bytes}, items=${account.info.items}")
+
         // Use the account's codeHash
         val codeHash = account.info.codeHash
 
-        val code = account.preimages[codeHash]?.bytes
-        if (code == null) {
+        val preimage = account.preimages[codeHash]?.bytes
+        if (preimage == null) {
+            return createEmptyResult(partialState, serviceId, timeslot)
+        }
+
+        // Extract code blob from preimage (format: metaLength + metadata + code)
+        val code = extractCodeBlob(preimage)
+        if (code == null || code.isEmpty()) {
             return createEmptyResult(partialState, serviceId, timeslot)
         }
 
@@ -61,18 +69,51 @@ class AccumulationExecutor(
             it.accounts[serviceId] = updatedAccount
         }
 
+        // Calculate initial nextAccountIndex
+        val minPublicServiceIndex = 256L
+        val initialIndex = calculateInitialIndex(serviceId, entropy, timeslot)
+        val s = minPublicServiceIndex.toUInt()
+        val modValue = UInt.MAX_VALUE - s - 255u
+        val candidateIndex = s.toLong() + (initialIndex.toUInt() % modValue).toLong()
+        val nextAccountIndex =
+            findAvailableServiceIndex(candidateIndex, minPublicServiceIndex, postTransferState.accounts)
+        println(
+            "[EXEC] serviceId=$serviceId, timeslot=$timeslot, entropy(full)=${
+                entropy.bytes.joinToString("") {
+                    "%02x".format(
+                        it
+                    )
+                }
+            }"
+        )
+        println(
+            "[EXEC] initialIndex=$initialIndex (0x${initialIndex.toString(16)}), modValue=$modValue (0x${
+                modValue.toString(
+                    16
+                )
+            })"
+        )
+        println(
+            "[EXEC] candidateIndex=$candidateIndex (0x${candidateIndex.toString(16)}), nextAccountIndex=$nextAccountIndex (0x${
+                nextAccountIndex.toString(
+                    16
+                )
+            })"
+        )
+
         // Create accumulation context with dual state
         val context = AccumulationContext(
             x = postTransferState.deepCopy(),
             y = postTransferState.deepCopy(),
             serviceIndex = serviceId,
             timeslot = timeslot,
-            entropy = entropy
+            entropy = entropy,
+            nextAccountIndex = nextAccountIndex
         )
 
         // Execute PVM
         val (exitReason, gasUsed) = executePvm(context, code, gasLimit, operands)
-        println("[EXEC-DONE] service=$serviceId, exitReason=$exitReason, gasUsed=$gasUsed")
+        println("[EXEC-DONE] service=$serviceId, exitReason=$exitReason, gasUsed=$gasUsed, gasLimit=$gasLimit, codeSize=${code.size}, operands=${operands.size}")
 
         // Collapse state based on exit reason
         val finalState = context.collapse(exitReason)
@@ -108,8 +149,8 @@ class AccumulationExecutor(
             return Pair(ExitReason.INVALID_CODE, 0L)
         }
 
-        // Manually instantiate with step tracing
-        val interpreted = InterpretedInstance.newFromModule(module, true)
+        // Manually instantiate without step tracing (to avoid memory issues)
+        val interpreted = InterpretedInstance.newFromModule(module, false)
         val backend = InstanceBackend.Interpreted(interpreted)
         val instance = RawInstance(module, backend, null)
 
@@ -122,13 +163,17 @@ class AccumulationExecutor(
 
         val entryPointPc = io.forge.jam.pvm.program.ProgramCounter(5u)
 
-        // Encode input as 3 SCALE-compact integers: timeslot, serviceIndex, itemCount
-        val inputData = java.io.ByteArrayOutputStream().use { stream ->
-            stream.write(encodeCompactInteger(context.timeslot))
-            stream.write(encodeCompactInteger(context.serviceIndex))
-            stream.write(encodeCompactInteger(operands.size.toLong()))
-            stream.toByteArray()
-        }
+        // Encode input using compact encoding (Gray Paper natural numbers)
+        val inputData = encodeGrayPaperNatural(context.timeslot) +
+            encodeGrayPaperNatural(context.serviceIndex) +
+            encodeGrayPaperNatural(operands.size.toLong())
+        println(
+            "[DEBUG-INPUTDATA] timeslot=${context.timeslot}, serviceIndex=${context.serviceIndex}, count=${operands.size}, bytes=${
+                inputData.joinToString(
+                    ""
+                ) { "%02x".format(it) }
+            }, size=${inputData.size}"
+        )
 
         val RA_INIT = 0xFFFF0000uL
         val SP_INIT = 0xFEFE0000uL
@@ -168,6 +213,7 @@ class AccumulationExecutor(
                 }
 
                 InterruptKind.Panic -> {
+                    println("[PANIC] PC=${instance.programCounter()}, gas=${instance.gas()}")
                     exitReason = ExitReason.PANIC
                     break
                 }
@@ -179,18 +225,24 @@ class AccumulationExecutor(
 
                 is InterruptKind.Ecalli -> {
                     hostCallCount++
+                    val gasBefore = instance.gas()
+                    // Deduct host call gas cost BEFORE execution
+                    val gasCost = hostCalls.getGasCost(interrupt.value, instance)
+                    val newGas = instance.gas() - gasCost
+                    instance.setGas(newGas)
+                    // Now dispatch with gas already charged
                     hostCalls.dispatch(interrupt.value, instance)
+                    val gasAfter = instance.gas()
+                    // Check if dispatch changed gas (it shouldn't)
+                    if (gasAfter != newGas) {
+                        println("[WARNING] Gas changed during dispatch! before=$newGas, after=$gasAfter")
+                    }
+                    println("[HOST-TRACE] #$hostCallCount: id=${interrupt.value}, gasBefore=$gasBefore, gasCost=$gasCost, gasAfter=$gasAfter")
                 }
 
                 is InterruptKind.Segfault -> {
-                    val segfault = interrupt as InterruptKind.Segfault
-                    println(
-                        "[SEGFAULT] service=${context.serviceIndex}, pageAddress=0x${
-                            segfault.fault.pageAddress.toString(
-                                16
-                            )
-                        }, pageSize=${segfault.fault.pageSize}"
-                    )
+                    // val segfault = interrupt as InterruptKind.Segfault
+                    // println("[SEGFAULT] service=${context.serviceIndex}, pageAddress=${segfault.fault.pageAddress}, pageSize=${segfault.fault.pageSize}")
                     exitReason = ExitReason.PAGE_FAULT
                     break
                 }
@@ -200,6 +252,7 @@ class AccumulationExecutor(
                 }
 
                 null -> {
+                    println("[PANIC-NULL] PC=${instance.programCounter()}, gas=${instance.gas()}")
                     exitReason = ExitReason.PANIC
                     break
                 }
@@ -207,6 +260,8 @@ class AccumulationExecutor(
         }
 
         val gasUsed = initialGas - instance.gas()
+        val finalGas = instance.gas()
+        println("[DEBUG-EXEC] hostCalls=$hostCallCount, initialGas=$initialGas, finalGas=$finalGas, gasUsed=$gasUsed, exitReason=$exitReason")
 
         if (exitReason == ExitReason.PANIC) {
             throw RuntimeException("PVM Panic! Host calls: $hostCallCount")
@@ -253,11 +308,14 @@ class AccumulationExecutor(
                     return null
                 }
                 val blob = blobResult.getOrThrow()
+                println("[DEBUG-BLOB] codeAndJumpTable=${parts.codeAndJumpTable.toByteArray().size}, parsed code=${blob.code.toByteArray().size}, jumpTable=${blob.jumpTable.toByteArray().size}, bitmask=${blob.bitmask.toByteArray().size}")
 
                 val moduleConfig = ModuleConfig.new(dynamicPaging = false)
                 moduleConfig.setGasMetering(GasMeteringKind.Sync)
                 moduleConfig.setPageSize(4096u)
-                moduleConfig.setStepTracing(true)
+                // Enable step tracing temporarily for debugging
+                val enableStepTrace = true
+                moduleConfig.setStepTracing(enableStepTrace)
                 moduleConfig.setAuxDataSize(16908288u)
 
                 val moduleResult = Module.fromBlob(engine, moduleConfig, blob)
@@ -334,6 +392,52 @@ class AccumulationExecutor(
                 roData = ArcBytes.fromStatic(code),
                 codeAndJumpTable = ArcBytes.fromStatic(ByteArray(0))
             )
+        }
+
+        /**
+         * Extract code blob from preimage data.
+         * Preimage format: metaLength (Gray Paper natural number) + metadata + codeBlob
+         *
+         * Natural number encoding: count leading zeros of inverted first byte to determine
+         * how many additional bytes to read, then combine with masked bits.
+         */
+        private fun extractCodeBlob(preimage: ByteArray): ByteArray? {
+            if (preimage.isEmpty()) return null
+
+            val firstByte = preimage[0].toInt() and 0xFF
+
+            if (firstByte == 0) {
+                // Metadata length is 0, code starts at byte 1
+                return preimage.copyOfRange(1, preimage.size)
+            }
+
+            // Count leading zeros of inverted byte
+            val inverted = firstByte.inv() and 0xFF
+            var byteLength = 0
+            for (i in 0 until 8) {
+                if ((inverted and (0x80 shr i)) != 0) break
+                byteLength++
+            }
+
+            if (preimage.size < 1 + byteLength) return null
+
+            // Read additional bytes (little-endian)
+            var res: Long = 0
+            for (i in 0 until byteLength) {
+                res = res or ((preimage[1 + i].toLong() and 0xFF) shl (8 * i))
+            }
+
+            // Mask for top bits from first byte
+            val mask = (1 shl (8 - byteLength)) - 1
+            val topBits = firstByte and mask
+
+            val metaLength = (res + (topBits.toLong() shl (8 * byteLength))).toInt()
+            val metaLengthSize = 1 + byteLength
+            val codeStart = metaLengthSize + metaLength
+
+            if (codeStart > preimage.size) return null
+
+            return preimage.copyOfRange(codeStart, preimage.size)
         }
     }
 }
@@ -498,4 +602,98 @@ fun accumulateParallel(
         outputs = allOutputs,
         gasUsed = allGasUsed
     )
+}
+
+/**
+ * Calculate the initial index for nextAccountIndex using Blake2b256.
+ * Returns the first 4 bytes as a UInt32 (little endian).
+ */
+private fun calculateInitialIndex(serviceId: Long, entropy: JamByteArray, timeslot: Long): Long {
+    // Encode: serviceId (compact natural), entropy (32 bytes), timeslot (compact natural)
+    // JAM encoding uses compact/variable-width natural numbers
+    val encodedServiceId = encodeGrayPaperNatural(serviceId)
+    val encodedTimeslot = encodeGrayPaperNatural(timeslot)
+    val data = encodedServiceId +
+        entropy.bytes +
+        encodedTimeslot
+    println(
+        "[CALC-INDEX] serviceId=$serviceId (${encodedServiceId.joinToString("") { "%02x".format(it) }}), timeslot=$timeslot (${
+            encodedTimeslot.joinToString(
+                ""
+            ) { "%02x".format(it) }
+        }), entropy=${entropy.bytes.take(8).joinToString("") { "%02x".format(it) }}..."
+    )
+
+    // Hash with Blake2b-256
+    val digest = Blake2bDigest(256)
+    digest.update(data, 0, data.size)
+    val hash = ByteArray(32)
+    digest.doFinal(hash, 0)
+
+    println("[CALC-INDEX] inputData(${data.size} bytes)=${data.joinToString("") { "%02x".format(it) }}")
+    println("[CALC-INDEX] hashResult=${hash.joinToString("") { "%02x".format(it) }}")
+
+    // Take first 4 bytes as little-endian UInt32
+    val result = (hash[0].toLong() and 0xFF) or
+        ((hash[1].toLong() and 0xFF) shl 8) or
+        ((hash[2].toLong() and 0xFF) shl 16) or
+        ((hash[3].toLong() and 0xFF) shl 24)
+    println("[CALC-INDEX] UInt32 result=$result (0x${result.toString(16)})")
+    return result
+}
+
+/**
+ * Encode a non-negative integer using Gray Paper natural number format.
+ */
+private fun encodeGrayPaperNatural(value: Long): ByteArray {
+    if (value == 0L) return byteArrayOf(0)
+
+    // Find how many 7-bit groups we need
+    for (l in 0 until 8) {
+        if (value < (1L shl (7 * (l + 1)))) {
+            // l is the number of additional bytes needed
+            val prefix = (256 - (1 shl (8 - l))).toByte()
+            val data = (value / (1L shl (8 * l))).toByte()
+            val firstByte = ((prefix.toInt() and 0xFF) + (data.toInt() and 0xFF)).toByte()
+
+            return if (l == 0) {
+                byteArrayOf(firstByte)
+            } else {
+                val result = ByteArray(1 + l)
+                result[0] = firstByte
+                for (i in 0 until l) {
+                    result[1 + i] = ((value shr (8 * i)) and 0xFF).toByte()
+                }
+                result
+            }
+        }
+    }
+
+    // 8 bytes needed (very large number)
+    val result = ByteArray(9)
+    result[0] = 0xFF.toByte()
+    for (i in 0 until 8) {
+        result[1 + i] = ((value shr (8 * i)) and 0xFF).toByte()
+    }
+    return result
+}
+
+/**
+ * Find the first available service index starting from a candidate.
+ */
+private fun findAvailableServiceIndex(
+    candidate: Long,
+    minPublicServiceIndex: Long,
+    accounts: Map<Long, ServiceAccount>
+): Long {
+    var i = candidate
+    val s = minPublicServiceIndex
+    val right = (UInt.MAX_VALUE - s.toUInt() - 255u).toLong()
+
+    // Loop until we find an unused service index
+    while (accounts.containsKey(i)) {
+        val left = (i - s + 1)
+        i = s + (left % right)
+    }
+    return i
 }
