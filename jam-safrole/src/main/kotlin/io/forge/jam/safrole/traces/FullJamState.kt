@@ -3,11 +3,7 @@ package io.forge.jam.safrole.traces
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.JamByteArrayList
 import io.forge.jam.core.WorkReport
-import io.forge.jam.safrole.AvailabilityAssignment
-import io.forge.jam.safrole.Psi
-import io.forge.jam.safrole.TicketBody
-import io.forge.jam.safrole.TicketsOrKeys
-import io.forge.jam.safrole.ValidatorKey
+import io.forge.jam.safrole.*
 import io.forge.jam.safrole.accumulation.AccumulationState
 import io.forge.jam.safrole.accumulation.Privileges
 import io.forge.jam.safrole.accumulation.ReadyRecord
@@ -16,19 +12,8 @@ import io.forge.jam.safrole.assurance.AssuranceState
 import io.forge.jam.safrole.authorization.AuthState
 import io.forge.jam.safrole.historical.HistoricalBetaContainer
 import io.forge.jam.safrole.historical.HistoricalState
-import io.forge.jam.safrole.preimage.AccountInfo
-import io.forge.jam.safrole.preimage.PreimageAccount
-import io.forge.jam.safrole.preimage.PreimageHash
-import io.forge.jam.safrole.preimage.PreimageHistory
-import io.forge.jam.safrole.preimage.PreimageHistoryKey
-import io.forge.jam.safrole.preimage.PreimageState
-import io.forge.jam.safrole.report.AccumulationServiceData
-import io.forge.jam.safrole.report.AccumulationServiceItem
-import io.forge.jam.safrole.report.CoreStatisticsRecord
-import io.forge.jam.safrole.report.ReportState
-import io.forge.jam.safrole.report.ServiceData
-import io.forge.jam.safrole.report.ServiceItem
-import io.forge.jam.safrole.safrole.SafroleGammaState
+import io.forge.jam.safrole.preimage.*
+import io.forge.jam.safrole.report.*
 import io.forge.jam.safrole.safrole.SafroleState
 import io.forge.jam.safrole.stats.StatCount
 import io.forge.jam.safrole.stats.StatState
@@ -300,10 +285,10 @@ private fun AccumulationServiceItem.toPreimageAccount(): PreimageAccount {
             lookupMeta = this.data.preimagesStatus.map { status ->
                 PreimageHistory(
                     key = PreimageHistoryKey(
-                        hash = status.key.hash,
-                        length = status.key.length.toLong()
+                        hash = status.hash,
+                        length = status.status.size.toLong()
                     ),
-                    value = status.value
+                    value = status.status
                 )
             }
         )

@@ -20,9 +20,10 @@ data class AccumulationOutput(
     val ok: JamByteArray,
     @Serializable(with = ReportErrorCodeSerializer::class)
     val err: ReportErrorCode? = null,
-    // Transient field - not serialized, used for computing final service stats
     @kotlinx.serialization.Transient
-    val accumulationStats: AccumulationStats = emptyMap()
+    val accumulationStats: AccumulationStats = emptyMap(),
+    @kotlinx.serialization.Transient
+    val outputs: Map<Long, JamByteArray> = emptyMap()
 ) : Encodable {
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0): Pair<AccumulationOutput, Int> {

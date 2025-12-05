@@ -44,8 +44,22 @@ class AccumulationExecutor(
         // Use the account's codeHash
         val codeHash = account.info.codeHash
 
+        val blobStateKey = computeServiceDataStateKey(serviceId, 0xFFFFFFFEL, codeHash)
         val preimage = account.preimages[codeHash]?.bytes
+            ?: partialState.rawServiceDataByStateKey[blobStateKey]?.bytes
+
+        println(
+            "[EXEC-CODE] service=$serviceId, codeHash=${
+                codeHash.toHex().take(16)
+            }, hasPreimagesMap=${account.preimages.containsKey(codeHash)}, rawDataKeys=${partialState.rawServiceDataByStateKey.keys.size}, blobKeyFound=${
+                partialState.rawServiceDataByStateKey.containsKey(
+                    blobStateKey
+                )
+            }"
+        )
+
         if (preimage == null) {
+            println("[EXEC-CODE] No code found for service $serviceId")
             return createEmptyResult(partialState, serviceId, timeslot, operands)
         }
 
@@ -142,9 +156,15 @@ class AccumulationExecutor(
             else -> context.yield
         }
 
+        val deferredTransfers = context.getDeferredTransfers(execResult.exitReason)
+        println("[EXEC-RESULT] service=$serviceId, exitReason=${execResult.exitReason}, deferredTransfers=${deferredTransfers.size}")
+        deferredTransfers.forEach { t ->
+            println("[EXEC-RESULT]   transfer: src=${t.source}, dst=${t.destination}, amount=${t.amount}, gas=${t.gasLimit}")
+        }
+
         return AccumulationOneResult(
             postState = finalState,
-            deferredTransfers = context.getDeferredTransfers(execResult.exitReason),
+            deferredTransfers = deferredTransfers,
             yield = yield,
             gasUsed = execResult.gasUsed,
             provisions = context.getProvisions(execResult.exitReason)

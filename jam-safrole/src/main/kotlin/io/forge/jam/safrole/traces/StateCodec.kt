@@ -152,31 +152,74 @@ object StateCodec {
         // Service accounts - combine account metadata with storage/preimage data
         val serviceAccountsList = serviceAccountKvs.map { (serviceIndex, kv) ->
             val (accountData, _) = AccumulationServiceData.fromBytes(kv.value.bytes, 0)
-            AccumulationServiceItem(serviceIndex.toLong(), accountData)
+            AccumulationServiceItem(serviceIndex.toUInt().toLong(), accountData)
         }.sortedBy { it.id }.toMutableList()
 
         // Collect all raw service data keyvals for pass-through
         val rawServiceDataKvs = serviceDataKvs.values.flatten().sortedBy { it.key.toHex() }
 
-        // Extract preimages from service data keyvals and merge into service accounts
+        // Extract preimages and preimage info from service data keyvals and merge into service accounts
         // Preimage data is stored separately with interleaved keys
         serviceDataKvs.forEach { (serviceIndex, kvList) ->
-            val accountIdx = serviceAccountsList.indexOfFirst { it.id == serviceIndex.toLong() }
+            val accountIdx = serviceAccountsList.indexOfFirst { it.id == serviceIndex.toUInt().toLong() }
             if (accountIdx >= 0) {
                 val account = serviceAccountsList[accountIdx]
                 val preimagesList = account.data.preimages.toMutableList()
+                val preimageStatusList = account.data.preimagesStatus.toMutableList()
 
+                // First pass: collect preimage blobs to build hash->size map
+                val hashToBlob = mutableMapOf<String, JamByteArray>()
                 kvList.forEach { kv ->
                     // Large values (>1000 bytes) are likely preimages (service code)
                     if (kv.value.bytes.size > 1000) {
                         val hash = JamByteArray(blake2b256(kv.value.bytes))
                         preimagesList.add(io.forge.jam.safrole.preimage.PreimageHash(hash, kv.value))
+                        hashToBlob[hash.toHex()] = kv.value
                     }
                 }
 
-                // Update the account with merged preimages
-                if (preimagesList.size > account.data.preimages.size) {
-                    val updatedData = account.data.copy(preimages = preimagesList)
+                // Second pass: extract preimage info entries
+                kvList.forEach { kv ->
+                    val valueSize = kv.value.bytes.size
+                    // Valid sizes: 1, 5, 9, 13 bytes
+                    if (valueSize in listOf(1, 5, 9, 13)) {
+                        val bytes = kv.value.bytes
+                        val count = bytes[0].toInt() and 0xFF
+                        if (count <= 3 && valueSize == 1 + count * 4) {
+                            // This is a preimage info entry - extract timeslots
+                            val timeslots = mutableListOf<Long>()
+                            for (i in 0 until count) {
+                                val offset = 1 + i * 4
+                                val ts = (bytes[offset].toLong() and 0xFF) or
+                                    ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+                                    ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+                                    ((bytes[offset + 3].toLong() and 0xFF) shl 24)
+                                timeslots.add(ts)
+                            }
+
+                            val actualKeyHex = kv.key.toHex()
+                            for ((hashHex, blob) in hashToBlob) {
+                                val hash = JamByteArray(hashHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
+                                val computedKey = io.forge.jam.safrole.accumulation.computePreimageInfoStateKey(
+                                    serviceIndex.toUInt().toLong(), blob.size, hash
+                                )
+                                if (computedKey.toHex() == actualKeyHex) {
+                                    preimageStatusList.add(
+                                        io.forge.jam.safrole.report.PreimagesStatusMapEntry(hash, timeslots)
+                                    )
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Update the account with merged preimages and status
+                if (preimagesList.size > account.data.preimages.size || preimageStatusList.size > account.data.preimagesStatus.size) {
+                    val updatedData = account.data.copy(
+                        preimages = preimagesList,
+                        preimagesStatus = preimageStatusList
+                    )
                     serviceAccountsList[accountIdx] = account.copy(data = updatedData)
                 }
             }

@@ -17,7 +17,7 @@ class FuzzyLightTraceTest : BaseTraceTest() {
 //    fun testFuzzyLightEncoding() = runEncodingTests()
 
     @Test
-    fun testFuzzyLightBlockImport() = runSingleBlockTest(11)
+    fun testFuzzyLightBlockImport() = runSingleBlockTest(111)
 
 //    @Test
 //    fun testFuzzyLightDecoding() = runDecodingTests()

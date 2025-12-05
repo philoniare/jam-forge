@@ -1,8 +1,6 @@
 package io.forge.jam.safrole.preimage
 
-import io.forge.jam.core.blakeHash
-import io.forge.jam.core.JamByteArray
-import io.forge.jam.core.decodeCompactInteger
+import io.forge.jam.core.*
 import io.forge.jam.safrole.traces.StateKeys
 
 class PreimageStateTransition {
@@ -63,9 +61,13 @@ class PreimageStateTransition {
             accounts = preState.accounts.map { it.copy() }
         )
 
+        // Track raw state updates for merged state
+        val rawUpdates = mutableMapOf<JamByteArray, JamByteArray>()
+
         for (submission in input.preimages) {
             val account = postState.accounts.find { it.id == submission.requester }!!
             val hash = blakeHash(submission.blob.bytes)
+            val hashArray = JamByteArray(hash)
             val length = submission.blob.size.toLong()
 
             // Check if we need to add a new lookupMeta entry (from raw keyvals)
@@ -78,7 +80,7 @@ class PreimageStateTransition {
             } else {
                 // Add a new entry for this preimage from raw keyvals
                 account.data.lookupMeta + PreimageHistory(
-                    key = PreimageHistoryKey(hash = JamByteArray(hash), length = length),
+                    key = PreimageHistoryKey(hash = hashArray, length = length),
                     value = emptyList()
                 )
             }
@@ -95,16 +97,40 @@ class PreimageStateTransition {
             }.sortedBy { it.key.hash.toHex() }
 
             val updatedPreimages = (account.data.preimages + PreimageHash(
-                hash = JamByteArray(hash),
+                hash = hashArray,
                 blob = submission.blob
             )).sortedBy { it.hash.toHex() }
 
             // Update account state
             account.data.lookupMeta = updatedHistory
             account.data.preimages = updatedPreimages
+
+            // Generate raw state updates
+            val infoKey = StateKeys.servicePreimageInfoKey(
+                submission.requester.toInt(),
+                length.toInt(),
+                hashArray
+            )
+            val infoValue = encodeTimestampList(listOf(input.slot))
+            rawUpdates[infoKey] = JamByteArray(infoValue)
+
+            // 2. Preimage blob key -> blob data
+            val blobKey = StateKeys.servicePreimageKey(submission.requester.toInt(), hashArray)
+            rawUpdates[blobKey] = submission.blob
         }
 
-        return Pair(postState, PreimageOutput(ok = null))
+        return Pair(postState, PreimageOutput(ok = null, rawServiceDataUpdates = rawUpdates))
+    }
+
+    /**
+     * Encode a list of timestamps as compact-prefixed bytes.
+     */
+    private fun encodeTimestampList(timestamps: List<Long>): ByteArray {
+        val countBytes = encodeCompactInteger(timestamps.size.toLong())
+        val timestampBytes = timestamps.flatMap { ts ->
+            encodeFixedWidthInteger(ts, 4, false).toList()
+        }.toByteArray()
+        return countBytes + timestampBytes
     }
 
     /**

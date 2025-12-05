@@ -40,27 +40,16 @@ data class StorageMapEntry(
     }
 }
 
-@Serializable
-data class PreimageStatusKey(
-    @Serializable(with = JamByteArrayHexSerializer::class)
-    val hash: JamByteArray,
-    val length: Int
-)
-
 /**
  * Status entry for preimages - used in accumulation state.
- * Contains hash, length (for state key), and status list (timeslots).
+ * Contains hash and status list (timeslots) per ASN schema.
  */
 @Serializable
 data class PreimagesStatusMapEntry(
     @Serializable(with = JamByteArrayHexSerializer::class)
     val hash: JamByteArray,
-    val length: Int,
     val status: List<Long>
 ) : Encodable {
-    val key: PreimageStatusKey get() = PreimageStatusKey(hash, length)
-    val value: List<Long> get() = status
-
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0): Pair<PreimagesStatusMapEntry, Int> {
             var currentOffset = offset
@@ -68,10 +57,6 @@ data class PreimagesStatusMapEntry(
             // hash - 32 bytes
             val hash = JamByteArray(data.copyOfRange(currentOffset, currentOffset + 32))
             currentOffset += 32
-
-            // length - 4 bytes LE
-            val length = decodeFixedWidthInteger(data, currentOffset, 4, false).toInt()
-            currentOffset += 4
 
             // status count - compact integer
             val (statusCount, statusCountBytes) = decodeCompactInteger(data, currentOffset)
@@ -84,16 +69,15 @@ data class PreimagesStatusMapEntry(
                 currentOffset += 4
             }
 
-            return Pair(PreimagesStatusMapEntry(hash, length, statusValues), currentOffset - offset)
+            return Pair(PreimagesStatusMapEntry(hash, statusValues), currentOffset - offset)
         }
     }
 
     override fun encode(): ByteArray {
-        // Encode: hash (32 bytes) + length (4 bytes LE) + status count (compact) + status values (4 bytes each LE)
-        val lengthBytes = encodeFixedWidthInteger(length, 4, false)
+        // Encode: hash (32 bytes) + status count (compact) + status values (4 bytes each LE)
         val statusCountBytes = encodeCompactInteger(status.size.toLong())
         val statusBytes = status.flatMap { encodeFixedWidthInteger(it, 4, false).toList() }.toByteArray()
-        return hash.bytes + lengthBytes + statusCountBytes + statusBytes
+        return hash.bytes + statusCountBytes + statusBytes
     }
 }
 

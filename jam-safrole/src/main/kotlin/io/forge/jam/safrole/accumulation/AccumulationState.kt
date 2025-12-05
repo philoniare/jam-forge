@@ -6,10 +6,8 @@ import io.forge.jam.core.serializers.JamByteArrayHexSerializer
 import io.forge.jam.safrole.preimage.PreimageHash
 import io.forge.jam.safrole.report.AccumulationServiceData
 import io.forge.jam.safrole.report.AccumulationServiceItem
-import io.forge.jam.safrole.report.ServiceInfo
-import io.forge.jam.safrole.report.StorageMapEntry
 import io.forge.jam.safrole.report.PreimagesStatusMapEntry
-import io.forge.jam.safrole.report.PreimageStatusKey
+import io.forge.jam.safrole.report.StorageMapEntry
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -32,7 +30,12 @@ data class AccumulationState(
     val rawServiceDataByStateKey: MutableMap<JamByteArray, JamByteArray> = mutableMapOf()
 ) : Encodable {
     companion object {
-        fun fromBytes(data: ByteArray, offset: Int = 0, coresCount: Int, epochLength: Int): Pair<AccumulationState, Int> {
+        fun fromBytes(
+            data: ByteArray,
+            offset: Int = 0,
+            coresCount: Int,
+            epochLength: Int
+        ): Pair<AccumulationState, Int> {
             var currentOffset = offset
 
             // slot - 4 bytes
@@ -129,17 +132,26 @@ data class AccumulationState(
     fun toPartialState(): PartialState {
         return PartialState(
             accounts = accounts.associate { item ->
+                val preimagesMap = item.data.preimages.associate { preimage ->
+                    preimage.hash to preimage.blob
+                }.toMutableMap()
+
                 item.id to ServiceAccount(
                     info = item.data.service,
                     storage = item.data.storage.associate { entry ->
                         entry.key to entry.value
                     }.toMutableMap(),
-                    preimages = item.data.preimages.associate { preimage ->
-                        preimage.hash to preimage.blob
-                    }.toMutableMap(),
-                    preimageRequests = item.data.preimagesStatus.associate { status ->
-                        PreimageKey(status.hash, status.length) to PreimageRequest(status.status)
-                    }.toMutableMap(),
+                    preimages = preimagesMap,
+                    // Preimage requests keyed by (hash, length) where length is the preimage blob size
+                    preimageRequests = item.data.preimagesStatus.mapNotNull { status ->
+                        // Look up the preimage blob to get its length
+                        val blob = preimagesMap[status.hash]
+                        if (blob != null) {
+                            PreimageKey(status.hash, length = blob.size) to PreimageRequest(status.status)
+                        } else {
+                            null
+                        }
+                    }.toMap().toMutableMap(),
                     lastAccumulated = item.data.service.lastAccumulationSlot
                 )
             }.toMutableMap(),
@@ -175,7 +187,6 @@ fun PartialState.toAccumulationServiceItems(): List<AccumulationServiceItem> {
                     .map { (key, request) ->
                         PreimagesStatusMapEntry(
                             hash = key.hash,
-                            length = key.length,
                             status = request.requestedAt
                         )
                     }
