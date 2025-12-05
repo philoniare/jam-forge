@@ -104,7 +104,11 @@ object InputExtractor {
     /**
      * Extract PreimageInput from block.
      */
-    fun extractPreimageInput(block: Block, slot: Long): PreimageInput {
+    fun extractPreimageInput(
+        block: Block,
+        slot: Long,
+        rawServiceDataByStateKey: Map<JamByteArray, JamByteArray> = emptyMap()
+    ): PreimageInput {
         // Convert Preimage to PreimageExtrinsic
         val preimageExtrinsics = block.extrinsic.preimages.map { preimage ->
             PreimageExtrinsic(
@@ -114,7 +118,8 @@ object InputExtractor {
         }
         return PreimageInput(
             preimages = preimageExtrinsics,
-            slot = slot
+            slot = slot,
+            rawServiceDataByStateKey = rawServiceDataByStateKey
         )
     }
 

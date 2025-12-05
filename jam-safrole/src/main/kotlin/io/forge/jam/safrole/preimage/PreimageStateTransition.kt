@@ -2,6 +2,8 @@ package io.forge.jam.safrole.preimage
 
 import io.forge.jam.core.blakeHash
 import io.forge.jam.core.JamByteArray
+import io.forge.jam.core.decodeCompactInteger
+import io.forge.jam.safrole.traces.StateKeys
 
 class PreimageStateTransition {
     fun transition(
@@ -17,11 +19,39 @@ class PreimageStateTransition {
             val length = submission.blob.size.toLong()
 
             // Verify this preimage was solicited and not already available
+            // First check lookupMeta (typed state)
             val historyEntry = account.data.lookupMeta.find { historyItem ->
                 historyItem.key.hash.bytes.contentEquals(hash) &&
                     historyItem.key.length == length &&
                     historyItem.value.isEmpty()
-            } ?: return Pair(preState, PreimageOutput(err = PreimageErrorCode.PREIMAGE_UNNEEDED))
+            }
+
+            // If not found in lookupMeta, check raw keyvals
+            val isSolicited = if (historyEntry != null) {
+                true
+            } else {
+                // Compute the expected state key and check raw keyvals
+                val stateKey = StateKeys.servicePreimageInfoKey(
+                    submission.requester.toInt(),
+                    length.toInt(),
+                    JamByteArray(hash)
+                )
+                val rawValue = input.rawServiceDataByStateKey.entries.find { (k, _) ->
+                    k.bytes.contentEquals(stateKey.bytes)
+                }?.value
+
+                if (rawValue != null) {
+                    // Check if value is empty timestamp list (compact(0) = 0x00)
+                    val (timestampCount, _) = decodeCompactInteger(rawValue.bytes, 0)
+                    timestampCount == 0L
+                } else {
+                    false
+                }
+            }
+
+            if (!isSolicited) {
+                return Pair(preState, PreimageOutput(err = PreimageErrorCode.PREIMAGE_UNNEEDED))
+            }
         }
 
         // Then validate that preimages are sorted and unique by (requester, hash)
@@ -38,8 +68,23 @@ class PreimageStateTransition {
             val hash = blakeHash(submission.blob.bytes)
             val length = submission.blob.size.toLong()
 
+            // Check if we need to add a new lookupMeta entry (from raw keyvals)
+            val existsInLookupMeta = account.data.lookupMeta.any { item ->
+                item.key.hash.bytes.contentEquals(hash) && item.key.length == length
+            }
+
+            val baseHistory = if (existsInLookupMeta) {
+                account.data.lookupMeta
+            } else {
+                // Add a new entry for this preimage from raw keyvals
+                account.data.lookupMeta + PreimageHistory(
+                    key = PreimageHistoryKey(hash = JamByteArray(hash), length = length),
+                    value = emptyList()
+                )
+            }
+
             // Update history and preimages
-            val updatedHistory = account.data.lookupMeta.map { item ->
+            val updatedHistory = baseHistory.map { item ->
                 if (item.key.hash.bytes.contentEquals(hash) &&
                     item.key.length == length
                 ) {

@@ -7,10 +7,15 @@ import io.forge.jam.core.encodeFixedWidthInteger
 import io.forge.jam.core.encodeList
 import kotlinx.serialization.Serializable
 
+import io.forge.jam.core.JamByteArray
+
 @Serializable
 data class PreimageInput(
     val preimages: List<PreimageExtrinsic>,
     val slot: Long,
+    // Raw service data keyvals for checking preimage solicitation
+    @kotlinx.serialization.Transient
+    val rawServiceDataByStateKey: Map<JamByteArray, JamByteArray> = emptyMap()
 ) : Encodable {
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0): Pair<PreimageInput, Int> {

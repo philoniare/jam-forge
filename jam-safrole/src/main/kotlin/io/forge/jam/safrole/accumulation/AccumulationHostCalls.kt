@@ -709,10 +709,11 @@ class AccumulationHostCalls(
         }
 
         // Calculate threshold balance for new account
-        // The new account starts with: 1 preimage info entry (items=1)
-        // Bytes = preimage info overhead
-        val newAccountItems = 1
-        val newAccountBytes = 0L  // Will be updated when preimage is provided
+        // The new account starts with preimage info entry:
+        // - items = 2 (preimage info + placeholder for preimage itself)
+        // - bytes = 81 + codeHashLength (overhead for preimage info + length)
+        val newAccountItems = 2
+        val newAccountBytes = 81L + codeHashLength
         val base = config.SERVICE_MIN_BALANCE
         val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * newAccountItems
         val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * newAccountBytes
@@ -745,7 +746,7 @@ class AccumulationHostCalls(
 
         // Determine new service ID
         val newServiceId: Long
-        val minPublicServiceIndex = 256L  // From config
+        val minPublicServiceIndex = context.minPublicServiceIndex
 
         if (context.serviceIndex == context.x.registrar && requestedServiceId >= 0 && requestedServiceId < minPublicServiceIndex) {
             // Registrar can request specific service ID below minPublicServiceIndex
@@ -767,7 +768,7 @@ class AccumulationHostCalls(
                 minItemGas = minAccumulateGas,
                 minMemoGas = minMemoGas,
                 bytes = newAccountBytes,
-                items = newAccountItems,
+                items = newAccountItems.toInt(),
                 depositOffset = gratisStorage,
                 creationSlot = context.timeslot,
                 lastAccumulationSlot = 0,

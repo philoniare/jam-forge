@@ -29,6 +29,8 @@ data class ChainConfig(
     val maxBlockGas: Long,
     /** Maximum gas allowed for refinement */
     val maxRefineGas: Long,
+    /** Minimum public service index (S_S in Gray Paper, 2^16 by default) */
+    val minPublicServiceIndex: Long = 1L shl 16,
     /** Votes per verdict (2/3 * validators + 1 for supermajority) */
     val votesPerVerdict: Int = (2 * validatorCount / 3) + 1
 ) {

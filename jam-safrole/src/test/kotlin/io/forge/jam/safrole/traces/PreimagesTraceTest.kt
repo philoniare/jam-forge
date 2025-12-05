@@ -17,7 +17,7 @@ class PreimagesTraceTest : BaseTraceTest() {
     fun testPreimagesEncoding() = runEncodingTests()
 
     @Test
-    fun testPreimagesBlockImport() = runTraceTests()
+    fun testPreimagesBlockImport() = runStateChainTests()
 
     @Test
     fun testPreimagesDecoding() = runDecodingTests()

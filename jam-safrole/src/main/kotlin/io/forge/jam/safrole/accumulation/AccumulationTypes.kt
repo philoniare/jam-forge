@@ -335,28 +335,57 @@ class AccumulationContext(
     val timeslot: Long,
     val entropy: JamByteArray,
     val deferredTransfers: MutableList<DeferredTransfer> = mutableListOf(),
+    val deferredTransfersCheckpoint: MutableList<DeferredTransfer> = mutableListOf(),
     val provisions: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf(),
+    val provisionsCheckpoint: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf(),
     var yield: JamByteArray? = null,  // Accumulation output (32-byte hash) - x state
     var yieldCheckpoint: JamByteArray? = null,  // Checkpoint yield - y state (used on panic)
-    var nextAccountIndex: Long = 256  // Next available service account index
+    var nextAccountIndex: Long = 65536,  // Next available service account index
+    val minPublicServiceIndex: Long = 65536  // S_S from Gray Paper (2^16)
 ) {
     /**
-     * Checkpoint: copy current state x to checkpoint y, including yield.
+     * Checkpoint: copy current state x to checkpoint y, including yield, provisions, and transfers.
      */
     fun checkpoint() {
         y = x.deepCopy()
         yieldCheckpoint = yield
+        provisionsCheckpoint.clear()
+        provisionsCheckpoint.addAll(provisions)
+        deferredTransfersCheckpoint.clear()
+        deferredTransfersCheckpoint.addAll(deferredTransfers)
     }
 
     /**
      * Collapse: select final state based on exit reason.
-     * On panic, revert to checkpoint state y.
+     * On panic or out of gas, revert to checkpoint state y.
      */
     fun collapse(exitReason: ExitReason): PartialState {
         return when (exitReason) {
-            ExitReason.PANIC -> y
+            ExitReason.PANIC, ExitReason.OUT_OF_GAS -> y
             ExitReason.INVALID_CODE -> y
             else -> x
+        }
+    }
+
+    /**
+     * Get provisions based on exit reason.
+     * On panic or out of gas, use checkpoint provisions.
+     */
+    fun getProvisions(exitReason: ExitReason): Set<Pair<Long, JamByteArray>> {
+        return when (exitReason) {
+            ExitReason.PANIC, ExitReason.OUT_OF_GAS -> provisionsCheckpoint.toSet()
+            else -> provisions.toSet()
+        }
+    }
+
+    /**
+     * Get deferred transfers based on exit reason.
+     * On panic or out of gas, use checkpoint transfers.
+     */
+    fun getDeferredTransfers(exitReason: ExitReason): List<DeferredTransfer> {
+        return when (exitReason) {
+            ExitReason.PANIC, ExitReason.OUT_OF_GAS -> deferredTransfersCheckpoint.toList()
+            else -> deferredTransfers.toList()
         }
     }
 }
