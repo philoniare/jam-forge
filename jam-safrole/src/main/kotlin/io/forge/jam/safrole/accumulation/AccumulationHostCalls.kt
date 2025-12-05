@@ -575,7 +575,7 @@ class AccumulationHostCalls(
         val alwaysAccCount = instance.getReg12().toInt()
 
         // Read assigners array (4 bytes per core)
-        val coresCount = config.EPOCH_LENGTH // Use epoch length as number of cores
+        val coresCount = config.CORES_COUNT
         val assignersBytes = ByteArray(4 * coresCount)
         val assignersResult = instance.readMemoryInto(assignersPtr, assignersBytes)
         if (assignersResult.isFailure) {
