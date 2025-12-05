@@ -164,11 +164,14 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         )
 
         // 11. Build accumulation stats for fresh service statistics computation
-        // Must include ALL services that accumulated (including always-accumulate services)
-        val accumulationStats: AccumulationStats = gasUsedPerService.mapValues { (serviceId, gasUsed) ->
-            val count = workItemsPerService[serviceId] ?: 0
-            Pair(gasUsed, count)
-        }
+        // Only include services that actually did something (gasUsed > 0 or workItems > 0)
+        // Services that only received transfers without executing are NOT included
+        val accumulationStats: AccumulationStats = gasUsedPerService
+            .mapValues { (serviceId, gasUsed) ->
+                val count = workItemsPerService[serviceId] ?: 0
+                Pair(gasUsed, count)
+            }
+            .filter { (_, stats) -> stats.first > 0 || stats.second > 0 }
 
         // 12. Build final state (accounts and statistics are val, so need to create new state)
         // Include rawServiceDataByStateKey which tracks storage modifications (including deletions)
@@ -177,7 +180,13 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             entropy = preState.entropy.copy(),
             readyQueue = finalReadyQueue,
             accumulated = newAccumulatedArray,
-            privileges = preState.privileges.copy(),
+            privileges = Privileges(
+                bless = newPartialState.manager,
+                assign = newPartialState.assigners.toList(),
+                designate = newPartialState.delegator,
+                register = newPartialState.registrar,
+                alwaysAcc = newPartialState.alwaysAccers.map { (id, gas) -> AlwaysAccItem(id, gas) }
+            ),
             statistics = newStatistics,
             accounts = newPartialState.toAccumulationServiceItems(),
             rawServiceDataByStateKey = newPartialState.rawServiceDataByStateKey.toMutableMap()
@@ -186,7 +195,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         // 13. Compute commitment root from yields
         val outputHash = computeCommitmentRoot(commitments)
 
-        return Pair(finalState, AccumulationOutput(ok = outputHash, accumulationStats = accumulationStats))
+        return Pair(finalState, AccumulationOutput(ok = outputHash, accumulationStats = accumulationStats, outputs = commitments))
     }
 
     /**
