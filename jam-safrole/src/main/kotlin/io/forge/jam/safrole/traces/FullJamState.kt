@@ -209,6 +209,11 @@ data class FullJamState(
     fun toAccumulationState(): AccumulationState {
         val entropy = if (entropyPool.isNotEmpty()) entropyPool[0] else JamByteArray(ByteArray(32))
 
+        // Convert raw keyvals to map indexed by state key
+        val rawServiceDataMap = rawServiceDataKvs.associate { kv ->
+            kv.key to kv.value
+        }.toMutableMap()
+
         return AccumulationState(
             slot = timeslot,
             entropy = entropy,
@@ -216,7 +221,8 @@ data class FullJamState(
             accumulated = accumulationHistory.map { it.toList() }.toMutableList(),
             privileges = privilegedServices,
             statistics = serviceStatistics,
-            accounts = serviceAccounts
+            accounts = serviceAccounts,
+            rawServiceDataByStateKey = rawServiceDataMap
         )
     }
 

@@ -4,6 +4,41 @@ import io.forge.jam.core.ExecutionResult
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
 import io.forge.jam.safrole.report.ServiceInfo
+import org.bouncycastle.jcajce.provider.digest.Blake2b
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+/**
+ * Computes the state key for service storage.
+ * Result is a 31-byte state key.
+ */
+fun computeStorageStateKey(serviceIndex: Long, storageKey: JamByteArray): JamByteArray {
+    // UInt32.max = 0xFFFFFFFF
+    val valEncoded = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(-1).array()
+
+    // h = valEncoded + storageKey
+    val h = valEncoded + storageKey.bytes
+
+    // a = blake2b256(h)
+    val digest = Blake2b.Blake2b256()
+    digest.update(h, 0, h.size)
+    val a = digest.digest()
+
+    // Construct the state key by interleaving service index with hash
+    val serviceBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(serviceIndex.toInt()).array()
+    val stateKey = ByteArray(31)
+
+    // First 8 bytes: interleave service index with hash
+    for (i in 0 until 4) {
+        stateKey[i * 2] = serviceBytes[i]
+        stateKey[i * 2 + 1] = a[i]
+    }
+
+    // Remaining bytes from hash (bytes 4-26, which is 23 bytes)
+    System.arraycopy(a, 4, stateKey, 8, 23)
+
+    return JamByteArray(stateKey)
+}
 
 /**
  * Operand tuple as defined in Gray Paper equation 106.
@@ -149,7 +184,9 @@ data class PartialState(
     val assigners: MutableList<Long>,                    // Per-core assigners
     var delegator: Long,                                 // Delegator service ID
     var registrar: Long,                                 // Registrar service ID
-    val alwaysAccers: MutableMap<Long, Long>             // Always-accumulate services -> gas
+    val alwaysAccers: MutableMap<Long, Long>,            // Always-accumulate services -> gas
+    // Raw service data keyvals indexed by hashed state key (for storage/preimage lookups)
+    val rawServiceDataByStateKey: MutableMap<JamByteArray, JamByteArray> = mutableMapOf()
 ) {
     fun deepCopy(): PartialState {
         return PartialState(
@@ -160,7 +197,8 @@ data class PartialState(
             assigners = assigners.toMutableList(),
             delegator = delegator,
             registrar = registrar,
-            alwaysAccers = alwaysAccers.toMutableMap()
+            alwaysAccers = alwaysAccers.toMutableMap(),
+            rawServiceDataByStateKey = rawServiceDataByStateKey.toMutableMap()
         )
     }
 }
@@ -255,14 +293,16 @@ class AccumulationContext(
     val entropy: JamByteArray,
     val deferredTransfers: MutableList<DeferredTransfer> = mutableListOf(),
     val provisions: MutableSet<Pair<Long, JamByteArray>> = mutableSetOf(),
-    var yield: JamByteArray? = null,  // Accumulation output (32-byte hash)
+    var yield: JamByteArray? = null,  // Accumulation output (32-byte hash) - x state
+    var yieldCheckpoint: JamByteArray? = null,  // Checkpoint yield - y state (used on panic)
     var nextAccountIndex: Long = 256  // Next available service account index
 ) {
     /**
-     * Checkpoint: copy current state x to checkpoint y.
+     * Checkpoint: copy current state x to checkpoint y, including yield.
      */
     fun checkpoint() {
         y = x.deepCopy()
+        yieldCheckpoint = yield
     }
 
     /**

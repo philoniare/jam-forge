@@ -221,9 +221,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             )
 
             val accumulateRoot = accumulationOutput.ok ?: JamByteArray(ByteArray(32))
-            if (block.header.slot == 6L) {
-                println("[DEBUG-HISTORY] Block 6: accumulateRoot=${accumulateRoot.toHex()}")
-            }
+            println("[DEBUG-HISTORY] Block ${block.header.slot}: accumulateRoot=${accumulateRoot.toHex()}")
 
             // Step 6: Run History STF
             val historyInput = InputExtractor.extractHistoryInput(block, accumulateRoot)

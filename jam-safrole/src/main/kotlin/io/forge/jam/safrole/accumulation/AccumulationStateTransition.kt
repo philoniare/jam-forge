@@ -171,7 +171,9 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
      */
     private fun computeCommitmentRoot(commitments: Map<Long, JamByteArray>): JamByteArray {
         if (commitments.isEmpty()) {
-            return JamByteArray(ByteArray(32) { 0 })
+            val root = JamByteArray(ByteArray(32) { 0 })
+            println("[KOTLIN-ACCUM-ROOT] nodes=0, root=${root.toHex()}")
+            return root
         }
 
         // Sort by service index and encode each commitment
@@ -185,46 +187,77 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         }
 
         // Binary Merkle tree with Keccak-256
-        return JamByteArray(binaryMerklize(nodes))
+        val root = JamByteArray(binaryMerklize(nodes))
+        println("[KOTLIN-ACCUM-ROOT] nodes=${nodes.size}, root=${root.toHex()}")
+        return root
     }
 
     /**
-     * Binary Merkle tree with Keccak-256.
+     * Well-balanced binary Merkle function
      */
     private fun binaryMerklize(leaves: List<ByteArray>): ByteArray {
-        if (leaves.isEmpty()) {
-            return ByteArray(32) { 0 }
-        }
-        if (leaves.size == 1) {
-            return keccak256(leaves[0])
-        }
-
-        // Pad to power of 2
-        val paddedLeaves = leaves.toMutableList()
-        while (paddedLeaves.size and (paddedLeaves.size - 1) != 0) {
-            paddedLeaves.add(ByteArray(32) { 0 })
-        }
-
-        // Hash leaves
-        var currentLevel = paddedLeaves.map { keccak256(it) }
-
-        // Build tree upward
-        while (currentLevel.size > 1) {
-            val nextLevel = mutableListOf<ByteArray>()
-            for (i in currentLevel.indices step 2) {
-                val left = currentLevel[i]
-                val right = if (i + 1 < currentLevel.size) currentLevel[i + 1] else ByteArray(32) { 0 }
-                nextLevel.add(keccak256(left + right))
+        return when {
+            leaves.isEmpty() -> ByteArray(32) { 0 }
+            leaves.size == 1 -> keccak256(leaves[0])
+            else -> {
+                val result = binaryMerklizeHelper(leaves)
+                when (result) {
+                    is MerklizeResult.Leaf -> keccak256(result.data)
+                    is MerklizeResult.Hash -> result.hash
+                }
             }
-            currentLevel = nextLevel
         }
+    }
 
-        return currentLevel[0]
+    /**
+     * Merkle result can be either a leaf (unhashed data) or a hash.
+     */
+    private sealed class MerklizeResult {
+        data class Leaf(val data: ByteArray) : MerklizeResult()
+        data class Hash(val hash: ByteArray) : MerklizeResult()
+
+        fun toByteArray(): ByteArray = when (this) {
+            is Leaf -> data
+            is Hash -> hash
+        }
+    }
+
+    /**
+     * Helper for well-balanced binary Merkle tree.
+     */
+    private fun binaryMerklizeHelper(nodes: List<ByteArray>): MerklizeResult {
+        return when (nodes.size) {
+            0 -> MerklizeResult.Hash(ByteArray(32) { 0 })
+            1 -> MerklizeResult.Leaf(nodes[0])
+            else -> {
+                val mid = (nodes.size + 1) / 2  // roundup of half
+                val left = nodes.subList(0, mid)
+                val right = nodes.subList(mid, nodes.size)
+                val leftResult = binaryMerklizeHelper(left)
+                val rightResult = binaryMerklizeHelper(right)
+                // Hash with "node" prefix as per GP E.1.1
+                MerklizeResult.Hash(
+                    keccakHashWithPrefix(
+                        "node".toByteArray(),
+                        leftResult.toByteArray(),
+                        rightResult.toByteArray()
+                    )
+                )
+            }
+        }
     }
 
     private fun keccak256(data: ByteArray): ByteArray {
         val digest = Keccak.Digest256()
         digest.update(data, 0, data.size)
+        return digest.digest()
+    }
+
+    private fun keccakHashWithPrefix(prefix: ByteArray, left: ByteArray, right: ByteArray): ByteArray {
+        val digest = Keccak.Digest256()
+        digest.update(prefix, 0, prefix.size)
+        digest.update(left, 0, left.size)
+        digest.update(right, 0, right.size)
         return digest.digest()
     }
 

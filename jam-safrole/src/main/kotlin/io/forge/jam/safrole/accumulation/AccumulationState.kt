@@ -25,7 +25,11 @@ data class AccumulationState(
     var accumulated: MutableList<List<JamByteArray>>,
     val privileges: Privileges,
     val statistics: List<ServiceStatisticsEntry> = emptyList(),
-    val accounts: List<AccumulationServiceItem>
+    val accounts: List<AccumulationServiceItem>,
+    // Raw service data keyvals indexed by hashed state key (for storage lookups)
+    // Transient field - not serialized
+    @kotlinx.serialization.Transient
+    val rawServiceDataByStateKey: MutableMap<JamByteArray, JamByteArray> = mutableMapOf()
 ) : Encodable {
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0, coresCount: Int, epochLength: Int): Pair<AccumulationState, Int> {
@@ -145,7 +149,8 @@ data class AccumulationState(
             assigners = privileges.assign.toMutableList(),
             delegator = privileges.designate,
             registrar = privileges.register,
-            alwaysAccers = privileges.alwaysAcc.associate { it.id to it.gas }.toMutableMap()
+            alwaysAccers = privileges.alwaysAcc.associate { it.id to it.gas }.toMutableMap(),
+            rawServiceDataByStateKey = rawServiceDataByStateKey.toMutableMap()
         )
     }
 }
