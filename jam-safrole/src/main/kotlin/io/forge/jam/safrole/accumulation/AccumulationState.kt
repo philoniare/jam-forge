@@ -175,6 +175,7 @@ fun PartialState.toAccumulationServiceItems(): List<AccumulationServiceItem> {
                     .map { (key, request) ->
                         PreimagesStatusMapEntry(
                             hash = key.hash,
+                            length = key.length,
                             status = request.requestedAt
                         )
                     }

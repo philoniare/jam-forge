@@ -17,7 +17,7 @@ class PreimagesLightTraceTest : BaseTraceTest() {
     fun testPreimagesLightEncoding() = runEncodingTests()
 
     @Test
-    fun testPreimagesLightBlockImport() = runTraceTests()
+    fun testPreimagesLightBlockImport() = runStateChainTests()
 
     @Test
     fun testPreimagesLightDecoding() = runDecodingTests()

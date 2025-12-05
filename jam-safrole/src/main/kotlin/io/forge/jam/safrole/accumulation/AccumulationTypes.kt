@@ -9,15 +9,21 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Computes the state key for service storage.
+ * Computes a generic service data state key.
  * Result is a 31-byte state key.
+ *
+ * @param serviceIndex Service index (UInt32)
+ * @param discriminator Discriminator value (UInt32):
+ *   - UInt32.max (0xFFFFFFFF) for storage keys
+ *   - UInt32.max - 1 (0xFFFFFFFE) for preimage blob keys
+ *   - preimage length for preimage info keys
+ * @param data The data to hash (storage key or preimage hash)
  */
-fun computeStorageStateKey(serviceIndex: Long, storageKey: JamByteArray): JamByteArray {
-    // UInt32.max = 0xFFFFFFFF
-    val valEncoded = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(-1).array()
+fun computeServiceDataStateKey(serviceIndex: Long, discriminator: Long, data: JamByteArray): JamByteArray {
+    val valEncoded = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(discriminator.toInt()).array()
 
-    // h = valEncoded + storageKey
-    val h = valEncoded + storageKey.bytes
+    // h = valEncoded + data
+    val h = valEncoded + data.bytes
 
     // a = blake2b256(h)
     val digest = Blake2b.Blake2b256()
@@ -38,6 +44,44 @@ fun computeStorageStateKey(serviceIndex: Long, storageKey: JamByteArray): JamByt
     System.arraycopy(a, 4, stateKey, 8, 23)
 
     return JamByteArray(stateKey)
+}
+
+/**
+ * Computes the state key for service storage.
+ * Result is a 31-byte state key.
+ */
+fun computeStorageStateKey(serviceIndex: Long, storageKey: JamByteArray): JamByteArray {
+    return computeServiceDataStateKey(serviceIndex, 0xFFFFFFFFL, storageKey)
+}
+
+/**
+ * Computes the state key for preimage info entry.
+ * Uses preimage length as discriminator.
+ */
+fun computePreimageInfoStateKey(serviceIndex: Long, length: Int, preimageHash: JamByteArray): JamByteArray {
+    return computeServiceDataStateKey(serviceIndex, length.toLong(), preimageHash)
+}
+
+/**
+ * Encodes a preimage info value (list of 0-3 timeslots).
+ * Format: compact length + 4-byte LE timeslot values
+ */
+fun encodePreimageInfoValue(timeslots: List<Long>): JamByteArray {
+    val result = mutableListOf<Byte>()
+
+    // Compact length encoding
+    val count = timeslots.size
+    result.add(count.toByte())  // Simple 1-byte count for 0-3 values
+
+    // 4-byte LE timeslot values
+    for (ts in timeslots) {
+        result.add((ts and 0xFF).toByte())
+        result.add(((ts shr 8) and 0xFF).toByte())
+        result.add(((ts shr 16) and 0xFF).toByte())
+        result.add(((ts shr 24) and 0xFF).toByte())
+    }
+
+    return JamByteArray(result.toByteArray())
 }
 
 /**
@@ -130,7 +174,6 @@ sealed class AccumulationOperand {
 
         /**
          * Encode a non-negative integer using Gray Paper natural number format.
-         * This is different from SCALE compact encoding.
          *
          * Algorithm:
          * - For value 0: returns [0x00]

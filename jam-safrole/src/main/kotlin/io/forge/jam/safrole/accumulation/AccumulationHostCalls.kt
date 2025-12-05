@@ -1042,6 +1042,12 @@ class AccumulationHostCalls(
 
     /**
      * solicit (23): Request a preimage.
+     * Request that a preimage be made available.
+     *
+     * Cases:
+     * - notRequestedYet (null): Create new entry with empty list []
+     * - isPreviouslyAvailable (count == 2): Append timeslot
+     * - Otherwise: Return HUH
      */
     private fun handleSolicit(instance: RawInstance) {
         val hashAddr = instance.getReg7().toUInt()
@@ -1053,27 +1059,81 @@ class AccumulationHostCalls(
             return
         }
 
-        // Read hash from memory
+        // Read hash from memory - PANIC if fails
         val hashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(hashAddr, hashBuffer)
         if (readResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
-            return
+            throw RuntimeException("Solicit PANIC: Failed to read hash from memory")
         }
 
         val key = PreimageKey(JamByteArray(hashBuffer), length)
+        val existingRequest = account.preimageRequests[key]
 
-        if (account.preimageRequests.containsKey(key)) {
+        val notRequestedYet = existingRequest == null
+        val isPreviouslyAvailable = existingRequest?.requestedAt?.size == 2
+        val canSolicit = notRequestedYet || isPreviouslyAvailable
+
+        if (!canSolicit) {
             instance.setReg7(HostCallResult.HUH)
             return
         }
 
-        account.preimageRequests[key] = PreimageRequest(listOf(context.timeslot))
+        // Calculate new footprint for threshold balance check
+        val info = account.info
+        val (newItems, newBytes) = if (notRequestedYet) {
+            // Add: increase count by 2 and bytes by 81 + length
+            Pair(info.items + 2, info.bytes + 81 + length)
+        } else {
+            // Update: no change to footprint
+            Pair(info.items, info.bytes)
+        }
+
+        // Check threshold balance
+        val base = config.SERVICE_MIN_BALANCE
+        val itemsCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_ITEM * newItems
+        val bytesCost = config.ADDITIONAL_MIN_BALANCE_PER_STATE_BYTE * newBytes
+        val gratisUnsigned = info.depositOffset.toULong()
+        val costUnsigned = (base + itemsCost + bytesCost).toULong()
+        val thresholdBalance = if (costUnsigned > gratisUnsigned) (costUnsigned - gratisUnsigned).toLong() else 0L
+
+        if (info.balance.toULong() < thresholdBalance.toULong()) {
+            instance.setReg7(HostCallResult.FULL)
+            return
+        }
+
+        // Compute preimage info state key
+        val stateKey = computePreimageInfoStateKey(context.serviceIndex, length, JamByteArray(hashBuffer))
+
+        // Apply the change
+        if (notRequestedYet) {
+            // New request: start with empty list (preimage not yet available)
+            val newTimeslots = emptyList<Long>()
+            account.preimageRequests[key] = PreimageRequest(newTimeslots)
+            // Write to raw state data
+            context.x.rawServiceDataByStateKey[stateKey] = encodePreimageInfoValue(newTimeslots)
+            // Update footprint
+            val updatedInfo = info.copy(items = newItems, bytes = newBytes)
+            context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
+        } else if (isPreviouslyAvailable) {
+            // Re-solicit: append current timeslot (requesting again)
+            val newTimeslots = existingRequest!!.requestedAt + context.timeslot
+            account.preimageRequests[key] = PreimageRequest(newTimeslots)
+            // Write to raw state data
+            context.x.rawServiceDataByStateKey[stateKey] = encodePreimageInfoValue(newTimeslots)
+        }
+
         instance.setReg7(HostCallResult.OK)
     }
 
     /**
-     * forget (24): Cancel a preimage request.
+     * forget (24): Forget a preimage request.
+     * Mark a preimage as no longer needed or remove it.
+     *
+     * Cases:
+     * - canExpunge (count == 0 || (count == 2 && requestedAt[1] < minHoldSlot)): Remove entry
+     * - isAvailable1 (count == 1): Append timeslot
+     * - isAvailable3 (count == 3 && requestedAt[1] < minHoldSlot): Update to [requestedAt[2], timeslot]
+     * - Otherwise: Return HUH
      */
     private fun handleForget(instance: RawInstance) {
         val hashAddr = instance.getReg7().toUInt()
@@ -1085,22 +1145,69 @@ class AccumulationHostCalls(
             return
         }
 
-        // Read hash from memory
+        // Read hash from memory - PANIC if fails
         val hashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(hashAddr, hashBuffer)
         if (readResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
-            return
+            throw RuntimeException("Forget PANIC: Failed to read hash from memory")
         }
 
         val key = PreimageKey(JamByteArray(hashBuffer), length)
+        val existingRequest = account.preimageRequests[key]
 
-        if (!account.preimageRequests.containsKey(key)) {
+        if (existingRequest == null) {
             instance.setReg7(HostCallResult.HUH)
             return
         }
 
-        account.preimageRequests.remove(key)
+        val historyCount = existingRequest.requestedAt.size
+        val minHoldSlot = maxOf(0L, context.timeslot - config.PREIMAGE_PURGE_PERIOD)
+
+        val canExpunge = historyCount == 0 || (historyCount == 2 && existingRequest.requestedAt[1] < minHoldSlot)
+        val isAvailable1 = historyCount == 1
+        val isAvailable3 = historyCount == 3 && existingRequest.requestedAt[1] < minHoldSlot
+
+        val canForget = canExpunge || isAvailable1 || isAvailable3
+
+        if (!canForget) {
+            instance.setReg7(HostCallResult.HUH)
+            return
+        }
+
+        // Compute preimage info state key
+        val stateKey = computePreimageInfoStateKey(context.serviceIndex, length, JamByteArray(hashBuffer))
+
+        // Apply the change
+        val info = account.info
+        if (canExpunge) {
+            // Remove the preimage info entry
+            account.preimageRequests.remove(key)
+            // Remove from raw state data
+            context.x.rawServiceDataByStateKey.remove(stateKey)
+            // Also remove the preimage blob if it exists
+            val preimageHash = JamByteArray(hashBuffer)
+            account.preimages.remove(preimageHash)
+            val preimageStateKey = computeServiceDataStateKey(context.serviceIndex, 0xFFFFFFFEL, preimageHash)
+            context.x.rawServiceDataByStateKey.remove(preimageStateKey)
+            // Update footprint: decrease items by 2 and bytes by 81 + length
+            val newItems = maxOf(0, info.items - 2)
+            val newBytes = maxOf(0L, info.bytes - 81 - length)
+            val updatedInfo = info.copy(items = newItems, bytes = newBytes)
+            context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
+        } else if (isAvailable1) {
+            // Append current timeslot (marking as forgotten)
+            val newTimeslots = existingRequest.requestedAt + context.timeslot
+            account.preimageRequests[key] = PreimageRequest(newTimeslots)
+            // Write to raw state data
+            context.x.rawServiceDataByStateKey[stateKey] = encodePreimageInfoValue(newTimeslots)
+        } else if (isAvailable3) {
+            // Update to [requestedAt[2], timeslot]
+            val newTimeslots = listOf(existingRequest.requestedAt[2], context.timeslot)
+            account.preimageRequests[key] = PreimageRequest(newTimeslots)
+            // Write to raw state data
+            context.x.rawServiceDataByStateKey[stateKey] = encodePreimageInfoValue(newTimeslots)
+        }
+
         instance.setReg7(HostCallResult.OK)
     }
 

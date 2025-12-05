@@ -644,7 +644,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             availAssignments = assurancePost.availAssignments,
             currValidators = safrolePost.kappa,
             prevValidators = safrolePost.lambda,
-            entropy = fullPreState.entropyPool,
+            entropy = safrolePost.eta,
             offenders = fullPreState.judgements.offenders.toList(),
             recentBlocks = updatedRecentHistory,
             authPools = fullPreState.authPools,
@@ -681,6 +681,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
                     preimagesStatus = preimageAccount.data.lookupMeta.map { meta ->
                         PreimagesStatusMapEntry(
                             hash = meta.key.hash,
+                            length = meta.key.length.toInt(),
                             status = meta.value
                         )
                     }
