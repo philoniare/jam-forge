@@ -66,6 +66,7 @@ private fun RawInstance.getReg10(): ULong = reg(Reg.A3)
 private fun RawInstance.getReg11(): ULong = reg(Reg.A4)
 private fun RawInstance.getReg12(): ULong = reg(Reg.A5)
 private fun RawInstance.setReg7(value: ULong) = setReg(Reg.A0, value)
+private fun RawInstance.setReg8(value: ULong) = setReg(Reg.A1, value)
 
 /**
  * Handles host calls during accumulation PVM execution.
@@ -369,6 +370,7 @@ class AccumulationHostCalls(
             return
         }
 
+        println("[DEBUG-READ-RETURN] key=${key.toHex()}, data.size=${data.size}, returning ${data.size} to r7")
         instance.setReg7(data.size.toULong())
     }
 
@@ -406,8 +408,6 @@ class AccumulationHostCalls(
         }
         val oldValueSize = oldValue?.bytes?.size ?: 0
         val keyWasPresent = oldValue != null
-        println("[WRITE-LOOKUP] key=${key.toHex()}, stateKey=${stateKeyForLookup.toHex()}, keyWasPresent=$keyWasPresent, valueLen=$valueLen, oldValueSize=$oldValueSize")
-
         // Calculate new footprint to check threshold
         val newValue = if (valueLen == 0) null else {
             val valueBuffer = ByteArray(valueLen)
@@ -417,6 +417,7 @@ class AccumulationHostCalls(
             }
             JamByteArray(valueBuffer)
         }
+        println("[WRITE-LOOKUP] key=${key.toHex()}, stateKey=${stateKeyForLookup.toHex()}, keyWasPresent=$keyWasPresent, valueLen=$valueLen, oldValueSize=$oldValueSize, newValue=${newValue?.toHex()}")
 
         // Calculate bytes/items delta for threshold check
         val (bytesDelta, itemsDelta) = when {
@@ -506,6 +507,7 @@ class AccumulationHostCalls(
         val outputAddr = instance.getReg8().toUInt()
         val offset = instance.getReg9().toInt()
         val length = instance.getReg10().toInt()
+        println("[INFO-PARAMS] serviceId=$serviceId, outputAddr=$outputAddr, offset=$offset, length=$length")
 
         val targetServiceId = if (serviceId == -1L) context.serviceIndex else serviceId
         val account = context.x.accounts[targetServiceId]
@@ -545,6 +547,7 @@ class AccumulationHostCalls(
         val first = minOf(offset, data.size)
         val len = minOf(length, data.size - first)
         val slicedData = data.copyOfRange(first, first + len)
+        println("[INFO-OUTPUT] offset=$first, len=$len, slicedData=${slicedData.joinToString("") { "%02x".format(it) }}")
 
         val writeResult = instance.writeMemory(outputAddr, slicedData)
         if (writeResult.isFailure) {
@@ -561,11 +564,7 @@ class AccumulationHostCalls(
      * reg11 = always-acc pairs ptr, reg12 = always-acc pairs count
      */
     private fun handleBless(instance: RawInstance) {
-        // Only manager service can call bless
-        if (context.serviceIndex != context.x.manager) {
-            instance.setReg7(HostCallResult.HUH)
-            return
-        }
+        println("[BLESS] service=${context.serviceIndex}, manager=${context.x.manager}")
 
         val newManager = instance.getReg7().toLong()
         val assignersPtr = instance.getReg8().toUInt()
@@ -624,6 +623,7 @@ class AccumulationHostCalls(
         context.x.alwaysAccers.clear()
         context.x.alwaysAccers.putAll(alwaysAccMap)
 
+        println("[BLESS] OK - newManager=$newManager, newDelegator=$newDelegator, newRegistrar=$newRegistrar")
         instance.setReg7(HostCallResult.OK)
     }
 
@@ -793,6 +793,9 @@ class AccumulationHostCalls(
         context.x.accounts[newServiceId] = newAccount
         println("[NEW] created service=$newServiceId, balance=$thresholdBalance, parent=${context.serviceIndex}, codeHash=${codeHash.toHex()}")
 
+        val preimageInfoStateKey = computePreimageInfoStateKey(newServiceId, codeHashLength, codeHash)
+        context.x.rawServiceDataByStateKey[preimageInfoStateKey] = encodePreimageInfoValue(emptyList())
+
         // Deduct balance from creator
         val updatedCreatorInfo = currentAccount.info.copy(
             balance = currentAccount.info.balance - thresholdBalance
@@ -819,6 +822,8 @@ class AccumulationHostCalls(
      */
     private fun handleUpgrade(instance: RawInstance) {
         val codeHashAddr = instance.getReg7().toUInt()
+        val newMinAccumlateGas = instance.getReg8().toLong()
+        val newMinMemoGas = instance.getReg9().toLong()
 
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
@@ -830,11 +835,24 @@ class AccumulationHostCalls(
         val codeHashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(codeHashAddr, codeHashBuffer)
         if (readResult.isFailure) {
-            instance.setReg7(HostCallResult.OOB)
-            return
+            throw RuntimeException("Upgrade PANIC: Failed to read code hash from memory")
         }
 
-        val updatedInfo = account.info.copy(codeHash = JamByteArray(codeHashBuffer))
+        println(
+            "[UPGRADE] service=${context.serviceIndex}, codeHash=${
+                codeHashBuffer.joinToString("") {
+                    "%02x".format(
+                        it
+                    )
+                }
+            }, newMinAccumlateGas=$newMinAccumlateGas, newMinMemoGas=$newMinMemoGas"
+        )
+
+        val updatedInfo = account.info.copy(
+            codeHash = JamByteArray(codeHashBuffer),
+            minItemGas = newMinAccumlateGas,
+            minMemoGas = newMinMemoGas
+        )
         context.x.accounts[context.serviceIndex] = account.copy(info = updatedInfo)
 
         instance.setReg7(HostCallResult.OK)
@@ -863,10 +881,26 @@ class AccumulationHostCalls(
         }
 
         // 2. Check if destination exists (WHO)
-        if (!accounts.containsKey(destination)) {
+        val destinationAsInt = destination.toInt().toLong()
+        val destExists = accounts.containsKey(destination) || accounts.containsKey(destinationAsInt)
+        val actualDest = if (accounts.containsKey(destination)) destination else destinationAsInt
+        if (!destExists) {
+            println(
+                "[TRANSFER-FAIL] WHO: destination $destination (or $destinationAsInt) not in accounts. Keys: ${
+                    accounts.keys.map {
+                        "$it (0x${
+                            it.toString(
+                                16
+                            )
+                        })"
+                    }
+                }"
+            )
             instance.setReg7(HostCallResult.WHO)
             return
         }
+        // Use the key that actually exists
+        actualDest
 
         // 3. Check if gasLimit >= destination.minMemoGas (LOW)
         val destAccount = accounts[destination]!!
@@ -1027,6 +1061,7 @@ class AccumulationHostCalls(
 
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
+            println("[QUERY] WHO - account not found for service=${context.serviceIndex}")
             instance.setReg7(HostCallResult.WHO)
             return
         }
@@ -1035,6 +1070,7 @@ class AccumulationHostCalls(
         val hashBuffer = ByteArray(32)
         val readResult = instance.readMemoryInto(hashAddr, hashBuffer)
         if (readResult.isFailure) {
+            println("[QUERY] OOB - failed to read hash from memory")
             instance.setReg7(HostCallResult.OOB)
             return
         }
@@ -1043,9 +1079,24 @@ class AccumulationHostCalls(
         val request = account.preimageRequests[key]
 
         if (request == null) {
+            println("[QUERY] service=${context.serviceIndex}, hash=${hashBuffer.joinToString("") { "%02x".format(it) }}, length=$length, found=false, requestedAt=null, returning=NONE")
             instance.setReg7(HostCallResult.NONE)
+            instance.setReg8(0uL)
         } else {
-            instance.setReg7(request.requestedAt.firstOrNull()?.toULong() ?: HostCallResult.NONE)
+            val history = request.requestedAt
+            val count = history.size
+            val r7Value: ULong = when {
+                count == 0 -> 0uL
+                else -> count.toULong() + (history[0].toULong() shl 32)
+            }
+            val r8Value: ULong = when {
+                count >= 3 -> history[1].toULong() + (history[2].toULong() shl 32)
+                count >= 2 -> history[1].toULong()
+                else -> 0uL
+            }
+            println("[QUERY] service=${context.serviceIndex}, hash=${hashBuffer.joinToString("") { "%02x".format(it) }}, length=$length, found=true, requestedAt=$history, count=$count, r7=$r7Value, r8=$r8Value")
+            instance.setReg7(r7Value)
+            instance.setReg8(r8Value)
         }
     }
 
@@ -1148,8 +1199,11 @@ class AccumulationHostCalls(
         val hashAddr = instance.getReg7().toUInt()
         val length = instance.getReg8().toInt()
 
+        println("[FORGET] service=${context.serviceIndex}, hashAddr=$hashAddr, length=$length")
+
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
+            println("[FORGET] WHO - account not found")
             instance.setReg7(HostCallResult.WHO)
             return
         }
@@ -1161,10 +1215,22 @@ class AccumulationHostCalls(
             throw RuntimeException("Forget PANIC: Failed to read hash from memory")
         }
 
+        println("[FORGET] hash=${hashBuffer.joinToString("") { "%02x".format(it) }}")
+
         val key = PreimageKey(JamByteArray(hashBuffer), length)
         val existingRequest = account.preimageRequests[key]
+        println(
+            "[FORGET] existingRequest=$existingRequest, preimageRequestsKeys=${
+                account.preimageRequests.keys.map {
+                    "(${
+                        it.hash.toHex().take(16)
+                    }, len=${it.length})"
+                }
+            }"
+        )
 
         if (existingRequest == null) {
+            println("[FORGET] HUH - request not found")
             instance.setReg7(HostCallResult.HUH)
             return
         }
@@ -1177,8 +1243,10 @@ class AccumulationHostCalls(
         val isAvailable3 = historyCount == 3 && existingRequest.requestedAt[1] < minHoldSlot
 
         val canForget = canExpunge || isAvailable1 || isAvailable3
+        println("[FORGET] historyCount=$historyCount, canExpunge=$canExpunge, isAvailable1=$isAvailable1, isAvailable3=$isAvailable3, canForget=$canForget, timeslot=${context.timeslot}")
 
         if (!canForget) {
+            println("[FORGET] HUH - cannot forget")
             instance.setReg7(HostCallResult.HUH)
             return
         }
@@ -1206,9 +1274,11 @@ class AccumulationHostCalls(
         } else if (isAvailable1) {
             // Append current timeslot (marking as forgotten)
             val newTimeslots = existingRequest.requestedAt + context.timeslot
+            println("[FORGET] isAvailable1 - appending timeslot ${context.timeslot}, newTimeslots=$newTimeslots")
             account.preimageRequests[key] = PreimageRequest(newTimeslots)
             // Write to raw state data
             context.x.rawServiceDataByStateKey[stateKey] = encodePreimageInfoValue(newTimeslots)
+            println("[FORGET] wrote stateKey=${stateKey.toHex()}, value=${encodePreimageInfoValue(newTimeslots).toHex()}")
         } else if (isAvailable3) {
             // Update to [requestedAt[2], timeslot]
             val newTimeslots = listOf(existingRequest.requestedAt[2], context.timeslot)

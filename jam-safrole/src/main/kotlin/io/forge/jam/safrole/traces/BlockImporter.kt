@@ -11,6 +11,7 @@ import io.forge.jam.safrole.authorization.AuthorizationStateTransition
 import io.forge.jam.safrole.historical.HistoricalBetaContainer
 import io.forge.jam.safrole.historical.HistoricalState
 import io.forge.jam.safrole.historical.HistoryTransition
+import io.forge.jam.safrole.preimage.PreimageOutput
 import io.forge.jam.safrole.preimage.PreimageState
 import io.forge.jam.safrole.preimage.PreimageStateTransition
 import io.forge.jam.safrole.report.*
@@ -234,9 +235,13 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             val (authPostState, _) = authSTF.transition(authInput, authPreState)
 
             // Step 8: Run Preimages STF
-            val preimageInput = InputExtractor.extractPreimageInput(block, block.header.slot)
+            val rawServiceDataMap = fullPreState.rawServiceDataKvs.associate { kv ->
+                kv.key to kv.value
+            }
+            val preimageInput = InputExtractor.extractPreimageInput(block, block.header.slot, rawServiceDataMap)
             val preimagePreState = fullPreState.toPreimageState()
-            val (preimagePostState, _) = preimageSTF.transition(preimageInput, preimagePreState)
+
+            val (preimagePostState, preimageOutput) = preimageSTF.transition(preimageInput, preimagePreState)
 
             // Step 9: Run Statistics STF
             val statInput = InputExtractor.extractStatInput(block, fullPreState)
@@ -252,9 +257,6 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             )
 
             // Step 11: Compute final service statistics (fresh each block)
-            if (accumulationOutput.accumulationStats.isNotEmpty()) {
-                println("[DEBUG] Block ${block.header.slot}: accumulationStats = ${accumulationOutput.accumulationStats}")
-            }
             val finalServiceStats = computeFinalServiceStatistics(
                 guarantees = block.extrinsic.guarantees,
                 preimages = block.extrinsic.preimages,
@@ -268,9 +270,11 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
                 assurancePost = assurancePostState,
                 reportPost = reportPostState,
                 accumulationPost = accumulationPostState,
+                accumulationOutput = accumulationOutput,
                 historyPost = historyPostState,
                 authPost = authPostState,
                 preimagePost = preimagePostState,
+                preimageOutput = preimageOutput,
                 statPost = statPostState,
                 finalCoreStats = finalCoreStats,
                 finalServiceStats = finalServiceStats
@@ -448,9 +452,11 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
         assurancePost: AssuranceState,
         reportPost: ReportState,
         accumulationPost: AccumulationState,
+        accumulationOutput: AccumulationOutput,
         historyPost: HistoricalState,
         authPost: AuthState,
         preimagePost: PreimageState,
+        preimageOutput: PreimageOutput,
         statPost: StatState,
         finalCoreStats: List<CoreStatisticsRecord>,
         finalServiceStats: List<ServiceStatisticsEntry>
@@ -493,7 +499,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             privilegedServices = accumulationPost.privileges,
             accumulationQueue = accumulationPost.readyQueue,
             accumulationHistory = accumulationPost.accumulated,
-            lastAccumulationOutputs = preState.lastAccumulationOutputs, // Updated during accumulation
+            lastAccumulationOutputs = accumulationOutput.outputs,
 
             // Service accounts merged
             serviceAccounts = serviceAccounts,
@@ -512,7 +518,10 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             rawServiceDataKvs = mergeServiceDataKvs(
                 preState.rawServiceDataKvs,
                 serviceAccounts,
-                accumulationPost.rawServiceDataByStateKey
+                accumulationPost.rawServiceDataByStateKey,
+                accumulationOutput.outputs.keys.map { it.toInt() }.toSet(),
+                preState.serviceAccounts.map { it.id.toInt() }.toSet(),
+                preimageOutput.rawServiceDataUpdates
             )
         )
     }
@@ -524,13 +533,25 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
     private fun mergeServiceDataKvs(
         preStateKvs: List<KeyValue>,
         accumulationAccounts: List<AccumulationServiceItem>,
-        postAccumulationRawData: Map<JamByteArray, JamByteArray>
+        postAccumulationRawData: Map<JamByteArray, JamByteArray>,
+        yieldedServiceIds: Set<Int>, // Services that yielded (from outputs.keys)
+        preStateAccountIds: Set<Int>, // Service IDs that existed in pre-state
+        preimageRawUpdates: Map<JamByteArray, JamByteArray> // Raw updates from preimage extrinsic
     ): List<KeyValue> {
         // Build map from existing keyvals for efficient lookup and update
         val kvMap = preStateKvs.associateBy { it.key.toHex() }.toMutableMap()
 
-        // Get set of service IDs that were accumulated
-        val accumulatedServiceIds = accumulationAccounts.map { it.id.toInt() }.toSet()
+        val modifiedServiceIds = postAccumulationRawData.keys.mapNotNull { key ->
+            if (key.size == 31) {
+                // Extract service index from interleaved bytes (positions 0, 2, 4, 6)
+                (key.bytes[0].toInt() and 0xFF) or
+                    ((key.bytes[2].toInt() and 0xFF) shl 8) or
+                    ((key.bytes[4].toInt() and 0xFF) shl 16) or
+                    ((key.bytes[6].toInt() and 0xFF) shl 24)
+            } else null
+        }.toSet()
+
+        val allAccumulatedServiceIds = yieldedServiceIds + modifiedServiceIds
 
         // For accumulated services, remove keys that are NOT in postAccumulationRawData
         // (those were deleted during accumulation)
@@ -545,7 +566,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
                     ((keyBytes[4].toInt() and 0xFF) shl 16) or
                     ((keyBytes[6].toInt() and 0xFF) shl 24)
                 // Remove if: 1) belongs to accumulated service AND 2) not in post-accumulation data
-                serviceIndex in accumulatedServiceIds && keyHex !in postRawDataKeyHexes
+                serviceIndex in allAccumulatedServiceIds && keyHex !in postRawDataKeyHexes
             } else {
                 false
             }
@@ -557,33 +578,24 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             kvMap[key.toHex()] = KeyValue(key = key, value = value)
         }
 
-        // Also add storage/preimage entries from accumulationAccounts that might not be in rawData
-        for (account in accumulationAccounts) {
+        for (account in accumulationAccounts.filter { it.id.toInt() !in preStateAccountIds }) {
             val serviceId = account.id.toInt()
 
-            // Add/update storage entries
+            // Add/update storage entries (only for new accounts)
             for (storageEntry in account.data.storage) {
                 val stateKey = StateKeys.serviceStorageKey(serviceId, storageEntry.key)
                 kvMap[stateKey.toHex()] = KeyValue(key = stateKey, value = storageEntry.value)
             }
-
-            // Add/update preimage entries
+            // Add preimage/preimageStatus for new accounts only
             for (preimage in account.data.preimages) {
                 val stateKey = StateKeys.servicePreimageKey(serviceId, preimage.hash)
                 kvMap[stateKey.toHex()] = KeyValue(key = stateKey, value = preimage.blob)
             }
+        }
 
-            // Add/update preimage info entries
-            for (preimageStatus in account.data.preimagesStatus) {
-                val stateKey = StateKeys.servicePreimageInfoKey(
-                    serviceId,
-                    preimageStatus.key.length,
-                    preimageStatus.key.hash
-                )
-                // Encode the status (list of timestamps) as compact list
-                val statusValue = encodeTimestampList(preimageStatus.value)
-                kvMap[stateKey.toHex()] = KeyValue(key = stateKey, value = JamByteArray(statusValue))
-            }
+        // Add/update entries from preimage extrinsic (for existing accounts)
+        for ((key, value) in preimageRawUpdates) {
+            kvMap[key.toHex()] = KeyValue(key = key, value = value)
         }
 
         // Return sorted list
@@ -681,7 +693,6 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
                     preimagesStatus = preimageAccount.data.lookupMeta.map { meta ->
                         PreimagesStatusMapEntry(
                             hash = meta.key.hash,
-                            length = meta.key.length.toInt(),
                             status = meta.value
                         )
                     }
