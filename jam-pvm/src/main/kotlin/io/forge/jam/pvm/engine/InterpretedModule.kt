@@ -2,7 +2,8 @@ package io.forge.jam.pvm.engine
 
 class InterpretedModule private constructor(
     val roData: ByteArray,
-    val rwData: ByteArray
+    val rwData: ByteArray,
+    val heapEmptyPages: UInt  // Number of heap empty pages from program blob
 ) {
     companion object {
         fun new(init: GuestInit): Result<InterpretedModule> = runCatching {
@@ -14,7 +15,8 @@ class InterpretedModule private constructor(
 
             InterpretedModule(
                 roData = roData,
-                rwData = init.rwData.copyOf()
+                rwData = init.rwData.copyOf(),
+                heapEmptyPages = init.heapPages
             )
         }
     }
@@ -24,19 +26,22 @@ class InterpretedModule private constructor(
         if (other !is InterpretedModule) return false
 
         return roData.contentEquals(other.roData) &&
-            rwData.contentEquals(other.rwData)
+            rwData.contentEquals(other.rwData) &&
+            heapEmptyPages == other.heapEmptyPages
     }
 
     override fun hashCode(): Int {
         var result = roData.contentHashCode()
         result = 31 * result + rwData.contentHashCode()
+        result = 31 * result + heapEmptyPages.hashCode()
         return result
     }
 
     override fun toString(): String = buildString {
         append("InterpretedModule(")
         append("roData.size=${roData.size}, ")
-        append("rwData.size=${rwData.size}")
+        append("rwData.size=${rwData.size}, ")
+        append("heapEmptyPages=$heapEmptyPages")
         append(")")
     }
 }

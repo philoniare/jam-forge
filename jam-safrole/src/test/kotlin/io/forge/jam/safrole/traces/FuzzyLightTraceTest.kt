@@ -9,7 +9,6 @@ import kotlin.test.Test
  */
 class FuzzyLightTraceTest : BaseTraceTest() {
     override val traceName = "fuzzy_light"
-    override val maxBlocks: Int = 200
 
     @Test
     fun testFuzzyLightStateChain() = runStateChainTests()

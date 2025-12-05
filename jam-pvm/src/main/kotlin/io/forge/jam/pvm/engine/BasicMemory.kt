@@ -103,10 +103,13 @@ class BasicMemory private constructor(
             stack.resize(memoryMap.stackSize.toInt())
             aux.resize(memoryMap.auxDataSize.toInt())
 
-            // Initialize heapSize to include the initial heap pages
-            _heapSize = memoryMap.rwDataSize - (memoryMap.heapBase - memoryMap.rwDataAddress)
+            // The interpretedModule.heapEmptyPages contains the original heapPages from blob.
+            val actualRwDataLen = (interpretedModule.rwData.size).toUInt()
+            val pageAlignedRwDataLen = alignToNextPageSize(memoryMap.pageSize.toInt(), actualRwDataLen.toInt()).toUInt()
+            val heapEmptyPagesSize = interpretedModule.heapEmptyPages.toUInt() * memoryMap.pageSize
+            _heapSize = memoryMap.rwDataAddress + pageAlignedRwDataLen + heapEmptyPagesSize - memoryMap.heapBase
+            println("[HEAP-INIT] actualRwDataLen=$actualRwDataLen, pageAlignedRwDataLen=$pageAlignedRwDataLen, heapEmptyPagesSize=$heapEmptyPagesSize, heapPages=${interpretedModule.heapEmptyPages}, _heapSize=$_heapSize")
 
-            // Initialize PageMap with proper access control
             initializePageMap(module, memoryMap)
         }
     }
@@ -249,6 +252,9 @@ class BasicMemory private constructor(
 
         // Calculate current heap end (heapBase + heapSize)
         val prevHeapEnd = memoryMap.heapBase + _heapSize
+
+        println("[SBRK-KOTLIN] size=$size, heapBase=${memoryMap.heapBase}, _heapSize=$_heapSize, prevHeapEnd=$prevHeapEnd")
+        println("[SBRK-KOTLIN] rwDataAddress=${memoryMap.rwDataAddress}, rwDataSize=${memoryMap.rwDataSize}")
 
         // If size is 0, just return current heap end
         if (size == 0u) {

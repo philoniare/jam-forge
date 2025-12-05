@@ -10,15 +10,15 @@ import kotlin.test.Test
 class StorageTraceTest : BaseTraceTest() {
     override val traceName = "storage"
 
-//    @Test
-//    fun testStorageStateChain() = runStateChainTests()
-//
-//    @Test
-//    fun testStorageEncoding() = runEncodingTests()
+    @Test
+    fun testStorageStateChain() = runStateChainTests()
+
+    @Test
+    fun testStorageEncoding() = runEncodingTests()
 
     @Test
     fun testStorageBlockImport() = runTraceTests()
 
-//    @Test
-//    fun testStorageDecoding() = runDecodingTests()
+    @Test
+    fun testStorageDecoding() = runDecodingTests()
 }

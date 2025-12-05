@@ -149,6 +149,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         }
 
         // 12. Build final state (accounts and statistics are val, so need to create new state)
+        // Include rawServiceDataByStateKey which tracks storage modifications (including deletions)
         val finalState = AccumulationState(
             slot = input.slot,
             entropy = preState.entropy.copy(),
@@ -156,7 +157,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             accumulated = newAccumulatedArray,
             privileges = preState.privileges.copy(),
             statistics = newStatistics,
-            accounts = newPartialState.toAccumulationServiceItems()
+            accounts = newPartialState.toAccumulationServiceItems(),
+            rawServiceDataByStateKey = newPartialState.rawServiceDataByStateKey.toMutableMap()
         )
 
         // 13. Compute commitment root from yields

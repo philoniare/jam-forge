@@ -310,6 +310,7 @@ class AccumulationHostCalls(
         val outputAddr = instance.getReg10().toUInt()
         val offset = instance.getReg11().toInt()
         val length = instance.getReg12().toInt()
+        println("[DEBUG-READ-REGS] serviceId=$serviceId, keyAddr=$keyAddr, keyLen=$keyLen, outputAddr=$outputAddr, offset=$offset, length=$length")
 
         // Read key from memory
         val keyBuffer = ByteArray(keyLen)
@@ -333,8 +334,18 @@ class AccumulationHostCalls(
             return
         }
 
-        val value = account.storage[key]
+        // First check in-memory storage (for values written in this execution)
+        var value = account.storage[key]
+
+        // If not found in-memory, look up in raw service data using computed state key
         if (value == null) {
+            val stateKey = computeStorageStateKey(targetServiceId, key)
+            value = context.x.rawServiceDataByStateKey[stateKey]
+        }
+
+        println("[DEBUG-READ] service=$targetServiceId, key=${key.toHex()}, found=${value != null}, value=${value?.toHex()}")
+        if (value == null) {
+            println("[DEBUG-READ] returning NONE=${HostCallResult.NONE} (0x${HostCallResult.NONE.toString(16)})")
             instance.setReg7(HostCallResult.NONE)
             return
         }
@@ -363,6 +374,7 @@ class AccumulationHostCalls(
         val keyLen = instance.getReg8().toInt()
         val valueAddr = instance.getReg9().toUInt()
         val valueLen = instance.getReg10().toInt()
+        println("[DEBUG-WRITE] keyAddr=$keyAddr, keyLen=$keyLen, valueAddr=$valueAddr, valueLen=$valueLen")
 
         val account = context.x.accounts[context.serviceIndex]
         if (account == null) {
@@ -378,9 +390,15 @@ class AccumulationHostCalls(
         val key = JamByteArray(keyBuffer)
 
         // Track old value for return value and bytes calculation
-        val oldValue = account.storage[key]
+        // Check both in-memory storage and raw service data
+        var oldValue = account.storage[key]
+        val stateKeyForLookup = computeStorageStateKey(context.serviceIndex, key)
+        if (oldValue == null) {
+            oldValue = context.x.rawServiceDataByStateKey[stateKeyForLookup]
+        }
         val oldValueSize = oldValue?.bytes?.size ?: 0
         val keyWasPresent = oldValue != null
+        println("[WRITE-LOOKUP] key=${key.toHex()}, stateKey=${stateKeyForLookup.toHex()}, keyWasPresent=$keyWasPresent, valueLen=$valueLen, oldValueSize=$oldValueSize")
 
         // Calculate new footprint to check threshold
         val newValue = if (valueLen == 0) null else {
@@ -438,17 +456,22 @@ class AccumulationHostCalls(
             return
         }
 
+        // Compute state key for raw storage updates
+        val stateKey = computeStorageStateKey(context.serviceIndex, key)
+
         // Apply the write
         if (valueLen == 0) {
             // Delete key
             if (keyWasPresent) {
                 account.storage.remove(key)
+                context.x.rawServiceDataByStateKey.remove(stateKey)
                 println("[WRITE-DELETE] key=${key.toHex()}, oldValueSize=$oldValueSize, newBytes=$newBytes, newItems=$newItems")
             }
         } else {
-            // Write new value
+            // Write new value to both in-memory storage and raw service data
             account.storage[key] = newValue!!
-            println("[WRITE-SET] key=${key.toHex()}, valueLen=$valueLen, keyWasPresent=$keyWasPresent, newBytes=$newBytes, newItems=$newItems")
+            context.x.rawServiceDataByStateKey[stateKey] = newValue
+            println("[WRITE-SET] key=${key.toHex()}, value=${newValue.toHex()}, valueLen=$valueLen, keyWasPresent=$keyWasPresent, newBytes=$newBytes, newItems=$newItems")
         }
 
         // Update account info with new bytes/items

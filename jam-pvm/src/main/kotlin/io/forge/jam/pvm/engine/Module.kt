@@ -48,7 +48,8 @@ class Module private constructor(private var state: AtomicReference<ModulePrivat
                 rwDataSize = blob.rwDataSize,
                 actualRwDataLen = blob.actualRwDataLen,
                 stackSize = blob.stackSize,
-                auxDataSize = config.auxDataSize
+                auxDataSize = config.auxDataSize,
+                heapPages = blob.heapPages
             )
 
             val instructionSet = blob.instructionSet(allowSbrk = config.allowSbrk)

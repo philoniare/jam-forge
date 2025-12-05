@@ -14,7 +14,8 @@ data class GuestInit(
     val rwDataSize: UInt,
     val actualRwDataLen: UInt,  // The actual rwData content length (without heap pages)
     val stackSize: UInt,
-    val auxDataSize: UInt
+    val auxDataSize: UInt,
+    val heapPages: UInt = 0u  // Number of heap empty pages from program blob
 ) {
     /**
      * Creates a memory map based on the initialization parameters.
@@ -40,7 +41,8 @@ data class GuestInit(
             rwDataSize = 0u,
             actualRwDataLen = 0u,
             stackSize = 0u,
-            auxDataSize = 0u
+            auxDataSize = 0u,
+            heapPages = 0u
         )
     }
 
@@ -55,7 +57,8 @@ data class GuestInit(
             rwDataSize == other.rwDataSize &&
             actualRwDataLen == other.actualRwDataLen &&
             stackSize == other.stackSize &&
-            auxDataSize == other.auxDataSize
+            auxDataSize == other.auxDataSize &&
+            heapPages == other.heapPages
     }
 
     override fun hashCode(): Int {
@@ -67,6 +70,7 @@ data class GuestInit(
         result = 31 * result + actualRwDataLen.hashCode()
         result = 31 * result + stackSize.hashCode()
         result = 31 * result + auxDataSize.hashCode()
+        result = 31 * result + heapPages.hashCode()
         return result
     }
 
@@ -79,7 +83,8 @@ data class GuestInit(
         append("rwDataSize=").append(rwDataSize).append(", ")
         append("actualRwDataLen=").append(actualRwDataLen).append(", ")
         append("stackSize=").append(stackSize).append(", ")
-        append("auxDataSize=").append(auxDataSize)
+        append("auxDataSize=").append(auxDataSize).append(", ")
+        append("heapPages=").append(heapPages)
         append(")")
     }
 }

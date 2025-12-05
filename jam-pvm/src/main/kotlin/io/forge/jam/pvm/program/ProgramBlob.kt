@@ -16,6 +16,7 @@ data class ProgramBlob(
     var rwDataSize: UInt = 0u,
     var actualRwDataLen: UInt = 0u,  // The actual rwData content length (without heap pages)
     var stackSize: UInt = 0u,
+    var heapPages: UInt = 0u,  // Number of heap empty pages from program blob
     var roData: ArcBytes = ArcBytes.empty(),
     var rwData: ArcBytes = ArcBytes.empty(),
     var code: ArcBytes = ArcBytes.empty(),
@@ -70,6 +71,7 @@ data class ProgramBlob(
                 rwDataSize = parts.rwDataSize,
                 actualRwDataLen = parts.actualRwDataLen,
                 stackSize = parts.stackSize,
+                heapPages = parts.heapPages,
                 roData = parts.roData,
                 rwData = parts.rwData,
                 exports = parts.exports,

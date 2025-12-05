@@ -112,11 +112,11 @@ class AccumulationExecutor(
         )
 
         // Execute PVM
-        val (exitReason, gasUsed) = executePvm(context, code, gasLimit, operands)
-        println("[EXEC-DONE] service=$serviceId, exitReason=$exitReason, gasUsed=$gasUsed, gasLimit=$gasLimit, codeSize=${code.size}, operands=${operands.size}")
+        val execResult = executePvm(context, code, gasLimit, operands)
+        println("[EXEC-DONE] service=$serviceId, exitReason=${execResult.exitReason}, gasUsed=${execResult.gasUsed}, gasLimit=$gasLimit, codeSize=${code.size}, operands=${operands.size}, outputLen=${execResult.output?.size ?: 0}")
 
         // Collapse state based on exit reason
-        val finalState = context.collapse(exitReason)
+        val finalState = context.collapse(execResult.exitReason)
 
         // Update last_accumulation_slot for this service
         val serviceAccount = finalState.accounts[serviceId]
@@ -126,14 +126,38 @@ class AccumulationExecutor(
             )
         }
 
+        val yield: JamByteArray? = when (execResult.exitReason) {
+            ExitReason.PANIC, ExitReason.OUT_OF_GAS -> context.yieldCheckpoint
+            ExitReason.HALT -> {
+                val output = execResult.output
+                if (output != null && output.size == 32) {
+                    JamByteArray(output)
+                } else {
+                    // Fall back to YIELD host call result
+                    context.yield
+                }
+            }
+
+            else -> context.yield
+        }
+
         return AccumulationOneResult(
             postState = finalState,
             deferredTransfers = context.deferredTransfers.toList(),
-            yield = context.yield,  // Captured from YIELD host call
-            gasUsed = gasUsed,
+            yield = yield,
+            gasUsed = execResult.gasUsed,
             provisions = context.provisions.toSet()
         )
     }
+
+    /**
+     * Result of PVM execution including output data.
+     */
+    data class PvmExecResult(
+        val exitReason: ExitReason,
+        val gasUsed: Long,
+        val output: ByteArray?  // Output from registers r7 (addr) and r8 (len) on halt
+    )
 
     /**
      * Execute PVM code with host call handling.
@@ -143,10 +167,10 @@ class AccumulationExecutor(
         code: ByteArray,
         gasLimit: Long,
         operands: List<AccumulationOperand>
-    ): Pair<ExitReason, Long> {
+    ): PvmExecResult {
         val module = getOrCompileModule(code)
         if (module == null) {
-            return Pair(ExitReason.INVALID_CODE, 0L)
+            return PvmExecResult(ExitReason.INVALID_CODE, 0L, null)
         }
 
         // Manually instantiate without step tracing (to avoid memory issues)
@@ -267,7 +291,21 @@ class AccumulationExecutor(
             throw RuntimeException("PVM Panic! Host calls: $hostCallCount")
         }
 
-        return Pair(exitReason, gasUsed)
+        val output: ByteArray? = if (exitReason == ExitReason.HALT) {
+            val addr = instance.reg(Reg.A0).toUInt()
+            val len = instance.reg(Reg.A1).toInt()
+            if (len > 0) {
+                val buffer = ByteArray(len)
+                val result = instance.readMemoryInto(addr, buffer)
+                if (result.isSuccess) buffer else null
+            } else {
+                ByteArray(0)
+            }
+        } else {
+            null
+        }
+
+        return PvmExecResult(exitReason, gasUsed, output)
     }
 
     /**
