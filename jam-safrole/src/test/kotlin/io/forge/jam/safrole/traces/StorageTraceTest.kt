@@ -17,7 +17,7 @@ class StorageTraceTest : BaseTraceTest() {
     fun testStorageEncoding() = runEncodingTests()
 
     @Test
-    fun testStorageBlockImport() = runTraceTests()
+    fun testStorageBlockImport() = runStateChainTests()
 
     @Test
     fun testStorageDecoding() = runDecodingTests()

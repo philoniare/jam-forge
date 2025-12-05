@@ -111,7 +111,10 @@ object StateCodec {
 
         // Privileged services (χ)
         val privilegedServices = grouped[StateKeys.PRIVILEGED_SERVICES.toInt() and 0xFF]?.firstOrNull()?.let {
-            Privileges.fromBytes(it.value.bytes, 0, config.CORES_COUNT).first
+            println("[DEBUG-PRIVILEGES-RAW] key=0x${StateKeys.PRIVILEGED_SERVICES.toString(16)}, raw bytes (${it.value.bytes.size}): ${it.value.bytes.take(50).joinToString("") { "%02x".format(it) }}...")
+            val privs = Privileges.fromBytes(it.value.bytes, 0, config.CORES_COUNT).first
+            println("[DEBUG-PRIVILEGES] Loaded privileges: bless=${privs.bless}, assign=${privs.assign}, alwaysAcc=${privs.alwaysAcc}")
+            privs
         } ?: Privileges(0, List(config.CORES_COUNT) { 0L }, 0, 0, emptyList())
 
         // Activity statistics

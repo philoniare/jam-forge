@@ -102,19 +102,39 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             }
         }
 
-        // 8. Execute PVM for all accumulated reports
+        // 8. Execute PVM for accumulated reports (respecting gas budget)
         val allToAccumulate = immediateReports + readyToAccumulate
         val partialState = preState.toPartialState()
 
-        val execResult = executeAccumulation(
+        // Calculate total gas budget
+        val sumPrivilegedGas = partialState.alwaysAccers.values.sum()
+        val minTotalGas = config.WORK_REPORT_ACCUMULATION_GAS * config.CORES_COUNT + sumPrivilegedGas
+        val totalGasLimit = maxOf(config.TOTAL_ACCUMULATION_GAS, minTotalGas)
+
+        // Execute outer accumulation with recursive deferred transfer processing
+        val outerResult = outerAccumulate(
             partialState = partialState,
-            reports = allToAccumulate,
+            transfers = emptyList(),
+            workReports = allToAccumulate,
+            alwaysAccers = partialState.alwaysAccers.toMap(),
+            gasLimit = totalGasLimit,
             timeslot = input.slot,
             entropy = preState.entropy
         )
-        val newPartialState = execResult.postState
-        val gasUsedPerService = execResult.gasUsedMap
-        val commitments = execResult.commitments
+
+        // Determine which reports were actually accumulated (based on reportsAccumulated count)
+        val reportsToAccumulate = allToAccumulate.take(outerResult.reportsAccumulated)
+
+        // Rebuild newAccumulated to only include reports that will actually be accumulated
+        // (after gas filtering). This is critical for correct accumulation history.
+        val actuallyAccumulated = mutableSetOf<JamByteArray>()
+        reportsToAccumulate.forEach { report ->
+            actuallyAccumulated.add(report.packageSpec.hash)
+        }
+
+        val newPartialState = outerResult.postState
+        val gasUsedPerService = outerResult.gasUsedMap
+        val commitments = outerResult.commitments
 
         // Debug: print gas used per service
         if (gasUsedPerService.isNotEmpty()) {
@@ -122,7 +142,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         }
 
         // 9. Rotate accumulated array (sliding window: always shift by 1, add new at end)
-        val newAccumulatedList = newAccumulated.toList().sortedBy { it.toHex() }
+        // Use actuallyAccumulated (post gas-filtering) for correct history
+        val newAccumulatedList = actuallyAccumulated.toList().sortedBy { it.toHex() }
         val newAccumulatedArray = MutableList(config.EPOCH_LENGTH) { idx ->
             if (idx == config.EPOCH_LENGTH - 1) {
                 // New items at last position
@@ -134,7 +155,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         }
 
         // 10. Update statistics (for accumulated field tracking)
-        val workItemsPerService = countWorkItemsPerService(allToAccumulate)
+        // Use reportsToAccumulate (filtered by gas budget) for correct stats
+        val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
         val newStatistics = updateStatistics(
             preState.statistics,
             gasUsedPerService,
@@ -264,6 +286,51 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
     }
 
     /**
+     * Filter reports that fit within the gas budget.
+     */
+    private fun filterReportsByGasBudget(
+        reports: List<WorkReport>,
+        gasLimit: Long
+    ): List<WorkReport> {
+        var sumGasRequired = 0L
+        val result = mutableListOf<WorkReport>()
+
+        println("[DEBUG-GAS-FILTER] Starting filter with ${reports.size} reports, gasLimit=$gasLimit")
+        for ((reportIdx, report) in reports.withIndex()) {
+            // Check each work item (digest) individually
+            var canAccumulate = true
+            val reportStartGas = sumGasRequired
+            for ((itemIdx, workResult) in report.results.withIndex()) {
+                if (workResult.accumulateGas + sumGasRequired > gasLimit) {
+                    println("[DEBUG-GAS-FILTER] Report $reportIdx item $itemIdx rejected: ${workResult.accumulateGas} + $sumGasRequired > $gasLimit")
+                    canAccumulate = false
+                    break
+                }
+                sumGasRequired += workResult.accumulateGas
+            }
+
+            if (canAccumulate) {
+                result.add(report)
+                println(
+                    "[DEBUG-GAS-FILTER] Report $reportIdx accepted: hash=${
+                        report.packageSpec.hash.toHex().take(16)
+                    }..., items=${report.results.size}, gas=${sumGasRequired - reportStartGas}, totalGas=$sumGasRequired"
+                )
+            } else {
+                // Can't fit this report, stop processing
+                println("[DEBUG-GAS-FILTER] Report $reportIdx rejected, stopping")
+                break
+            }
+        }
+
+        if (result.size < reports.size) {
+            println("[DEBUG-GAS-FILTER] Filtered ${reports.size} reports to ${result.size} due to gas limit $gasLimit (used $sumGasRequired)")
+        }
+
+        return result
+    }
+
+    /**
      * Extract accumulatable reports while preserving slot information.
      */
     private fun extractAccumulatableWithSlots(
@@ -296,27 +363,135 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
     data class AccumulationExecResult(
         val postState: PartialState,
         val gasUsedMap: Map<Long, Long>,
-        val commitments: Map<Long, JamByteArray>  // service -> yield hash
+        val commitments: Map<Long, JamByteArray>,  // service -> yield hash
+        val deferredTransfers: List<DeferredTransfer> = emptyList()  // transfers to process in next round
     )
 
     /**
+     * Outer accumulation result for tracking how many reports were accumulated.
+     */
+    data class OuterAccumulationResult(
+        val reportsAccumulated: Int,
+        val postState: PartialState,
+        val gasUsedMap: Map<Long, Long>,
+        val commitments: Map<Long, JamByteArray>
+    )
+
+    /**
+     * Outer accumulation function
+     * Recursively processes work reports and deferred transfers.
+     */
+    private fun outerAccumulate(
+        partialState: PartialState,
+        transfers: List<DeferredTransfer>,
+        workReports: List<WorkReport>,
+        alwaysAccers: Map<Long, Long>,
+        gasLimit: Long,
+        timeslot: Long,
+        entropy: JamByteArray
+    ): OuterAccumulationResult {
+        // Count how many reports can fit in gas budget
+        var i = 0
+        var sumGasRequired = 0L
+
+        for (report in workReports) {
+            var canAccumulate = true
+            for (digest in report.results) {
+                if (digest.accumulateGas + sumGasRequired > gasLimit) {
+                    canAccumulate = false
+                    break
+                }
+                sumGasRequired += digest.accumulateGas
+            }
+            if (canAccumulate) {
+                i++
+            } else {
+                break
+            }
+        }
+
+        val n = i + transfers.size + alwaysAccers.size
+
+        if (n == 0) {
+            println("[OUTER-ACCUM] No work to do - returning empty")
+            return OuterAccumulationResult(
+                reportsAccumulated = 0,
+                postState = partialState,
+                gasUsedMap = emptyMap(),
+                commitments = emptyMap()
+            )
+        }
+
+        println("[OUTER-ACCUM] Can accumulate $i reports, ${transfers.size} transfers, ${alwaysAccers.size} alwaysAcc services")
+
+        // Execute parallel accumulation for this batch
+        val parallelResult = executeAccumulation(
+            partialState = partialState,
+            reports = workReports.take(i),
+            deferredTransfers = transfers,
+            alwaysAccers = alwaysAccers,
+            timeslot = timeslot,
+            entropy = entropy
+        )
+
+        val parallelGasUsed = parallelResult.gasUsedMap.values.sum()
+        val transfersGas = transfers.sumOf { it.gasLimit }
+
+        // Recursively process remaining reports with new deferred transfers
+        val remainingReports = workReports.drop(i)
+        val newTransfers = parallelResult.deferredTransfers
+
+        println("[OUTER-ACCUM] Parallel done: gasUsed=$parallelGasUsed, newTransfers=${newTransfers.size}, remaining=${remainingReports.size}")
+
+        // Recursive call if there are new transfers or remaining reports
+        val outerResult = outerAccumulate(
+            partialState = parallelResult.postState,
+            transfers = newTransfers,
+            workReports = remainingReports,
+            alwaysAccers = emptyMap(),  // Always-accumulate services only processed in first iteration
+            gasLimit = gasLimit + transfersGas - parallelGasUsed,
+            timeslot = timeslot,
+            entropy = entropy
+        )
+
+        // Merge results
+        val mergedGasUsed = (parallelResult.gasUsedMap.keys + outerResult.gasUsedMap.keys).associateWith { serviceId ->
+            (parallelResult.gasUsedMap[serviceId] ?: 0L) + (outerResult.gasUsedMap[serviceId] ?: 0L)
+        }
+
+        return OuterAccumulationResult(
+            reportsAccumulated = i + outerResult.reportsAccumulated,
+            postState = outerResult.postState,
+            gasUsedMap = mergedGasUsed,
+            commitments = parallelResult.commitments + outerResult.commitments
+        )
+    }
+
+    /**
      * Execute PVM accumulation for all reports.
+     * This is the parallelized accumulation function Δ* from the Gray Paper.
      */
     private fun executeAccumulation(
         partialState: PartialState,
         reports: List<WorkReport>,
+        deferredTransfers: List<DeferredTransfer>,
+        alwaysAccers: Map<Long, Long>,
         timeslot: Long,
         entropy: JamByteArray
     ): AccumulationExecResult {
         val gasUsedMap = mutableMapOf<Long, Long>()
         val commitments = mutableMapOf<Long, JamByteArray>()
+        val newDeferredTransfers = mutableListOf<DeferredTransfer>()
         var currentState = partialState
 
         // Group work items by service, preserving report order
         val serviceOperands = mutableMapOf<Long, MutableList<AccumulationOperand>>()
 
-        for (report in reports) {
-            for (result in report.results) {
+        println("[DEBUG-REPORTS] Processing ${reports.size} reports, ${deferredTransfers.size} deferred transfers")
+        for ((reportIdx, report) in reports.withIndex()) {
+            println("[DEBUG-REPORTS] Report $reportIdx has ${report.results.size} results")
+            for ((resultIdx, result) in report.results.withIndex()) {
+                println("[DEBUG-REPORTS]   Result $resultIdx: serviceId=${result.serviceId}, gas=${result.accumulateGas}")
                 val operand = OperandTuple(
                     packageHash = report.packageSpec.hash,
                     segmentRoot = report.packageSpec.exportsRoot,
@@ -332,14 +507,23 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
             }
         }
 
+        // Add deferred transfers as operands for destination services
+        for (transfer in deferredTransfers) {
+            println("[DEBUG-TRANSFER] Adding transfer: src=${transfer.source}, dst=${transfer.destination}, amount=${transfer.amount}, gas=${transfer.gasLimit}")
+            serviceOperands.computeIfAbsent(transfer.destination) { mutableListOf() }
+                .add(AccumulationOperand.Transfer(transfer))
+        }
+
         // Collect all services to accumulate (from reports + always-accumulate + transfers)
         val servicesToAccumulate = mutableSetOf<Long>()
         servicesToAccumulate.addAll(serviceOperands.keys)
-        servicesToAccumulate.addAll(partialState.alwaysAccers.keys)
+        servicesToAccumulate.addAll(alwaysAccers.keys)
+
+        println("[DEBUG-SERVICES] serviceOperands.keys=${serviceOperands.keys}, alwaysAccers=$alwaysAccers, servicesToAccumulate=$servicesToAccumulate")
 
         // If no services to process, return empty result
         if (servicesToAccumulate.isEmpty()) {
-            return AccumulationExecResult(partialState, emptyMap(), emptyMap())
+            return AccumulationExecResult(partialState, emptyMap(), emptyMap(), emptyList())
         }
 
         // Execute for each service in sorted order
@@ -349,7 +533,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
             // Calculate total gas limit for this service batch
             // Include always-accumulate gas + work item gas + transfer gas
-            val alwaysAccGas = partialState.alwaysAccers[serviceId] ?: 0L
+            val alwaysAccGas = alwaysAccers[serviceId] ?: 0L
             val workItemGas = operands.filterIsInstance<AccumulationOperand.WorkItem>()
                 .sumOf { it.operand.gasLimit }
             val transferGas = operands.filterIsInstance<AccumulationOperand.Transfer>()
@@ -370,9 +554,12 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
             // Collect yield/commitment if present
             execResult.yield?.let { commitments[serviceId] = it }
+
+            // Collect new deferred transfers generated by this service
+            newDeferredTransfers.addAll(execResult.deferredTransfers)
         }
 
-        return AccumulationExecResult(currentState, gasUsedMap, commitments)
+        return AccumulationExecResult(currentState, gasUsedMap, commitments, newDeferredTransfers)
     }
 
     /**

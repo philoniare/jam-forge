@@ -508,21 +508,56 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
             coreStatistics = finalCoreStats,
 
             // Raw service data keyvals - merge preState with storage/preimage modifications from merged accounts
-            rawServiceDataKvs = mergeServiceDataKvs(preState.rawServiceDataKvs, serviceAccounts)
+            // Pass the post-accumulation rawServiceDataByStateKey which tracks deletions
+            rawServiceDataKvs = mergeServiceDataKvs(
+                preState.rawServiceDataKvs,
+                serviceAccounts,
+                accumulationPost.rawServiceDataByStateKey
+            )
         )
     }
 
     /**
      * Merge raw service data keyvals from preState with modifications from accumulation.
-     * This adds new storage entries, preimages, and preimage info and updates existing ones.
+     * Uses postAccumulationRawData as the authoritative source for which keys should exist
      */
     private fun mergeServiceDataKvs(
         preStateKvs: List<KeyValue>,
-        accumulationAccounts: List<AccumulationServiceItem>
+        accumulationAccounts: List<AccumulationServiceItem>,
+        postAccumulationRawData: Map<JamByteArray, JamByteArray>
     ): List<KeyValue> {
         // Build map from existing keyvals for efficient lookup and update
         val kvMap = preStateKvs.associateBy { it.key.toHex() }.toMutableMap()
 
+        // Get set of service IDs that were accumulated
+        val accumulatedServiceIds = accumulationAccounts.map { it.id.toInt() }.toSet()
+
+        // For accumulated services, remove keys that are NOT in postAccumulationRawData
+        // (those were deleted during accumulation)
+        val postRawDataKeyHexes = postAccumulationRawData.keys.map { it.toHex() }.toSet()
+        val keysToRemove = kvMap.keys.filter { keyHex ->
+            // Check if this key belongs to an accumulated service
+            val keyBytes = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            if (keyBytes.size == 31) {
+                // Extract service index from interleaved bytes (positions 0, 2, 4, 6)
+                val serviceIndex = (keyBytes[0].toInt() and 0xFF) or
+                    ((keyBytes[2].toInt() and 0xFF) shl 8) or
+                    ((keyBytes[4].toInt() and 0xFF) shl 16) or
+                    ((keyBytes[6].toInt() and 0xFF) shl 24)
+                // Remove if: 1) belongs to accumulated service AND 2) not in post-accumulation data
+                serviceIndex in accumulatedServiceIds && keyHex !in postRawDataKeyHexes
+            } else {
+                false
+            }
+        }
+        keysToRemove.forEach { kvMap.remove(it) }
+
+        // Add/update entries from postAccumulationRawData (includes new writes and updates)
+        for ((key, value) in postAccumulationRawData) {
+            kvMap[key.toHex()] = KeyValue(key = key, value = value)
+        }
+
+        // Also add storage/preimage entries from accumulationAccounts that might not be in rawData
         for (account in accumulationAccounts) {
             val serviceId = account.id.toInt()
 
