@@ -1443,15 +1443,51 @@ class AccumulationHostCalls(
         val blobAddr = instance.getReg8().toUInt()
         val blobLen = instance.getReg9().toInt()
 
-        // Read blob from memory
+        // Read blob from memory - PANIC on failure
         val blobBuffer = ByteArray(blobLen)
         val readResult = instance.readMemoryInto(blobAddr, blobBuffer)
         if (readResult.isFailure) {
             println("[PROVIDE-PANIC] Failed to read blob from memory at 0x${blobAddr.toString(16)} len $blobLen")
             throw RuntimeException("Provide PANIC: Failed to read blob from memory at 0x${blobAddr.toString(16)} len $blobLen")
         }
+        val blob = JamByteArray(blobBuffer)
 
-        context.provisions.add(Pair(targetServiceId, JamByteArray(blobBuffer)))
+        // Check if target account exists - WHO if not
+        val targetAccount = context.x.accounts[targetServiceId]
+        if (targetAccount == null) {
+            println("[PROVIDE] WHO - target service $targetServiceId not found")
+            instance.setReg7(HostCallResult.WHO)
+            return
+        }
+
+        // Compute preimage hash
+        val digest = org.bouncycastle.jcajce.provider.digest.Blake2b.Blake2b256()
+        digest.update(blobBuffer)
+        val preimageHash = JamByteArray(digest.digest())
+
+        // Check if preimage has been solicited
+        val preimageKey = PreimageKey(preimageHash, blobLen)
+        val preimageRequest = targetAccount.preimageRequests[preimageKey]
+        val existingPreimage = targetAccount.preimages[preimageHash]
+
+        // If no request exists OR preimage already provided -> HUH
+        if (preimageRequest == null || existingPreimage != null) {
+            println("[PROVIDE] HUH - preimage not solicited or already provided for hash=${preimageHash.toHex()}, len=$blobLen")
+            instance.setReg7(HostCallResult.HUH)
+            return
+        }
+
+        // Check if already in provisions set for this execution -> HUH
+        val provisionEntry = Pair(targetServiceId, blob)
+        if (context.provisions.contains(provisionEntry)) {
+            println("[PROVIDE] HUH - already provided for service $targetServiceId")
+            instance.setReg7(HostCallResult.HUH)
+            return
+        }
+
+        // All checks passed - OK
+        context.provisions.add(provisionEntry)
+        println("[PROVIDE] OK - provided preimage for service $targetServiceId, hash=${preimageHash.toHex()}, len=$blobLen")
         instance.setReg7(HostCallResult.OK)
     }
 
