@@ -23,7 +23,7 @@ data class AccumulationOutput(
     @kotlinx.serialization.Transient
     val accumulationStats: AccumulationStats = emptyMap(),
     @kotlinx.serialization.Transient
-    val outputs: Map<Long, JamByteArray> = emptyMap()
+    val outputs: Set<Commitment> = emptySet()
 ) : Encodable {
     companion object {
         fun fromBytes(data: ByteArray, offset: Int = 0): Pair<AccumulationOutput, Int> {

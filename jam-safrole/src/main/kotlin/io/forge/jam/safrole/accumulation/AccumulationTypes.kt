@@ -299,7 +299,7 @@ data class AccumulationOneResult(
 data class AccumulationParResult(
     val postState: PartialState,
     val deferredTransfers: List<DeferredTransfer>,
-    val outputs: Map<Long, JamByteArray>,                 // Service -> output hash
+    val outputs: Set<Commitment>,                         // Set of (serviceIndex, hash) pairs
     val gasUsed: List<Pair<Long, Long>>                   // Service -> gas used
 )
 
@@ -309,7 +309,7 @@ data class AccumulationParResult(
 data class AccumulationSeqResult(
     val reportsAccumulated: Int,
     val postState: PartialState,
-    val outputs: Map<Long, JamByteArray>,
+    val outputs: Set<Commitment>,                         // Set of (serviceIndex, hash) pairs
     val gasUsed: List<Pair<Long, Long>>
 )
 

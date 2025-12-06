@@ -23,6 +23,15 @@ data class PrivilegeSnapshot(
     val alwaysAccers: Map<Long, Long>
 )
 
+/**
+ * Accumulation output commitment (serviceIndex, hash) pair.
+ * A service can have multiple commitments if it accumulates multiple times.
+ */
+data class Commitment(
+    val serviceIndex: Long,
+    val hash: JamByteArray
+)
+
 class AccumulationStateTransition(private val config: AccumulationConfig) {
     private val executor = AccumulationExecutor(config)
 
@@ -157,7 +166,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
         // Debug: print gas used per service
         if (gasUsedPerService.isNotEmpty()) {
-            println("[DEBUG-GAS] slot=${input.slot}, gasUsedPerService=$gasUsedPerService, commitments=${commitments.mapValues { it.value.toHex() }}")
+            println("[DEBUG-GAS] slot=${input.slot}, gasUsedPerService=$gasUsedPerService, commitments=${commitments.map { "${it.serviceIndex}=${it.hash.toHex()}" }}")
         }
 
         // 9. Rotate accumulated array (sliding window: always shift by 1, add new at end)
@@ -269,22 +278,24 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
     /**
      * Compute the Keccak Merkle root of service commitments.
-     * Sorted by service index, then Merklized with Keccak.
+     * Sorted by service index (then by hash for stability), then Merklized with Keccak.
      */
-    private fun computeCommitmentRoot(commitments: Map<Long, JamByteArray>): JamByteArray {
+    private fun computeCommitmentRoot(commitments: Set<Commitment>): JamByteArray {
         if (commitments.isEmpty()) {
             val root = JamByteArray(ByteArray(32) { 0 })
             println("[KOTLIN-ACCUM-ROOT] nodes=0, root=${root.toHex()}")
             return root
         }
 
-        // Sort by service index and encode each commitment
-        val sortedCommitments = commitments.entries.sortedBy { it.key }
-        val nodes = sortedCommitments.map { (serviceId, hash) ->
+        // Sort by service index, then by hash for deterministic ordering
+        val sortedCommitments = commitments.sortedWith(
+            compareBy({ it.serviceIndex }, { it.hash.toHex() })
+        )
+        val nodes = sortedCommitments.map { commitment ->
             // Encode service index as 4-byte LE + 32-byte hash
             val buffer = ByteBuffer.allocate(4 + 32).order(ByteOrder.LITTLE_ENDIAN)
-            buffer.putInt(serviceId.toInt())
-            buffer.put(hash.bytes)
+            buffer.putInt(commitment.serviceIndex.toInt())
+            buffer.put(commitment.hash.bytes)
             buffer.array()
         }
 
@@ -441,7 +452,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
     data class AccumulationExecResult(
         val postState: PartialState,
         val gasUsedMap: Map<Long, Long>,
-        val commitments: Map<Long, JamByteArray>,  // service -> yield hash
+        val commitments: Set<Commitment>,  // Set of (serviceIndex, hash) pairs - allows same service multiple times
         val deferredTransfers: List<DeferredTransfer> = emptyList(),  // transfers to process in next round
         val privilegeSnapshots: Map<Long, PrivilegeSnapshot> = emptyMap()  // service -> privilege snapshot after execution
     )
@@ -453,7 +464,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         val reportsAccumulated: Int,
         val postState: PartialState,
         val gasUsedMap: Map<Long, Long>,
-        val commitments: Map<Long, JamByteArray>,
+        val commitments: Set<Commitment>,  // Set of (serviceIndex, hash) pairs - allows same service multiple times
         val privilegeSnapshots: Map<Long, PrivilegeSnapshot> = emptyMap()  // service -> privilege snapshot
     )
 
@@ -498,7 +509,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
                 reportsAccumulated = 0,
                 postState = partialState,
                 gasUsedMap = emptyMap(),
-                commitments = emptyMap(),
+                commitments = emptySet(),
                 privilegeSnapshots = emptyMap()
             )
         }
@@ -565,7 +576,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         entropy: JamByteArray
     ): AccumulationExecResult {
         val gasUsedMap = mutableMapOf<Long, Long>()
-        val commitments = mutableMapOf<Long, JamByteArray>()
+        val commitments = mutableSetOf<Commitment>()
         val newDeferredTransfers = mutableListOf<DeferredTransfer>()
         val allProvisions = mutableSetOf<Pair<Long, JamByteArray>>()
         var currentState = partialState
@@ -609,7 +620,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
 
         // If no services to process, return empty result
         if (servicesToAccumulate.isEmpty()) {
-            return AccumulationExecResult(partialState, emptyMap(), emptyMap(), emptyList())
+            return AccumulationExecResult(partialState, emptyMap(), emptySet(), emptyList())
         }
 
         // Track privilege snapshots for each service after execution (for R function)
@@ -650,8 +661,8 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
                 alwaysAccers = currentState.alwaysAccers.toMap()
             )
 
-            // Collect yield/commitment if present
-            execResult.yield?.let { commitments[serviceId] = it }
+            // Collect yield/commitment if present (allows same service to have multiple commitments)
+            execResult.yield?.let { commitments.add(Commitment(serviceId, it)) }
 
             // Collect new deferred transfers generated by this service
             newDeferredTransfers.addAll(execResult.deferredTransfers)
@@ -707,13 +718,6 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
                 // Update raw state data for preimage blob
                 val blobStateKey = computeServiceDataStateKey(serviceId, 0xFFFFFFFEL, preimageHash)
                 state.rawServiceDataByStateKey[blobStateKey] = preimage
-
-                // Update service account footprint (items and bytes)
-                val updatedInfo = account.info.copy(
-                    items = account.info.items + 2,
-                    bytes = account.info.bytes + 81 + length
-                )
-                state.accounts[serviceId] = account.copy(info = updatedInfo)
             }
         }
         return state

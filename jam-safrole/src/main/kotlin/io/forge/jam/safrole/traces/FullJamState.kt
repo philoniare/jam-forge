@@ -77,8 +77,8 @@ data class FullJamState(
     // Accumulation history (historically accumulated hashes)
     val accumulationHistory: List<List<JamByteArray>>,
 
-    // Last accumulation outputs
-    val lastAccumulationOutputs: Map<Long, JamByteArray>,
+    // Last accumulation outputs - Set of (serviceIndex, hash) pairs allowing same service multiple times
+    val lastAccumulationOutputs: Set<io.forge.jam.safrole.accumulation.Commitment>,
 
     // δ - Service accounts
     val serviceAccounts: List<AccumulationServiceItem>,
@@ -259,7 +259,7 @@ data class FullJamState(
                 activityStatsLast = emptyStats,
                 accumulationQueue = emptyAccQueue,
                 accumulationHistory = emptyAccHistory,
-                lastAccumulationOutputs = emptyMap(),
+                lastAccumulationOutputs = emptySet(),
                 serviceAccounts = emptyList(),
                 serviceStatistics = emptyList()
             )

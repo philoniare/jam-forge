@@ -147,7 +147,7 @@ object StateCodec {
         val lastAccumulationOutputs =
             grouped[StateKeys.LAST_ACCUMULATION_OUTPUTS.toInt() and 0xFF]?.firstOrNull()?.let {
                 decodeLastAccumulationOutputs(it.value.bytes)
-            } ?: emptyMap()
+            } ?: emptySet()
         // Service accounts - combine account metadata with storage/preimage data
         val serviceAccountsList = serviceAccountKvs.map { (serviceIndex, kv) ->
             val rawBytes = kv.value.bytes
@@ -485,18 +485,19 @@ object StateCodec {
 
     /**
      * Decodes last accumulation outputs.
+     * Returns a Set of Commitment allowing the same service to appear multiple times.
      */
-    private fun decodeLastAccumulationOutputs(value: ByteArray): Map<Long, JamByteArray> {
+    private fun decodeLastAccumulationOutputs(value: ByteArray): Set<io.forge.jam.safrole.accumulation.Commitment> {
         var offset = 0
         val (length, lengthBytes) = decodeCompactInteger(value, offset)
         offset += lengthBytes
-        val outputs = mutableMapOf<Long, JamByteArray>()
+        val outputs = mutableSetOf<io.forge.jam.safrole.accumulation.Commitment>()
         for (i in 0 until length.toInt()) {
             val serviceId = decodeFixedWidthInteger(value, offset, 4, false)
             offset += 4
             val hash = JamByteArray(value.copyOfRange(offset, offset + 32))
             offset += 32
-            outputs[serviceId] = hash
+            outputs.add(io.forge.jam.safrole.accumulation.Commitment(serviceId, hash))
         }
         return outputs
     }

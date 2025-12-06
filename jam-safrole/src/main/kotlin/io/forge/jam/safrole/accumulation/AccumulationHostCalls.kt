@@ -833,9 +833,11 @@ class AccumulationHostCalls(
 
         // Read new code hash from memory
         val codeHashBuffer = ByteArray(32)
+        println("[DEBUG-UPGRADE] service=${context.serviceIndex}, codeHashAddr=$codeHashAddr (0x${codeHashAddr.toString(16)})")
         val readResult = instance.readMemoryInto(codeHashAddr, codeHashBuffer)
         if (readResult.isFailure) {
-            throw RuntimeException("Upgrade PANIC: Failed to read code hash from memory")
+            println("[DEBUG-UPGRADE] Memory read FAILED: ${readResult.exceptionOrNull()}")
+            throw RuntimeException("Upgrade PANIC: Failed to read code hash from memory at address $codeHashAddr (0x${codeHashAddr.toString(16)}): ${readResult.exceptionOrNull()}")
         }
 
         println(

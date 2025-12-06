@@ -273,8 +273,14 @@ class AccumulationExecutor(
                     val gasCost = hostCalls.getGasCost(interrupt.value, instance)
                     val newGas = instance.gas() - gasCost
                     instance.setGas(newGas)
-                    // Now dispatch with gas already charged
-                    hostCalls.dispatch(interrupt.value, instance)
+                    // Now dispatch with gas already charged, catching panics
+                    try {
+                        hostCalls.dispatch(interrupt.value, instance)
+                    } catch (e: RuntimeException) {
+                        println("[HOST-PANIC] ${e.message}")
+                        exitReason = ExitReason.PANIC
+                        break
+                    }
                 }
 
                 is InterruptKind.Segfault -> {
@@ -296,8 +302,8 @@ class AccumulationExecutor(
             }
         }
 
-        val gasUsed = initialGas - instance.gas()
         val finalGas = instance.gas()
+        val gasUsed = if (finalGas >= 0) initialGas - finalGas else initialGas
         println("[DEBUG-EXEC] hostCalls=$hostCallCount, initialGas=$initialGas, finalGas=$finalGas, gasUsed=$gasUsed, exitReason=$exitReason")
 
         val output: ByteArray? = if (exitReason == ExitReason.HALT) {
@@ -513,7 +519,7 @@ fun accumulateSequential(
         return AccumulationSeqResult(
             reportsAccumulated = 0,
             postState = partialState,
-            outputs = emptyMap(),
+            outputs = emptySet(),
             gasUsed = emptyList()
         )
     }
@@ -608,7 +614,7 @@ fun accumulateParallel(
     }
 
     // Execute each service
-    val allOutputs = mutableMapOf<Long, JamByteArray>()
+    val allOutputs = mutableSetOf<Commitment>()
     val allGasUsed = mutableListOf<Pair<Long, Long>>()
     val allTransfers = mutableListOf<DeferredTransfer>()
     var currentState = partialState
@@ -645,7 +651,7 @@ fun accumulateParallel(
         currentState = result.postState
         allGasUsed.add(Pair(serviceId, result.gasUsed))
         allTransfers.addAll(result.deferredTransfers)
-        result.yield?.let { allOutputs[serviceId] = it }
+        result.yield?.let { allOutputs.add(Commitment(serviceId, it)) }
     }
 
     return AccumulationParResult(

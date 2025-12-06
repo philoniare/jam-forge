@@ -297,12 +297,15 @@ object StateEncoder {
 
     /**
      * Encodes last accumulation outputs.
+     * Sorted by service index, then by hash for deterministic ordering.
      */
-    private fun encodeLastAccumulationOutputs(outputs: Map<Long, JamByteArray>): ByteArray {
-        val sorted = outputs.entries.sortedBy { it.key }
+    private fun encodeLastAccumulationOutputs(outputs: Set<io.forge.jam.safrole.accumulation.Commitment>): ByteArray {
+        val sorted = outputs.sortedWith(
+            compareBy({ it.serviceIndex }, { it.hash.toHex() })
+        )
         val lengthBytes = encodeCompactInteger(sorted.size.toLong())
-        val outputsBytes = sorted.fold(ByteArray(0)) { acc, (serviceId, hash) ->
-            acc + encodeFixedWidthInteger(serviceId, 4, false) + hash.bytes
+        val outputsBytes = sorted.fold(ByteArray(0)) { acc, commitment ->
+            acc + encodeFixedWidthInteger(commitment.serviceIndex, 4, false) + commitment.hash.bytes
         }
         return lengthBytes + outputsBytes
     }

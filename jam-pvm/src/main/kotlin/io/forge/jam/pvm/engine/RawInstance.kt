@@ -110,10 +110,6 @@ class RawInstance(
             return Result.success(ByteArray(0))
         }
 
-        if (address < 0x10000u) {
-            return Result.failure(MemoryAccessError.outOfRangeAccess(address, buffer.size.toULong()))
-        }
-
         if (address.toULong() + buffer.size.toULong() > 0x100000000u) {
             return Result.failure(MemoryAccessError.outOfRangeAccess(address, buffer.size.toULong()))
         }
@@ -140,10 +136,6 @@ class RawInstance(
     fun writeMemory(address: UInt, data: ByteArray, isExternal: Boolean = false): Result<Unit> {
         if (data.isEmpty()) {
             return Result.success(Unit)
-        }
-
-        if (address < 0x10000u) {
-            return Result.failure(MemoryAccessError.outOfRangeAccess(address, data.size.toULong()))
         }
 
         if (address.toULong() + data.size.toULong() > 0x100000000u) {

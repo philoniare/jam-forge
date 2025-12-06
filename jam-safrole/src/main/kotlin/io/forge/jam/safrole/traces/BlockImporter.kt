@@ -519,7 +519,7 @@ class BlockImporter(private val config: ImporterConfig = ImporterConfig()) {
                 preState.rawServiceDataKvs,
                 serviceAccounts,
                 accumulationPost.rawServiceDataByStateKey,
-                accumulationOutput.outputs.keys.map { it.toInt() }.toSet(),
+                accumulationOutput.outputs.map { it.serviceIndex.toInt() }.toSet(),
                 preState.serviceAccounts.map { it.id.toInt() }.toSet(),
                 preimageOutput.rawServiceDataUpdates
             )
