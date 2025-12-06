@@ -73,6 +73,9 @@ abstract class BaseTraceTest {
                 "[$traceName] Invalid slot at block $blockNum"
             )
 
+            // Determine if failure is expected (when pre-state and post-state roots are the same)
+            val expectFailure = step.preState.stateRoot.toHex() == step.postState.stateRoot.toHex()
+
             // Run block import with full STF pipeline
             val result = importer.importBlock(step.block, step.preState)
 
@@ -87,6 +90,11 @@ abstract class BaseTraceTest {
 
             when (result) {
                 is ImportResult.Success -> {
+                    // If we expected failure but got success, that's an error
+                    if (expectFailure) {
+                        fail("[$traceName] Block $blockNum: Expected failure but STF succeeded")
+                    }
+
                     // Compare computed state root with expected
                     val computedStateRoot = result.postState.stateRoot.toHex()
                     val expectedStateRoot = step.postState.stateRoot.toHex()
@@ -114,7 +122,11 @@ abstract class BaseTraceTest {
                     }
                 }
                 is ImportResult.Failure -> {
-                    fail("[$traceName] Block $blockNum import failed: ${result.error} - ${result.message}")
+                    if (!expectFailure) {
+                        fail("[$traceName] Block $blockNum import failed: ${result.error} - ${result.message}")
+                    } else {
+                        println("[$traceName] Block $blockNum: STF failed as expected - ${result.error}")
+                    }
                 }
             }
 
@@ -149,11 +161,19 @@ abstract class BaseTraceTest {
 
         val importer = BlockImporter(config)
 
+        // Determine if failure is expected (when pre-state and post-state roots are the same)
+        val expectFailure = step.preState.stateRoot.toHex() == step.postState.stateRoot.toHex()
+
         // Run block import with full STF pipeline
         val result = importer.importBlock(step.block, step.preState)
 
         when (result) {
             is ImportResult.Success -> {
+                // If we expected failure but got success, that's an error
+                if (expectFailure) {
+                    fail("[$traceName] Block $blockNumber: Expected failure but STF succeeded")
+                }
+
                 // Compare computed state root with expected
                 val computedStateRoot = result.postState.stateRoot.toHex()
                 val expectedStateRoot = step.postState.stateRoot.toHex()
@@ -182,7 +202,11 @@ abstract class BaseTraceTest {
                 println("[$traceName] Block $blockNumber: PASSED")
             }
             is ImportResult.Failure -> {
-                fail("[$traceName] Block $blockNumber import failed: ${result.error} - ${result.message}")
+                if (!expectFailure) {
+                    fail("[$traceName] Block $blockNumber import failed: ${result.error} - ${result.message}")
+                } else {
+                    println("[$traceName] Block $blockNumber: STF failed as expected - ${result.error}")
+                }
             }
         }
     }
