@@ -7,6 +7,7 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib"))
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.5.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     implementation("org.bouncycastle:bcprov-jdk15on:1.70")
     implementation(project(":jam-core"))
     implementation(project(":jam-vrfs"))

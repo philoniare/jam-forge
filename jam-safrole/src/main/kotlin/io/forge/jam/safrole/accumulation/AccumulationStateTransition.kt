@@ -2,6 +2,7 @@ package io.forge.jam.safrole.accumulation
 
 import io.forge.jam.core.JamByteArray
 import io.forge.jam.core.WorkReport
+import kotlinx.coroutines.*
 import org.bouncycastle.jcajce.provider.digest.Keccak
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -566,6 +567,7 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
     /**
      * Execute PVM accumulation for all reports.
      * This is the parallelized accumulation function Δ* from the Gray Paper.
+     * Uses Kotlin coroutines for parallel service execution.
      */
     private fun executeAccumulation(
         partialState: PartialState,
@@ -629,33 +631,57 @@ class AccumulationStateTransition(private val config: AccumulationConfig) {
         // Collect account changes from all services for merging
         val allAccountChanges = AccountChanges()
 
-        // Execute for each service in sorted order
-        // Each service gets a COPY of the initial state
-        for (serviceId in servicesToAccumulate.sorted()) {
-            // Get operands for this service (may be empty for always-accumulate services)
-            val operands = serviceOperands[serviceId] ?: mutableListOf()
+        // Execute services in parallel using coroutines
+        // Each service gets a COPY of the initial state and runs concurrently
+        val sortedServices = servicesToAccumulate.sorted()
+        
+        // Data class to hold results from parallel execution
+        data class ServiceResult(
+            val serviceId: Long,
+            val execResult: AccumulationOneResult,
+            val changes: AccountChanges,
+            val operands: List<AccumulationOperand>,
+            val totalGasLimit: Long
+        )
+        
+        // Run all services in parallel with runBlocking at the entry point
+        val results: List<ServiceResult> = runBlocking(Dispatchers.Default) {
+            sortedServices.map { serviceId ->
+                async {
+                    // Get operands for this service (may be empty for always-accumulate services)
+                    val operands = serviceOperands[serviceId] ?: mutableListOf()
 
-            // Calculate total gas limit for this service batch
-            // Include always-accumulate gas + work item gas + transfer gas
-            val alwaysAccGas = alwaysAccers[serviceId] ?: 0L
-            val workItemGas = operands.filterIsInstance<AccumulationOperand.WorkItem>()
-                .sumOf { it.operand.gasLimit }
-            val transferGas = operands.filterIsInstance<AccumulationOperand.Transfer>()
-                .sumOf { it.transfer.gasLimit }
-            val totalGasLimit = workItemGas + alwaysAccGas + transferGas
-            val serviceInitialState = initialState.deepCopy()
+                    // Calculate total gas limit for this service batch
+                    // Include always-accumulate gas + work item gas + transfer gas
+                    val alwaysAccGas = alwaysAccers[serviceId] ?: 0L
+                    val workItemGas = operands.filterIsInstance<AccumulationOperand.WorkItem>()
+                        .sumOf { it.operand.gasLimit }
+                    val transferGas = operands.filterIsInstance<AccumulationOperand.Transfer>()
+                        .sumOf { it.transfer.gasLimit }
+                    val totalGasLimit = workItemGas + alwaysAccGas + transferGas
+                    val serviceInitialState = initialState.deepCopy()
 
-            val execResult = executor.executeService(
-                partialState = serviceInitialState,
-                timeslot = timeslot,
-                serviceId = serviceId,
-                gasLimit = totalGasLimit,
-                entropy = entropy,
-                operands = operands
-            )
+                    val execResult = executor.executeService(
+                        partialState = serviceInitialState,
+                        timeslot = timeslot,
+                        serviceId = serviceId,
+                        gasLimit = totalGasLimit,
+                        entropy = entropy,
+                        operands = operands
+                    )
 
-            // Compute changes this service made (diff from initial state)
-            val serviceChanges = computeServiceChanges(serviceId, initialState, execResult.postState)
+                    // Compute changes this service made (diff from initial state)
+                    val serviceChanges = computeServiceChanges(serviceId, initialState, execResult.postState)
+                    
+                    ServiceResult(serviceId, execResult, serviceChanges, operands, totalGasLimit)
+                }
+            }.awaitAll()
+        }
+        
+        // Process results sequentially after parallel execution (sorted by service ID for determinism)
+        for (result in results.sortedBy { it.serviceId }) {
+            val (serviceId, execResult, serviceChanges, _, _) = result
+            
             // Merge changes (will throw if conflicts detected)
             allAccountChanges.checkAndMerge(serviceChanges)
 
