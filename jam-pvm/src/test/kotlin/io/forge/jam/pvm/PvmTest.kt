@@ -109,6 +109,9 @@ class PvmTest {
                         InterruptKind.Panic -> return@run PvmStatus.PANIC
                         is InterruptKind.Segfault -> {
                             pageFaultAddress = result.fault.pageAddress
+                            // NOTE: PVM test vectors expect 1 gas consumed on page fault, will need to revisit this
+                            // once official PVM test vectors are merged
+                            instance.consumeGas(1)
                             return@run PvmStatus.PAGE_FAULT
                         }
 

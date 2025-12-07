@@ -85,6 +85,11 @@ class RawInstance(
         backend.access { backend -> backend.gas = gas }
     }
 
+    fun consumeGas(amount: Long) {
+        crosscheckInstance?.let { it.gas -= amount }
+        backend.access { backend -> backend.gas -= amount }
+    }
+
     fun programCounter(): ProgramCounter? = backend.access { backend -> backend.programCounter() }
 
     fun nextProgramCounter(): ProgramCounter? = backend.access { backend -> backend.nextProgramCounter() }

@@ -260,7 +260,6 @@ class Visitor(
 
     /**
      * Handles segmentation faults
-     * Consumes 1 additional gas on page fault
      */
     fun segfaultImpl(programCounter: ProgramCounter, pageAddress: UInt): Target? {
         inner.apply {
