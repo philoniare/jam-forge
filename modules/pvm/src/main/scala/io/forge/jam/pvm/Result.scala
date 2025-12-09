@@ -13,7 +13,7 @@ enum PvmResult[+A]:
   case Segfault(pageAddress: UInt)
   case HostCall(hostCallId: UInt)
   case Finished
-  
+
   def map[B](f: A => B): PvmResult[B] = this match
     case Success(v) => Success(f(v))
     case OutOfGas => OutOfGas
@@ -21,7 +21,7 @@ enum PvmResult[+A]:
     case Segfault(addr) => Segfault(addr)
     case HostCall(id) => HostCall(id)
     case Finished => Finished
-  
+
   def flatMap[B](f: A => PvmResult[B]): PvmResult[B] = this match
     case Success(v) => f(v)
     case OutOfGas => OutOfGas
@@ -29,7 +29,7 @@ enum PvmResult[+A]:
     case Segfault(addr) => Segfault(addr)
     case HostCall(id) => HostCall(id)
     case Finished => Finished
-  
+
   def isSuccess: Boolean = this.isInstanceOf[Success[?]]
   def isError: Boolean = !isSuccess
 
@@ -44,21 +44,21 @@ enum MemoryResult[+A]:
   case Success(value: A)
   case Segfault(address: UInt, pageAddress: UInt)
   case OutOfBounds(address: UInt)
-  
+
   def map[B](f: A => B): MemoryResult[B] = this match
     case Success(v) => Success(f(v))
     case Segfault(a, p) => Segfault(a, p)
     case OutOfBounds(a) => OutOfBounds(a)
-  
+
   def flatMap[B](f: A => MemoryResult[B]): MemoryResult[B] = this match
     case Success(v) => f(v)
     case Segfault(a, p) => Segfault(a, p)
     case OutOfBounds(a) => OutOfBounds(a)
-  
+
   def toEither: Either[String, A] = this match
     case Success(v) => Right(v)
-    case Segfault(a, _) => Left(s"Segfault at address ${a.toHexString}")
-    case OutOfBounds(a) => Left(s"Out of bounds access at ${a.toHexString}")
+    case Segfault(a, _) => Left(f"Segfault at address 0x${a.toLong}%08x")
+    case OutOfBounds(a) => Left(f"Out of bounds access at 0x${a.toLong}%08x")
 
 object MemoryResult:
   def success[A](a: A): MemoryResult[A] = Success(a)

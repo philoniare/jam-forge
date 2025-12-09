@@ -48,3 +48,4 @@ bin/
 
 .editorconfig
 *.md
+*.yml
