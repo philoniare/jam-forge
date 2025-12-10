@@ -4,16 +4,14 @@ import spire.math.UInt
 import io.forge.jam.pvm.types.*
 import io.forge.jam.pvm.InterruptKind
 
+// ============================================================================
+// Focused Traits (Interface Segregation)
+// ============================================================================
+
 /**
- * Execution context trait for instruction execution.
- * This abstracts the VM state access needed by InstructionExecutor
+ * Register access operations.
  */
-trait ExecutionContext:
-
-  // ============================================================================
-  // Register Access
-  // ============================================================================
-
+trait RegisterOps:
   /** Gets the value of a register */
   def getReg(idx: Int): Long
 
@@ -23,10 +21,10 @@ trait ExecutionContext:
   /** Sets a 64-bit value in a register */
   def setReg64(idx: Int, value: Long): Unit
 
-  // ============================================================================
-  // Control Flow
-  // ============================================================================
-
+/**
+ * Control flow operations.
+ */
+trait ControlFlowOps:
   /** Advances to the next instruction (returns compiled offset) */
   def advance(): Option[UInt]
 
@@ -42,10 +40,10 @@ trait ExecutionContext:
   /** Branch helper - jumps to target if condition is true, otherwise continues to nextPc */
   def branch(condition: Boolean, pc: ProgramCounter, target: Int, nextPc: ProgramCounter): Option[UInt]
 
-  // ============================================================================
-  // Interrupts
-  // ============================================================================
-
+/**
+ * Interrupt signaling operations.
+ */
+trait InterruptOps:
   /** Triggers a panic interrupt */
   def panic(pc: ProgramCounter): Option[UInt]
 
@@ -61,10 +59,10 @@ trait ExecutionContext:
   /** Triggers a segfault interrupt */
   def segfault(pc: ProgramCounter, pageAddress: UInt): Option[UInt]
 
-  // ============================================================================
-  // Memory Operations
-  // ============================================================================
-
+/**
+ * Memory load operations.
+ */
+trait MemoryLoadOps:
   def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt]
   def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt]
   def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt]
@@ -73,6 +71,10 @@ trait ExecutionContext:
   def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt]
   def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt]
 
+/**
+ * Memory store operations.
+ */
+trait MemoryStoreOps:
   def storeU8(pc: ProgramCounter, src: Int, address: UInt): Option[UInt]
   def storeU16(pc: ProgramCounter, src: Int, address: UInt): Option[UInt]
   def storeU32(pc: ProgramCounter, src: Int, address: UInt): Option[UInt]
@@ -83,12 +85,28 @@ trait ExecutionContext:
   def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Option[UInt]
   def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Option[UInt]
 
-  // ============================================================================
-  // Heap Operations
-  // ============================================================================
+/**
+ * Combined memory operations.
+ */
+trait MemoryOps extends MemoryLoadOps, MemoryStoreOps
 
+/**
+ * Heap operations (sbrk syscall).
+ */
+trait HeapOps:
   /** Extends the heap (sbrk syscall) */
   def sbrk(dst: Int, size: UInt): Option[UInt]
+
+// ============================================================================
+// Combined ExecutionContext
+// ============================================================================
+
+/**
+ * Full execution context combining all operation traits.
+ * This is the main trait that instruction executors use.
+ */
+trait ExecutionContext
+    extends RegisterOps, ControlFlowOps, InterruptOps, MemoryOps, HeapOps:
 
   // ============================================================================
   // Helper Operations (with default implementations)

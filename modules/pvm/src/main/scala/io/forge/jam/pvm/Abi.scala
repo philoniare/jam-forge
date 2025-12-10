@@ -40,6 +40,12 @@ object Abi:
  * PVM standard constants from Gray Paper.
  */
 object PvmConstants:
+  /** Number of general-purpose registers (RA through R12) */
+  val NumGeneralRegisters: Int = 13
+
+  /** Maximum instruction size in bytes */
+  val MaxInstructionSize: Int = 24
+
   /** ZP = 2^12: Page size (4 KB) */
   val ZP: UInt = UInt(4096)
   
