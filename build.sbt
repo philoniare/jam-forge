@@ -15,7 +15,9 @@ lazy val core = (project in file("modules/core"))
         libraryDependencies ++= Seq(
             "org.typelevel" %% "spire" % "0.18.0",
             "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
-            "org.scalatest" %% "scalatest" % "3.2.17" % Test
+            "org.scalatest" %% "scalatest" % "3.2.17" % Test,
+            "io.circe" %% "circe-core" % "0.14.6" % Test,
+            "io.circe" %% "circe-parser" % "0.14.6" % Test
         ),
         scalacOptions ++= Seq(
             "-deprecation",

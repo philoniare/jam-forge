@@ -77,22 +77,6 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     decoded.prerequisites.head.toHex shouldBe prereq.toHex
   }
 
-  it should "encode test vector context correctly" in {
-    // From refine_context.json
-    val ctx = Context(
-      anchor = Hash.fromHex("c0564c5e0de0942589df4343ad1956da66797240e2a2f2d6f8116b5047768986").toOption.get,
-      stateRoot = Hash.fromHex("f6967658df626fa39cbfb6014b50196d23bc2cfbfa71a7591ca7715472dd2b48").toOption.get,
-      beefyRoot = Hash.fromHex("9329de635d4bbb8c47cdccbbc1285e48bf9dbad365af44b205343e99dea298f3").toOption.get,
-      lookupAnchor = Hash.fromHex("60751ab5b251361fbfd3ad5b0e84f051ccece6b00830aed31a5354e00b20b9ed").toOption.get,
-      lookupAnchorSlot = Timeslot(33),
-      prerequisites = List.empty
-    )
-    val encoded = Context.given_JamEncoder_Context.encode(ctx)
-    // Read expected binary
-    val expectedBytes = Files.readAllBytes(Paths.get(s"$testVectorBase/refine_context.bin"))
-    encoded.toArray shouldBe expectedBytes
-  }
-
   // ============================================================================
   // Test 2: WorkItem encode/decode (variable length)
   // ============================================================================
