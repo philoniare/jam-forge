@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
 import spire.math.{UShort, UInt}
 
@@ -26,14 +26,14 @@ object workitem:
       def encode(a: WorkItemImportSegment): JamBytes =
         val builder = JamBytes.newBuilder
         builder ++= a.treeRoot.bytes
-        builder ++= encoding.encodeU16LE(a.index)
+        builder ++= codec.encodeU16LE(a.index)
         builder.result()
 
     given JamDecoder[WorkItemImportSegment] with
       def decode(bytes: JamBytes, offset: Int): (WorkItemImportSegment, Int) =
         val arr = bytes.toArray
         val treeRoot = Hash(arr.slice(offset, offset + Hash.Size))
-        val index = encoding.decodeU16LE(arr, offset + Hash.Size)
+        val index = codec.decodeU16LE(arr, offset + Hash.Size)
         (WorkItemImportSegment(treeRoot, index), Size)
 
   /**
@@ -52,14 +52,14 @@ object workitem:
       def encode(a: WorkItemExtrinsic): JamBytes =
         val builder = JamBytes.newBuilder
         builder ++= a.hash.bytes
-        builder ++= encoding.encodeU32LE(a.len)
+        builder ++= codec.encodeU32LE(a.len)
         builder.result()
 
     given JamDecoder[WorkItemExtrinsic] with
       def decode(bytes: JamBytes, offset: Int): (WorkItemExtrinsic, Int) =
         val arr = bytes.toArray
         val hash = Hash(arr.slice(offset, offset + Hash.Size))
-        val len = encoding.decodeU32LE(arr, offset + Hash.Size)
+        val len = codec.decodeU32LE(arr, offset + Hash.Size)
         (WorkItemExtrinsic(hash, len), Size)
 
   /**
@@ -91,26 +91,26 @@ object workitem:
       def encode(a: WorkItem): JamBytes =
         val builder = JamBytes.newBuilder
         // service - 4 bytes
-        builder ++= encoding.encodeU32LE(a.service.value)
+        builder ++= codec.encodeU32LE(a.service.value)
         // codeHash - 32 bytes
         builder ++= a.codeHash.bytes
         // refineGasLimit - 8 bytes
-        builder ++= encoding.encodeU64LE(a.refineGasLimit.value)
+        builder ++= codec.encodeU64LE(a.refineGasLimit.value)
         // accumulateGasLimit - 8 bytes
-        builder ++= encoding.encodeU64LE(a.accumulateGasLimit.value)
+        builder ++= codec.encodeU64LE(a.accumulateGasLimit.value)
         // exportCount - 2 bytes
-        builder ++= encoding.encodeU16LE(a.exportCount)
+        builder ++= codec.encodeU16LE(a.exportCount)
         // payload - compact length prefix + bytes
-        builder ++= encoding.encodeCompactInteger(a.payload.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.payload.length.toLong)
         builder ++= a.payload
         // importSegments - compact length prefix + fixed-size items
-        builder ++= encoding.encodeCompactInteger(a.importSegments.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.importSegments.length.toLong)
         for segment <- a.importSegments do
-          builder ++= WorkItemImportSegment.given_JamEncoder_WorkItemImportSegment.encode(segment)
+          builder ++= segment.encode
         // extrinsic - compact length prefix + fixed-size items
-        builder ++= encoding.encodeCompactInteger(a.extrinsic.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.extrinsic.length.toLong)
         for ext <- a.extrinsic do
-          builder ++= WorkItemExtrinsic.given_JamEncoder_WorkItemExtrinsic.encode(ext)
+          builder ++= ext.encode
         builder.result()
 
     given JamDecoder[WorkItem] with
@@ -119,7 +119,7 @@ object workitem:
         var pos = offset
 
         // service - 4 bytes
-        val service = ServiceId(encoding.decodeU32LE(arr, pos))
+        val service = ServiceId(codec.decodeU32LE(arr, pos))
         pos += 4
 
         // codeHash - 32 bytes
@@ -127,25 +127,25 @@ object workitem:
         pos += Hash.Size
 
         // refineGasLimit - 8 bytes
-        val refineGasLimit = Gas(encoding.decodeU64LE(arr, pos))
+        val refineGasLimit = Gas(codec.decodeU64LE(arr, pos))
         pos += 8
 
         // accumulateGasLimit - 8 bytes
-        val accumulateGasLimit = Gas(encoding.decodeU64LE(arr, pos))
+        val accumulateGasLimit = Gas(codec.decodeU64LE(arr, pos))
         pos += 8
 
         // exportCount - 2 bytes
-        val exportCount = encoding.decodeU16LE(arr, pos)
+        val exportCount = codec.decodeU16LE(arr, pos)
         pos += 2
 
         // payload - compact length prefix + bytes
-        val (payloadLength, payloadLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (payloadLength, payloadLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += payloadLengthBytes
         val payload = bytes.slice(pos, pos + payloadLength.toInt)
         pos += payloadLength.toInt
 
         // importSegments - compact length prefix + fixed-size items
-        val (segmentsLength, segmentsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (segmentsLength, segmentsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += segmentsLengthBytes
         val importSegments = (0 until segmentsLength.toInt).map { _ =>
           val (segment, consumed) = WorkItemImportSegment.given_JamDecoder_WorkItemImportSegment.decode(bytes, pos)
@@ -154,7 +154,7 @@ object workitem:
         }.toList
 
         // extrinsic - compact length prefix + fixed-size items
-        val (extrinsicLength, extrinsicLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (extrinsicLength, extrinsicLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += extrinsicLengthBytes
         val extrinsic = (0 until extrinsicLength.toInt).map { _ =>
           val (ext, consumed) = WorkItemExtrinsic.given_JamDecoder_WorkItemExtrinsic.decode(bytes, pos)

@@ -159,7 +159,7 @@ final class JamBytesList private (private val items: ArrayBuffer[JamBytes]) exte
    */
   def encode(): Array[Byte] =
     val builder = JamBytes.newBuilder
-    builder ++= encoding.encodeCompactInteger(size)
+    builder ++= codec.encodeCompactInteger(size)
     items.foreach(item => builder ++= item.toArray)
     builder.result().toArray
   
@@ -221,7 +221,7 @@ object JamBytesList:
    */
   def fromBytes(data: Array[Byte], offset: Int = 0, itemSize: Int = 32): (JamBytesList, Int) =
     var currentOffset = offset
-    val (length, lengthBytes) = encoding.decodeCompactInteger(data, currentOffset)
+    val (length, lengthBytes) = codec.decodeCompactInteger(data, currentOffset)
     currentOffset += lengthBytes
     
     val list = JamBytesList.empty
@@ -246,7 +246,7 @@ object JamBytesList:
     decoder: (Array[Byte], Int) => (JamBytes, Int)
   ): (JamBytesList, Int) =
     var currentOffset = offset
-    val (length, lengthBytes) = encoding.decodeCompactInteger(data, currentOffset)
+    val (length, lengthBytes) = codec.decodeCompactInteger(data, currentOffset)
     currentOffset += lengthBytes
     
     val list = JamBytesList.empty

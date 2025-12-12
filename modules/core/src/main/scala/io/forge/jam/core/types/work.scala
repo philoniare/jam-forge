@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
+import io.forge.jam.core.{JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519Signature}
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 import spire.math.{UByte, UShort, UInt}
 
 /**
@@ -29,21 +31,37 @@ object work:
       def encode(a: PackageSpec): JamBytes =
         val builder = JamBytes.newBuilder
         builder ++= a.hash.bytes
-        builder ++= encoding.encodeU32LE(a.length)
+        builder ++= codec.encodeU32LE(a.length)
         builder ++= a.erasureRoot.bytes
         builder ++= a.exportsRoot.bytes
-        builder ++= encoding.encodeU16LE(a.exportsCount)
+        builder ++= codec.encodeU16LE(a.exportsCount)
         builder.result()
 
     given JamDecoder[PackageSpec] with
       def decode(bytes: JamBytes, offset: Int): (PackageSpec, Int) =
         val arr = bytes.toArray
         val hash = Hash(arr.slice(offset, offset + Hash.Size))
-        val length = encoding.decodeU32LE(arr, offset + Hash.Size)
+        val length = codec.decodeU32LE(arr, offset + Hash.Size)
         val erasureRoot = Hash(arr.slice(offset + 36, offset + 68))
         val exportsRoot = Hash(arr.slice(offset + 68, offset + 100))
-        val exportsCount = encoding.decodeU16LE(arr, offset + 100)
+        val exportsCount = codec.decodeU16LE(arr, offset + 100)
         (PackageSpec(hash, length, erasureRoot, exportsRoot, exportsCount), Size)
+
+    given Decoder[PackageSpec] = Decoder.instance { cursor =>
+      for
+        hash <- cursor.get[String]("hash")
+        length <- cursor.get[Long]("length")
+        erasureRoot <- cursor.get[String]("erasure_root")
+        exportsRoot <- cursor.get[String]("exports_root")
+        exportsCount <- cursor.get[Int]("exports_count")
+      yield PackageSpec(
+        Hash(parseHex(hash)),
+        UInt(length.toInt),
+        Hash(parseHex(erasureRoot)),
+        Hash(parseHex(exportsRoot)),
+        UShort(exportsCount)
+      )
+    }
 
   /**
    * Execution result - either Ok with output data or Panic.
@@ -65,7 +83,7 @@ object work:
         case ExecutionResult.Ok(output) =>
           val builder = JamBytes.newBuilder
           builder += OkTag
-          builder ++= encoding.encodeCompactInteger(output.length.toLong)
+          builder ++= codec.encodeCompactInteger(output.length.toLong)
           builder ++= output
           builder.result()
         case ExecutionResult.Panic =>
@@ -76,7 +94,7 @@ object work:
         val tag = bytes.signedAt(offset)
         tag match
           case OkTag =>
-            val (length, lengthBytes) = encoding.decodeCompactInteger(bytes.toArray, offset + 1)
+            val (length, lengthBytes) = codec.decodeCompactInteger(bytes.toArray, offset + 1)
             val output = bytes.slice(offset + 1 + lengthBytes, offset + 1 + lengthBytes + length.toInt)
             (ExecutionResult.Ok(output), 1 + lengthBytes + length.toInt)
           case PanicTag =>
@@ -84,6 +102,17 @@ object work:
           case _ =>
             // Unknown tag, treat as Panic for robustness
             (ExecutionResult.Panic, 1)
+
+    given Decoder[ExecutionResult] = Decoder.instance { cursor =>
+      val ok = cursor.get[String]("ok").toOption
+      val err = cursor.get[Int]("err").toOption
+      Right(ok match
+        case Some(data) => ExecutionResult.Ok(JamBytes(parseHex(data)))
+        case None => err match
+          case Some(_) => ExecutionResult.Panic
+          case None => ExecutionResult.Ok(JamBytes.empty)
+      )
+    }
 
   /**
    * A vote containing validator index and Ed25519 signature.
@@ -102,7 +131,7 @@ object work:
       def encode(a: Vote): JamBytes =
         val builder = JamBytes.newBuilder
         builder += (if a.vote then 1.toByte else 0.toByte)
-        builder ++= encoding.encodeU16LE(a.validatorIndex.value)
+        builder ++= codec.encodeU16LE(a.validatorIndex.value)
         builder ++= a.signature.bytes
         builder.result()
 
@@ -110,6 +139,14 @@ object work:
       def decode(bytes: JamBytes, offset: Int): (Vote, Int) =
         val arr = bytes.toArray
         val vote = arr(offset) != 0
-        val validatorIndex = ValidatorIndex(encoding.decodeU16LE(arr, offset + 1))
+        val validatorIndex = ValidatorIndex(codec.decodeU16LE(arr, offset + 1))
         val signature = Ed25519Signature(arr.slice(offset + 3, offset + 3 + Ed25519Signature.Size))
         (Vote(vote, validatorIndex, signature), Size)
+
+    given Decoder[Vote] = Decoder.instance { cursor =>
+      for
+        vote <- cursor.get[Boolean]("vote")
+        validatorIndex <- cursor.get[Int]("validator_index")
+        signature <- cursor.get[String]("signature")
+      yield Vote(vote, ValidatorIndex(validatorIndex), Ed25519Signature(parseHex(signature)))
+    }

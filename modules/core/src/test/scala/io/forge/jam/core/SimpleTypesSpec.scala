@@ -4,6 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UByte, UShort, UInt}
 import codec.*
+import codec.encode
 import primitives.*
 import types.tickets.*
 import types.epoch.*
@@ -19,7 +20,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "TicketEnvelope" should "encode to exactly 785 bytes" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x42.toByte)
     val envelope = TicketEnvelope(UByte(3), signature)
-    val encoded = TicketEnvelope.given_JamEncoder_TicketEnvelope.encode(envelope)
+    val encoded = envelope.encode
     encoded.length shouldBe TicketEnvelope.Size
     encoded.length shouldBe 785
   }
@@ -27,14 +28,14 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "encode attempt as first byte" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x00.toByte)
     val envelope = TicketEnvelope(UByte(42), signature)
-    val encoded = TicketEnvelope.given_JamEncoder_TicketEnvelope.encode(envelope)
+    val encoded = envelope.encode
     encoded(0) shouldBe UByte(42)
   }
 
   it should "round-trip correctly" in {
     val signature = JamBytes.fromHexUnsafe("ab" * RingVrfSignatureSize)
     val envelope = TicketEnvelope(UByte(7), signature)
-    val encoded = TicketEnvelope.given_JamEncoder_TicketEnvelope.encode(envelope)
+    val encoded = envelope.encode
     val (decoded, consumed) = TicketEnvelope.given_JamDecoder_TicketEnvelope.decode(encoded, 0)
     consumed shouldBe TicketEnvelope.Size
     decoded.attempt shouldBe envelope.attempt
@@ -48,7 +49,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "TicketMark" should "encode to exactly 33 bytes" in {
     val id = JamBytes.fill(32)(0xAB.toByte)
     val mark = TicketMark(id, UByte(5))
-    val encoded = TicketMark.given_JamEncoder_TicketMark.encode(mark)
+    val encoded = mark.encode
     encoded.length shouldBe TicketMark.Size
     encoded.length shouldBe 33
   }
@@ -56,7 +57,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "encode id first, then attempt" in {
     val id = JamBytes.fill(32)(0xFF.toByte)
     val mark = TicketMark(id, UByte(1))
-    val encoded = TicketMark.given_JamEncoder_TicketMark.encode(mark)
+    val encoded = mark.encode
     // First 32 bytes should be the id
     encoded.slice(0, 32) shouldBe id
     // Last byte should be the attempt
@@ -66,7 +67,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "round-trip correctly" in {
     val id = JamBytes.fromHexUnsafe("deadbeef" * 8) // 32 bytes
     val mark = TicketMark(id, UByte(255))
-    val encoded = TicketMark.given_JamEncoder_TicketMark.encode(mark)
+    val encoded = mark.encode
     val (decoded, consumed) = TicketMark.given_JamDecoder_TicketMark.decode(encoded, 0)
     consumed shouldBe TicketMark.Size
     decoded.id shouldBe mark.id
@@ -82,7 +83,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val erasureRoot = Hash(Array.fill(32)(0x22.toByte))
     val exportsRoot = Hash(Array.fill(32)(0x33.toByte))
     val spec = PackageSpec(hash, UInt(1000), erasureRoot, exportsRoot, UShort(10))
-    val encoded = PackageSpec.given_JamEncoder_PackageSpec.encode(spec)
+    val encoded = spec.encode
     encoded.length shouldBe PackageSpec.Size
     encoded.length shouldBe 102
   }
@@ -92,7 +93,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val erasureRoot = Hash.zero
     val exportsRoot = Hash.zero
     val spec = PackageSpec(hash, UInt(0x12345678), erasureRoot, exportsRoot, UShort(0))
-    val encoded = PackageSpec.given_JamEncoder_PackageSpec.encode(spec)
+    val encoded = spec.encode
     // Length is at offset 32, 4 bytes little-endian
     encoded(32) shouldBe UByte(0x78)
     encoded(33) shouldBe UByte(0x56)
@@ -105,7 +106,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val erasureRoot = Hash(Array.tabulate(32)(i => (i + 32).toByte))
     val exportsRoot = Hash(Array.tabulate(32)(i => (i + 64).toByte))
     val spec = PackageSpec(hash, UInt(999999), erasureRoot, exportsRoot, UShort(65535))
-    val encoded = PackageSpec.given_JamEncoder_PackageSpec.encode(spec)
+    val encoded = spec.encode
     val (decoded, consumed) = PackageSpec.given_JamDecoder_PackageSpec.decode(encoded, 0)
     consumed shouldBe PackageSpec.Size
     decoded.hash.toHex shouldBe spec.hash.toHex
@@ -123,7 +124,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val bandersnatch = BandersnatchPublicKey(Array.fill(32)(0xAA.toByte))
     val ed25519 = Ed25519PublicKey(Array.fill(32)(0xBB.toByte))
     val key = EpochValidatorKey(bandersnatch, ed25519)
-    val encoded = EpochValidatorKey.given_JamEncoder_EpochValidatorKey.encode(key)
+    val encoded = key.encode
     encoded.length shouldBe EpochValidatorKey.Size
     encoded.length shouldBe 64
   }
@@ -132,7 +133,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val bandersnatch = BandersnatchPublicKey(Array.fill(32)(0x11.toByte))
     val ed25519 = Ed25519PublicKey(Array.fill(32)(0x22.toByte))
     val key = EpochValidatorKey(bandersnatch, ed25519)
-    val encoded = EpochValidatorKey.given_JamEncoder_EpochValidatorKey.encode(key)
+    val encoded = key.encode
     // First 32 bytes should be bandersnatch
     encoded.slice(0, 32).toArray.forall(_ == 0x11.toByte) shouldBe true
     // Next 32 bytes should be ed25519
@@ -143,7 +144,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val bandersnatch = BandersnatchPublicKey(Array.tabulate(32)(i => i.toByte))
     val ed25519 = Ed25519PublicKey(Array.tabulate(32)(i => (i + 100).toByte))
     val key = EpochValidatorKey(bandersnatch, ed25519)
-    val encoded = EpochValidatorKey.given_JamEncoder_EpochValidatorKey.encode(key)
+    val encoded = key.encode
     val (decoded, consumed) = EpochValidatorKey.given_JamDecoder_EpochValidatorKey.decode(encoded, 0)
     consumed shouldBe EpochValidatorKey.Size
     decoded.bandersnatch.bytes.toSeq shouldBe key.bandersnatch.bytes.toSeq
@@ -157,7 +158,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "Vote" should "encode to exactly 67 bytes" in {
     val signature = Ed25519Signature(Array.fill(64)(0xCC.toByte))
     val vote = Vote(true, ValidatorIndex(100), signature)
-    val encoded = Vote.given_JamEncoder_Vote.encode(vote)
+    val encoded = vote.encode
     encoded.length shouldBe Vote.Size
     encoded.length shouldBe 67
   }
@@ -166,8 +167,8 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val signature = Ed25519Signature(Array.fill(64)(0x00.toByte))
     val voteTrue = Vote(true, ValidatorIndex(0), signature)
     val voteFalse = Vote(false, ValidatorIndex(0), signature)
-    val encodedTrue = Vote.given_JamEncoder_Vote.encode(voteTrue)
-    val encodedFalse = Vote.given_JamEncoder_Vote.encode(voteFalse)
+    val encodedTrue = voteTrue.encode
+    val encodedFalse = voteFalse.encode
     encodedTrue(0) shouldBe UByte(1)
     encodedFalse(0) shouldBe UByte(0)
   }
@@ -175,7 +176,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "encode validator index as 2-byte little-endian at offset 1" in {
     val signature = Ed25519Signature(Array.fill(64)(0x00.toByte))
     val vote = Vote(false, ValidatorIndex(0x1234), signature)
-    val encoded = Vote.given_JamEncoder_Vote.encode(vote)
+    val encoded = vote.encode
     encoded(1) shouldBe UByte(0x34)
     encoded(2) shouldBe UByte(0x12)
   }
@@ -183,7 +184,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "round-trip correctly" in {
     val signature = Ed25519Signature(Array.tabulate(64)(i => i.toByte))
     val vote = Vote(true, ValidatorIndex(999), signature)
-    val encoded = Vote.given_JamEncoder_Vote.encode(vote)
+    val encoded = vote.encode
     val (decoded, consumed) = Vote.given_JamDecoder_Vote.decode(encoded, 0)
     consumed shouldBe Vote.Size
     decoded.vote shouldBe vote.vote
@@ -198,7 +199,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "ExecutionResult.Ok" should "encode with 0x00 tag followed by compact length and data" in {
     val output = JamBytes(Array[Byte](1, 2, 3, 4, 5))
     val result = ExecutionResult.Ok(output)
-    val encoded = ExecutionResult.given_JamEncoder_ExecutionResult.encode(result)
+    val encoded = result.encode
     encoded(0) shouldBe UByte(0x00)
     // Compact length of 5 is just 5
     encoded(1) shouldBe UByte(5)
@@ -207,7 +208,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
 
   "ExecutionResult.Panic" should "encode as single 0x02 byte" in {
     val result = ExecutionResult.Panic
-    val encoded = ExecutionResult.given_JamEncoder_ExecutionResult.encode(result)
+    val encoded = result.encode
     encoded.length shouldBe 1
     encoded(0) shouldBe UByte(0x02)
   }
@@ -215,7 +216,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "ExecutionResult" should "round-trip Ok correctly" in {
     val output = JamBytes.fill(100)(0xAB.toByte)
     val result = ExecutionResult.Ok(output)
-    val encoded = ExecutionResult.given_JamEncoder_ExecutionResult.encode(result)
+    val encoded = result.encode
     val (decoded, consumed) = ExecutionResult.given_JamDecoder_ExecutionResult.decode(encoded, 0)
     decoded match
       case ExecutionResult.Ok(decodedOutput) =>
@@ -227,7 +228,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
 
   it should "round-trip Panic correctly" in {
     val result = ExecutionResult.Panic
-    val encoded = ExecutionResult.given_JamEncoder_ExecutionResult.encode(result)
+    val encoded = result.encode
     val (decoded, consumed) = ExecutionResult.given_JamDecoder_ExecutionResult.decode(encoded, 0)
     decoded shouldBe ExecutionResult.Panic
     consumed shouldBe 1
@@ -242,7 +243,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val key = Ed25519PublicKey(Array.fill(32)(0x22.toByte))
     val signature = Ed25519Signature(Array.fill(64)(0x33.toByte))
     val culprit = Culprit(target, key, signature)
-    val encoded = Culprit.given_JamEncoder_Culprit.encode(culprit)
+    val encoded = culprit.encode
     encoded.length shouldBe Culprit.Size
     encoded.length shouldBe 128
   }
@@ -252,7 +253,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val key = Ed25519PublicKey(Array.tabulate(32)(i => (i + 50).toByte))
     val signature = Ed25519Signature(Array.tabulate(64)(i => (i + 100).toByte))
     val culprit = Culprit(target, key, signature)
-    val encoded = Culprit.given_JamEncoder_Culprit.encode(culprit)
+    val encoded = culprit.encode
     val (decoded, consumed) = Culprit.given_JamDecoder_Culprit.decode(encoded, 0)
     consumed shouldBe Culprit.Size
     decoded.target.toHex shouldBe culprit.target.toHex
@@ -269,7 +270,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val key = Ed25519PublicKey(Array.fill(32)(0x55.toByte))
     val signature = Ed25519Signature(Array.fill(64)(0x66.toByte))
     val fault = Fault(target, true, key, signature)
-    val encoded = Fault.given_JamEncoder_Fault.encode(fault)
+    val encoded = fault.encode
     encoded.length shouldBe Fault.Size
     encoded.length shouldBe 129
   }
@@ -280,8 +281,8 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val signature = Ed25519Signature(Array.fill(64)(0x00.toByte))
     val faultTrue = Fault(target, true, key, signature)
     val faultFalse = Fault(target, false, key, signature)
-    val encodedTrue = Fault.given_JamEncoder_Fault.encode(faultTrue)
-    val encodedFalse = Fault.given_JamEncoder_Fault.encode(faultFalse)
+    val encodedTrue = faultTrue.encode
+    val encodedFalse = faultFalse.encode
     encodedTrue(32) shouldBe UByte(1)
     encodedFalse(32) shouldBe UByte(0)
   }
@@ -291,7 +292,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val key = Ed25519PublicKey(Array.tabulate(32)(i => (i * 3).toByte))
     val signature = Ed25519Signature(Array.tabulate(64)(i => (i * 4).toByte))
     val fault = Fault(target, false, key, signature)
-    val encoded = Fault.given_JamEncoder_Fault.encode(fault)
+    val encoded = fault.encode
     val (decoded, consumed) = Fault.given_JamDecoder_Fault.decode(encoded, 0)
     consumed shouldBe Fault.Size
     decoded.target.toHex shouldBe fault.target.toHex
@@ -307,7 +308,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   "GuaranteeSignature" should "encode to exactly 66 bytes" in {
     val signature = Ed25519Signature(Array.fill(64)(0x77.toByte))
     val gs = GuaranteeSignature(ValidatorIndex(42), signature)
-    val encoded = GuaranteeSignature.given_JamEncoder_GuaranteeSignature.encode(gs)
+    val encoded = gs.encode
     encoded.length shouldBe GuaranteeSignature.Size
     encoded.length shouldBe 66
   }
@@ -315,7 +316,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "encode validator index as 2-byte little-endian first" in {
     val signature = Ed25519Signature(Array.fill(64)(0x00.toByte))
     val gs = GuaranteeSignature(ValidatorIndex(0xABCD), signature)
-    val encoded = GuaranteeSignature.given_JamEncoder_GuaranteeSignature.encode(gs)
+    val encoded = gs.encode
     encoded(0) shouldBe UByte(0xCD)
     encoded(1) shouldBe UByte(0xAB)
   }
@@ -323,7 +324,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   it should "round-trip correctly" in {
     val signature = Ed25519Signature(Array.tabulate(64)(i => (i + 200).toByte))
     val gs = GuaranteeSignature(ValidatorIndex(1022), signature)
-    val encoded = GuaranteeSignature.given_JamEncoder_GuaranteeSignature.encode(gs)
+    val encoded = gs.encode
     val (decoded, consumed) = GuaranteeSignature.given_JamDecoder_GuaranteeSignature.decode(encoded, 0)
     consumed shouldBe GuaranteeSignature.Size
     decoded.validatorIndex.toInt shouldBe gs.validatorIndex.toInt
@@ -344,7 +345,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
       )
     }.toList
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
-    val encoded = EpochMark.given_JamEncoder_EpochMark.encode(epochMark)
+    val encoded = epochMark.encode
     encoded.length shouldBe EpochMark.size(6)
     encoded.length shouldBe (32 + 32 + 6 * 64) // 448 bytes
   }
@@ -359,7 +360,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
       )
     }.toList
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
-    val encoded = EpochMark.given_JamEncoder_EpochMark.encode(epochMark)
+    val encoded = epochMark.encode
     val (decoded, consumed) = EpochMark.decoder(3).decode(encoded, 0)
     consumed shouldBe EpochMark.size(3)
     decoded.entropy.toHex shouldBe epochMark.entropy.toHex

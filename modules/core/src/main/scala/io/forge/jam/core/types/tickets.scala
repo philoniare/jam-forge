@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
+import io.forge.jam.core.{JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 import spire.math.UByte
 
 /**
@@ -29,15 +31,22 @@ object tickets:
     given JamEncoder[TicketEnvelope] with
       def encode(a: TicketEnvelope): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeU8(a.attempt)
+        builder ++= codec.encodeU8(a.attempt)
         builder ++= a.signature
         builder.result()
 
     given JamDecoder[TicketEnvelope] with
       def decode(bytes: JamBytes, offset: Int): (TicketEnvelope, Int) =
-        val attempt = encoding.decodeU8(bytes.toArray, offset)
+        val attempt = codec.decodeU8(bytes.toArray, offset)
         val signature = bytes.slice(offset + 1, offset + 1 + RingVrfSignatureSize)
         (TicketEnvelope(attempt, signature), Size)
+
+    given Decoder[TicketEnvelope] = Decoder.instance { cursor =>
+      for
+        attempt <- cursor.get[Int]("attempt")
+        signature <- cursor.get[String]("signature")
+      yield TicketEnvelope(UByte(attempt), JamBytes(parseHex(signature)))
+    }
 
   /**
    * A ticket mark identifying a ticket by its ID and attempt index.
@@ -57,11 +66,11 @@ object tickets:
       def encode(a: TicketMark): JamBytes =
         val builder = JamBytes.newBuilder
         builder ++= a.id
-        builder ++= encoding.encodeU8(a.attempt)
+        builder ++= codec.encodeU8(a.attempt)
         builder.result()
 
     given JamDecoder[TicketMark] with
       def decode(bytes: JamBytes, offset: Int): (TicketMark, Int) =
         val id = bytes.slice(offset, offset + Hash.Size)
-        val attempt = encoding.decodeU8(bytes.toArray, offset + Hash.Size)
+        val attempt = codec.decodeU8(bytes.toArray, offset + Hash.Size)
         (TicketMark(id, attempt), Size)

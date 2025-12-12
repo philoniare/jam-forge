@@ -1,12 +1,14 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.primitives.{Hash, ServiceId, CoreIndex, Gas}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workresult.WorkResult
 import io.forge.jam.core.types.work.PackageSpec
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 import spire.math.UInt
 
 /**
@@ -37,6 +39,13 @@ object workpackage:
         val segmentTreeRoot = Hash(arr.slice(offset + Hash.Size, offset + Size))
         (SegmentRootLookup(workPackageHash, segmentTreeRoot), Size)
 
+    given Decoder[SegmentRootLookup] = Decoder.instance { cursor =>
+      for
+        workPackageHash <- cursor.get[String]("work_package_hash")
+        segmentTreeRoot <- cursor.get[String]("segment_tree_root")
+      yield SegmentRootLookup(Hash(parseHex(workPackageHash)), Hash(parseHex(segmentTreeRoot)))
+    }
+
   /**
    * A work package containing authorization and work items.
    *
@@ -62,21 +71,21 @@ object workpackage:
       def encode(a: WorkPackage): JamBytes =
         val builder = JamBytes.newBuilder
         // authCodeHost - 4 bytes
-        builder ++= encoding.encodeU32LE(a.authCodeHost.value)
+        builder ++= codec.encodeU32LE(a.authCodeHost.value)
         // authCodeHash - 32 bytes
         builder ++= a.authCodeHash.bytes
         // context - variable size
-        builder ++= Context.given_JamEncoder_Context.encode(a.context)
+        builder ++= a.context.encode
         // authorization - compact length prefix + bytes
-        builder ++= encoding.encodeCompactInteger(a.authorization.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.authorization.length.toLong)
         builder ++= a.authorization
         // authorizerConfig - compact length prefix + bytes
-        builder ++= encoding.encodeCompactInteger(a.authorizerConfig.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.authorizerConfig.length.toLong)
         builder ++= a.authorizerConfig
         // items - compact length prefix + variable-size items
-        builder ++= encoding.encodeCompactInteger(a.items.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.items.length.toLong)
         for item <- a.items do
-          builder ++= WorkItem.given_JamEncoder_WorkItem.encode(item)
+          builder ++= item.encode
         builder.result()
 
     given JamDecoder[WorkPackage] with
@@ -85,7 +94,7 @@ object workpackage:
         var pos = offset
 
         // authCodeHost - 4 bytes
-        val authCodeHost = ServiceId(encoding.decodeU32LE(arr, pos))
+        val authCodeHost = ServiceId(codec.decodeU32LE(arr, pos))
         pos += 4
 
         // authCodeHash - 32 bytes
@@ -97,19 +106,19 @@ object workpackage:
         pos += contextBytes
 
         // authorization - compact length prefix + bytes
-        val (authorizationLength, authorizationLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (authorizationLength, authorizationLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authorizationLengthBytes
         val authorization = bytes.slice(pos, pos + authorizationLength.toInt)
         pos += authorizationLength.toInt
 
         // authorizerConfig - compact length prefix + bytes
-        val (authorizerConfigLength, authorizerConfigLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (authorizerConfigLength, authorizerConfigLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authorizerConfigLengthBytes
         val authorizerConfig = bytes.slice(pos, pos + authorizerConfigLength.toInt)
         pos += authorizerConfigLength.toInt
 
         // items - compact length prefix + variable-size items
-        val (itemsLength, itemsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (itemsLength, itemsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += itemsLengthBytes
         val items = (0 until itemsLength.toInt).map { _ =>
           val (item, itemBytes) = WorkItem.given_JamDecoder_WorkItem.decode(bytes, pos)
@@ -148,26 +157,26 @@ object workpackage:
       def encode(a: WorkReport): JamBytes =
         val builder = JamBytes.newBuilder
         // packageSpec - 102 bytes
-        builder ++= PackageSpec.given_JamEncoder_PackageSpec.encode(a.packageSpec)
+        builder ++= a.packageSpec.encode
         // context - variable size
-        builder ++= Context.given_JamEncoder_Context.encode(a.context)
+        builder ++= a.context.encode
         // coreIndex - compact integer
-        builder ++= encoding.encodeCompactInteger(a.coreIndex.toInt.toLong)
+        builder ++= codec.encodeCompactInteger(a.coreIndex.toInt.toLong)
         // authorizerHash - 32 bytes
         builder ++= a.authorizerHash.bytes
         // authGasUsed - compact integer
-        builder ++= encoding.encodeCompactInteger(a.authGasUsed.toLong)
+        builder ++= codec.encodeCompactInteger(a.authGasUsed.toLong)
         // authOutput - compact length prefix + bytes
-        builder ++= encoding.encodeCompactInteger(a.authOutput.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.authOutput.length.toLong)
         builder ++= a.authOutput
         // segmentRootLookup - compact length prefix + fixed-size items
-        builder ++= encoding.encodeCompactInteger(a.segmentRootLookup.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.segmentRootLookup.length.toLong)
         for lookup <- a.segmentRootLookup do
-          builder ++= SegmentRootLookup.given_JamEncoder_SegmentRootLookup.encode(lookup)
+          builder ++= lookup.encode
         // results - compact length prefix + variable-size items
-        builder ++= encoding.encodeCompactInteger(a.results.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.results.length.toLong)
         for result <- a.results do
-          builder ++= WorkResult.given_JamEncoder_WorkResult.encode(result)
+          builder ++= result.encode
         builder.result()
 
     given JamDecoder[WorkReport] with
@@ -184,7 +193,7 @@ object workpackage:
         pos += contextBytes
 
         // coreIndex - compact integer
-        val (coreIndex, coreIndexBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (coreIndex, coreIndexBytes) = codec.decodeCompactInteger(arr, pos)
         pos += coreIndexBytes
 
         // authorizerHash - 32 bytes
@@ -192,17 +201,17 @@ object workpackage:
         pos += Hash.Size
 
         // authGasUsed - compact integer
-        val (authGasUsed, authGasUsedBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (authGasUsed, authGasUsedBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authGasUsedBytes
 
         // authOutput - compact length prefix + bytes
-        val (authOutputLength, authOutputLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (authOutputLength, authOutputLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authOutputLengthBytes
         val authOutput = bytes.slice(pos, pos + authOutputLength.toInt)
         pos += authOutputLength.toInt
 
         // segmentRootLookup - compact length prefix + fixed-size items
-        val (segmentRootLookupLength, segmentRootLookupLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (segmentRootLookupLength, segmentRootLookupLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += segmentRootLookupLengthBytes
         val segmentRootLookup = (0 until segmentRootLookupLength.toInt).map { _ =>
           val (lookup, consumed) = SegmentRootLookup.given_JamDecoder_SegmentRootLookup.decode(bytes, pos)
@@ -211,7 +220,7 @@ object workpackage:
         }.toList
 
         // results - compact length prefix + variable-size items
-        val (resultsLength, resultsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (resultsLength, resultsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += resultsLengthBytes
         val results = (0 until resultsLength.toInt).map { _ =>
           val (result, resultBytes) = WorkResult.given_JamDecoder_WorkResult.decode(bytes, pos)
@@ -229,3 +238,25 @@ object workpackage:
           segmentRootLookup,
           results
         ), pos - offset)
+
+    given Decoder[WorkReport] = Decoder.instance { cursor =>
+      for
+        packageSpec <- cursor.get[PackageSpec]("package_spec")
+        context <- cursor.get[Context]("context")
+        coreIndex <- cursor.get[Int]("core_index")
+        authorizerHash <- cursor.get[String]("authorizer_hash")
+        authGasUsed <- cursor.get[Long]("auth_gas_used")
+        authOutput <- cursor.get[String]("auth_output")
+        segmentRootLookup <- cursor.get[List[SegmentRootLookup]]("segment_root_lookup")
+        results <- cursor.get[List[WorkResult]]("results")
+      yield WorkReport(
+        packageSpec,
+        context,
+        CoreIndex(coreIndex),
+        Hash(parseHex(authorizerHash)),
+        Gas(authGasUsed),
+        JamBytes(parseHex(authOutput)),
+        segmentRootLookup,
+        results
+      )
+    }

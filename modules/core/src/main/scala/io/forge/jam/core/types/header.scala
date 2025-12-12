@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
@@ -60,14 +60,14 @@ object header:
         // extrinsicHash - 32 bytes
         builder ++= a.extrinsicHash.bytes
         // slot - 4 bytes
-        builder ++= encoding.encodeU32LE(a.slot.value)
+        builder ++= codec.encodeU32LE(a.slot.value)
         // epochMark - 0/1 prefix + data
         a.epochMark match
           case None =>
             builder += 0x00.toByte
           case Some(em) =>
             builder += 0x01.toByte
-            builder ++= EpochMark.given_JamEncoder_EpochMark.encode(em)
+            builder ++= em.encode
         // ticketsMark - 0/1 prefix + epochLength items (no length prefix, fixed count)
         a.ticketsMark match
           case None =>
@@ -75,13 +75,13 @@ object header:
           case Some(marks) =>
             builder += 0x01.toByte
             for mark <- marks do
-              builder ++= TicketMark.given_JamEncoder_TicketMark.encode(mark)
+              builder ++= mark.encode
         // authorIndex - 2 bytes
-        builder ++= encoding.encodeU16LE(a.authorIndex.value)
+        builder ++= codec.encodeU16LE(a.authorIndex.value)
         // entropySource - 96 bytes
         builder ++= a.entropySource
         // offendersMark - compact length prefix + hashes
-        builder ++= encoding.encodeCompactInteger(a.offendersMark.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.offendersMark.length.toLong)
         for offender <- a.offendersMark do
           builder ++= offender.bytes
         // seal - 96 bytes
@@ -116,7 +116,7 @@ object header:
         pos += Hash.Size
 
         // slot - 4 bytes
-        val slot = Timeslot(encoding.decodeU32LE(arr, pos))
+        val slot = Timeslot(codec.decodeU32LE(arr, pos))
         pos += 4
 
         // epochMark - 0/1 prefix
@@ -142,7 +142,7 @@ object header:
         else None
 
         // authorIndex - 2 bytes
-        val authorIndex = ValidatorIndex(encoding.decodeU16LE(arr, pos))
+        val authorIndex = ValidatorIndex(codec.decodeU16LE(arr, pos))
         pos += 2
 
         // entropySource - 96 bytes
@@ -150,7 +150,7 @@ object header:
         pos += EntropySourceSize
 
         // offendersMark - compact length prefix + hashes
-        val (offendersLength, offendersLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (offendersLength, offendersLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += offendersLengthBytes
         val offendersMark = (0 until offendersLength.toInt).map { _ =>
           val hash = Hash(arr.slice(pos, pos + Hash.Size))

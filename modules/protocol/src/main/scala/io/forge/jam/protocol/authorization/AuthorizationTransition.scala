@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.authorization
 
-import io.forge.jam.core.constants
+import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 
@@ -17,10 +17,10 @@ object AuthorizationTransition:
    *
    * @param input The authorization input containing slot and consumed authorizations.
    * @param preState The pre-transition state.
-   * @param config The authorization configuration with core count.
+   * @param config The chain configuration.
    * @return The post-transition state.
    */
-  def stf(input: AuthInput, preState: AuthState, config: AuthConfig): AuthState =
+  def stf(input: AuthInput, preState: AuthState, config: ChainConfig): AuthState =
     // Group authorizations by core index
     val authsByCoreIndex = input.auths.groupBy(_.core.toInt)
 

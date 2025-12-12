@@ -3,7 +3,8 @@ package io.forge.jam.protocol.authorization
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
-import io.forge.jam.core.JamBytes
+import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.TestHelpers.hashFilled
@@ -14,6 +15,10 @@ import io.forge.jam.protocol.authorization.AuthorizationTransition
  * Tests for the Authorization State Transition Function.
  */
 class AuthorizationTest extends AnyFunSuite with Matchers:
+
+  // Config for single-core unit tests
+  private val singleCoreConfig = ChainConfig.TINY.copy(coresCount = 1)
+  private val twoCoreConfig = ChainConfig.TINY.copy(coresCount = 2)
 
   test("authorization consumption from pool") {
     // Create a simple state with one core
@@ -31,7 +36,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(2)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, AuthConfig(1))
+    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
 
     // hashFilled(2) should be removed, and a new item from queue added
     postState.authPools(0) should not contain hashFilled(2)
@@ -59,7 +64,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input42, preState, AuthConfig(2))
+    val postState = AuthorizationTransition.stf(input42, preState, twoCoreConfig)
 
     // Core 0 should get item from queue at index 42 % 80 = 42
     postState.authPools(0) should contain(queue1(42))
@@ -86,7 +91,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, AuthConfig(1))
+    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
 
     // Pool should have a zero hash since it became empty
     postState.authPools(0) should contain(Hash.zero)
@@ -108,7 +113,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, AuthConfig(1))
+    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
 
     // Pool should still be at max size 8
     postState.authPools(0).size shouldBe 8
@@ -133,14 +138,14 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          val encoded = AuthCase.given_JamEncoder_AuthCase.encode(testCase)
+          val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
           val postState = AuthorizationTransition.stf(
             testCase.input,
             testCase.preState,
-            AuthConfig(coreCount = 2)
+            ChainConfig.TINY
           )
           assertAuthStateEquals(testCase.postState, postState, testCaseName)
   }
@@ -160,14 +165,14 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          val encoded = AuthCase.given_JamEncoder_AuthCase.encode(testCase)
+          val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
           val postState = AuthorizationTransition.stf(
             testCase.input,
             testCase.preState,
-            AuthConfig(coreCount = 341)
+            ChainConfig.FULL
           )
           assertAuthStateEquals(testCase.postState, postState, testCaseName)
   }

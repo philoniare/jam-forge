@@ -1,9 +1,9 @@
 package io.forge.jam.protocol.authorization
 
-import io.forge.jam.core.{JamBytes, encoding, constants}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec, constants}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
-import io.forge.jam.protocol.common.JsonHelpers.{parseHash, parseHashListList}
+import io.forge.jam.core.json.JsonHelpers.{parseHash, parseHashListList}
 import io.circe.{Decoder, HCursor}
 import spire.math.UShort
 
@@ -22,11 +22,6 @@ object AuthorizationTypes:
   val PoolSize: Int = constants.O
 
   /**
-   * Configuration for the Authorization STF.
-   */
-  final case class AuthConfig(coreCount: Int)
-
-  /**
    * An authorization entry with core index and authorization hash.
    * Fixed size: 34 bytes (2 bytes for core + 32 bytes for authHash)
    */
@@ -41,14 +36,14 @@ object AuthorizationTypes:
     given JamEncoder[Auth] with
       def encode(a: Auth): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeU16LE(a.core.value)
+        builder ++= codec.encodeU16LE(a.core.value)
         builder ++= a.authHash.bytes
         builder.result()
 
     given JamDecoder[Auth] with
       def decode(bytes: JamBytes, offset: Int): (Auth, Int) =
         val arr = bytes.toArray
-        val core = CoreIndex(encoding.decodeU16LE(arr, offset))
+        val core = CoreIndex(codec.decodeU16LE(arr, offset))
         val authHash = Hash(arr.slice(offset + 2, offset + 2 + Hash.Size))
         (Auth(core, authHash), Size)
 
@@ -74,11 +69,11 @@ object AuthorizationTypes:
       def encode(a: AuthInput): JamBytes =
         val builder = JamBytes.newBuilder
         // slot is 4 bytes (u32)
-        builder ++= encoding.encodeU32LE(spire.math.UInt(a.slot.toInt))
+        builder ++= codec.encodeU32LE(spire.math.UInt(a.slot.toInt))
         // auths - variable-size list with compact integer length prefix
-        builder ++= encoding.encodeCompactInteger(a.auths.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.auths.length.toLong)
         for auth <- a.auths do
-          builder ++= Auth.given_JamEncoder_Auth.encode(auth)
+          builder ++= auth.encode
         builder.result()
 
     given JamDecoder[AuthInput] with
@@ -86,10 +81,10 @@ object AuthorizationTypes:
         val arr = bytes.toArray
         var pos = offset
         // slot is 4 bytes (u32)
-        val slot = encoding.decodeU32LE(arr, pos).toLong
+        val slot = codec.decodeU32LE(arr, pos).toLong
         pos += 4
         // auths - variable-size list with compact integer length prefix
-        val (authsLength, authsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (authsLength, authsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authsLengthBytes
         val auths = (0 until authsLength.toInt).map { _ =>
           val (auth, consumed) = Auth.given_JamDecoder_Auth.decode(bytes, pos)
@@ -120,14 +115,15 @@ object AuthorizationTypes:
     /**
      * Create a config-aware decoder for AuthState.
      */
-    def decoderWithConfig(coreCount: Int): JamDecoder[AuthState] = new JamDecoder[AuthState]:
+    def decoder(config: ChainConfig): JamDecoder[AuthState] = new JamDecoder[AuthState]:
+      private val coreCount = config.coresCount
       def decode(bytes: JamBytes, offset: Int): (AuthState, Int) =
         val arr = bytes.toArray
         var pos = offset
 
         // authPools - fixed size outer (coreCount), variable inner (compact length + 32-byte hashes)
         val authPools = (0 until coreCount).map { _ =>
-          val (poolLength, poolLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+          val (poolLength, poolLengthBytes) = codec.decodeCompactInteger(arr, pos)
           pos += poolLengthBytes
           val pool = (0 until poolLength.toInt).map { _ =>
             val hash = Hash(arr.slice(pos, pos + Hash.Size))
@@ -155,7 +151,7 @@ object AuthorizationTypes:
         // AuthPools: outer list is fixed-size (core-count), inner list is variable-size (0..8)
         // No outer length prefix, inner uses compact integer length prefix
         for pool <- a.authPools do
-          builder ++= encoding.encodeCompactInteger(pool.length.toLong)
+          builder ++= codec.encodeCompactInteger(pool.length.toLong)
           for hash <- pool do
             builder ++= hash.bytes
 
@@ -190,12 +186,12 @@ object AuthorizationTypes:
     /**
      * Create a config-aware decoder for AuthCase.
      */
-    def decoderWithConfig(coreCount: Int): JamDecoder[AuthCase] = new JamDecoder[AuthCase]:
+    def decoder(config: ChainConfig): JamDecoder[AuthCase] = new JamDecoder[AuthCase]:
       def decode(bytes: JamBytes, offset: Int): (AuthCase, Int) =
         var pos = offset
         val (input, inputBytes) = AuthInput.given_JamDecoder_AuthInput.decode(bytes, pos)
         pos += inputBytes
-        val stateDecoder = AuthState.decoderWithConfig(coreCount)
+        val stateDecoder = AuthState.decoder(config)
         val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
         pos += preStateBytes
         // output is always null in encoding (per encode method)
@@ -206,10 +202,10 @@ object AuthorizationTypes:
     given JamEncoder[AuthCase] with
       def encode(a: AuthCase): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= AuthInput.given_JamEncoder_AuthInput.encode(a.input)
-        builder ++= AuthState.given_JamEncoder_AuthState.encode(a.preState)
+        builder ++= a.input.encode
+        builder ++= a.preState.encode
         // NULL output encodes to empty byte array (nothing)
-        builder ++= AuthState.given_JamEncoder_AuthState.encode(a.postState)
+        builder ++= a.postState.encode
         builder.result()
 
     given Decoder[AuthCase] =

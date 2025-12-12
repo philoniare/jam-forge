@@ -1,9 +1,11 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
 import io.forge.jam.core.types.work.ExecutionResult
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 import spire.math.{UShort, UInt}
 
 /**
@@ -26,11 +28,11 @@ object workresult:
     given JamEncoder[RefineLoad] with
       def encode(a: RefineLoad): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeCompactInteger(a.gasUsed.toLong)
-        builder ++= encoding.encodeCompactInteger(a.imports.toLong)
-        builder ++= encoding.encodeCompactInteger(a.extrinsicCount.toLong)
-        builder ++= encoding.encodeCompactInteger(a.extrinsicSize.toLong)
-        builder ++= encoding.encodeCompactInteger(a.exports.toLong)
+        builder ++= codec.encodeCompactInteger(a.gasUsed.toLong)
+        builder ++= codec.encodeCompactInteger(a.imports.toLong)
+        builder ++= codec.encodeCompactInteger(a.extrinsicCount.toLong)
+        builder ++= codec.encodeCompactInteger(a.extrinsicSize.toLong)
+        builder ++= codec.encodeCompactInteger(a.exports.toLong)
         builder.result()
 
     given JamDecoder[RefineLoad] with
@@ -38,19 +40,19 @@ object workresult:
         val arr = bytes.toArray
         var pos = offset
 
-        val (gasUsed, gasUsedBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (gasUsed, gasUsedBytes) = codec.decodeCompactInteger(arr, pos)
         pos += gasUsedBytes
 
-        val (imports, importsBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (imports, importsBytes) = codec.decodeCompactInteger(arr, pos)
         pos += importsBytes
 
-        val (extrinsicCount, extrinsicCountBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (extrinsicCount, extrinsicCountBytes) = codec.decodeCompactInteger(arr, pos)
         pos += extrinsicCountBytes
 
-        val (extrinsicSize, extrinsicSizeBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (extrinsicSize, extrinsicSizeBytes) = codec.decodeCompactInteger(arr, pos)
         pos += extrinsicSizeBytes
 
-        val (exports, exportsBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (exports, exportsBytes) = codec.decodeCompactInteger(arr, pos)
         pos += exportsBytes
 
         (RefineLoad(
@@ -60,6 +62,16 @@ object workresult:
           UInt(extrinsicSize.toInt),
           UShort(exports.toInt)
         ), pos - offset)
+
+    given Decoder[RefineLoad] = Decoder.instance { cursor =>
+      for
+        gasUsed <- cursor.get[Long]("gas_used")
+        imports <- cursor.get[Int]("imports")
+        extrinsicCount <- cursor.get[Int]("extrinsic_count")
+        extrinsicSize <- cursor.get[Long]("extrinsic_size")
+        exports <- cursor.get[Int]("exports")
+      yield RefineLoad(Gas(gasUsed), UShort(imports), UShort(extrinsicCount), UInt(extrinsicSize.toInt), UShort(exports))
+    }
 
   /**
    * Result of executing a work item.
@@ -86,17 +98,17 @@ object workresult:
       def encode(a: WorkResult): JamBytes =
         val builder = JamBytes.newBuilder
         // serviceId - 4 bytes
-        builder ++= encoding.encodeU32LE(a.serviceId.value)
+        builder ++= codec.encodeU32LE(a.serviceId.value)
         // codeHash - 32 bytes
         builder ++= a.codeHash.bytes
         // payloadHash - 32 bytes
         builder ++= a.payloadHash.bytes
         // accumulateGas - 8 bytes
-        builder ++= encoding.encodeU64LE(a.accumulateGas.value)
+        builder ++= codec.encodeU64LE(a.accumulateGas.value)
         // result - ExecutionResult (variable)
-        builder ++= ExecutionResult.given_JamEncoder_ExecutionResult.encode(a.result)
+        builder ++= a.result.encode
         // refineLoad - RefineLoad (variable)
-        builder ++= RefineLoad.given_JamEncoder_RefineLoad.encode(a.refineLoad)
+        builder ++= a.refineLoad.encode
         builder.result()
 
     given JamDecoder[WorkResult] with
@@ -105,7 +117,7 @@ object workresult:
         var pos = offset
 
         // serviceId - 4 bytes
-        val serviceId = ServiceId(encoding.decodeU32LE(arr, pos))
+        val serviceId = ServiceId(codec.decodeU32LE(arr, pos))
         pos += 4
 
         // codeHash - 32 bytes
@@ -117,7 +129,7 @@ object workresult:
         pos += Hash.Size
 
         // accumulateGas - 8 bytes
-        val accumulateGas = Gas(encoding.decodeU64LE(arr, pos))
+        val accumulateGas = Gas(codec.decodeU64LE(arr, pos))
         pos += 8
 
         // result - ExecutionResult (variable)
@@ -129,3 +141,21 @@ object workresult:
         pos += refineLoadBytes
 
         (WorkResult(serviceId, codeHash, payloadHash, accumulateGas, result, refineLoad), pos - offset)
+
+    given Decoder[WorkResult] = Decoder.instance { cursor =>
+      for
+        serviceId <- cursor.get[Long]("service_id")
+        codeHash <- cursor.get[String]("code_hash")
+        payloadHash <- cursor.get[String]("payload_hash")
+        accumulateGas <- cursor.get[Long]("accumulate_gas")
+        result <- cursor.get[ExecutionResult]("result")
+        refineLoad <- cursor.get[RefineLoad]("refine_load")
+      yield WorkResult(
+        ServiceId(UInt(serviceId.toInt)),
+        Hash(parseHex(codeHash)),
+        Hash(parseHex(payloadHash)),
+        Gas(accumulateGas),
+        result,
+        refineLoad
+      )
+    }

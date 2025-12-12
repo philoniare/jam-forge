@@ -1,8 +1,8 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
-import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 
 /**
  * Epoch-related types
@@ -54,7 +54,7 @@ object epoch:
         builder ++= a.entropy.bytes
         builder ++= a.ticketsEntropy.bytes
         for validator <- a.validators do
-          builder ++= EpochValidatorKey.given_JamEncoder_EpochValidatorKey.encode(validator)
+          builder ++= validator.encode
         builder.result()
 
     /**
@@ -82,3 +82,40 @@ object epoch:
      */
     def fromBytes(bytes: JamBytes, offset: Int, config: ChainConfig): (EpochMark, Int) =
       decoder(config.validatorCount).decode(bytes, offset)
+
+  /**
+   * Full validator key containing all key material.
+   * Size: 336 bytes (32 + 32 + 144 + 128)
+   */
+  final case class ValidatorKey(
+    bandersnatch: BandersnatchPublicKey,
+    ed25519: Ed25519PublicKey,
+    bls: BlsPublicKey,
+    metadata: JamBytes
+  )
+
+  object ValidatorKey:
+    val Size: Int = 336 // 32 + 32 + 144 + 128
+    val MetadataSize: Int = 128
+
+    given JamEncoder[ValidatorKey] with
+      def encode(a: ValidatorKey): JamBytes =
+        val builder = JamBytes.newBuilder
+        builder ++= a.bandersnatch.bytes
+        builder ++= a.ed25519.bytes
+        builder ++= a.bls.bytes
+        builder ++= a.metadata
+        builder.result()
+
+    given JamDecoder[ValidatorKey] with
+      def decode(bytes: JamBytes, offset: Int): (ValidatorKey, Int) =
+        val arr = bytes.toArray
+        var pos = offset
+        val bandersnatch = BandersnatchPublicKey(arr.slice(pos, pos + BandersnatchPublicKey.Size))
+        pos += BandersnatchPublicKey.Size
+        val ed25519 = Ed25519PublicKey(arr.slice(pos, pos + Ed25519PublicKey.Size))
+        pos += Ed25519PublicKey.Size
+        val bls = BlsPublicKey(arr.slice(pos, pos + BlsPublicKey.Size))
+        pos += BlsPublicKey.Size
+        val metadata = JamBytes(arr.slice(pos, pos + MetadataSize))
+        (ValidatorKey(bandersnatch, ed25519, bls, metadata), Size)

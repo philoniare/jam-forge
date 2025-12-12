@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec, encoding}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.extrinsic.{Preimage, GuaranteeExtrinsic, AssuranceExtrinsic, Dispute}
@@ -34,23 +34,23 @@ object block:
       def encode(a: Extrinsic): JamBytes =
         val builder = JamBytes.newBuilder
         // tickets - compact length prefix + fixed-size items
-        builder ++= encoding.encodeCompactInteger(a.tickets.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.tickets.length.toLong)
         for ticket <- a.tickets do
-          builder ++= TicketEnvelope.given_JamEncoder_TicketEnvelope.encode(ticket)
+          builder ++= ticket.encode
         // preimages - compact length prefix + variable-size items
-        builder ++= encoding.encodeCompactInteger(a.preimages.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.preimages.length.toLong)
         for preimage <- a.preimages do
-          builder ++= Preimage.given_JamEncoder_Preimage.encode(preimage)
+          builder ++= preimage.encode
         // guarantees - compact length prefix + variable-size items
-        builder ++= encoding.encodeCompactInteger(a.guarantees.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.guarantees.length.toLong)
         for guarantee <- a.guarantees do
-          builder ++= GuaranteeExtrinsic.given_JamEncoder_GuaranteeExtrinsic.encode(guarantee)
+          builder ++= guarantee.encode
         // assurances - compact length prefix + config-dependent items
-        builder ++= encoding.encodeCompactInteger(a.assurances.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.assurances.length.toLong)
         for assurance <- a.assurances do
-          builder ++= AssuranceExtrinsic.given_JamEncoder_AssuranceExtrinsic.encode(assurance)
+          builder ++= assurance.encode
         // disputes - variable size
-        builder ++= Dispute.given_JamEncoder_Dispute.encode(a.disputes)
+        builder ++= a.disputes.encode
         builder.result()
 
     /**
@@ -68,7 +68,7 @@ object block:
         var pos = offset
 
         // tickets - compact length prefix + fixed-size items
-        val (ticketsLength, ticketsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (ticketsLength, ticketsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += ticketsLengthBytes
         val tickets = (0 until ticketsLength.toInt).map { _ =>
           val (ticket, consumed) = TicketEnvelope.given_JamDecoder_TicketEnvelope.decode(bytes, pos)
@@ -77,7 +77,7 @@ object block:
         }.toList
 
         // preimages - compact length prefix + variable-size items
-        val (preimagesLength, preimagesLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (preimagesLength, preimagesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += preimagesLengthBytes
         val preimages = (0 until preimagesLength.toInt).map { _ =>
           val (preimage, consumed) = Preimage.given_JamDecoder_Preimage.decode(bytes, pos)
@@ -86,7 +86,7 @@ object block:
         }.toList
 
         // guarantees - compact length prefix + variable-size items
-        val (guaranteesLength, guaranteesLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (guaranteesLength, guaranteesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += guaranteesLengthBytes
         val guarantees = (0 until guaranteesLength.toInt).map { _ =>
           val (guarantee, consumed) = GuaranteeExtrinsic.given_JamDecoder_GuaranteeExtrinsic.decode(bytes, pos)
@@ -95,7 +95,7 @@ object block:
         }.toList
 
         // assurances - compact length prefix + config-dependent items
-        val (assurancesLength, assurancesLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (assurancesLength, assurancesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += assurancesLengthBytes
         val assuranceDecoder = AssuranceExtrinsic.decoder(coresCount)
         val assurances = (0 until assurancesLength.toInt).map { _ =>
@@ -126,8 +126,8 @@ object block:
     given JamEncoder[Block] with
       def encode(a: Block): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= Header.given_JamEncoder_Header.encode(a.header)
-        builder ++= Extrinsic.given_JamEncoder_Extrinsic.encode(a.extrinsic)
+        builder ++= a.header.encode
+        builder ++= a.extrinsic.encode
         builder.result()
 
     /**

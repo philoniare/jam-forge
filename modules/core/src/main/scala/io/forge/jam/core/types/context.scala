@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
+import io.forge.jam.core.{JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.{Hash, Timeslot}
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 import spire.math.UInt
 
 /**
@@ -41,9 +43,9 @@ object context:
         builder ++= a.stateRoot.bytes
         builder ++= a.beefyRoot.bytes
         builder ++= a.lookupAnchor.bytes
-        builder ++= encoding.encodeU32LE(a.lookupAnchorSlot.value)
+        builder ++= codec.encodeU32LE(a.lookupAnchorSlot.value)
         // prerequisites - compact length prefix followed by hashes
-        builder ++= encoding.encodeCompactInteger(a.prerequisites.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.prerequisites.length.toLong)
         for prereq <- a.prerequisites do
           builder ++= prereq.bytes
         builder.result()
@@ -65,11 +67,11 @@ object context:
         val lookupAnchor = Hash(arr.slice(pos, pos + Hash.Size))
         pos += Hash.Size
 
-        val lookupAnchorSlot = Timeslot(encoding.decodeU32LE(arr, pos))
+        val lookupAnchorSlot = Timeslot(codec.decodeU32LE(arr, pos))
         pos += 4
 
         // prerequisites - compact length prefix followed by hashes
-        val (prereqsLength, prereqsLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (prereqsLength, prereqsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += prereqsLengthBytes
 
         val prerequisites = (0 until prereqsLength.toInt).map { _ =>
@@ -79,3 +81,21 @@ object context:
         }.toList
 
         (Context(anchor, stateRoot, beefyRoot, lookupAnchor, lookupAnchorSlot, prerequisites), pos - offset)
+
+    given Decoder[Context] = Decoder.instance { cursor =>
+      for
+        anchor <- cursor.get[String]("anchor")
+        stateRoot <- cursor.get[String]("state_root")
+        beefyRoot <- cursor.get[String]("beefy_root")
+        lookupAnchor <- cursor.get[String]("lookup_anchor")
+        lookupAnchorSlot <- cursor.get[Long]("lookup_anchor_slot")
+        prerequisites <- cursor.get[List[String]]("prerequisites")
+      yield Context(
+        Hash(parseHex(anchor)),
+        Hash(parseHex(stateRoot)),
+        Hash(parseHex(beefyRoot)),
+        Hash(parseHex(lookupAnchor)),
+        Timeslot(lookupAnchorSlot.toInt),
+        prerequisites.map(h => Hash(parseHex(h)))
+      )
+    }

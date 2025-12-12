@@ -1,10 +1,10 @@
 package io.forge.jam.protocol.history
 
-import io.forge.jam.core.{JamBytes, encoding, ChainConfig, constants}
+import io.forge.jam.core.{JamBytes, codec, ChainConfig, constants}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.Hash
 import io.circe.Decoder
-import io.forge.jam.protocol.common.JsonHelpers.parseHash
+import io.forge.jam.core.json.JsonHelpers.parseHash
 import io.forge.jam.protocol.common.SharedTypes.ReportedWorkPackage
 
 /**
@@ -33,7 +33,7 @@ object HistoryTypes:
         builder ++= a.headerHash.bytes
         builder ++= a.beefyRoot.bytes
         builder ++= a.stateRoot.bytes
-        builder ++= encoding.encodeCompactInteger(a.reported.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.reported.length.toLong)
         for pkg <- a.reported do
           builder ++= summon[JamEncoder[ReportedWorkPackage]].encode(pkg)
         builder.result()
@@ -48,7 +48,7 @@ object HistoryTypes:
         pos += Hash.Size
         val stateRoot = Hash(arr.slice(pos, pos + Hash.Size))
         pos += Hash.Size
-        val (reportedLength, reportedLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (reportedLength, reportedLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += reportedLengthBytes
         val reported = (0 until reportedLength.toInt).map { _ =>
           val (pkg, consumed) = summon[JamDecoder[ReportedWorkPackage]].decode(bytes, pos)
@@ -84,7 +84,7 @@ object HistoryTypes:
     given JamEncoder[HistoricalMmr] with
       def encode(a: HistoricalMmr): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeCompactInteger(a.peaks.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.peaks.length.toLong)
         for peak <- a.peaks do
           peak match
             case None =>
@@ -98,7 +98,7 @@ object HistoryTypes:
       def decode(bytes: JamBytes, offset: Int): (HistoricalMmr, Int) =
         val arr = bytes.toArray
         var pos = offset
-        val (length, lengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (length, lengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += lengthBytes
         val peaks = (0 until length.toInt).map { _ =>
           val optionByte = arr(pos).toInt & 0xFF
@@ -139,7 +139,7 @@ object HistoryTypes:
     given JamEncoder[HistoricalBetaContainer] with
       def encode(a: HistoricalBetaContainer): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeCompactInteger(a.history.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.history.length.toLong)
         for beta <- a.history do
           builder ++= summon[JamEncoder[HistoricalBeta]].encode(beta)
         builder ++= summon[JamEncoder[HistoricalMmr]].encode(a.mmr)
@@ -149,7 +149,7 @@ object HistoryTypes:
       def decode(bytes: JamBytes, offset: Int): (HistoricalBetaContainer, Int) =
         val arr = bytes.toArray
         var pos = offset
-        val (historyLength, historyLengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (historyLength, historyLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += historyLengthBytes
         val history = (0 until historyLength.toInt).map { _ =>
           val (beta, consumed) = summon[JamDecoder[HistoricalBeta]].decode(bytes, pos)
@@ -221,7 +221,7 @@ object HistoryTypes:
         builder ++= a.headerHash.bytes
         builder ++= a.parentStateRoot.bytes
         builder ++= a.accumulateRoot.bytes
-        builder ++= encoding.encodeCompactInteger(a.workPackages.length.toLong)
+        builder ++= codec.encodeCompactInteger(a.workPackages.length.toLong)
         for pkg <- a.workPackages do
           builder ++= summon[JamEncoder[ReportedWorkPackage]].encode(pkg)
         builder.result()
@@ -236,7 +236,7 @@ object HistoryTypes:
         pos += Hash.Size
         val accumulateRoot = Hash(arr.slice(pos, pos + Hash.Size))
         pos += Hash.Size
-        val (length, lengthBytes) = encoding.decodeCompactInteger(arr, pos)
+        val (length, lengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += lengthBytes
         val workPackages = (0 until length.toInt).map { _ =>
           val (pkg, consumed) = summon[JamDecoder[ReportedWorkPackage]].decode(bytes, pos)

@@ -3,7 +3,7 @@ package io.forge.jam.core
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UInt, ULong, UByte, UShort}
-import encoding.*
+import codec.*
 
 class EncodingSpec extends AnyFlatSpec with Matchers:
 

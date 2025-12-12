@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec, encoding}
+import io.forge.jam.core.{JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519PublicKey, Ed25519Signature}
+import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.circe.Decoder
 
 /**
  * Dispute-related types
@@ -38,6 +40,14 @@ object dispute:
         val signature = Ed25519Signature(arr.slice(offset + 64, offset + Size))
         (Culprit(target, key, signature), Size)
 
+    given Decoder[Culprit] = Decoder.instance { cursor =>
+      for
+        target <- cursor.get[String]("target")
+        key <- cursor.get[String]("key")
+        signature <- cursor.get[String]("signature")
+      yield Culprit(Hash(parseHex(target)), Ed25519PublicKey(parseHex(key)), Ed25519Signature(parseHex(signature)))
+    }
+
   /**
    * A fault in a dispute - a validator who voted incorrectly.
    * Fixed size: 129 bytes (32 bytes target + 1 byte vote + 32 bytes key + 64 bytes signature)
@@ -70,6 +80,15 @@ object dispute:
         val signature = Ed25519Signature(arr.slice(offset + 65, offset + Size))
         (Fault(target, vote, key, signature), Size)
 
+    given Decoder[Fault] = Decoder.instance { cursor =>
+      for
+        target <- cursor.get[String]("target")
+        vote <- cursor.get[Boolean]("vote")
+        key <- cursor.get[String]("key")
+        signature <- cursor.get[String]("signature")
+      yield Fault(Hash(parseHex(target)), vote, Ed25519PublicKey(parseHex(key)), Ed25519Signature(parseHex(signature)))
+    }
+
   /**
    * A guarantee signature from a validator.
    * Fixed size: 66 bytes (2 bytes validator index + 64 bytes signature)
@@ -85,13 +104,20 @@ object dispute:
     given JamEncoder[GuaranteeSignature] with
       def encode(a: GuaranteeSignature): JamBytes =
         val builder = JamBytes.newBuilder
-        builder ++= encoding.encodeU16LE(a.validatorIndex.value)
+        builder ++= codec.encodeU16LE(a.validatorIndex.value)
         builder ++= a.signature.bytes
         builder.result()
 
     given JamDecoder[GuaranteeSignature] with
       def decode(bytes: JamBytes, offset: Int): (GuaranteeSignature, Int) =
         val arr = bytes.toArray
-        val validatorIndex = ValidatorIndex(encoding.decodeU16LE(arr, offset))
+        val validatorIndex = ValidatorIndex(codec.decodeU16LE(arr, offset))
         val signature = Ed25519Signature(arr.slice(offset + 2, offset + Size))
         (GuaranteeSignature(validatorIndex, signature), Size)
+
+    given Decoder[GuaranteeSignature] = Decoder.instance { cursor =>
+      for
+        validatorIndex <- cursor.get[Int]("validator_index")
+        signature <- cursor.get[String]("signature")
+      yield GuaranteeSignature(ValidatorIndex(validatorIndex), Ed25519Signature(parseHex(signature)))
+    }

@@ -3,8 +3,8 @@ package io.forge.jam.protocol.common
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.json.JsonHelpers.parseHash
 import io.circe.Decoder
-import JsonHelpers.parseHash
 
 /**
  * Shared types used across multiple STFs.

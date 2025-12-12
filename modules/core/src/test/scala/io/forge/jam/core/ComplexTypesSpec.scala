@@ -6,6 +6,7 @@ import spire.math.{UByte, UShort, UInt}
 import java.nio.file.{Files, Paths}
 
 import codec.*
+import codec.encode
 import primitives.*
 import types.context.*
 import types.workitem.*
@@ -34,7 +35,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(42),
       prerequisites = List.empty
     )
-    val encoded = Context.given_JamEncoder_Context.encode(ctx)
+    val encoded = ctx.encode
     // 4 * 32 + 4 + 1 (compact 0) = 133 bytes
     encoded.length shouldBe 133
   }
@@ -50,7 +51,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(0),
       prerequisites = List(prereq1, prereq2)
     )
-    val encoded = Context.given_JamEncoder_Context.encode(ctx)
+    val encoded = ctx.encode
     // 4 * 32 + 4 + 1 (compact 2) + 2 * 32 = 197 bytes
     encoded.length shouldBe 197
   }
@@ -65,7 +66,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(12345),
       prerequisites = List(prereq)
     )
-    val encoded = Context.given_JamEncoder_Context.encode(ctx)
+    val encoded = ctx.encode
     val (decoded, consumed) = Context.given_JamDecoder_Context.decode(encoded, 0)
     consumed shouldBe encoded.length
     decoded.anchor.toHex shouldBe ctx.anchor.toHex
@@ -92,7 +93,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       extrinsic = List.empty,
       exportCount = UShort(0)
     )
-    val encoded = WorkItem.given_JamEncoder_WorkItem.encode(item)
+    val encoded = item.encode
     // service is little-endian
     encoded(0) shouldBe UByte(0x78)
     encoded(1) shouldBe UByte(0x56)
@@ -116,7 +117,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       ),
       exportCount = UShort(5)
     )
-    val encoded = WorkItem.given_JamEncoder_WorkItem.encode(item)
+    val encoded = item.encode
     val (decoded, consumed) = WorkItem.given_JamDecoder_WorkItem.decode(encoded, 0)
     consumed shouldBe encoded.length
     decoded.service.toInt shouldBe item.service.toInt
@@ -139,7 +140,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Ok(JamBytes(Array[Byte](0xAA.toByte, 0xBB.toByte, 0xCC.toByte))),
       refineLoad = RefineLoad(Gas(0L), UShort(0), UShort(0), UInt(0), UShort(0))
     )
-    val encoded = WorkResult.given_JamEncoder_WorkResult.encode(result)
+    val encoded = result.encode
     // Fixed part: 4 + 32 + 32 + 8 = 76 bytes
     // Then result tag (0x00) + compact length (3) + 3 bytes = 5 bytes
     // Then refineLoad: 5 compact zeros = 5 bytes
@@ -156,7 +157,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Panic,
       refineLoad = RefineLoad(Gas(0L), UShort(0), UShort(0), UInt(0), UShort(0))
     )
-    val encoded = WorkResult.given_JamEncoder_WorkResult.encode(result)
+    val encoded = result.encode
     val (decoded, consumed) = WorkResult.given_JamDecoder_WorkResult.decode(encoded, 0)
     decoded.result shouldBe ExecutionResult.Panic
   }
@@ -170,7 +171,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Ok(JamBytes(Array.tabulate(50)(i => (i * 2).toByte))),
       refineLoad = RefineLoad(Gas(100L), UShort(5), UShort(3), UInt(1000), UShort(2))
     )
-    val encoded = WorkResult.given_JamEncoder_WorkResult.encode(result)
+    val encoded = result.encode
     val (decoded, consumed) = WorkResult.given_JamDecoder_WorkResult.decode(encoded, 0)
     consumed shouldBe encoded.length
     decoded.serviceId.toInt shouldBe result.serviceId.toInt
@@ -191,7 +192,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       assurances = List.empty,
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
-    val encoded = types.block.Extrinsic.given_JamEncoder_Extrinsic.encode(ext)
+    val encoded = ext.encode
     // 4 compact zeros for the 4 lists (tickets, preimages, guarantees, assurances)
     // + 3 compact zeros for dispute (verdicts, culprits, faults)
     // = 7 bytes total
@@ -206,7 +207,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       assurances = List.empty,
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
-    val encoded = types.block.Extrinsic.given_JamEncoder_Extrinsic.encode(ext)
+    val encoded = ext.encode
     val config = ChainConfig.TINY
     val (decoded, consumed) = types.block.Extrinsic.decoder(config).decode(encoded, 0)
     consumed shouldBe encoded.length
@@ -244,7 +245,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val block = JamBlock(header, extrinsic)
-    val encoded = types.block.Block.given_JamEncoder_Block.encode(block)
+    val encoded = block.encode
 
     // Header: 32*3 (hashes) + 4 (slot) + 1 (no epoch) + 1 (no tickets) + 2 (author) + 96 (entropy) + 1 (no offenders) + 96 (seal) = 297
     // Extrinsic: 7 bytes (4 empty lists + 3 empty dispute lists)
@@ -275,7 +276,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val block = JamBlock(header, extrinsic)
-    val encoded = types.block.Block.given_JamEncoder_Block.encode(block)
+    val encoded = block.encode
     val config = ChainConfig.TINY
     val (decoded, consumed) = types.block.Block.decoder(config).decode(encoded, 0)
     consumed shouldBe encoded.length
@@ -317,7 +318,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       items = List(item)
     )
 
-    val encoded = WorkPackage.given_JamEncoder_WorkPackage.encode(pkg)
+    val encoded = pkg.encode
     val (decoded, consumed) = WorkPackage.given_JamDecoder_WorkPackage.decode(encoded, 0)
     consumed shouldBe encoded.length
     decoded.authCodeHost.toInt shouldBe 42
@@ -367,7 +368,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       results = List(result)
     )
 
-    val encoded = types.workpackage.WorkReport.given_JamEncoder_WorkReport.encode(report)
+    val encoded = report.encode
     val (decoded, consumed) = types.workpackage.WorkReport.given_JamDecoder_WorkReport.decode(encoded, 0)
     consumed shouldBe encoded.length
     decoded.coreIndex.toInt shouldBe 2

@@ -4,6 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.JamBytes
+import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.TestHelpers.hashFilled
@@ -116,7 +117,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          val encoded = HistoricalCase.given_JamEncoder_HistoricalCase.encode(testCase)
+          val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
@@ -139,7 +140,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          val encoded = HistoricalCase.given_JamEncoder_HistoricalCase.encode(testCase)
+          val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
