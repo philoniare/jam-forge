@@ -3,7 +3,7 @@ ThisBuild / organization := "io.forge.jam"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
 lazy val root = (project in file("."))
-    .aggregate(core, pvm)
+    .aggregate(core, pvm, protocol)
     .settings(
         name := "jam",
         publish / skip := true
@@ -39,6 +39,28 @@ lazy val pvm = (project in file("modules/pvm"))
             "io.circe" %% "circe-core" % "0.14.6" % Test,
             "io.circe" %% "circe-generic" % "0.14.6" % Test,
             "io.circe" %% "circe-parser" % "0.14.6" % Test
+        ),
+        scalacOptions ++= Seq(
+            "-deprecation",
+            "-feature",
+            "-unchecked",
+            "-language:implicitConversions",
+            "-language:higherKinds"
+        )
+    )
+
+lazy val protocol = (project in file("modules/protocol"))
+    .dependsOn(core)
+    .settings(
+        name := "jam-protocol",
+        libraryDependencies ++= Seq(
+            "org.typelevel" %% "spire" % "0.18.0",
+            "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
+            // circe for JSON parsing - needed for STF types and test loading
+            "io.circe" %% "circe-core" % "0.14.6",
+            "io.circe" %% "circe-generic" % "0.14.6",
+            "io.circe" %% "circe-parser" % "0.14.6",
+            "org.scalatest" %% "scalatest" % "3.2.17" % Test
         ),
         scalacOptions ++= Seq(
             "-deprecation",

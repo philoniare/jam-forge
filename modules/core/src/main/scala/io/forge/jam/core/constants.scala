@@ -32,7 +32,13 @@ object constants:
   
   /** Y = 12: Rotation period for ticket accumulation */
   val Y: Int = 12
-  
+
+  /** H = 8: Recent history length in blocks */
+  val H: Int = 8
+
+  /** U = 10: Availability timeout in slots */
+  val U: Int = 10
+
   // ══════════════════════════════════════════════════════════════════════════
   // Memory and Size Constants
   // ══════════════════════════════════════════════════════════════════════════
