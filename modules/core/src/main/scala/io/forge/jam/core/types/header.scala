@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
@@ -134,7 +134,7 @@ object header:
         pos += 1
         val ticketsMark = if ticketsMarkFlag == 1 then
           val marks = (0 until epochLength).map { _ =>
-            val (mark, consumed) = TicketMark.given_JamDecoder_TicketMark.decode(bytes, pos)
+            val (mark, consumed) = bytes.decodeAs[TicketMark](pos)
             pos += consumed
             mark
           }.toList

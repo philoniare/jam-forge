@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
 import spire.math.{UShort, UInt}
 
@@ -148,7 +148,7 @@ object workitem:
         val (segmentsLength, segmentsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += segmentsLengthBytes
         val importSegments = (0 until segmentsLength.toInt).map { _ =>
-          val (segment, consumed) = WorkItemImportSegment.given_JamDecoder_WorkItemImportSegment.decode(bytes, pos)
+          val (segment, consumed) = bytes.decodeAs[WorkItemImportSegment](pos)
           pos += consumed
           segment
         }.toList
@@ -157,7 +157,7 @@ object workitem:
         val (extrinsicLength, extrinsicLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += extrinsicLengthBytes
         val extrinsic = (0 until extrinsicLength.toInt).map { _ =>
-          val (ext, consumed) = WorkItemExtrinsic.given_JamDecoder_WorkItemExtrinsic.decode(bytes, pos)
+          val (ext, consumed) = bytes.decodeAs[WorkItemExtrinsic](pos)
           pos += consumed
           ext
         }.toList

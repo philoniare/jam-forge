@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.authorization
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec, constants}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.core.json.JsonHelpers.{parseHash, parseHashListList}
 import io.circe.{Decoder, HCursor}
@@ -87,7 +87,7 @@ object AuthorizationTypes:
         val (authsLength, authsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += authsLengthBytes
         val auths = (0 until authsLength.toInt).map { _ =>
-          val (auth, consumed) = Auth.given_JamDecoder_Auth.decode(bytes, pos)
+          val (auth, consumed) = bytes.decodeAs[Auth](pos)
           pos += consumed
           auth
         }.toList
@@ -189,7 +189,7 @@ object AuthorizationTypes:
     def decoder(config: ChainConfig): JamDecoder[AuthCase] = new JamDecoder[AuthCase]:
       def decode(bytes: JamBytes, offset: Int): (AuthCase, Int) =
         var pos = offset
-        val (input, inputBytes) = AuthInput.given_JamDecoder_AuthInput.decode(bytes, pos)
+        val (input, inputBytes) = bytes.decodeAs[AuthInput](pos)
         pos += inputBytes
         val stateDecoder = AuthState.decoder(config)
         val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)

@@ -2,11 +2,9 @@ package io.forge.jam.protocol.statistics
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encodeFixedList, decodeFixedList, listDecoder, encode}
-import io.forge.jam.core.primitives.{BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Dispute, GuaranteeExtrinsic}
 import io.forge.jam.core.types.tickets.TicketEnvelope
-import io.forge.jam.core.json.JsonHelpers.{parseHex, parseHexBytesFixed}
 import io.circe.Decoder
 import spire.math.{UShort, UInt}
 
@@ -76,21 +74,6 @@ object StatisticsTypes:
           assurances <- cursor.get[Long]("assurances")
         yield StatCount(blocks, tickets, preImages, preImagesSize, guarantees, assurances)
       }
-
-  // JSON decoder for ValidatorKey (the type is imported from core)
-  given Decoder[ValidatorKey] =
-    Decoder.instance { cursor =>
-      for
-        bandersnatchHex <- cursor.get[String]("bandersnatch")
-        ed25519Hex <- cursor.get[String]("ed25519")
-        blsHex <- cursor.get[String]("bls")
-        metadataHex <- cursor.get[String]("metadata")
-        bandersnatch <- parseHexBytesFixed(bandersnatchHex, BandersnatchPublicKey.Size).map(BandersnatchPublicKey(_))
-        ed25519 <- parseHexBytesFixed(ed25519Hex, Ed25519PublicKey.Size).map(Ed25519PublicKey(_))
-        bls <- parseHexBytesFixed(blsHex, BlsPublicKey.Size).map(BlsPublicKey(_))
-        metadata <- parseHexBytesFixed(metadataHex, ValidatorKey.MetadataSize).map(JamBytes(_))
-      yield ValidatorKey(bandersnatch, ed25519, bls, metadata)
-    }
 
   /**
    * Extrinsic data relevant to statistics.

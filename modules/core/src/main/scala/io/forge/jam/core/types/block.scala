@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.extrinsic.{Preimage, GuaranteeExtrinsic, AssuranceExtrinsic, Dispute}
@@ -71,7 +71,7 @@ object block:
         val (ticketsLength, ticketsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += ticketsLengthBytes
         val tickets = (0 until ticketsLength.toInt).map { _ =>
-          val (ticket, consumed) = TicketEnvelope.given_JamDecoder_TicketEnvelope.decode(bytes, pos)
+          val (ticket, consumed) = bytes.decodeAs[TicketEnvelope](pos)
           pos += consumed
           ticket
         }.toList
@@ -80,7 +80,7 @@ object block:
         val (preimagesLength, preimagesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += preimagesLengthBytes
         val preimages = (0 until preimagesLength.toInt).map { _ =>
-          val (preimage, consumed) = Preimage.given_JamDecoder_Preimage.decode(bytes, pos)
+          val (preimage, consumed) = bytes.decodeAs[Preimage](pos)
           pos += consumed
           preimage
         }.toList
@@ -89,7 +89,7 @@ object block:
         val (guaranteesLength, guaranteesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += guaranteesLengthBytes
         val guarantees = (0 until guaranteesLength.toInt).map { _ =>
-          val (guarantee, consumed) = GuaranteeExtrinsic.given_JamDecoder_GuaranteeExtrinsic.decode(bytes, pos)
+          val (guarantee, consumed) = bytes.decodeAs[GuaranteeExtrinsic](pos)
           pos += consumed
           guarantee
         }.toList

@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ServiceId, CoreIndex, Gas}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
@@ -102,7 +102,7 @@ object workpackage:
         pos += Hash.Size
 
         // context - variable size
-        val (context, contextBytes) = Context.given_JamDecoder_Context.decode(bytes, pos)
+        val (context, contextBytes) = bytes.decodeAs[Context](pos)
         pos += contextBytes
 
         // authorization - compact length prefix + bytes
@@ -121,7 +121,7 @@ object workpackage:
         val (itemsLength, itemsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += itemsLengthBytes
         val items = (0 until itemsLength.toInt).map { _ =>
-          val (item, itemBytes) = WorkItem.given_JamDecoder_WorkItem.decode(bytes, pos)
+          val (item, itemBytes) = bytes.decodeAs[WorkItem](pos)
           pos += itemBytes
           item
         }.toList
@@ -185,11 +185,11 @@ object workpackage:
         var pos = offset
 
         // packageSpec - 102 bytes
-        val (packageSpec, packageSpecBytes) = PackageSpec.given_JamDecoder_PackageSpec.decode(bytes, pos)
+        val (packageSpec, packageSpecBytes) = bytes.decodeAs[PackageSpec](pos)
         pos += packageSpecBytes
 
         // context - variable size
-        val (context, contextBytes) = Context.given_JamDecoder_Context.decode(bytes, pos)
+        val (context, contextBytes) = bytes.decodeAs[Context](pos)
         pos += contextBytes
 
         // coreIndex - compact integer
@@ -214,7 +214,7 @@ object workpackage:
         val (segmentRootLookupLength, segmentRootLookupLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += segmentRootLookupLengthBytes
         val segmentRootLookup = (0 until segmentRootLookupLength.toInt).map { _ =>
-          val (lookup, consumed) = SegmentRootLookup.given_JamDecoder_SegmentRootLookup.decode(bytes, pos)
+          val (lookup, consumed) = bytes.decodeAs[SegmentRootLookup](pos)
           pos += consumed
           lookup
         }.toList
@@ -223,7 +223,7 @@ object workpackage:
         val (resultsLength, resultsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += resultsLengthBytes
         val results = (0 until resultsLength.toInt).map { _ =>
-          val (result, resultBytes) = WorkResult.given_JamDecoder_WorkResult.decode(bytes, pos)
+          val (result, resultBytes) = bytes.decodeAs[WorkResult](pos)
           pos += resultBytes
           result
         }.toList

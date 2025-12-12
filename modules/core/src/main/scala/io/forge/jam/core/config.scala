@@ -29,10 +29,15 @@ final case class ChainConfig(
     /** Maximum gas allowed for refinement */
     maxRefineGas: Long,
     /** Minimum public service index */
-    minPublicServiceIndex: Long = 1L << 16
+    minPublicServiceIndex: Long = 1L << 16,
+    /** Assurance timeout period in slots */
+    assuranceTimeoutPeriod: Int = 5
 ):
   /** Votes per verdict (2/3 * validators + 1 for supermajority) */
   val votesPerVerdict: Int = (2 * validatorCount / 3) + 1
+
+  /** Supermajority threshold: strictly more than 2/3 of validators */
+  val superMajority: Int = (2 * validatorCount) / 3
 
 object ChainConfig:
   /**

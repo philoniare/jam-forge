@@ -6,7 +6,7 @@ import spire.math.{UByte, UShort, UInt}
 import java.nio.file.{Files, Paths}
 
 import codec.*
-import codec.encode
+import codec.{encode, decodeAs}
 import primitives.*
 import types.context.*
 import types.workitem.*
@@ -67,7 +67,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       prerequisites = List(prereq)
     )
     val encoded = ctx.encode
-    val (decoded, consumed) = Context.given_JamDecoder_Context.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[Context](0)
     consumed shouldBe encoded.length
     decoded.anchor.toHex shouldBe ctx.anchor.toHex
     decoded.stateRoot.toHex shouldBe ctx.stateRoot.toHex
@@ -118,7 +118,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       exportCount = UShort(5)
     )
     val encoded = item.encode
-    val (decoded, consumed) = WorkItem.given_JamDecoder_WorkItem.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[WorkItem](0)
     consumed shouldBe encoded.length
     decoded.service.toInt shouldBe item.service.toInt
     decoded.payload shouldBe item.payload
@@ -158,7 +158,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       refineLoad = RefineLoad(Gas(0L), UShort(0), UShort(0), UInt(0), UShort(0))
     )
     val encoded = result.encode
-    val (decoded, consumed) = WorkResult.given_JamDecoder_WorkResult.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[WorkResult](0)
     decoded.result shouldBe ExecutionResult.Panic
   }
 
@@ -172,7 +172,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       refineLoad = RefineLoad(Gas(100L), UShort(5), UShort(3), UInt(1000), UShort(2))
     )
     val encoded = result.encode
-    val (decoded, consumed) = WorkResult.given_JamDecoder_WorkResult.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[WorkResult](0)
     consumed shouldBe encoded.length
     decoded.serviceId.toInt shouldBe result.serviceId.toInt
     decoded.result match
@@ -319,7 +319,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val encoded = pkg.encode
-    val (decoded, consumed) = WorkPackage.given_JamDecoder_WorkPackage.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[WorkPackage](0)
     consumed shouldBe encoded.length
     decoded.authCodeHost.toInt shouldBe 42
     decoded.items.length shouldBe 1
@@ -369,7 +369,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val encoded = report.encode
-    val (decoded, consumed) = types.workpackage.WorkReport.given_JamDecoder_WorkReport.decode(encoded, 0)
+    val (decoded, consumed) = encoded.decodeAs[WReport](0)
     consumed shouldBe encoded.length
     decoded.coreIndex.toInt shouldBe 2
     decoded.results.length shouldBe 1

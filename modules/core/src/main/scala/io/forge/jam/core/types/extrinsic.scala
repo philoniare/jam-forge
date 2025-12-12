@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ServiceId, ValidatorIndex, Timeslot, Ed25519Signature, Ed25519PublicKey}
 import io.forge.jam.core.types.work.Vote
 import io.forge.jam.core.types.dispute.{Culprit, Fault, GuaranteeSignature}
@@ -156,7 +156,7 @@ object extrinsic:
         pos += 4
 
         val votes = (0 until votesPerVerdict).map { _ =>
-          val (vote, consumed) = Vote.given_JamDecoder_Vote.decode(bytes, pos)
+          val (vote, consumed) = bytes.decodeAs[Vote](pos)
           pos += consumed
           vote
         }.toList
@@ -219,7 +219,7 @@ object extrinsic:
         val (culpritsLength, culpritsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += culpritsLengthBytes
         val culprits = (0 until culpritsLength.toInt).map { _ =>
-          val (culprit, consumed) = Culprit.given_JamDecoder_Culprit.decode(bytes, pos)
+          val (culprit, consumed) = bytes.decodeAs[Culprit](pos)
           pos += consumed
           culprit
         }.toList
@@ -228,7 +228,7 @@ object extrinsic:
         val (faultsLength, faultsLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += faultsLengthBytes
         val faults = (0 until faultsLength.toInt).map { _ =>
-          val (fault, consumed) = Fault.given_JamDecoder_Fault.decode(bytes, pos)
+          val (fault, consumed) = bytes.decodeAs[Fault](pos)
           pos += consumed
           fault
         }.toList
@@ -272,7 +272,7 @@ object extrinsic:
         var pos = offset
 
         // report - variable size
-        val (report, reportBytes) = workpackage.WorkReport.given_JamDecoder_WorkReport.decode(bytes, pos)
+        val (report, reportBytes) = bytes.decodeAs[WorkReport](pos)
         pos += reportBytes
 
         // slot - 4 bytes
@@ -283,7 +283,7 @@ object extrinsic:
         val (signaturesLength, signaturesLengthBytes) = codec.decodeCompactInteger(arr, pos)
         pos += signaturesLengthBytes
         val signatures = (0 until signaturesLength.toInt).map { _ =>
-          val (sig, consumed) = GuaranteeSignature.given_JamDecoder_GuaranteeSignature.decode(bytes, pos)
+          val (sig, consumed) = bytes.decodeAs[GuaranteeSignature](pos)
           pos += consumed
           sig
         }.toList

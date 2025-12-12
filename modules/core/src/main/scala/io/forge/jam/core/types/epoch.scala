@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
+import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
+import io.circe.Decoder
 
 /**
  * Epoch-related types
@@ -69,7 +71,7 @@ object epoch:
 
         var pos = offset + Hash.Size * 2
         val validators = (0 until validatorCount).map { _ =>
-          val (validator, consumed) = EpochValidatorKey.given_JamDecoder_EpochValidatorKey.decode(bytes, pos)
+          val (validator, consumed) = bytes.decodeAs[EpochValidatorKey](pos)
           pos += consumed
           validator
         }.toList
@@ -119,3 +121,17 @@ object epoch:
         pos += BlsPublicKey.Size
         val metadata = JamBytes(arr.slice(pos, pos + MetadataSize))
         (ValidatorKey(bandersnatch, ed25519, bls, metadata), Size)
+
+    given Decoder[ValidatorKey] =
+      Decoder.instance { cursor =>
+        for
+          bandersnatchHex <- cursor.get[String]("bandersnatch")
+          ed25519Hex <- cursor.get[String]("ed25519")
+          blsHex <- cursor.get[String]("bls")
+          metadataHex <- cursor.get[String]("metadata")
+          bandersnatch <- parseHexBytesFixed(bandersnatchHex, BandersnatchPublicKey.Size).map(BandersnatchPublicKey(_))
+          ed25519 <- parseHexBytesFixed(ed25519Hex, Ed25519PublicKey.Size).map(Ed25519PublicKey(_))
+          bls <- parseHexBytesFixed(blsHex, BlsPublicKey.Size).map(BlsPublicKey(_))
+          metadata <- parseHexBytesFixed(metadataHex, MetadataSize).map(JamBytes(_))
+        yield ValidatorKey(bandersnatch, ed25519, bls, metadata)
+      }

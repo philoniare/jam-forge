@@ -1,7 +1,7 @@
 package io.forge.jam.core.types
 
 import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.json.JsonHelpers.parseHex
@@ -133,11 +133,11 @@ object workresult:
         pos += 8
 
         // result - ExecutionResult (variable)
-        val (result, resultBytes) = ExecutionResult.given_JamDecoder_ExecutionResult.decode(bytes, pos)
+        val (result, resultBytes) = bytes.decodeAs[ExecutionResult](pos)
         pos += resultBytes
 
         // refineLoad - RefineLoad (variable)
-        val (refineLoad, refineLoadBytes) = RefineLoad.given_JamDecoder_RefineLoad.decode(bytes, pos)
+        val (refineLoad, refineLoadBytes) = bytes.decodeAs[RefineLoad](pos)
         pos += refineLoadBytes
 
         (WorkResult(serviceId, codeHash, payloadHash, accumulateGas, result, refineLoad), pos - offset)
