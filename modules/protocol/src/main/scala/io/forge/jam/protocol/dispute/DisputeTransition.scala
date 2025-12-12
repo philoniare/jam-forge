@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, Hashing}
+import io.forge.jam.core.JamBytes.compareUnsigned
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature, Timeslot}
 import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
 import io.forge.jam.core.types.dispute.{Culprit, Fault}
@@ -31,18 +32,6 @@ object DisputeTransition:
   private val JAM_VALID = "jam_valid"
   private val JAM_INVALID = "jam_invalid"
   private val JAM_GUARANTEE = "jam_guarantee"
-
-  /**
-   * Compare two byte arrays lexicographically as unsigned values.
-   */
-  private def compareUnsigned(a: Array[Byte], b: Array[Byte]): Int =
-    val len = math.min(a.length, b.length)
-    var i = 0
-    while i < len do
-      val diff = (a(i).toInt & 0xFF) - (b(i).toInt & 0xFF)
-      if diff != 0 then return diff
-      i += 1
-    a.length - b.length
 
   /**
    * Verify Ed25519 signature on a message.

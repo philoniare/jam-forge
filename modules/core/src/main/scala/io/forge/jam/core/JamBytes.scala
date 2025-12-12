@@ -130,6 +130,19 @@ final class JamBytes private (private val underlying: Array[Byte]) extends Order
 object JamBytes:
   /** Empty byte sequence */
   val empty: JamBytes = new JamBytes(Array.emptyByteArray)
+
+  /**
+   * Compare two byte arrays lexicographically as unsigned values.
+   * Returns negative if a < b, zero if equal, positive if a > b.
+   */
+  def compareUnsigned(a: Array[Byte], b: Array[Byte]): Int =
+    val len = math.min(a.length, b.length)
+    var i = 0
+    while i < len do
+      val diff = (a(i).toInt & 0xFF) - (b(i).toInt & 0xFF)
+      if diff != 0 then return diff
+      i += 1
+    a.length - b.length
   
   /** Create from byte array (defensive copy) */
   def apply(bytes: Array[Byte]): JamBytes = new JamBytes(bytes.clone())
