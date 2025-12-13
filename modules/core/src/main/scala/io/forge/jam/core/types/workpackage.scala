@@ -7,7 +7,6 @@ import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workresult.WorkResult
 import io.forge.jam.core.types.work.PackageSpec
-import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 import spire.math.UInt
 
@@ -41,9 +40,9 @@ object workpackage:
 
     given Decoder[SegmentRootLookup] = Decoder.instance { cursor =>
       for
-        workPackageHash <- cursor.get[String]("work_package_hash")
-        segmentTreeRoot <- cursor.get[String]("segment_tree_root")
-      yield SegmentRootLookup(Hash(parseHex(workPackageHash)), Hash(parseHex(segmentTreeRoot)))
+        workPackageHash <- cursor.get[Hash]("work_package_hash")
+        segmentTreeRoot <- cursor.get[Hash]("segment_tree_root")
+      yield SegmentRootLookup(workPackageHash, segmentTreeRoot)
     }
 
   /**
@@ -67,6 +66,24 @@ object workpackage:
   )
 
   object WorkPackage:
+    given Decoder[WorkPackage] = Decoder.instance { cursor =>
+      for
+        authCodeHost <- cursor.get[Long]("auth_code_host")
+        authCodeHash <- cursor.get[Hash]("auth_code_hash")
+        context <- cursor.get[Context]("context")
+        authorization <- cursor.get[JamBytes]("authorization")
+        authorizerConfig <- cursor.get[JamBytes]("authorizer_config")
+        items <- cursor.get[List[WorkItem]]("items")
+      yield WorkPackage(
+        ServiceId(authCodeHost.toInt),
+        authCodeHash,
+        context,
+        authorization,
+        authorizerConfig,
+        items
+      )
+    }
+
     given JamEncoder[WorkPackage] with
       def encode(a: WorkPackage): JamBytes =
         val builder = JamBytes.newBuilder
@@ -244,18 +261,18 @@ object workpackage:
         packageSpec <- cursor.get[PackageSpec]("package_spec")
         context <- cursor.get[Context]("context")
         coreIndex <- cursor.get[Int]("core_index")
-        authorizerHash <- cursor.get[String]("authorizer_hash")
+        authorizerHash <- cursor.get[Hash]("authorizer_hash")
         authGasUsed <- cursor.get[Long]("auth_gas_used")
-        authOutput <- cursor.get[String]("auth_output")
+        authOutput <- cursor.get[JamBytes]("auth_output")
         segmentRootLookup <- cursor.get[List[SegmentRootLookup]]("segment_root_lookup")
         results <- cursor.get[List[WorkResult]]("results")
       yield WorkReport(
         packageSpec,
         context,
         CoreIndex(coreIndex),
-        Hash(parseHex(authorizerHash)),
+        authorizerHash,
         Gas(authGasUsed),
-        JamBytes(parseHex(authOutput)),
+        authOutput,
         segmentRootLookup,
         results
       )

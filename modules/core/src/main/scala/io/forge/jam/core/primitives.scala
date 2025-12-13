@@ -2,7 +2,9 @@ package io.forge.jam.core
 
 import scala.annotation.targetName
 import spire.math.{UByte, UShort, UInt, ULong}
+import io.circe.Decoder
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.json.JsonHelpers
 
 /**
  * Core primitive types for JAM using Spire unsigned types.
@@ -59,6 +61,14 @@ object primitives:
       def decode(bytes: JamBytes, offset: Int): (Hash, Int) =
         (Hash(bytes.toArray.slice(offset, offset + Size)), Size)
 
+    given Decoder[Hash] = Decoder.decodeString.emap { hex =>
+      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
+      if cleanHex.length != Size * 2 then
+        Left(s"Hash must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
+      else
+        fromHex(cleanHex).left.map(err => s"Invalid hash: $err")
+    }
+
   // ══════════════════════════════════════════════════════════════════════════
   // Bandersnatch Types
   // ══════════════════════════════════════════════════════════════════════════
@@ -77,6 +87,18 @@ object primitives:
       require(bytes.length == Size)
       new BandersnatchPublicKey(bytes.clone())
     def zero: BandersnatchPublicKey = new BandersnatchPublicKey(new Array[Byte](Size))
+
+    given Decoder[BandersnatchPublicKey] = Decoder.decodeString.emap { hex =>
+      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
+      if cleanHex.length != Size * 2 then
+        Left(s"BandersnatchPublicKey must be $Size bytes, got ${cleanHex.length / 2} bytes")
+      else
+        try
+          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+          Right(BandersnatchPublicKey(bytes))
+        catch
+          case _: NumberFormatException => Left("Invalid hex character")
+    }
 
   /** Bandersnatch signature (96 bytes) */
   final case class BandersnatchSignature private (private val underlying: Array[Byte]):
@@ -117,6 +139,18 @@ object primitives:
       def decode(bytes: JamBytes, offset: Int): (Ed25519PublicKey, Int) =
         (Ed25519PublicKey(bytes.toArray.slice(offset, offset + Size)), Size)
 
+    given Decoder[Ed25519PublicKey] = Decoder.decodeString.emap { hex =>
+      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
+      if cleanHex.length != Size * 2 then
+        Left(s"Ed25519PublicKey must be $Size bytes, got ${cleanHex.length / 2} bytes")
+      else
+        try
+          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+          Right(Ed25519PublicKey(bytes))
+        catch
+          case _: NumberFormatException => Left("Invalid hex character")
+    }
+
   /** Ed25519 signature (64 bytes) */
   final case class Ed25519Signature private (private val underlying: Array[Byte]):
     def bytes: Array[Byte] = underlying.clone()
@@ -130,6 +164,18 @@ object primitives:
     def apply(bytes: Array[Byte]): Ed25519Signature =
       require(bytes.length == Size)
       new Ed25519Signature(bytes.clone())
+
+    given Decoder[Ed25519Signature] = Decoder.decodeString.emap { hex =>
+      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
+      if cleanHex.length != Size * 2 then
+        Left(s"Ed25519Signature must be $Size bytes, got ${cleanHex.length / 2} bytes")
+      else
+        try
+          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+          Right(Ed25519Signature(bytes))
+        catch
+          case _: NumberFormatException => Left("Invalid hex character")
+    }
 
   // ══════════════════════════════════════════════════════════════════════════
   // BLS Types

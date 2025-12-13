@@ -1,5 +1,6 @@
 package io.forge.jam.core.types
 
+import io.circe.Decoder
 import io.forge.jam.core.{JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
@@ -36,6 +37,13 @@ object workitem:
         val index = codec.decodeU16LE(arr, offset + Hash.Size)
         (WorkItemImportSegment(treeRoot, index), Size)
 
+    given Decoder[WorkItemImportSegment] = Decoder.instance { cursor =>
+      for
+        treeRoot <- cursor.get[Hash]("tree_root")
+        index <- cursor.get[Int]("index")
+      yield WorkItemImportSegment(treeRoot, UShort(index))
+    }
+
   /**
    * Extrinsic reference for a work item.
    * Fixed size: 36 bytes (32-byte hash + 4-byte length)
@@ -61,6 +69,13 @@ object workitem:
         val hash = Hash(arr.slice(offset, offset + Hash.Size))
         val len = codec.decodeU32LE(arr, offset + Hash.Size)
         (WorkItemExtrinsic(hash, len), Size)
+
+    given Decoder[WorkItemExtrinsic] = Decoder.instance { cursor =>
+      for
+        hash <- cursor.get[Hash]("hash")
+        len <- cursor.get[Long]("len")
+      yield WorkItemExtrinsic(hash, UInt(len.toInt))
+    }
 
   /**
    * A work item in a work package.
@@ -163,3 +178,25 @@ object workitem:
         }.toList
 
         (WorkItem(service, codeHash, payload, refineGasLimit, accumulateGasLimit, importSegments, extrinsic, exportCount), pos - offset)
+
+    given Decoder[WorkItem] = Decoder.instance { cursor =>
+      for
+        service <- cursor.get[Long]("service")
+        codeHash <- cursor.get[Hash]("code_hash")
+        payload <- cursor.get[JamBytes]("payload")
+        refineGasLimit <- cursor.get[Long]("refine_gas_limit")
+        accumulateGasLimit <- cursor.get[Long]("accumulate_gas_limit")
+        importSegments <- cursor.get[List[WorkItemImportSegment]]("import_segments")
+        extrinsic <- cursor.get[List[WorkItemExtrinsic]]("extrinsic")
+        exportCount <- cursor.get[Int]("export_count")
+      yield WorkItem(
+        ServiceId(service.toInt),
+        codeHash,
+        payload,
+        Gas(refineGasLimit),
+        Gas(accumulateGasLimit),
+        importSegments,
+        extrinsic,
+        UShort(exportCount)
+      )
+    }

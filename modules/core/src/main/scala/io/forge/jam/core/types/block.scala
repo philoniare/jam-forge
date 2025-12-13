@@ -1,5 +1,6 @@
 package io.forge.jam.core.types
 
+import io.circe.Decoder
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.types.header.Header
@@ -111,6 +112,16 @@ object block:
 
         (Extrinsic(tickets, preimages, guarantees, assurances, disputes), pos - offset)
 
+    given Decoder[Extrinsic] = Decoder.instance { cursor =>
+      for
+        tickets <- cursor.get[List[TicketEnvelope]]("tickets")
+        preimages <- cursor.get[List[Preimage]]("preimages")
+        guarantees <- cursor.get[List[GuaranteeExtrinsic]]("guarantees")
+        assurances <- cursor.get[List[AssuranceExtrinsic]]("assurances")
+        disputes <- cursor.get[Dispute]("disputes")
+      yield Extrinsic(tickets, preimages, guarantees, assurances, disputes)
+    }
+
   /**
    * A complete block containing header and extrinsic.
    */
@@ -161,3 +172,10 @@ object block:
      */
     def fromBytes(bytes: JamBytes, offset: Int, config: ChainConfig): (Block, Int) =
       decoder(config).decode(bytes, offset)
+
+    given Decoder[Block] = Decoder.instance { cursor =>
+      for
+        header <- cursor.get[Header]("header")
+        extrinsic <- cursor.get[Extrinsic]("extrinsic")
+      yield Block(header, extrinsic)
+    }

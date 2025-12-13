@@ -1,5 +1,6 @@
 package io.forge.jam.core.types
 
+import io.circe.Decoder
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
@@ -44,10 +45,11 @@ object header:
     offendersMark: List[Hash],
     seal: JamBytes
   ):
-    require(entropySource.length == EntropySourceSize,
-      s"Entropy source must be $EntropySourceSize bytes, got ${entropySource.length}")
-    require(seal.length == SealSize,
-      s"Seal must be $SealSize bytes, got ${seal.length}")
+    require(
+      entropySource.length == EntropySourceSize,
+      s"Entropy source must be $EntropySourceSize bytes, got ${entropySource.length}"
+    )
+    require(seal.length == SealSize, s"Seal must be $SealSize bytes, got ${seal.length}")
 
   object Header:
     given JamEncoder[Header] with
@@ -120,7 +122,7 @@ object header:
         pos += 4
 
         // epochMark - 0/1 prefix
-        val epochMarkFlag = arr(pos) & 0xFF
+        val epochMarkFlag = arr(pos) & 0xff
         pos += 1
         val epochMark = if epochMarkFlag == 1 then
           val epochMarkDecoder = EpochMark.decoder(validatorCount)
@@ -130,7 +132,7 @@ object header:
         else None
 
         // ticketsMark - 0/1 prefix + epochLength items
-        val ticketsMarkFlag = arr(pos) & 0xFF
+        val ticketsMarkFlag = arr(pos) & 0xff
         pos += 1
         val ticketsMark = if ticketsMarkFlag == 1 then
           val marks = (0 until epochLength).map { _ =>
@@ -162,21 +164,50 @@ object header:
         val seal = bytes.slice(pos, pos + SealSize)
         pos += SealSize
 
-        (Header(
-          parent,
-          parentStateRoot,
-          extrinsicHash,
-          slot,
-          epochMark,
-          ticketsMark,
-          authorIndex,
-          entropySource,
-          offendersMark,
-          seal
-        ), pos - offset)
+        (
+          Header(
+            parent,
+            parentStateRoot,
+            extrinsicHash,
+            slot,
+            epochMark,
+            ticketsMark,
+            authorIndex,
+            entropySource,
+            offendersMark,
+            seal
+          ),
+          pos - offset
+        )
 
     /**
      * Convenience method to decode with config.
      */
     def fromBytes(bytes: JamBytes, offset: Int, config: ChainConfig): (Header, Int) =
       decoder(config).decode(bytes, offset)
+
+    given Decoder[Header] = Decoder.instance { cursor =>
+      for
+        parent <- cursor.get[Hash]("parent")
+        parentStateRoot <- cursor.get[Hash]("parent_state_root")
+        extrinsicHash <- cursor.get[Hash]("extrinsic_hash")
+        slot <- cursor.get[Long]("slot")
+        epochMark <- cursor.get[Option[EpochMark]]("epoch_mark")
+        ticketsMark <- cursor.get[Option[List[TicketMark]]]("tickets_mark")
+        authorIndex <- cursor.get[Int]("author_index")
+        entropySource <- cursor.get[JamBytes]("entropy_source")
+        offendersMark <- cursor.get[List[Hash]]("offenders_mark")
+        seal <- cursor.get[JamBytes]("seal")
+      yield Header(
+        parent,
+        parentStateRoot,
+        extrinsicHash,
+        Timeslot(slot.toInt),
+        epochMark,
+        ticketsMark,
+        ValidatorIndex(authorIndex),
+        entropySource,
+        offendersMark,
+        seal
+      )
+    }
