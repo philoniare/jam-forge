@@ -4,7 +4,25 @@ import io.forge.jam.core.{ChainConfig, JamBytes, codec}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
+import io.forge.jam.core.types.workpackage.AvailabilityAssignment
+import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.safrole.SafroleTypes.*
+import io.forge.jam.protocol.dispute.DisputeTypes.Psi
+import io.forge.jam.protocol.accumulation.{
+  AccumulationState,
+  AccumulationServiceItem,
+  AccumulationServiceData,
+  AccumulationReadyRecord,
+  Privileges,
+  AlwaysAccItem
+}
+import io.forge.jam.protocol.history.HistoryTypes.HistoricalState
+import io.forge.jam.protocol.authorization.AuthorizationTypes.AuthState
+import io.forge.jam.protocol.preimage.PreimageTypes.{PreimageState, PreimageAccount, AccountInfo}
+import io.forge.jam.protocol.statistics.StatisticsTypes.{StatState, StatCount}
+import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
+
+import scala.collection.mutable
 
 /**
  * Unified JAM state container holding all state components.
@@ -31,17 +49,44 @@ final case class FullJamState(
   safroleGammaS: TicketsOrKeys, // gamma_s - sealing sequence
   safroleGammaA: List[TicketMark], // gamma_a - ticket accumulator
 
-  // phi_c - Core authorization pools (simplified as raw bytes)
+  // phi_c - Core authorization pools (per core, variable-size inner lists)
   authPools: List[List[Hash]] = List.empty,
 
-  // phi - Authorization queues (simplified as raw bytes)
+  // phi - Authorization queues (per core, fixed-size 80 inner lists)
   authQueues: List[List[Hash]] = List.empty,
 
-  // rho - Pending reports as raw keyvals (simplified)
-  reportsKvs: List[KeyValue] = List.empty,
+  // beta - Recent block history
+  recentHistory: HistoricalBetaContainer = HistoricalBetaContainer(),
 
-  // psi - Judgements as raw keyvals (simplified)
-  judgementsKvs: List[KeyValue] = List.empty,
+  // rho - Pending work reports (availability assignments per core)
+  reports: List[Option[AvailabilityAssignment]] = List.empty,
+
+  // psi - Judgements (disputes resolution state)
+  judgements: Psi = Psi.empty,
+
+  // chi - Privileged services configuration
+  privilegedServices: Privileges = Privileges(0, List.empty, 0, 0, List.empty),
+
+  // Ready queue for accumulation (epoch-length ring buffer)
+  accumulationQueue: List[List[AccumulationReadyRecord]] = List.empty,
+
+  // Accumulated hashes history (epoch-length ring buffer)
+  accumulationHistory: List[List[JamBytes]] = List.empty,
+
+  // delta - Service accounts with full data
+  serviceAccounts: List[AccumulationServiceItem] = List.empty,
+
+  // pi - Service statistics (per block, fresh each block)
+  serviceStatistics: List[ServiceStatisticsEntry] = List.empty,
+
+  // alpha_c - Core statistics (per core)
+  coreStatistics: List[CoreStatisticsRecord] = List.empty,
+
+  // alpha_v^curr - Current epoch validator statistics
+  activityStatsCurrent: List[StatCount] = List.empty,
+
+  // alpha_v^last - Last epoch validator statistics
+  activityStatsLast: List[StatCount] = List.empty,
 
   // Post-dispute offenders
   postOffenders: List[Ed25519PublicKey] = List.empty,
@@ -82,6 +127,96 @@ final case class FullJamState(
       safroleGammaS = safrole.gammaS,
       safroleGammaZ = safrole.gammaZ,
       postOffenders = safrole.postOffenders
+    )
+
+  /**
+   * Convert to AccumulationState for Accumulation STF.
+   */
+  def toAccumulationState(config: ChainConfig): AccumulationState =
+    // Initialize ready queue and accumulated history if empty
+    val readyQueue = if accumulationQueue.isEmpty then
+      List.fill(config.epochLength)(List.empty[AccumulationReadyRecord])
+    else
+      accumulationQueue
+
+    val accumulated = if accumulationHistory.isEmpty then
+      List.fill(config.epochLength)(List.empty[JamBytes])
+    else
+      accumulationHistory
+
+    AccumulationState(
+      slot = timeslot,
+      entropy = if entropyPool.nonEmpty then JamBytes(entropyPool.head.bytes) else JamBytes.zeros(32),
+      readyQueue = readyQueue,
+      accumulated = accumulated,
+      privileges = privilegedServices,
+      statistics = serviceStatistics.map(s =>
+        io.forge.jam.protocol.accumulation.ServiceStatisticsEntry(
+          s.id,
+          io.forge.jam.protocol.accumulation.ServiceActivityRecord(
+            s.record.refinementCount.toInt,
+            s.record.refinementGasUsed,
+            s.record.refinementCount,
+            s.record.refinementGasUsed,
+            s.record.imports,
+            s.record.extrinsicCount,
+            s.record.extrinsicSize,
+            s.record.exports,
+            0,
+            0
+          )
+        )
+      ),
+      accounts = serviceAccounts
+    )
+
+  /**
+   * Convert to HistoricalState for History STF.
+   */
+  def toHistoryState(): HistoricalState =
+    HistoricalState(beta = recentHistory)
+
+  /**
+   * Convert to AuthState for Authorization STF.
+   */
+  def toAuthState(): AuthState =
+    AuthState(
+      authPools = authPools,
+      authQueues = authQueues
+    )
+
+  /**
+   * Convert to PreimageState for Preimage STF.
+   */
+  def toPreimageState(): PreimageState =
+    PreimageState(
+      accounts = serviceAccounts.map { item =>
+        PreimageAccount(
+          id = item.id,
+          data = AccountInfo(
+            preimages = item.data.preimages.map(p =>
+              io.forge.jam.core.types.preimage.PreimageHash(p.hash, p.blob)
+            ),
+            lookupMeta = item.data.preimagesStatus.map { status =>
+              io.forge.jam.protocol.preimage.PreimageTypes.PreimageHistory(
+                key = io.forge.jam.protocol.preimage.PreimageTypes.PreimageHistoryKey(status.hash, 0),
+                value = status.status
+              )
+            }
+          )
+        )
+      }
+    )
+
+  /**
+   * Convert to StatState for Statistics STF.
+   */
+  def toStatState(): StatState =
+    StatState(
+      valsCurrStats = activityStatsCurrent,
+      valsLastStats = activityStatsLast,
+      slot = timeslot,
+      currValidators = currentValidators
     )
 
   /**
@@ -197,6 +332,19 @@ object FullJamState:
 
     val otherKvs = keyvals.filterNot(kv => safroleRelatedPrefixes.contains(kv.key.toArray(0).toInt & 0xff))
 
+    // Initialize empty reports list (one per core)
+    val emptyReports = List.fill(config.coresCount)(Option.empty[AvailabilityAssignment])
+
+    // Initialize empty auth pools and queues (one per core)
+    val emptyAuthPools = List.fill(config.coresCount)(List.empty[Hash])
+    val emptyAuthQueues = List.fill(config.coresCount)(List.fill(80)(Hash.zero))
+
+    // Initialize empty validator statistics
+    val emptyStatCount = List.fill(config.validatorCount)(StatCount.zero)
+
+    // Initialize empty core statistics
+    val emptyCoreStats = List.fill(config.coresCount)(CoreStatisticsRecord())
+
     FullJamState(
       timeslot = safroleState.tau,
       entropyPool = safroleState.eta,
@@ -208,6 +356,13 @@ object FullJamState:
       safroleGammaS = safroleState.gammaS,
       safroleGammaA = safroleState.gammaA,
       postOffenders = safroleState.postOffenders,
+      judgements = Psi.empty, // Judgements initialized empty, updated by Disputes STF
+      reports = emptyReports,
+      authPools = emptyAuthPools,
+      authQueues = emptyAuthQueues,
+      activityStatsCurrent = emptyStatCount,
+      activityStatsLast = emptyStatCount,
+      coreStatistics = emptyCoreStats,
       otherKeyvals = otherKvs
     )
 
@@ -223,6 +378,11 @@ object FullJamState:
     )
     val emptyValidators = List.fill(config.validatorCount)(emptyValidatorKey)
     val emptyEntropy = List.fill(4)(Hash.zero)
+    val emptyReports = List.fill(config.coresCount)(Option.empty[AvailabilityAssignment])
+    val emptyAuthPools = List.fill(config.coresCount)(List.empty[Hash])
+    val emptyAuthQueues = List.fill(config.coresCount)(List.fill(80)(Hash.zero))
+    val emptyStatCount = List.fill(config.validatorCount)(StatCount.zero)
+    val emptyCoreStats = List.fill(config.coresCount)(CoreStatisticsRecord())
 
     FullJamState(
       timeslot = 0,
@@ -233,5 +393,11 @@ object FullJamState:
       safroleGammaK = emptyValidators,
       safroleGammaZ = JamBytes.zeros(RING_COMMITMENT_SIZE),
       safroleGammaS = TicketsOrKeys.Keys(List.fill(config.epochLength)(BandersnatchPublicKey.zero)),
-      safroleGammaA = List.empty
+      safroleGammaA = List.empty,
+      reports = emptyReports,
+      authPools = emptyAuthPools,
+      authQueues = emptyAuthQueues,
+      activityStatsCurrent = emptyStatCount,
+      activityStatsLast = emptyStatCount,
+      coreStatistics = emptyCoreStats
     )
