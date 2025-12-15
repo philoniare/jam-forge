@@ -27,20 +27,13 @@ object StatisticsTransition:
    * @return Tuple of (updated JamState, optional StatOutput).
    */
   def stf(input: StatInput, state: JamState, config: ChainConfig): (JamState, Option[StatOutput]) =
-    // Convert JamState fields to StatState for existing logic
-    val preState = StatState(
-      valsCurrStats = state.statistics.current,
-      valsLastStats = state.statistics.last,
-      slot = state.tau,
-      currValidators = state.validators.current
-    )
+    // Extract StatState using lens bundle
+    val preState = JamState.StatisticsLenses.extract(state)
 
     val (postState, output) = stfInternal(input, preState, config)
 
-    // Update JamState with results
-    val updatedState = state
-      .focus(_.statistics.current).replace(postState.valsCurrStats)
-      .focus(_.statistics.last).replace(postState.valsLastStats)
+    // Apply results back using lens bundle
+    val updatedState = JamState.StatisticsLenses.apply(state, postState)
 
     (updatedState, output)
 

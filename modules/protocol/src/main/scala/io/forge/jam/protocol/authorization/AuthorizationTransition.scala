@@ -28,18 +28,13 @@ object AuthorizationTransition:
    * @return The updated JamState.
    */
   def stf(input: AuthInput, state: JamState, config: ChainConfig): JamState =
-    // Convert JamState fields to AuthState for existing logic
-    val preState = AuthState(
-      authPools = state.authPools,
-      authQueues = state.authQueues
-    )
+    // Extract AuthState using lens bundle
+    val preState = JamState.AuthorizationLenses.extract(state)
 
     val postState = stfInternal(input, preState, config)
 
-    // Update JamState with results
-    state
-      .focus(_.authPools).replace(postState.authPools)
-      .focus(_.authQueues).replace(postState.authQueues)
+    // Apply results back using lens bundle
+    JamState.AuthorizationLenses.apply(state, postState)
 
   /**
    * Internal Authorization STF implementation using AuthState.

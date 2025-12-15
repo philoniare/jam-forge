@@ -33,13 +33,13 @@ object HistoryTransition:
    * @return The updated JamState.
    */
   def stf(input: HistoricalInput, state: JamState, config: ChainConfig = ChainConfig.FULL): JamState =
-    // Convert JamState fields to HistoricalState for existing logic
-    val preState = HistoricalState(beta = state.beta)
+    // Extract HistoricalState using lens bundle
+    val preState = JamState.HistoryLenses.extract(state)
 
     val postState = stfInternal(input, preState, config)
 
-    // Update JamState with results
-    state.focus(_.beta).replace(postState.beta)
+    // Apply results back using lens bundle
+    JamState.HistoryLenses.apply(state, postState)
 
   /**
    * Internal History STF implementation using HistoricalState.

@@ -396,6 +396,169 @@ object JamState:
     )
 
   /**
+   * Safrole lens bundle - extracts and applies Safrole-related state.
+   * Fields: tau, eta, lambda, kappa, gammaK, iota, gammaA, gammaS, gammaZ, postOffenders
+   */
+  object SafroleLenses:
+    import io.forge.jam.protocol.safrole.SafroleTypes.SafroleState
+
+    /** Extract SafroleState from JamState */
+    def extract(state: JamState): SafroleState = SafroleState(
+      tau = tauLens.get(state),
+      eta = etaLens.get(state),
+      lambda = lambdaLens.get(state),
+      kappa = kappaLens.get(state),
+      gammaK = gammaKLens.get(state),
+      iota = iotaLens.get(state),
+      gammaA = gammaALens.get(state),
+      gammaS = gammaSLens.get(state),
+      gammaZ = gammaZLens.get(state),
+      postOffenders = postOffendersLens.get(state)
+    )
+
+    /** Apply SafroleState changes back to JamState */
+    def apply(state: JamState, post: SafroleState): JamState = state
+      .focus(_.tau).replace(post.tau)
+      .focus(_.entropy.pool).replace(post.eta)
+      .focus(_.validators.previous).replace(post.lambda)
+      .focus(_.validators.current).replace(post.kappa)
+      .focus(_.validators.nextEpoch).replace(post.gammaK)
+      .focus(_.validators.queue).replace(post.iota)
+      .focus(_.gamma.a).replace(post.gammaA)
+      .focus(_.gamma.s).replace(post.gammaS)
+      .focus(_.gamma.z).replace(post.gammaZ)
+      .focus(_.postOffenders).replace(post.postOffenders)
+
+  /**
+   * Dispute lens bundle - extracts and applies Dispute-related state.
+   * Fields: psi, rho, tau, kappa, lambda
+   */
+  object DisputeLenses:
+    import io.forge.jam.protocol.dispute.DisputeTypes.DisputeState
+
+    /** Extract DisputeState from JamState */
+    def extract(state: JamState): DisputeState = DisputeState(
+      psi = psiLens.get(state),
+      rho = rhoLens.get(state),
+      tau = tauLens.get(state),
+      kappa = kappaLens.get(state),
+      lambda = lambdaLens.get(state)
+    )
+
+    /** Apply DisputeState changes back to JamState (only psi and rho are modified) */
+    def apply(state: JamState, post: DisputeState): JamState = state
+      .focus(_.psi).replace(post.psi)
+      .focus(_.cores.reports).replace(post.rho)
+
+  /**
+   * Assurance lens bundle - extracts and applies Assurance-related state.
+   * Fields: availAssignments (rho), currValidators (kappa)
+   */
+  object AssuranceLenses:
+    import io.forge.jam.protocol.assurance.AssuranceTypes.AssuranceState
+
+    /** Extract AssuranceState from JamState */
+    def extract(state: JamState): AssuranceState = AssuranceState(
+      availAssignments = rhoLens.get(state),
+      currValidators = kappaLens.get(state)
+    )
+
+    /** Apply AssuranceState changes back to JamState */
+    def apply(state: JamState, post: AssuranceState): JamState = state
+      .focus(_.cores.reports).replace(post.availAssignments)
+
+  /**
+   * Authorization lens bundle - extracts and applies Authorization-related state.
+   * Fields: authPools, authQueues
+   */
+  object AuthorizationLenses:
+    import io.forge.jam.protocol.authorization.AuthorizationTypes.AuthState
+
+    /** Extract AuthState from JamState */
+    def extract(state: JamState): AuthState = AuthState(
+      authPools = authPoolsLens.get(state),
+      authQueues = authQueuesLens.get(state)
+    )
+
+    /** Apply AuthState changes back to JamState */
+    def apply(state: JamState, post: AuthState): JamState = state
+      .focus(_.authPools).replace(post.authPools)
+      .focus(_.authQueues).replace(post.authQueues)
+
+  /**
+   * History lens bundle - extracts and applies History-related state.
+   * Fields: beta (HistoricalBetaContainer)
+   */
+  object HistoryLenses:
+    import io.forge.jam.protocol.history.HistoryTypes.HistoricalState
+
+    /** Extract HistoricalState from JamState */
+    def extract(state: JamState): HistoricalState = HistoricalState(
+      beta = betaLens.get(state)
+    )
+
+    /** Apply HistoricalState changes back to JamState */
+    def apply(state: JamState, post: HistoricalState): JamState = state
+      .focus(_.beta).replace(post.beta)
+
+  /**
+   * Statistics lens bundle - extracts and applies Statistics-related state.
+   * Fields: valsCurrStats, valsLastStats, slot (tau), currValidators (kappa)
+   */
+  object StatisticsLenses:
+    import io.forge.jam.protocol.statistics.StatisticsTypes.StatState
+
+    /** Extract StatState from JamState */
+    def extract(state: JamState): StatState = StatState(
+      valsCurrStats = valsCurrStatsLens.get(state),
+      valsLastStats = valsLastStatsLens.get(state),
+      slot = tauLens.get(state),
+      currValidators = kappaLens.get(state)
+    )
+
+    /** Apply StatState changes back to JamState (only stats are modified) */
+    def apply(state: JamState, post: StatState): JamState = state
+      .focus(_.statistics.current).replace(post.valsCurrStats)
+      .focus(_.statistics.last).replace(post.valsLastStats)
+
+  /**
+   * Report lens bundle - extracts and applies Report-related state.
+   * Fields: availAssignments (rho), validators, entropy, offenders, recentBlocks, authPools, accounts, statistics
+   */
+  object ReportLenses:
+    import io.forge.jam.protocol.report.ReportTypes.ReportState
+    import io.forge.jam.core.types.service.{ServiceAccount, ServiceData}
+
+    /** Extract ReportState from JamState (includes service account conversion) */
+    def extract(state: JamState): ReportState =
+      // Convert accumulation service accounts to core ServiceAccount type
+      val accounts = state.accumulation.serviceAccounts.map { item =>
+        ServiceAccount(
+          id = item.id,
+          data = ServiceData(service = item.data.service)
+        )
+      }
+
+      ReportState(
+        availAssignments = rhoLens.get(state),
+        currValidators = kappaLens.get(state),
+        prevValidators = lambdaLens.get(state),
+        entropy = etaLens.get(state),
+        offenders = psiLens.get(state).offenders.map(key => io.forge.jam.core.primitives.Hash(key.bytes)),
+        recentBlocks = betaLens.get(state),
+        authPools = authPoolsLens.get(state),
+        accounts = accounts,
+        coresStatistics = coreStatisticsLens.get(state),
+        servicesStatistics = serviceStatisticsLens.get(state)
+      )
+
+    /** Apply ReportState changes back to JamState */
+    def apply(state: JamState, post: ReportState): JamState = state
+      .focus(_.cores.reports).replace(post.availAssignments)
+      .focus(_.cores.statistics).replace(post.coresStatistics)
+      .focus(_.serviceStatistics).replace(post.servicesStatistics)
+
+  /**
    * Convert a JamState back to FullJamState for encoding.
    * This is a temporary bridge during migration from the old state architecture.
    *

@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult}
+import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.JamBytes.compareUnsigned
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature, Timeslot}
 import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
@@ -28,43 +28,6 @@ import monocle.syntax.all.*
  * - Maintain sorted/unique ordering requirements
  */
 object DisputeTransition:
-
-  /**
-   * Validate that culprits are sorted and unique by key.
-   */
-  private def validateCulpritsSortedUnique(culprits: List[Culprit]): Boolean =
-    culprits.sliding(2).forall {
-      case List(curr, next) => compareUnsigned(curr.key.bytes, next.key.bytes) < 0
-      case _ => true
-    }
-
-  /**
-   * Validate that verdicts are sorted and unique by target hash.
-   */
-  private def validateVerdictsSortedUnique(verdicts: List[Verdict]): Boolean =
-    verdicts.sliding(2).forall {
-      case List(curr, next) => compareUnsigned(curr.target.bytes, next.target.bytes) < 0
-      case _ => true
-    }
-
-  /**
-   * Validate that faults are sorted and unique by key.
-   */
-  private def validateFaultsSortedUnique(faults: List[Fault]): Boolean =
-    faults.sliding(2).forall {
-      case List(curr, next) => compareUnsigned(curr.key.bytes, next.key.bytes) < 0
-      case _ => true
-    }
-
-  /**
-   * Validate that votes within a verdict are sorted and unique by index.
-   */
-  private def validateVotesSortedUnique(votes: List[Vote]): Boolean =
-    votes.sliding(2).forall {
-      case List(curr, next) => curr.validatorIndex.toInt < next.validatorIndex.toInt
-      case _ => true
-    }
-
   /**
    * Validate judgment age is either current epoch or previous epoch.
    */
@@ -129,7 +92,7 @@ object DisputeTransition:
     val validGuarantorKeys = (state.kappa ++ state.lambda).map(_.ed25519).toSet
 
     // 1. Validate verdicts ordering first
-    if !validateVerdictsSortedUnique(disputes.verdicts) then
+    if !ValidationHelpers.isSortedUniqueByBytes(disputes.verdicts)(_.target.bytes) then
       return Some(DisputeErrorCode.VerdictsNotSortedUnique)
 
     // 2. Validate each verdict (must happen before culprit target validation)
@@ -147,7 +110,7 @@ object DisputeTransition:
         return Some(DisputeErrorCode.BadVoteSplit)
 
       // Validate votes are sorted and unique by index
-      if !validateVotesSortedUnique(verdict.votes) then
+      if !ValidationHelpers.isSortedUniqueByInt(verdict.votes)(_.validatorIndex.toInt) then
         return Some(DisputeErrorCode.JudgementsNotSortedUnique)
 
       // Verify all vote signatures
@@ -164,27 +127,31 @@ object DisputeTransition:
 
       // Validate target has not already been judged
       if state.psi.good.exists(h => java.util.Arrays.equals(h.bytes, verdict.target.bytes)) ||
-         state.psi.bad.exists(h => java.util.Arrays.equals(h.bytes, verdict.target.bytes)) ||
-         state.psi.wonky.exists(h => java.util.Arrays.equals(h.bytes, verdict.target.bytes)) then
+        state.psi.bad.exists(h => java.util.Arrays.equals(h.bytes, verdict.target.bytes)) ||
+        state.psi.wonky.exists(h => java.util.Arrays.equals(h.bytes, verdict.target.bytes))
+      then
         return Some(DisputeErrorCode.AlreadyJudged)
 
       // For all-negative verdicts, require at least 2 culprits
       if negativeVotes == verdict.votes.size && positiveVotes == 0 then
         val culpritsForTarget = disputes.culprits.count(c =>
-          java.util.Arrays.equals(c.target.bytes, verdict.target.bytes))
+          java.util.Arrays.equals(c.target.bytes, verdict.target.bytes)
+        )
         if culpritsForTarget < 2 then
           return Some(DisputeErrorCode.NotEnoughCulprits)
 
       // For supermajority positive verdicts, require at least one fault
       if positiveVotes >= config.votesPerVerdict then
         val hasFault = disputes.faults.exists(f =>
-          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes))
+          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes)
+        )
         if !hasFault then
           return Some(DisputeErrorCode.NotEnoughFaults)
 
         // Validate fault votes are opposite of verdict outcome
         val matchingFaults = disputes.faults.filter(f =>
-          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes))
+          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes)
+        )
         for fault <- matchingFaults do
           // For a good verdict (supermajority positive), faults must have voted false
           if fault.vote then
@@ -194,7 +161,7 @@ object DisputeTransition:
     val newBadTargets = computeBadTargets(disputes.verdicts)
 
     // 3. Validate culprits ordering
-    if !validateCulpritsSortedUnique(disputes.culprits) then
+    if !ValidationHelpers.isSortedUniqueByBytes(disputes.culprits)(_.key.bytes) then
       return Some(DisputeErrorCode.CulpritsNotSortedUnique)
 
     // 4. Validate each culprit
@@ -215,12 +182,12 @@ object DisputeTransition:
 
       // Validate that culprit target will be judged bad (or was already bad in state)
       val targetIsBad = newBadTargets.exists(h => java.util.Arrays.equals(h.bytes, culprit.target.bytes)) ||
-                        state.psi.bad.exists(h => java.util.Arrays.equals(h.bytes, culprit.target.bytes))
+        state.psi.bad.exists(h => java.util.Arrays.equals(h.bytes, culprit.target.bytes))
       if !targetIsBad then
         return Some(DisputeErrorCode.CulpritsVerdictNotBad)
 
     // 5. Validate faults ordering
-    if !validateFaultsSortedUnique(disputes.faults) then
+    if !ValidationHelpers.isSortedUniqueByBytes(disputes.faults)(_.key.bytes) then
       return Some(DisputeErrorCode.FaultsNotSortedUnique)
 
     // 6. Validate each fault
@@ -303,9 +270,7 @@ object DisputeTransition:
           offendersMark += fault.key
 
     // Sort new offenders by key for adding to state
-    val sortedNewOffenders = newOffendersSet.toList.sortWith { (a, b) =>
-      compareUnsigned(a.bytes, b.bytes) < 0
-    }
+    val sortedNewOffenders = newOffendersSet.toList.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
 
     // Add sorted offenders to state
     offenders = offenders ++ sortedNewOffenders
@@ -319,7 +284,7 @@ object DisputeTransition:
 
         // Clear if the report is in bad or wonky
         val isInvalid = bad.exists(h => java.util.Arrays.equals(h.bytes, reportHash.bytes)) ||
-                        wonky.exists(h => java.util.Arrays.equals(h.bytes, reportHash.bytes))
+          wonky.exists(h => java.util.Arrays.equals(h.bytes, reportHash.bytes))
 
         if isInvalid then None else Some(assignment)
       }
@@ -347,22 +312,14 @@ object DisputeTransition:
     state: JamState,
     config: ChainConfig
   ): (JamState, DisputeOutput) =
-    // Extract DisputeState from JamState using lenses
-    val preState = DisputeState(
-      psi = JamState.psiLens.get(state),
-      rho = JamState.rhoLens.get(state),
-      tau = JamState.tauLens.get(state),
-      kappa = JamState.kappaLens.get(state),
-      lambda = JamState.lambdaLens.get(state)
-    )
+    // Extract DisputeState using lens bundle
+    val preState = JamState.DisputeLenses.extract(state)
 
     // Execute the internal STF logic
     val (postState, output) = stfInternal(input, preState, config)
 
-    // Apply results back to JamState using lenses
-    val updatedState = state
-      .focus(_.psi).replace(postState.psi)
-      .focus(_.cores.reports).replace(postState.rho)
+    // Apply results back using lens bundle
+    val updatedState = JamState.DisputeLenses.apply(state, postState)
 
     (updatedState, output)
 

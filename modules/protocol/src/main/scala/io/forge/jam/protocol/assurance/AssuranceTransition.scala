@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants, StfResult}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
@@ -69,15 +69,6 @@ object AssuranceTransition:
     state.copy(availAssignments = newAssignments)
 
   /**
-   * Validate that assurances are sorted and unique by validator index.
-   */
-  private def validateSortedAndUniqueValidators(assurances: List[AssuranceExtrinsic]): Boolean =
-    assurances.sliding(2).forall {
-      case List(curr, next) => curr.validatorIndex.toInt < next.validatorIndex.toInt
-      case _ => true
-    }
-
-  /**
    * Validate that assurance bitfields only reference engaged cores.
    */
   private def validateCoreEngagement(assurances: List[AssuranceExtrinsic], state: AssuranceState): Boolean =
@@ -130,7 +121,7 @@ object AssuranceTransition:
 
       firstError.orElse {
         // Check for sorted and unique validator indices
-        if !validateSortedAndUniqueValidators(input.assurances) then
+        if !ValidationHelpers.isSortedUniqueByInt(input.assurances)(_.validatorIndex.toInt) then
           Some(AssuranceErrorCode.NotSortedOrUniqueAssurers)
         else
           None
@@ -192,18 +183,14 @@ object AssuranceTransition:
     state: JamState,
     config: ChainConfig
   ): (JamState, AssuranceOutput) =
-    // Extract AssuranceState from JamState using lenses
-    val preState = AssuranceState(
-      availAssignments = JamState.rhoLens.get(state),
-      currValidators = JamState.kappaLens.get(state)
-    )
+    // Extract AssuranceState using lens bundle
+    val preState = JamState.AssuranceLenses.extract(state)
 
     // Execute the internal STF logic
     val (postState, output) = stfInternal(input, preState, config)
 
-    // Apply results back to JamState using lenses
-    val updatedState = state
-      .focus(_.cores.reports).replace(postState.availAssignments)
+    // Apply results back using lens bundle
+    val updatedState = JamState.AssuranceLenses.apply(state, postState)
 
     (updatedState, output)
 

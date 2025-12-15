@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants, StfResult}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, ValidatorIndex}
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
@@ -81,35 +81,13 @@ object ReportTransition:
     config: ChainConfig,
     skipAncestryValidation: Boolean = false
   ): (JamState, ReportOutput) =
-    // Convert accumulation service accounts to core ServiceAccount type
-    val accounts = state.accumulation.serviceAccounts.map { item =>
-      ServiceAccount(
-        id = item.id,
-        data = ServiceData(service = item.data.service)
-      )
-    }
-
-    // Convert JamState fields to ReportState for existing logic
-    val preState = ReportState(
-      availAssignments = state.cores.reports,
-      currValidators = state.validators.current,
-      prevValidators = state.validators.previous,
-      entropy = state.entropy.pool,
-      offenders = state.psi.offenders.map(key => Hash(key.bytes)),
-      recentBlocks = state.beta,
-      authPools = state.authPools,
-      accounts = accounts,
-      coresStatistics = state.cores.statistics,
-      servicesStatistics = state.serviceStatistics
-    )
+    // Extract ReportState using lens bundle
+    val preState = JamState.ReportLenses.extract(state)
 
     val (postState, output) = stfInternal(input, preState, config, skipAncestryValidation)
 
-    // Update JamState with results
-    val updatedState = state
-      .focus(_.cores.reports).replace(postState.availAssignments)
-      .focus(_.cores.statistics).replace(postState.coresStatistics)
-      .focus(_.serviceStatistics).replace(postState.servicesStatistics)
+    // Apply results back using lens bundle
+    val updatedState = JamState.ReportLenses.apply(state, postState)
 
     (updatedState, output)
 
@@ -201,14 +179,9 @@ object ReportTransition:
 
     Right((reports.toList, packages.toList, guarantors.toList))
 
-  /**
-   * Validate guarantees are sorted by core index.
-   */
+  /** Validate guarantees are sorted by core index. */
   private def validateGuaranteesOrder(guarantees: List[GuaranteeExtrinsic]): ValidationResult =
-    val isSorted = guarantees.sliding(2).forall {
-      case List(curr, next) => curr.report.coreIndex.toInt < next.report.coreIndex.toInt
-      case _ => true
-    }
+    val isSorted = ValidationHelpers.isSortedUniqueByInt(guarantees)(_.report.coreIndex.toInt)
     require(isSorted, ReportErrorCode.OutOfOrderGuarantee)
 
   /**
@@ -363,15 +336,9 @@ object ReportTransition:
             return Left(ReportErrorCode.ServiceItemGasTooLow)
     Right(())
 
-  /**
-   * Validate guarantor signature order (must be sorted and unique by validator index).
-   */
+  /** Validate guarantor signature order (must be sorted and unique by validator index). */
   private def validateGuarantorSignatureOrder(guarantee: GuaranteeExtrinsic): ValidationResult =
-    val indices = guarantee.signatures.map(_.validatorIndex.toInt)
-    val isSortedUnique = indices.sliding(2).forall {
-      case List(curr, next) => curr < next
-      case _ => true
-    }
+    val isSortedUnique = ValidationHelpers.isSortedUniqueByInt(guarantee.signatures)(_.validatorIndex.toInt)
     require(isSortedUnique, ReportErrorCode.NotSortedOrUniqueGuarantors)
 
   /**

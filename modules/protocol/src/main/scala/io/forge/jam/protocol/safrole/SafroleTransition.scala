@@ -44,35 +44,14 @@ object SafroleTransition:
     state: JamState,
     config: ChainConfig
   ): (JamState, SafroleOutput) =
-    // Extract SafroleState from JamState using lenses
-    val preState = SafroleState(
-      tau = JamState.tauLens.get(state),
-      eta = JamState.etaLens.get(state),
-      lambda = JamState.lambdaLens.get(state),
-      kappa = JamState.kappaLens.get(state),
-      gammaK = JamState.gammaKLens.get(state),
-      iota = JamState.iotaLens.get(state),
-      gammaA = JamState.gammaALens.get(state),
-      gammaS = JamState.gammaSLens.get(state),
-      gammaZ = JamState.gammaZLens.get(state),
-      postOffenders = JamState.postOffendersLens.get(state)
-    )
+    // Extract SafroleState using lens bundle
+    val preState = JamState.SafroleLenses.extract(state)
 
     // Execute the internal STF logic
     val (postState, output) = stfInternal(input, preState, config)
 
-    // Apply results back to JamState using focus syntax
-    val updatedState = state
-      .focus(_.tau).replace(postState.tau)
-      .focus(_.entropy.pool).replace(postState.eta)
-      .focus(_.validators.previous).replace(postState.lambda)
-      .focus(_.validators.current).replace(postState.kappa)
-      .focus(_.validators.nextEpoch).replace(postState.gammaK)
-      .focus(_.validators.queue).replace(postState.iota)
-      .focus(_.gamma.a).replace(postState.gammaA)
-      .focus(_.gamma.s).replace(postState.gammaS)
-      .focus(_.gamma.z).replace(postState.gammaZ)
-      .focus(_.postOffenders).replace(postState.postOffenders)
+    // Apply results back using lens bundle
+    val updatedState = JamState.SafroleLenses.apply(state, postState)
 
     (updatedState, output)
 
