@@ -74,7 +74,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     )
 
     val config = ChainConfig.TINY.copy(validatorCount = 2)
-    val (postState, _) = StatisticsTransition.stf(input, preState, config)
+    val (postState, _) = StatisticsTransition.stfInternal(input, preState, config)
 
     // Current stats should have moved to last stats
     postState.valsLastStats(0).blocks shouldBe 5
@@ -115,7 +115,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     )
 
     val config = ChainConfig.TINY.copy(validatorCount = 3)
-    val (postState, _) = StatisticsTransition.stf(input, preState, config)
+    val (postState, _) = StatisticsTransition.stfInternal(input, preState, config)
 
     // Author (validator 1) should have updated stats
     postState.valsCurrStats(1).blocks shouldBe 1
@@ -175,7 +175,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     )
 
     val config = ChainConfig.TINY.copy(validatorCount = 4)
-    val (postState, _) = StatisticsTransition.stf(input, preState, config)
+    val (postState, _) = StatisticsTransition.stfInternal(input, preState, config)
 
     // Each unique validator who signed gets +1 (not per signature)
     postState.valsCurrStats(0).guarantees shouldBe 1
@@ -222,7 +222,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     )
 
     val config = ChainConfig.TINY.copy(validatorCount = 4)
-    val (postState, _) = StatisticsTransition.stf(input, preState, config)
+    val (postState, _) = StatisticsTransition.stfInternal(input, preState, config)
 
     // Each assurance increments the validator's count
     postState.valsCurrStats(0).assurances shouldBe 2 // Two assurances from validator 0
@@ -250,7 +250,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val (postState, _) = StatisticsTransition.stf(
+          val (postState, _) = StatisticsTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -277,7 +277,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val (postState, _) = StatisticsTransition.stf(
+          val (postState, _) = StatisticsTransition.stfInternal(
             testCase.input,
             testCase.preState,
             FullConfig

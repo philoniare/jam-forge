@@ -7,10 +7,12 @@ import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, Avail
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.core.types.service.ServiceAccount
+import io.forge.jam.core.types.service.{ServiceAccount, ServiceData}
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
+import io.forge.jam.protocol.state.JamState
 import io.forge.jam.crypto.Ed25519
+import monocle.syntax.all.*
 
 /**
  * Reports State Transition Function.
@@ -61,25 +63,78 @@ object ReportTransition:
     else currValidators
 
   /**
-   * Execute the Reports STF.
+   * Execute the Reports STF using unified JamState.
+   *
+   * Reads: cores.reports, validators (kappa, lambda), entropy.pool, judgements.offenders,
+   *        recentHistory, authPools, accumulation.serviceAccounts
+   * Writes: cores.reports
+   *
+   * @param input The input containing guarantees and current slot
+   * @param state The unified JamState
+   * @param config The chain configuration
+   * @param skipAncestryValidation When true, skip anchor recency validation
+   * @return Tuple of (updated JamState, ReportOutput)
+   */
+  def stf(
+    input: ReportInput,
+    state: JamState,
+    config: ChainConfig,
+    skipAncestryValidation: Boolean = false
+  ): (JamState, ReportOutput) =
+    // Convert accumulation service accounts to core ServiceAccount type
+    val accounts = state.accumulation.serviceAccounts.map { item =>
+      ServiceAccount(
+        id = item.id,
+        data = ServiceData(service = item.data.service)
+      )
+    }
+
+    // Convert JamState fields to ReportState for existing logic
+    val preState = ReportState(
+      availAssignments = state.cores.reports,
+      currValidators = state.validators.current,
+      prevValidators = state.validators.previous,
+      entropy = state.entropy.pool,
+      offenders = state.psi.offenders.map(key => Hash(key.bytes)),
+      recentBlocks = state.beta,
+      authPools = state.authPools,
+      accounts = accounts,
+      coresStatistics = state.cores.statistics,
+      servicesStatistics = state.serviceStatistics
+    )
+
+    val (postState, output) = stfInternal(input, preState, config, skipAncestryValidation)
+
+    // Update JamState with results
+    val updatedState = state
+      .focus(_.cores.reports).replace(postState.availAssignments)
+      .focus(_.cores.statistics).replace(postState.coresStatistics)
+      .focus(_.serviceStatistics).replace(postState.servicesStatistics)
+
+    (updatedState, output)
+
+  /**
+   * Internal Reports STF implementation using ReportState.
    *
    * @param input The input containing guarantees and current slot
    * @param preState The pre-state for the Reports STF
    * @param config The chain configuration
    * @param skipAncestryValidation When true, skip anchor recency validation (used when ancestry feature is disabled)
    */
-  def stf(
+  def stfInternal(
     input: ReportInput,
     preState: ReportState,
     config: ChainConfig,
     skipAncestryValidation: Boolean = false
   ): (ReportState, ReportOutput) =
-    val result = for
-      _ <- validateGuaranteesOrder(input.guarantees)
-      _ <- validateNoDuplicatePackages(input.guarantees, preState.recentBlocks)
-      _ <- if skipAncestryValidation then Right(()) else validateAnchor(input.guarantees, preState.recentBlocks, input.slot, config)
-      processedGuarantees <- processGuarantees(input, preState, config)
-    yield processedGuarantees
+    val result =
+      for
+        _ <- validateGuaranteesOrder(input.guarantees)
+        _ <- validateNoDuplicatePackages(input.guarantees, preState.recentBlocks)
+        _ <- if skipAncestryValidation then Right(())
+        else validateAnchor(input.guarantees, preState.recentBlocks, input.slot, config)
+        processedGuarantees <- processGuarantees(input, preState, config)
+      yield processedGuarantees
 
     result match
       case Left(err) => (preState, StfResult.error(err))
@@ -109,14 +164,29 @@ object ReportTransition:
     val guarantors = scala.collection.mutable.ListBuffer[Hash]()
 
     for guarantee <- input.guarantees do
-      val result = for
-        _ <- validateGuarantorSignatureOrder(guarantee)
-        _ <- validateWorkReport(guarantee.report, guarantee.slot.toInt.toLong, input.slot,
-               preState.accounts, preState.authPools, preState.availAssignments, config)
-        _ <- validateGuarantorSignatures(guarantee, preState.currValidators, preState.prevValidators,
-               input.slot, preState.entropy, preState.offenders, config)
-        _ <- require(!seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
-      yield ()
+      val result =
+        for
+          _ <- validateGuarantorSignatureOrder(guarantee)
+          _ <- validateWorkReport(
+            guarantee.report,
+            guarantee.slot.toInt.toLong,
+            input.slot,
+            preState.accounts,
+            preState.authPools,
+            preState.availAssignments,
+            config
+          )
+          _ <- validateGuarantorSignatures(
+            guarantee,
+            preState.currValidators,
+            preState.prevValidators,
+            input.slot,
+            preState.entropy,
+            preState.offenders,
+            config
+          )
+          _ <- require(!seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
+        yield ()
 
       result match
         case Left(err) => return Left(err)
@@ -170,8 +240,8 @@ object ReportTransition:
       val validLookup = batchPackages.get(lookup.workPackageHash) match
         case Some(exportsRoot) => lookup.segmentTreeRoot == exportsRoot
         case None => recentBlocks.history.exists(_.reported.exists(r =>
-          r.hash == lookup.workPackageHash && r.exportsRoot == lookup.segmentTreeRoot
-        ))
+            r.hash == lookup.workPackageHash && r.exportsRoot == lookup.segmentTreeRoot
+          ))
       if !validLookup then
         return Left(ReportErrorCode.SegmentRootLookupInvalid)
 
@@ -231,9 +301,9 @@ object ReportTransition:
         }
         val existsInHistory = recentBlocks.history.exists(_.reported.exists { reported =>
           reported.hash == prerequisite &&
-            guarantee.report.segmentRootLookup.forall(lookup =>
-              lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == reported.exportsRoot
-            )
+          guarantee.report.segmentRootLookup.forall(lookup =>
+            lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == reported.exportsRoot
+          )
         })
         if !existsInBatch && !existsInHistory then
           return Left(ReportErrorCode.DependencyMissing)
@@ -257,13 +327,17 @@ object ReportTransition:
       _ <- require(workReport.results.nonEmpty, ReportErrorCode.MissingWorkResults)
       _ <- require(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
-      _ <- require(workReport.results.map(_.accumulateGas.toLong).sum <= config.maxAccumulationGas,
-             ReportErrorCode.WorkReportGasTooHigh)
+      _ <- require(
+        workReport.results.map(_.accumulateGas.toLong).sum <= config.maxAccumulationGas,
+        ReportErrorCode.WorkReportGasTooHigh
+      )
       _ <- require(workReport.coreIndex.toInt < config.coresCount, ReportErrorCode.BadCoreIndex)
       _ <- validateAuthorizer(workReport, authPools)
       _ <- validateWorkResults(workReport, accounts)
-      _ <- require(workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
-             ReportErrorCode.TooManyDependencies)
+      _ <- require(
+        workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
+        ReportErrorCode.TooManyDependencies
+      )
     yield ()
 
   private def validateOutputSize(workReport: WorkReport): ValidationResult =
@@ -383,8 +457,9 @@ object ReportTransition:
     currentSlot: Long
   ): List[Option[AvailabilityAssignment]] =
     val reportsByCore = reports.map(r => r.coreIndex.toInt -> r).toMap
-    existing.zipWithIndex.map { case (existing, index) =>
-      reportsByCore.get(index).map(AvailabilityAssignment(_, currentSlot)).orElse(existing)
+    existing.zipWithIndex.map {
+      case (existing, index) =>
+        reportsByCore.get(index).map(AvailabilityAssignment(_, currentSlot)).orElse(existing)
     }
 
   /**
@@ -398,10 +473,16 @@ object ReportTransition:
 
   private def computeCoreStats(guarantee: GuaranteeExtrinsic): CoreStatisticsRecord =
     val report = guarantee.report
-    val totals = report.results.foldLeft((0L, 0L, 0L, 0L, 0L)) { case ((imports, extCount, extSize, exports, gas), result) =>
-      val load = result.refineLoad
-      (imports + load.imports.toLong, extCount + load.extrinsicCount.toLong,
-       extSize + load.extrinsicSize.toLong, exports + load.exports.toLong, gas + load.gasUsed.toLong)
+    val totals = report.results.foldLeft((0L, 0L, 0L, 0L, 0L)) {
+      case ((imports, extCount, extSize, exports, gas), result) =>
+        val load = result.refineLoad
+        (
+          imports + load.imports.toLong,
+          extCount + load.extrinsicCount.toLong,
+          extSize + load.extrinsicSize.toLong,
+          exports + load.exports.toLong,
+          gas + load.gasUsed.toLong
+        )
     }
     CoreStatisticsRecord(
       imports = totals._1,
@@ -428,10 +509,11 @@ object ReportTransition:
   private def updateServiceStatistics(guarantees: List[GuaranteeExtrinsic]): List[ServiceStatisticsEntry] =
     if guarantees.isEmpty then return List.empty
 
-    val allResults = for
-      guarantee <- guarantees
-      result <- guarantee.report.results
-    yield result
+    val allResults =
+      for
+        guarantee <- guarantees
+        result <- guarantee.report.results
+      yield result
 
     allResults
       .groupMapReduce(_.serviceId.toInt.toLong)(computeServiceStats)(mergeServiceStats)

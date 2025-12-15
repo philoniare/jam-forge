@@ -71,7 +71,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         fail(s"Failed to load test case $testCaseName: $error")
       case Right(testCase) =>
         // Test state transition
-        val (postState, output) = AccumulationTransition.stf(
+        val (postState, output) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           TinyConfig
@@ -103,7 +103,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         case Right(testCase) =>
           try
             // Test state transition
-            val (postState, output) = AccumulationTransition.stf(
+            val (postState, output) = AccumulationTransition.stfInternal(
               testCase.input,
               testCase.preState,
               TinyConfig
@@ -143,7 +143,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case: $error")
       case Right(testCase) =>
-        val (postState, _) = AccumulationTransition.stf(
+        val (postState, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           TinyConfig
@@ -165,7 +165,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case: $error")
       case Right(testCase) =>
-        val (postState, _) = AccumulationTransition.stf(
+        val (postState, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           TinyConfig
@@ -370,7 +370,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         // Enable tracing to file
         PvmTraceWriter.enable("../scala_pvm_trace.txt")
         try
-          val (postState, output) = AccumulationTransition.stf(
+          val (postState, output) = AccumulationTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -405,7 +405,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           try
-            val (postState, output) = AccumulationTransition.stf(
+            val (postState, output) = AccumulationTransition.stfInternal(
               testCase.input,
               testCase.preState,
               FullConfig

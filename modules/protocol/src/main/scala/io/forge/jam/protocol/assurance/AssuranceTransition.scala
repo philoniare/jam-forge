@@ -7,6 +7,8 @@ import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
 import io.forge.jam.crypto.Ed25519
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 
 /**
  * Assurances State Transition Function.
@@ -81,11 +83,12 @@ object AssuranceTransition:
   private def validateCoreEngagement(assurances: List[AssuranceExtrinsic], state: AssuranceState): Boolean =
     assurances.forall { assurance =>
       val bitfieldBytes = assurance.bitfield.toArray
-      state.availAssignments.zipWithIndex.forall { case (assignment, coreIndex) =>
-        val isSet = isBitSet(bitfieldBytes, coreIndex)
-        val isEngaged = assignment.isDefined
-        // If bit is set, core must be engaged
-        !isSet || isEngaged
+      state.availAssignments.zipWithIndex.forall {
+        case (assignment, coreIndex) =>
+          val isSet = isBitSet(bitfieldBytes, coreIndex)
+          val isEngaged = assignment.isDefined
+          // If bit is set, core must be engaged
+          !isSet || isEngaged
       }
     }
 
@@ -157,9 +160,7 @@ object AssuranceTransition:
    * Get work reports from available cores in sorted order.
    */
   private def processAvailableReports(availableCores: Set[Int], state: AssuranceState): List[WorkReport] =
-    availableCores.toList.sorted.flatMap { coreIndex =>
-      state.availAssignments.lift(coreIndex).flatten.map(_.report)
-    }
+    availableCores.toList.sorted.flatMap(coreIndex => state.availAssignments.lift(coreIndex).flatten.map(_.report))
 
   /**
    * Update state by removing available reports.
@@ -176,14 +177,45 @@ object AssuranceTransition:
     state.copy(availAssignments = newAssignments)
 
   /**
-   * Execute the Assurances STF.
+   * Execute the Assurances STF using unified JamState.
+   *
+   * Reads: cores.reports (availAssignments), validators.current (currValidators)
+   * Writes: cores.reports (availAssignments)
+   *
+   * @param input The assurance input containing assurances, slot, and parent hash.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @return Tuple of (updated JamState, output).
+   */
+  def stf(
+    input: AssuranceInput,
+    state: JamState,
+    config: ChainConfig
+  ): (JamState, AssuranceOutput) =
+    // Extract AssuranceState from JamState using lenses
+    val preState = AssuranceState(
+      availAssignments = JamState.rhoLens.get(state),
+      currValidators = JamState.kappaLens.get(state)
+    )
+
+    // Execute the internal STF logic
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Apply results back to JamState using lenses
+    val updatedState = state
+      .focus(_.cores.reports).replace(postState.availAssignments)
+
+    (updatedState, output)
+
+  /**
+   * Internal Assurances STF implementation using AssuranceState.
    *
    * @param input The assurance input containing assurances, slot, and parent hash.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
    * @return Tuple of (post-transition state, output).
    */
-  def stf(
+  def stfInternal(
     input: AssuranceInput,
     preState: AssuranceState,
     config: ChainConfig

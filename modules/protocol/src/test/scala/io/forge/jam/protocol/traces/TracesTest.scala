@@ -10,6 +10,9 @@ import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.safrole.SafroleTransition
+import io.forge.jam.protocol.dispute.DisputeTransition
+import io.forge.jam.protocol.dispute.DisputeTypes.*
+import io.forge.jam.protocol.state.JamState
 import io.circe.Decoder
 
 // Import all JSON decoders from core types
@@ -113,12 +116,12 @@ class TracesTest extends AnyFunSuite with Matchers:
         computedPreRoot shouldBe step.preState.stateRoot withClue
           s"Pre-state root mismatch in step $firstStepName"
 
-        // Run Safrole STF
+        // Run Safrole STF using unified JamState
         val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-        val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-        val safrolePreState = fullPreState.toSafroleState()
+        val jamState = JamState.fromFullJamState(fullPreState, config)
+        val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-        val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+        val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
         // Verify STF succeeded or failed as expected
         if safroleOutput.err.isDefined then
@@ -146,12 +149,12 @@ class TracesTest extends AnyFunSuite with Matchers:
         case Left(error) =>
           fail(s"Failed to load safrole step $stepName: $error")
         case Right(step) =>
-          // Extract and run Safrole STF
+          // Extract and run Safrole STF using unified JamState
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           // Log progress
           if (index + 1) % 10 == 0 then
@@ -159,7 +162,7 @@ class TracesTest extends AnyFunSuite with Matchers:
 
           // Basic validation
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -195,10 +198,10 @@ class TracesTest extends AnyFunSuite with Matchers:
         fail(s"Failed to load fallback step $firstStepName: $error")
       case Right(step) =>
         val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-        val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-        val safrolePreState = fullPreState.toSafroleState()
+        val jamState = JamState.fromFullJamState(fullPreState, config)
+        val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-        val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+        val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
         // Fallback mode should work even without tickets
         safrolePostState.tau should be >= step.block.header.slot.value.toLong
@@ -221,16 +224,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load fallback step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} fallback steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -268,16 +271,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load storage step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} storage steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -315,16 +318,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load storage_light step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} storage_light steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -362,16 +365,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load preimages step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} preimages steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -409,16 +412,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load preimages_light step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} preimages_light steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -456,16 +459,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load fuzzy step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} fuzzy steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -503,16 +506,16 @@ class TracesTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load fuzzy_light step $stepName: $error")
         case Right(step) =>
           val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-          val safroleInput = InputExtractor.extractSafroleInput(step.block, fullPreState)
-          val safrolePreState = fullPreState.toSafroleState()
+          val jamState = JamState.fromFullJamState(fullPreState, config)
+          val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+          val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
           if (index + 1) % 10 == 0 then
             info(s"Processed ${index + 1}/${stepNames.size} fuzzy_light steps")
 
           safrolePostState.tau should be >= 0L withClue s"Invalid tau in step $stepName"
-          safrolePostState.eta.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
+          safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
   // ════════════════════════════════════════════════════════════════════════════

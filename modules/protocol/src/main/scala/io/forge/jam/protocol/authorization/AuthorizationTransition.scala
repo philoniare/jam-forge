@@ -3,6 +3,8 @@ package io.forge.jam.protocol.authorization
 import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 import org.slf4j.LoggerFactory
 
 /**
@@ -15,14 +17,39 @@ object AuthorizationTransition:
   private val logger = LoggerFactory.getLogger(getClass)
 
   /**
-   * Execute the Authorization STF.
+   * Execute the Authorization STF using unified JamState.
+   *
+   * Reads: authPools, authQueues
+   * Writes: authPools, authQueues
+   *
+   * @param input The authorization input containing slot and consumed authorizations.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @return The updated JamState.
+   */
+  def stf(input: AuthInput, state: JamState, config: ChainConfig): JamState =
+    // Convert JamState fields to AuthState for existing logic
+    val preState = AuthState(
+      authPools = state.authPools,
+      authQueues = state.authQueues
+    )
+
+    val postState = stfInternal(input, preState, config)
+
+    // Update JamState with results
+    state
+      .focus(_.authPools).replace(postState.authPools)
+      .focus(_.authQueues).replace(postState.authQueues)
+
+  /**
+   * Internal Authorization STF implementation using AuthState.
    *
    * @param input The authorization input containing slot and consumed authorizations.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
    * @return The post-transition state.
    */
-  def stf(input: AuthInput, preState: AuthState, config: ChainConfig): AuthState =
+  def stfInternal(input: AuthInput, preState: AuthState, config: ChainConfig): AuthState =
     // Group authorizations by core index
     val authsByCoreIndex = input.auths.groupBy(_.core.toInt)
 

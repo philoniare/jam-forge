@@ -10,6 +10,8 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.dispute.DisputeTypes.*
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.crypto.Ed25519
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 
 /**
  * Disputes State Transition Function.
@@ -330,14 +332,50 @@ object DisputeTransition:
     (newState, offendersMark.toList)
 
   /**
-   * Execute the Disputes STF.
+   * Execute the Disputes STF using unified JamState.
+   *
+   * Reads: judgements (psi), cores.reports (rho), tau, validators.current (kappa), validators.previous (lambda)
+   * Writes: judgements (psi), cores.reports (rho)
+   *
+   * @param input The dispute input containing verdicts, culprits, and faults.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @return Tuple of (updated JamState, output).
+   */
+  def stf(
+    input: DisputeInput,
+    state: JamState,
+    config: ChainConfig
+  ): (JamState, DisputeOutput) =
+    // Extract DisputeState from JamState using lenses
+    val preState = DisputeState(
+      psi = JamState.psiLens.get(state),
+      rho = JamState.rhoLens.get(state),
+      tau = JamState.tauLens.get(state),
+      kappa = JamState.kappaLens.get(state),
+      lambda = JamState.lambdaLens.get(state)
+    )
+
+    // Execute the internal STF logic
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Apply results back to JamState using lenses
+    val updatedState = state
+      .focus(_.psi).replace(postState.psi)
+      .focus(_.cores.reports).replace(postState.rho)
+
+    (updatedState, output)
+
+  /**
+   * Internal Disputes STF implementation using DisputeState.
+   * Exposed for unit testing with module-specific state types.
    *
    * @param input The dispute input containing verdicts, culprits, and faults.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
    * @return Tuple of (post-transition state, output).
    */
-  def stf(
+  def stfInternal(
     input: DisputeInput,
     preState: DisputeState,
     config: ChainConfig

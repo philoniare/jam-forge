@@ -135,7 +135,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val (postState, output) = SafroleTransition.stf(
+          val (postState, output) = SafroleTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -163,7 +163,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = SafroleTransition.stf(
+          val (postState, output) = SafroleTransition.stfInternal(
             testCase.input,
             testCase.preState,
             FullConfig

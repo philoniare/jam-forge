@@ -105,7 +105,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
     )
 
     val config = TinyConfig.copy(validatorCount = 4, coresCount = 4)
-    val (_, output) = AssuranceTransition.stf(input, state, config)
+    val (_, output) = AssuranceTransition.stfInternal(input, state, config)
     output.err shouldBe Some(AssuranceErrorCode.BadSignature)
   }
 
@@ -139,7 +139,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
     )
 
     val config = TinyConfig.copy(validatorCount = 4, coresCount = 2, assuranceTimeoutPeriod = 5)
-    val (postState, output) = AssuranceTransition.stf(input, state, config)
+    val (postState, output) = AssuranceTransition.stfInternal(input, state, config)
 
     // First assignment should be cleared (5 + 5 = 10 <= 12)
     postState.availAssignments(0) shouldBe None
@@ -167,7 +167,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
     )
 
     val config = TinyConfig.copy(validatorCount = 4, coresCount = 2)
-    val (_, output) = AssuranceTransition.stf(input, state, config)
+    val (_, output) = AssuranceTransition.stfInternal(input, state, config)
 
     output.err shouldBe Some(AssuranceErrorCode.BadSignature)
   }
@@ -191,7 +191,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val (postState, output) = AssuranceTransition.stf(
+          val (postState, output) = AssuranceTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -219,7 +219,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val (postState, output) = AssuranceTransition.stf(
+          val (postState, output) = AssuranceTransition.stfInternal(
             testCase.input,
             testCase.preState,
             FullConfig

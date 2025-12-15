@@ -87,7 +87,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
 
     // With empty disputes (no verdicts), should succeed
     val input = DisputeInput(emptyDisputes)
-    val (postState, output) = DisputeTransition.stf(input, state, config)
+    val (postState, output) = DisputeTransition.stfInternal(input, state, config)
 
     output.ok shouldBe defined
     output.err shouldBe None
@@ -107,7 +107,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
     // This is tested through the test vectors
     val state = emptyDisputeState(6, 2)
     val input = DisputeInput(emptyDisputes)
-    val (_, output) = DisputeTransition.stf(input, state, config)
+    val (_, output) = DisputeTransition.stfInternal(input, state, config)
 
     output.ok shouldBe defined
   }
@@ -137,7 +137,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
 
     val disputes = Dispute(List.empty, List(invalidCulprit), List.empty)
     val input = DisputeInput(disputes)
-    val (_, output) = DisputeTransition.stf(input, state, config)
+    val (_, output) = DisputeTransition.stfInternal(input, state, config)
 
     // Should fail with BadGuarantorKey since the key is not in kappa or lambda
     output.err shouldBe defined
@@ -158,7 +158,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
 
     val disputes = Dispute(List.empty, List.empty, List(invalidFault))
     val input = DisputeInput(disputes)
-    val (_, output) = DisputeTransition.stf(input, state, config)
+    val (_, output) = DisputeTransition.stfInternal(input, state, config)
 
     // Should fail with BadAuditorKey since the key is not in kappa or lambda
     output.err shouldBe defined
@@ -187,7 +187,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
     // Culprits with same key in wrong order should fail
     val disputes = Dispute(List.empty, List(culprit1, culprit2), List.empty)
     val input = DisputeInput(disputes)
-    val (_, output) = DisputeTransition.stf(input, state, config)
+    val (_, output) = DisputeTransition.stfInternal(input, state, config)
 
     // Should fail since keys are duplicate (not unique)
     output.err shouldBe defined
@@ -208,7 +208,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = DisputeTransition.stf(
+          val (postState, output) = DisputeTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -232,7 +232,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = DisputeTransition.stf(
+          val (postState, output) = DisputeTransition.stfInternal(
             testCase.input,
             testCase.preState,
             FullConfig

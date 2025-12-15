@@ -2,6 +2,8 @@ package io.forge.jam.protocol.statistics
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 
 /**
  * Statistics State Transition Function.
@@ -14,14 +16,43 @@ import io.forge.jam.protocol.statistics.StatisticsTypes.*
 object StatisticsTransition:
 
   /**
-   * Execute the Statistics STF.
+   * Execute the Statistics STF using unified JamState.
+   *
+   * Reads: statistics (current, last), tau, validators.current (kappa)
+   * Writes: statistics (current, last)
+   *
+   * @param input The statistics input containing slot, author index, and extrinsic data.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @return Tuple of (updated JamState, optional StatOutput).
+   */
+  def stf(input: StatInput, state: JamState, config: ChainConfig): (JamState, Option[StatOutput]) =
+    // Convert JamState fields to StatState for existing logic
+    val preState = StatState(
+      valsCurrStats = state.statistics.current,
+      valsLastStats = state.statistics.last,
+      slot = state.tau,
+      currValidators = state.validators.current
+    )
+
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Update JamState with results
+    val updatedState = state
+      .focus(_.statistics.current).replace(postState.valsCurrStats)
+      .focus(_.statistics.last).replace(postState.valsLastStats)
+
+    (updatedState, output)
+
+  /**
+   * Internal Statistics STF implementation using StatState.
    *
    * @param input The statistics input containing slot, author index, and extrinsic data.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
    * @return Tuple of (post-transition state, optional output).
    */
-  def stf(input: StatInput, preState: StatState, config: ChainConfig): (StatState, Option[StatOutput]) =
+  def stfInternal(input: StatInput, preState: StatState, config: ChainConfig): (StatState, Option[StatOutput]) =
     // Calculate epochs for pre and post states
     val preEpoch = preState.slot / config.epochLength
     val postEpoch = input.slot / config.epochLength
@@ -50,9 +81,7 @@ object StatisticsTransition:
     // Update guarantees - each unique validator who signed any guarantee gets +1 credit per block
     val reporters = scala.collection.mutable.Set[Int]()
     input.extrinsic.guarantees.foreach { guarantee =>
-      guarantee.signatures.foreach { sig =>
-        reporters.add(sig.validatorIndex.toInt)
-      }
+      guarantee.signatures.foreach(sig => reporters.add(sig.validatorIndex.toInt))
     }
     reporters.foreach { validatorIndex =>
       currStats(validatorIndex) = currStats(validatorIndex).copy(

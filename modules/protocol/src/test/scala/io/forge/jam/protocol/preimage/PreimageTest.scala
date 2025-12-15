@@ -43,7 +43,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val wrongPreimage = Preimage(requester = ServiceId(UInt(1)), blob = blob)
     val input = PreimageInput(preimages = List(wrongPreimage), slot = 100)
 
-    val (postState, output) = PreimageTransition.stf(input, preState)
+    val (postState, output) = PreimageTransition.stfInternal(input, preState)
 
     output.err shouldBe defined
     output.err.get shouldBe PreimageErrorCode.PreimageUnneeded
@@ -77,7 +77,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val input = PreimageInput(preimages = List(preimage1, preimage2), slot = 100)
 
     // This will first fail because preimages are not solicited
-    val (_, output) = PreimageTransition.stf(input, preState)
+    val (_, output) = PreimageTransition.stfInternal(input, preState)
 
     // Expected to fail because preimages are not solicited (no lookup entry exists)
     output.err shouldBe defined
@@ -107,7 +107,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val preimage = Preimage(requester = ServiceId(UInt(5)), blob = blob)
     val input = PreimageInput(preimages = List(preimage), slot = 42)
 
-    val (postState, output) = PreimageTransition.stf(input, preState)
+    val (postState, output) = PreimageTransition.stfInternal(input, preState)
 
     output.ok shouldBe defined
     output.err shouldBe None
@@ -146,7 +146,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val slot = 123L
     val input = PreimageInput(preimages = List(preimage), slot = slot)
 
-    val (postState, output) = PreimageTransition.stf(input, preState)
+    val (postState, output) = PreimageTransition.stfInternal(input, preState)
 
     output.ok shouldBe defined
 
@@ -175,7 +175,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = PreimageTransition.stf(
+          val (postState, output) = PreimageTransition.stfInternal(
             testCase.input,
             testCase.preState
           )
@@ -198,7 +198,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = PreimageTransition.stf(
+          val (postState, output) = PreimageTransition.stfInternal(
             testCase.input,
             testCase.preState
           )

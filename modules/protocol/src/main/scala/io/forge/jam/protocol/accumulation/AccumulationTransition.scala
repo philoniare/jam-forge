@@ -3,6 +3,8 @@ package io.forge.jam.protocol.accumulation
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 import org.bouncycastle.jcajce.provider.digest.Keccak
 import org.slf4j.LoggerFactory
 
@@ -22,14 +24,57 @@ object AccumulationTransition:
   private val logger = LoggerFactory.getLogger(getClass)
 
   /**
-   * Execute the Accumulation STF.
+   * Execute the Accumulation STF using unified JamState.
+   *
+   * Reads: tau, entropy.pool[0], accumulation (readyQueue, accumulated, privileges, serviceAccounts)
+   * Writes: accumulation (readyQueue, accumulated, privileges, serviceAccounts)
+   *
+   * @param input The accumulation input containing slot and reports
+   * @param state The unified JamState
+   * @param config The chain configuration
+   * @return Tuple of (updated JamState, AccumulationOutput)
+   */
+  def stf(
+    input: AccumulationInput,
+    state: JamState,
+    config: ChainConfig
+  ): (JamState, AccumulationOutput) =
+    // Extract entropy as 32-byte JamBytes (eta[0])
+    val entropyBytes = state.entropy.firstAsBytes
+
+    // Convert JamState fields to AccumulationState for existing logic
+    val preState = AccumulationState(
+      slot = state.tau,
+      entropy = entropyBytes,
+      readyQueue = state.accumulation.readyQueue,
+      accumulated = state.accumulation.accumulated,
+      privileges = state.accumulation.privileges,
+      statistics = List.empty, // Not used in accumulation input
+      accounts = state.accumulation.serviceAccounts,
+      rawServiceDataByStateKey = mutable.Map.from(state.rawServiceDataByStateKey)
+    )
+
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Update JamState with results
+    val updatedState = state
+      .focus(_.accumulation.readyQueue).replace(postState.readyQueue)
+      .focus(_.accumulation.accumulated).replace(postState.accumulated)
+      .focus(_.accumulation.privileges).replace(postState.privileges)
+      .focus(_.accumulation.serviceAccounts).replace(postState.accounts)
+      .focus(_.rawServiceDataByStateKey).replace(postState.rawServiceDataByStateKey.toMap)
+
+    (updatedState, output)
+
+  /**
+   * Internal Accumulation STF implementation using AccumulationState.
    *
    * @param input The accumulation input containing slot and reports
    * @param preState The pre-transition state
    * @param config The accumulation configuration
    * @return Tuple of (post-transition state, output)
    */
-  def stf(
+  def stfInternal(
     input: AccumulationInput,
     preState: AccumulationState,
     config: ChainConfig
@@ -315,7 +360,7 @@ object AccumulationTransition:
     gasUsedMap: Map[Long, Long],
     commitments: Set[Commitment],
     privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty,
-    transferStatsMap: Map[Long, (Long, Long)] = Map.empty  // serviceId -> (count, gasUsed)
+    transferStatsMap: Map[Long, (Long, Long)] = Map.empty // serviceId -> (count, gasUsed)
   )
 
   /**
@@ -419,11 +464,12 @@ object AccumulationTransition:
       outerResult.privilegeSnapshots.view.filterKeys(!parallelResult.privilegeSnapshots.contains(_)).toMap
 
     // Merge transfer stats
-    val mergedTransferStats = (parallelResult.transferStatsMap.keys ++ outerResult.transferStatsMap.keys).toSet.map { serviceId =>
-      val (c1, g1) = parallelResult.transferStatsMap.getOrElse(serviceId, (0L, 0L))
-      val (c2, g2) = outerResult.transferStatsMap.getOrElse(serviceId, (0L, 0L))
-      serviceId -> (c1 + c2, g1 + g2)
-    }.toMap
+    val mergedTransferStats =
+      (parallelResult.transferStatsMap.keys ++ outerResult.transferStatsMap.keys).toSet.map { serviceId =>
+        val (c1, g1) = parallelResult.transferStatsMap.getOrElse(serviceId, (0L, 0L))
+        val (c2, g2) = outerResult.transferStatsMap.getOrElse(serviceId, (0L, 0L))
+        serviceId -> (c1 + c2, g1 + g2)
+      }.toMap
 
     OuterAccumulationResult(
       reportsAccumulated = i + outerResult.reportsAccumulated,
@@ -443,7 +489,7 @@ object AccumulationTransition:
     commitments: Set[Commitment],
     deferredTransfers: List[DeferredTransfer] = List.empty,
     privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty,
-    transferStatsMap: Map[Long, (Long, Long)] = Map.empty  // serviceId -> (count, gasUsed)
+    transferStatsMap: Map[Long, (Long, Long)] = Map.empty // serviceId -> (count, gasUsed)
   )
 
   /**
@@ -466,12 +512,14 @@ object AccumulationTransition:
     val newDeferredTransfers = mutable.ListBuffer.empty[DeferredTransfer]
     val allProvisions = mutable.Set.empty[(Long, JamBytes)]
     val initialState = partialState.deepCopy()
-    val transferStatsMap = mutable.Map.empty[Long, (Long, Long)]  // serviceId -> (count, gasUsed)
+    val transferStatsMap = mutable.Map.empty[Long, (Long, Long)] // serviceId -> (count, gasUsed)
 
     // Group work items by service (NO transfers here - v0.7.0 separates them)
     val serviceOperands = mutable.Map.empty[Long, mutable.ListBuffer[AccumulationOperand]]
 
-    logger.debug(s"[executeAccumulation] Processing ${reports.size} reports, alwaysAccers=${alwaysAccers.size}, deferredTransfers=${deferredTransfers.size}")
+    logger.debug(
+      s"[executeAccumulation] Processing ${reports.size} reports, alwaysAccers=${alwaysAccers.size}, deferredTransfers=${deferredTransfers.size}"
+    )
     for report <- reports do
       logger.debug(s"[executeAccumulation] Report has ${report.results.size} results")
       for result <- report.results do
@@ -509,7 +557,7 @@ object AccumulationTransition:
       val operands = serviceOperands.getOrElse(serviceId, mutable.ListBuffer.empty).toList
       val alwaysAccGas = alwaysAccers.getOrElse(serviceId, 0L)
       val workItemGas = operands.collect { case AccumulationOperand.WorkItem(op) => op.gasLimit }.sum
-      val totalGasLimit = workItemGas + alwaysAccGas  // No transfer gas here - handled separately
+      val totalGasLimit = workItemGas + alwaysAccGas // No transfer gas here - handled separately
 
       val serviceInitialState = initialState.deepCopy()
 
@@ -531,7 +579,9 @@ object AccumulationTransition:
       val prevGas = gasUsedMap.getOrElse(serviceId, 0L)
       val newGas = prevGas + execResult.gasUsed
       gasUsedMap(serviceId) = newGas
-      logger.debug(s"[executeAccumulation] serviceId=$serviceId execResult.gasUsed=${execResult.gasUsed} newGas=$newGas")
+      logger.debug(
+        s"[executeAccumulation] serviceId=$serviceId execResult.gasUsed=${execResult.gasUsed} newGas=$newGas"
+      )
 
       // Capture privilege snapshot
       privilegeSnapshots(serviceId) = PrivilegeSnapshot(
@@ -562,7 +612,9 @@ object AccumulationTransition:
       finalState
 
     // Execute on_transfer for incoming deferred transfers (v0.7.0 - separate entry point PC=10)
-    logger.debug(s"[executeAccumulation] deferredTransfers.size=${deferredTransfers.size} newDeferredTransfers.size=${newDeferredTransfers.size}")
+    logger.debug(
+      s"[executeAccumulation] deferredTransfers.size=${deferredTransfers.size} newDeferredTransfers.size=${newDeferredTransfers.size}"
+    )
     val stateAfterTransfers = if deferredTransfers.nonEmpty then
       // Group transfers by destination service
       val transfersByService = deferredTransfers.groupBy(_.destination)
@@ -585,9 +637,12 @@ object AccumulationTransition:
     else
       stateAfterPreimages
 
-    logger.debug(s"[executeAccumulation FINAL] rawServiceDataByStateKey.size=${stateAfterTransfers.rawServiceDataByStateKey.size}")
-    stateAfterTransfers.rawServiceDataByStateKey.foreach { case (k, v) =>
-      logger.debug(s"[executeAccumulation FINAL] key=${k.toHex.take(32)}... valueLen=${v.length}")
+    logger.debug(
+      s"[executeAccumulation FINAL] rawServiceDataByStateKey.size=${stateAfterTransfers.rawServiceDataByStateKey.size}"
+    )
+    stateAfterTransfers.rawServiceDataByStateKey.foreach {
+      case (k, v) =>
+        logger.debug(s"[executeAccumulation FINAL] key=${k.toHex.take(32)}... valueLen=${v.length}")
     }
     AccumulationExecResult(
       stateAfterTransfers,

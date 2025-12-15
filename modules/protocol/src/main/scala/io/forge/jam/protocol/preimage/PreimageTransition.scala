@@ -6,6 +6,9 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.protocol.preimage.PreimageTypes.*
+import io.forge.jam.protocol.accumulation.PreimagesStatusMapEntry
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 
 /**
  * Preimages State Transition Function.
@@ -60,7 +63,6 @@ object PreimageTransition:
             if comparison >= 0 then
               result = false
           case _ => // First element, no comparison needed
-
         prevRequester = Some(submission.requester.value.toLong)
         prevHash = Some(currentHash)
 
@@ -76,18 +78,83 @@ object PreimageTransition:
   ): Boolean =
     account.data.lookupMeta.exists { historyItem =>
       java.util.Arrays.equals(historyItem.key.hash.bytes, hash) &&
-        historyItem.key.length == length &&
-        historyItem.value.isEmpty
+      historyItem.key.length == length &&
+      historyItem.value.isEmpty
     }
 
   /**
-   * Execute the Preimages STF.
+   * Execute the Preimages STF using unified JamState.
+   *
+   * Reads: accumulation.serviceAccounts (preimage subset)
+   * Writes: accumulation.serviceAccounts (preimage subset)
+   *
+   * @param input The preimage input containing preimages and slot.
+   * @param state The unified JamState.
+   * @return Tuple of (updated JamState, PreimageOutput).
+   */
+  def stf(input: PreimageInput, state: JamState): (JamState, PreimageOutput) =
+    // Convert service accounts to PreimageAccount view
+    val preimageAccounts = state.accumulation.serviceAccounts.map { item =>
+      PreimageAccount(
+        id = item.id,
+        data = AccountInfo(
+          preimages = item.data.preimages,
+          lookupMeta = item.data.preimagesStatus.map { status =>
+            // Find corresponding preimage to get length
+            val preimageOpt = item.data.preimages.find(_.hash == status.hash)
+            val length = preimageOpt.map(_.blob.length.toLong).getOrElse(0L)
+            PreimageHistory(
+              key = PreimageHistoryKey(status.hash, length),
+              value = status.status
+            )
+          }
+        )
+      )
+    }
+
+    val preState = PreimageState(
+      accounts = preimageAccounts,
+      statistics = List.empty // Statistics type is different, handle separately
+    )
+
+    val (postState, output) = stfInternal(input, preState)
+
+    // Convert back to JamState format
+    val updatedServiceAccounts = state.accumulation.serviceAccounts.map { item =>
+      val updatedAccount = postState.accounts.find(_.id == item.id)
+      updatedAccount match
+        case Some(account) =>
+          // Update preimages and status from the processed state
+          val newPreimages = account.data.preimages
+          val newStatus = account.data.lookupMeta.map { historyItem =>
+            PreimagesStatusMapEntry(
+              hash = historyItem.key.hash,
+              status = historyItem.value
+            )
+          }
+          item.copy(
+            data = item.data.copy(
+              preimages = newPreimages,
+              preimagesStatus = newStatus
+            )
+          )
+        case None => item
+    }
+
+    // Update JamState with results
+    val updatedState = state
+      .focus(_.accumulation.serviceAccounts).replace(updatedServiceAccounts)
+
+    (updatedState, output)
+
+  /**
+   * Internal Preimages STF implementation using PreimageState.
    *
    * @param input The preimage input containing preimages and slot.
    * @param preState The pre-transition state.
    * @return Tuple of (post-transition state, output).
    */
-  def stf(
+  def stfInternal(
     input: PreimageInput,
     preState: PreimageState
   ): (PreimageState, PreimageOutput) =
@@ -136,7 +203,7 @@ object PreimageTransition:
           // Update preimages list - add new preimage
           val newPreimage = PreimageHash(hashObj, submission.blob)
           currentPreimages = (currentPreimages :+ newPreimage).sortWith { (a, b) =>
-              compareUnsigned(a.hash.bytes, b.hash.bytes) < 0
+            compareUnsigned(a.hash.bytes, b.hash.bytes) < 0
           }
 
           // Update lookup metadata - set timestamp to current slot
@@ -145,9 +212,7 @@ object PreimageTransition:
               historyItem.copy(value = List(input.slot))
             else
               historyItem
-          }.sortWith { (a, b) =>
-              compareUnsigned(a.key.hash.bytes, b.key.hash.bytes) < 0
-          }
+          }.sortWith((a, b) => compareUnsigned(a.key.hash.bytes, b.key.hash.bytes) < 0)
 
           // Track statistics update
           val (currentCount, currentSize) = statsUpdates.getOrElse(account.id, (0, 0L))
@@ -157,25 +222,26 @@ object PreimageTransition:
     }
 
     // Build updated statistics list
-    val updatedStatistics = statsUpdates.toList.sortBy(_._1).map { case (serviceId, (count, size)) =>
-      // Find existing stat entry or create new one
-      val existingEntry = preState.statistics.find(_.id == serviceId)
-      existingEntry match
-        case Some(entry) =>
-          entry.copy(
-            record = entry.record.copy(
-              providedCount = entry.record.providedCount + count,
-              providedSize = entry.record.providedSize + size
+    val updatedStatistics = statsUpdates.toList.sortBy(_._1).map {
+      case (serviceId, (count, size)) =>
+        // Find existing stat entry or create new one
+        val existingEntry = preState.statistics.find(_.id == serviceId)
+        existingEntry match
+          case Some(entry) =>
+            entry.copy(
+              record = entry.record.copy(
+                providedCount = entry.record.providedCount + count,
+                providedSize = entry.record.providedSize + size
+              )
             )
-          )
-        case None =>
-          ServiceStatisticsEntry(
-            id = serviceId,
-            record = ServiceActivityRecord(
-              providedCount = count,
-              providedSize = size
+          case None =>
+            ServiceStatisticsEntry(
+              id = serviceId,
+              record = ServiceActivityRecord(
+                providedCount = count,
+                providedSize = size
+              )
             )
-          )
     }
 
     // Merge existing stats not updated with new stats

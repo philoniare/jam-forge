@@ -9,30 +9,15 @@ import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import io.forge.jam.protocol.accumulation.{
-  AccumulationState,
   AccumulationServiceItem,
   AccumulationServiceData,
   AccumulationReadyRecord,
   Privileges,
-  AlwaysAccItem,
-  StorageMapEntry,
-  PreimagesStatusMapEntry
+  AlwaysAccItem
 }
 import io.forge.jam.core.types.service.ServiceInfo
-import io.forge.jam.protocol.history.HistoryTypes.HistoricalState
-import io.forge.jam.protocol.authorization.AuthorizationTypes.AuthState
-import io.forge.jam.protocol.preimage.PreimageTypes.{PreimageState, PreimageAccount, AccountInfo}
-import io.forge.jam.protocol.statistics.StatisticsTypes.{
-  StatState,
-  StatCount,
-  ActivityStatistics,
-  CoreStatistics,
-  ServiceStatistics,
-  ServiceStatisticsEntry as StatServiceEntry,
-  CountAndGas,
-  PreimagesAndSize
-}
 import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
+import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -113,131 +98,6 @@ final case class FullJamState(
   // Raw service data by state key (for preimages, storage, etc.)
   rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty
 ):
-
-  /**
-   * Convert to SafroleState for Safrole STF.
-   */
-  def toSafroleState(): SafroleState =
-    SafroleState(
-      tau = timeslot,
-      eta = entropyPool,
-      lambda = previousValidators,
-      kappa = currentValidators,
-      gammaK = safroleGammaK,
-      iota = validatorQueue,
-      gammaA = safroleGammaA,
-      gammaS = safroleGammaS,
-      gammaZ = safroleGammaZ,
-      postOffenders = postOffenders
-    )
-
-  /**
-   * Update from SafroleState after STF execution.
-   */
-  def withSafroleState(safrole: SafroleState): FullJamState =
-    copy(
-      timeslot = safrole.tau,
-      entropyPool = safrole.eta,
-      previousValidators = safrole.lambda,
-      currentValidators = safrole.kappa,
-      safroleGammaK = safrole.gammaK,
-      validatorQueue = safrole.iota,
-      safroleGammaA = safrole.gammaA,
-      safroleGammaS = safrole.gammaS,
-      safroleGammaZ = safrole.gammaZ,
-      postOffenders = safrole.postOffenders
-    )
-
-  /**
-   * Convert to AccumulationState for Accumulation STF.
-   */
-  def toAccumulationState(config: ChainConfig): AccumulationState =
-    // Initialize ready queue and accumulated history if empty
-    val readyQueue = if accumulationQueue.isEmpty then
-      List.fill(config.epochLength)(List.empty[AccumulationReadyRecord])
-    else
-      accumulationQueue
-
-    val accumulated = if accumulationHistory.isEmpty then
-      List.fill(config.epochLength)(List.empty[JamBytes])
-    else
-      accumulationHistory
-
-    AccumulationState(
-      slot = timeslot,
-      entropy = if entropyPool.nonEmpty then JamBytes(entropyPool.head.bytes) else JamBytes.zeros(32),
-      readyQueue = readyQueue,
-      accumulated = accumulated,
-      privileges = privilegedServices,
-      statistics = serviceStatistics.map(s =>
-        io.forge.jam.protocol.accumulation.ServiceStatisticsEntry(
-          s.id,
-          io.forge.jam.protocol.accumulation.ServiceActivityRecord(
-            s.record.refinementCount.toInt,
-            s.record.refinementGasUsed,
-            s.record.refinementCount,
-            s.record.refinementGasUsed,
-            s.record.imports,
-            s.record.extrinsicCount,
-            s.record.extrinsicSize,
-            s.record.exports,
-            0,
-            0
-          )
-        )
-      ),
-      accounts = serviceAccounts,
-      rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey)
-    )
-
-  /**
-   * Convert to HistoricalState for History STF.
-   */
-  def toHistoryState(): HistoricalState =
-    HistoricalState(beta = recentHistory)
-
-  /**
-   * Convert to AuthState for Authorization STF.
-   */
-  def toAuthState(): AuthState =
-    AuthState(
-      authPools = authPools,
-      authQueues = authQueues
-    )
-
-  /**
-   * Convert to PreimageState for Preimage STF.
-   */
-  def toPreimageState(): PreimageState =
-    PreimageState(
-      accounts = serviceAccounts.map { item =>
-        PreimageAccount(
-          id = item.id,
-          data = AccountInfo(
-            preimages = item.data.preimages.map(p =>
-              io.forge.jam.core.types.preimage.PreimageHash(p.hash, p.blob)
-            ),
-            lookupMeta = item.data.preimagesStatus.map { status =>
-              io.forge.jam.protocol.preimage.PreimageTypes.PreimageHistory(
-                key = io.forge.jam.protocol.preimage.PreimageTypes.PreimageHistoryKey(status.hash, 0),
-                value = status.status
-              )
-            }
-          )
-        )
-      }
-    )
-
-  /**
-   * Convert to StatState for Statistics STF.
-   */
-  def toStatState(): StatState =
-    StatState(
-      valsCurrStats = activityStatsCurrent,
-      valsLastStats = activityStatsLast,
-      slot = timeslot,
-      currValidators = currentValidators
-    )
 
   /**
    * Convert back to raw keyvals for state root computation.
@@ -467,54 +327,6 @@ final case class FullJamState(
     history.encode
 
   /**
-   * Encode privileged services (chi).
-   * Fields: bless, assign (list), designate, alwaysAcc (list)
-   * NOTE: register field removed for v0.7.0 compatibility (fuzz-proto tests)
-   */
-  private def encodePrivilegedServices(privileges: Privileges): JamBytes =
-    import io.forge.jam.core.codec.encode
-    import spire.math.UInt
-    val builder = JamBytes.newBuilder
-    // Encode bless service ID
-    builder ++= codec.encodeU32LE(UInt(privileges.bless.toInt))
-    // Encode assign list (fixed-size array, no length prefix - size determined by coresCount)
-    for serviceId <- privileges.assign do
-      builder ++= codec.encodeU32LE(UInt(serviceId.toInt))
-    // Encode designate service ID
-    builder ++= codec.encodeU32LE(UInt(privileges.designate.toInt))
-    // NOTE: register field removed for v0.7.0 compatibility (fuzz-proto tests)
-    // Will be re-added when upgrading to v0.7.1 test vectors
-    builder ++= codec.encodeCompactInteger(privileges.alwaysAcc.size.toLong)
-    for item <- privileges.alwaysAcc do
-      builder ++= codec.encodeU32LE(UInt(item.id.toInt))
-      builder ++= codec.encodeU64LE(spire.math.ULong(item.gas))
-    builder.result()
-
-  /**
-   * Encode judgements (psi).
-   */
-  private def encodeJudgements(psi: Psi): JamBytes =
-    import spire.math.UInt
-    val builder = JamBytes.newBuilder
-    // Encode good verdicts (compact list of hashes)
-    builder ++= codec.encodeCompactInteger(psi.good.size.toLong)
-    for hash <- psi.good do
-      builder ++= hash.bytes
-    // Encode bad verdicts (compact list of hashes)
-    builder ++= codec.encodeCompactInteger(psi.bad.size.toLong)
-    for hash <- psi.bad do
-      builder ++= hash.bytes
-    // Encode wonky verdicts (compact list of hashes)
-    builder ++= codec.encodeCompactInteger(psi.wonky.size.toLong)
-    for hash <- psi.wonky do
-      builder ++= hash.bytes
-    // Encode offenders (compact list of ed25519 pubkeys)
-    builder ++= codec.encodeCompactInteger(psi.offenders.size.toLong)
-    for offender <- psi.offenders do
-      builder ++= offender.bytes
-    builder.result()
-
-  /**
    * Encode reports (rho) - availability assignments.
    */
   private def encodeReports(reports: List[Option[AvailabilityAssignment]]): JamBytes =
@@ -607,18 +419,6 @@ final case class FullJamState(
     builder.result()
 
   /**
-   * Encode accumulation queue.
-   */
-  private def encodeAccumulationQueue(queue: List[List[AccumulationReadyRecord]]): JamBytes =
-    import io.forge.jam.core.codec.encode
-    val builder = JamBytes.newBuilder
-    for slot <- queue do
-      builder ++= codec.encodeCompactInteger(slot.size.toLong)
-      for record <- slot do
-        builder ++= record.encode
-    builder.result()
-
-  /**
    * Encode accumulation history.
    */
   private def encodeAccumulationHistory(history: List[List[JamBytes]]): JamBytes =
@@ -627,16 +427,6 @@ final case class FullJamState(
       builder ++= codec.encodeCompactInteger(slot.size.toLong)
       for hash <- slot do
         builder ++= hash
-    builder.result()
-
-  /**
-   * Encode offenders list.
-   */
-  private def encodeOffenders(offenders: List[Ed25519PublicKey]): JamBytes =
-    val builder = JamBytes.newBuilder
-    builder ++= codec.encodeCompactInteger(offenders.size.toLong)
-    for offender <- offenders do
-      builder ++= offender.bytes
     builder.result()
 
 object FullJamState:
@@ -864,7 +654,7 @@ object FullJamState:
 
   /**
    * Decode accumulation history from keyvals (0x0F).
-   * Format: For each slot: compact count + N × 32-byte hashes
+   * Format: For each slot: compact count + N x 32-byte hashes
    */
   private def decodeAccumulationHistory(keyvals: List[KeyValue], epochLength: Int): List[List[JamBytes]] =
     val historyKv = keyvals.find(kv =>

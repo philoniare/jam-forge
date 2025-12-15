@@ -39,6 +39,8 @@ import io.forge.jam.protocol.statistics.StatisticsTransition
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
 import io.forge.jam.protocol.dispute.DisputeTransition
 import io.forge.jam.protocol.dispute.DisputeTypes.*
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 import org.slf4j.LoggerFactory
 
 /**
@@ -80,14 +82,16 @@ enum ImportError:
 /**
  * BlockImporter handles importing blocks and applying all state transitions.
  *
- * 1. Safrole - Block production and VRF validation (includes Disputes)
- * 2. Assurances - Process availability assurances
- * 3. Reports - Process work reports (guarantees)
- * 4. Accumulation - Execute PVM accumulation
- * 5. History - Update recent blocks history
- * 6. Authorizations - Update authorization pools
- * 7. Preimages - Handle preimage provisioning
- * 8. Statistics - Update chain statistics
+ * Uses a unified JamState pipeline where state flows sequentially through all 9 STFs:
+ * 1. Safrole - Block production and VRF validation
+ * 2. Disputes - Process dispute verdicts
+ * 3. Assurances - Process availability assurances
+ * 4. Reports - Process work reports (guarantees)
+ * 5. Accumulation - Execute PVM accumulation
+ * 6. History - Update recent blocks history
+ * 7. Authorizations - Update authorization pools
+ * 8. Preimages - Handle preimage provisioning
+ * 9. Statistics - Update chain statistics
  *
  * @param config The chain configuration
  * @param skipAncestryValidation When true, skip anchor recency validation in Reports STF.
@@ -99,7 +103,7 @@ class BlockImporter(
   private val logger = LoggerFactory.getLogger(getClass)
 
   /**
-   * Imports a block and applies all state transitions.
+   * Imports a block and applies all state transitions using the unified JamState pipeline.
    * Returns the computed post-state with updated state root.
    *
    * @param block The block to import
@@ -108,13 +112,16 @@ class BlockImporter(
    */
   def importBlock(block: Block, preState: RawState): ImportResult =
     try
-      // Step 1: Decode full pre-state from keyvals
+      // Step 1: Decode full pre-state from keyvals and convert to JamState
       val fullPreState = FullJamState.fromKeyvals(preState.keyvals, config)
+      var jamState = JamState.fromFullJamState(fullPreState, config)
 
-      // Step 2: Run Safrole STF (includes Disputes)
-      val safroleInput = InputExtractor.extractSafroleInput(block, fullPreState.toSafroleState())
-      val safrolePreState = fullPreState.toSafroleState()
-      val (safrolePostState, safroleOutput) = SafroleTransition.stf(safroleInput, safrolePreState, config)
+      // Capture pre-transition tau for Statistics STF (needs original timeslot for epoch boundary detection)
+      val preTransitionTau = jamState.tau
+
+      // Step 2: Run Safrole STF using unified JamState pipeline
+      val safroleInput = InputExtractor.extractSafroleInput(block)
+      val (stateAfterSafrole, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
 
       if safroleOutput.err.isDefined then
         return ImportResult.Failure(
@@ -122,20 +129,22 @@ class BlockImporter(
           s"Safrole STF error: ${safroleOutput.err.get}"
         )
 
+      jamState = stateAfterSafrole
+
       // Step 2.5: Validate block author against sealing sequence (post-Safrole state)
       // Uses IETF VRF verification with the block seal
       val slotIndex = (block.header.slot.value.toInt % config.epochLength)
       val authorIndex = block.header.authorIndex.value.toInt
-      val blockAuthorKey = safrolePostState.kappa(authorIndex).bandersnatch
+      val blockAuthorKey = jamState.validators.current(authorIndex).bandersnatch
 
       // Get entropy eta3 for VRF input (use post-state entropy)
-      val entropy = if safrolePostState.eta.length > 3 then safrolePostState.eta(3).bytes else new Array[Byte](32)
+      val entropy = if jamState.entropy.pool.length > 3 then jamState.entropy.pool(3).bytes else new Array[Byte](32)
 
       // Encode header for aux data (unsigned header = full header minus 96-byte seal at the end)
       val fullHeaderBytes = block.header.encode.toArray
       val encodedHeader = fullHeaderBytes.dropRight(96) // Remove the 96-byte seal
 
-      safrolePostState.gammaS match
+      jamState.gamma.s match
         case TicketsOrKeys.Keys(keys) =>
           // Fallback keys mode: verify key matches AND verify seal signature
           val expectedKey = keys(slotIndex)
@@ -201,16 +210,9 @@ class BlockImporter(
           s"block header verification failure: InvalidTicketsMark"
         )
 
-      // Step 3: Run Disputes STF
+      // Step 3: Run Disputes STF using unified JamState pipeline
       val disputeInput = InputExtractor.extractDisputeInput(block)
-      val disputePreState = DisputeState(
-        psi = fullPreState.judgements,
-        rho = fullPreState.reports,
-        tau = safrolePostState.tau,
-        kappa = safrolePostState.kappa,
-        lambda = safrolePostState.lambda
-      )
-      val (disputePostState, disputeOutput) = DisputeTransition.stf(disputeInput, disputePreState, config)
+      val (stateAfterDispute, disputeOutput) = DisputeTransition.stf(disputeInput, jamState, config)
 
       if disputeOutput.err.isDefined then
         return ImportResult.Failure(
@@ -218,13 +220,11 @@ class BlockImporter(
           s"Dispute STF error: ${disputeOutput.err.get}"
         )
 
-      // Step 4: Run Assurances STF
-      val assuranceInput = InputExtractor.extractAssuranceInput(block, fullPreState)
-      val assurancePreState = AssuranceState(
-        availAssignments = fullPreState.reports,
-        currValidators = safrolePostState.kappa
-      )
-      val (assurancePostState, assuranceOutput) = AssuranceTransition.stf(assuranceInput, assurancePreState, config)
+      jamState = stateAfterDispute
+
+      // Step 4: Run Assurances STF using unified JamState pipeline
+      val assuranceInput = InputExtractor.extractAssuranceInput(block)
+      val (stateAfterAssurance, assuranceOutput) = AssuranceTransition.stf(assuranceInput, jamState, config)
 
       if assuranceOutput.err.isDefined then
         return ImportResult.Failure(
@@ -232,24 +232,28 @@ class BlockImporter(
           s"Assurance STF error: ${assuranceOutput.err.get}"
         )
 
+      jamState = stateAfterAssurance
+
       // Get available reports from assurances
       val availableReports = assuranceOutput.ok.map(_.reported).getOrElse(List.empty)
       logger.debug(
         s"[BlockImporter] assuranceOutput.reported=${availableReports.size} guarantees=${block.extrinsic.guarantees.size}"
       )
 
-      // Step 4: Run Reports STF
+      // Step 5: Run Reports STF using unified JamState pipeline
       val updatedRecentHistory = updateRecentHistoryPartial(
-        fullPreState.recentHistory,
+        jamState.beta,
         block.header.parentStateRoot
       )
+      // Update beta in jamState before Reports STF
+      jamState = jamState.focus(_.beta).replace(updatedRecentHistory)
+
       val reportInput = ReportInput(
         guarantees = block.extrinsic.guarantees,
         slot = block.header.slot.value.toLong
       )
-      val reportPreState = buildReportState(fullPreState, safrolePostState, assurancePostState, updatedRecentHistory)
-      val (reportPostState, reportOutput) =
-        ReportTransition.stf(reportInput, reportPreState, config, skipAncestryValidation)
+      val (stateAfterReport, reportOutput) =
+        ReportTransition.stf(reportInput, jamState, config, skipAncestryValidation)
 
       if reportOutput.err.isDefined then
         return ImportResult.Failure(
@@ -257,41 +261,36 @@ class BlockImporter(
           s"Report STF error: ${reportOutput.err.get}"
         )
 
-      // Step 5: Run Accumulation STF
-      val accumulationInput = InputExtractor.extractAccumulationInput(availableReports, block.header.slot.value.toLong)
-      val baseAccumulationState = fullPreState.toAccumulationState(config)
-      // Use entropy from Safrole post-state
-      val postSafroleEntropy = if safrolePostState.eta.nonEmpty then
-        JamBytes(safrolePostState.eta.head.bytes)
-      else
-        JamBytes.zeros(32)
+      jamState = stateAfterReport
 
-      val accumulationPreState = baseAccumulationState.copy(
-        entropy = postSafroleEntropy
-      )
-      val (accumulationPostState, accumulationOutput) = AccumulationTransition.stf(
+      // Step 6: Run Accumulation STF using unified JamState pipeline
+      val accumulationInput = InputExtractor.extractAccumulationInput(availableReports, block.header.slot.value.toLong)
+      val (stateAfterAccumulation, accumulationOutput) = AccumulationTransition.stf(
         accumulationInput,
-        accumulationPreState,
+        jamState,
         config
       )
+
+      jamState = stateAfterAccumulation
 
       val accumulationOutputData = accumulationOutput.ok.get
       val accumulateRoot = accumulationOutputData.ok
 
-      // Step 6: Run History STF
+      // Step 7: Run History STF using unified JamState pipeline
       val historyInput = InputExtractor.extractHistoryInput(block, Hash(accumulateRoot.toArray))
-      val historyPreState = fullPreState.toHistoryState()
-      val historyPostState = HistoryTransition.stf(historyInput, historyPreState, config)
+      val stateAfterHistory = HistoryTransition.stf(historyInput, jamState, config)
 
-      // Step 7: Run Authorization STF
-      val authInput = InputExtractor.extractAuthInput(block, fullPreState)
-      val authPreState = fullPreState.toAuthState()
-      val authPostState = AuthorizationTransition.stf(authInput, authPreState, config)
+      jamState = stateAfterHistory
 
-      // Step 8: Run Preimages STF
+      // Step 8: Run Authorization STF using unified JamState pipeline
+      val authInput = InputExtractor.extractAuthInput(block)
+      val stateAfterAuth = AuthorizationTransition.stf(authInput, jamState, config)
+
+      jamState = stateAfterAuth
+
+      // Step 9: Run Preimages STF using unified JamState pipeline
       val preimageInput = InputExtractor.extractPreimageInput(block, block.header.slot.value.toLong)
-      val preimagePreState = fullPreState.toPreimageState()
-      val (preimagePostState, preimageOutput) = PreimageTransition.stf(preimageInput, preimagePreState)
+      val (stateAfterPreimage, preimageOutput) = PreimageTransition.stf(preimageInput, jamState)
 
       if preimageOutput.err.isDefined then
         return ImportResult.Failure(
@@ -302,12 +301,21 @@ class BlockImporter(
             }"
         )
 
-      // Step 9: Run Statistics STF
-      val statInput = InputExtractor.extractStatInput(block, fullPreState)
-      val statPreState = fullPreState.toStatState()
-      val (statPostState, _) = StatisticsTransition.stf(statInput, statPreState, config)
+      jamState = stateAfterPreimage
 
-      // Step 10: Compute final core statistics (combines guarantees, available reports, assurances)
+      // Step 10: Run Statistics STF using unified JamState pipeline
+      // NOTE: Statistics STF needs the PRE-transition tau for epoch boundary detection,
+      // but jamState.tau has already been updated by Safrole. We temporarily set it back
+      // to preTransitionTau, run Statistics, then restore the correct tau.
+      val postTransitionTau = jamState.tau
+      val statInput = InputExtractor.extractStatInput(block)
+      val stateWithPreTau = jamState.focus(_.tau).replace(preTransitionTau)
+      val (stateAfterStat, _) = StatisticsTransition.stf(statInput, stateWithPreTau, config)
+
+      // Restore the post-transition tau
+      jamState = stateAfterStat.focus(_.tau).replace(postTransitionTau)
+
+      // Step 11: Compute final core statistics (combines guarantees, available reports, assurances)
       val finalCoreStats = computeFinalCoreStatistics(
         guarantees = block.extrinsic.guarantees, // Use raw guarantees, not Reports STF output
         availableReports = availableReports,
@@ -315,32 +323,21 @@ class BlockImporter(
         maxCores = config.coresCount
       )
 
-      // Step 11: Compute final service statistics (fresh each block)
+      // Step 12: Compute final service statistics (fresh each block)
       val finalServiceStats = computeFinalServiceStatistics(
         guarantees = block.extrinsic.guarantees,
         preimages = block.extrinsic.preimages,
         accumulationStats = accumulationOutputData.accumulationStats
       )
 
-      // Step 12: Merge all post-states into unified FullJamState
-      val mergedState = mergePostStates(
-        preState = fullPreState,
-        safrolePost = safrolePostState,
-        disputePost = disputePostState,
-        assurancePost = assurancePostState,
-        reportPost = reportPostState,
-        accumulationPost = accumulationPostState,
-        accumulationOutput = accumulationOutput,
-        historyPost = historyPostState,
-        authPost = authPostState,
-        preimagePost = preimagePostState,
-        preimageOutput = preimageOutput,
-        statPost = statPostState,
-        finalCoreStats = finalCoreStats,
-        finalServiceStats = finalServiceStats
-      )
+      // Step 13: Convert final JamState to FullJamState for encoding
+      // Apply final core and service statistics to the state
+      val finalJamState = jamState
+        .focus(_.cores.statistics).replace(finalCoreStats)
+        .focus(_.serviceStatistics).replace(finalServiceStats)
+      val mergedState = JamState.toFullJamState(finalJamState)
 
-      // Step 13: Encode merged state back to keyvals
+      // Step 14: Encode merged state back to keyvals
       val postKeyvals = StateEncoder.encodeFullState(mergedState, config)
 
       // Debug: Minimal logging - just show which prefixes changed
@@ -366,12 +363,24 @@ class BlockImporter(
           f"[KV] slot=${block.header.slot.value} key=${kv.key.toHex.take(16)}... prefix=0x$prefix%02x len=${kv.value.length}%5d valueHash=$valueHash"
         )
 
-      // Step 14: Compute state root via Merkle trie
-      // Pass debug block index 13 for slot 12 (epoch boundary)
-      val debugBlock = if block.header.slot.value.toInt == 12 then 13 else -1
-      val stateRoot = StateMerklization.stateMerklize(postKeyvals, debugBlock)
+      // Step 15: Compute state root via Merkle trie
+      val stateRoot = StateMerklization.stateMerklize(postKeyvals)
 
       val rawPostState = RawState(stateRoot, postKeyvals)
+
+      // Extract SafroleState for backward compatibility
+      val safrolePostState = SafroleState(
+        tau = finalJamState.tau,
+        eta = finalJamState.entropy.pool,
+        lambda = finalJamState.validators.previous,
+        kappa = finalJamState.validators.current,
+        gammaK = finalJamState.validators.nextEpoch,
+        iota = finalJamState.validators.queue,
+        gammaA = finalJamState.gamma.a,
+        gammaS = finalJamState.gamma.s,
+        gammaZ = finalJamState.gamma.z,
+        postOffenders = finalJamState.postOffenders
+      )
 
       ImportResult.Success(rawPostState, mergedState, Some(safrolePostState))
     catch
@@ -534,152 +543,6 @@ class BlockImporter(
       recentHistory.copy(history = history.toList)
 
   /**
-   * Build ReportState from FullJamState, Safrole post-state, and Assurance post-state.
-   * Uses availability assignments from Assurance post-state (which has cleared cores
-   * for reports that became available).
-   */
-  private def buildReportState(
-    fullPreState: FullJamState,
-    safrolePost: SafroleState,
-    assurancePost: AssuranceState,
-    updatedRecentHistory: HistoricalBetaContainer
-  ): ReportState =
-    // Convert service accounts to ServiceAccount for ReportState
-    val serviceAccounts = fullPreState.serviceAccounts.map { item =>
-      CoreServiceAccount(
-        id = item.id,
-        data = io.forge.jam.core.types.service.ServiceData(item.data.service)
-      )
-    }
-
-    ReportState(
-      // Use availability assignments from Assurance post-state (cores cleared after reports available)
-      availAssignments = assurancePost.availAssignments,
-      currValidators = safrolePost.kappa,
-      prevValidators = safrolePost.lambda,
-      entropy = safrolePost.eta,
-      offenders = fullPreState.judgements.offenders.map(k => Hash(k.bytes)),
-      recentBlocks = updatedRecentHistory,
-      authPools = fullPreState.authPools,
-      accounts = serviceAccounts,
-      coresStatistics = fullPreState.coreStatistics,
-      servicesStatistics = fullPreState.serviceStatistics
-    )
-
-  /**
-   * Merge all STF post-states into a unified FullJamState.
-   */
-  private def mergePostStates(
-    preState: FullJamState,
-    safrolePost: SafroleState,
-    disputePost: DisputeState,
-    assurancePost: AssuranceState,
-    reportPost: ReportState,
-    accumulationPost: AccumulationState,
-    accumulationOutput: AccumulationOutput,
-    historyPost: HistoricalState,
-    authPost: AuthState,
-    preimagePost: PreimageState,
-    preimageOutput: PreimageOutput,
-    statPost: StatState,
-    finalCoreStats: List[CoreStatisticsRecord],
-    finalServiceStats: List[ReportTypes.ServiceStatisticsEntry]
-  ): FullJamState =
-    // Use judgements from Disputes STF
-    val judgements = disputePost.psi
-
-    // Merge service accounts from accumulation and preimage
-    val serviceAccounts = mergeServiceAccounts(
-      accumulationPost.accounts,
-      preimagePost.accounts
-    )
-
-    FullJamState(
-      // From Safrole
-      timeslot = safrolePost.tau,
-      entropyPool = safrolePost.eta,
-      currentValidators = safrolePost.kappa,
-      previousValidators = safrolePost.lambda,
-      validatorQueue = safrolePost.iota,
-      safroleGammaK = safrolePost.gammaK,
-      safroleGammaZ = safrolePost.gammaZ,
-      safroleGammaS = safrolePost.gammaS,
-      safroleGammaA = safrolePost.gammaA,
-
-      // From Authorization
-      authPools = authPost.authPools,
-      authQueues = authPost.authQueues,
-
-      // From History
-      recentHistory = historyPost.beta,
-
-      // From Reports STF (updates availAssignments with new guarantees)
-      reports = reportPost.availAssignments,
-
-      // From Safrole (Disputes)
-      judgements = judgements,
-
-      // From Accumulation
-      privilegedServices = accumulationPost.privileges,
-      accumulationQueue = accumulationPost.readyQueue,
-      accumulationHistory = accumulationPost.accumulated,
-
-      // Service accounts merged
-      serviceAccounts = serviceAccounts,
-      // Service statistics computed fresh each block
-      serviceStatistics = finalServiceStats,
-
-      // From Statistics
-      activityStatsCurrent = statPost.valsCurrStats,
-      activityStatsLast = statPost.valsLastStats,
-
-      // Core statistics computed from guarantees, available reports, and assurances
-      coreStatistics = finalCoreStats,
-
-      // Post-dispute offenders
-      postOffenders = safrolePost.postOffenders,
-
-      // Raw keyvals for pass-through
-      otherKeyvals = preState.otherKeyvals,
-
-      // Preserve original keyvals for unchanged components
-      originalKeyvals = preState.originalKeyvals,
-
-      // Updated raw service data from accumulation (for storage writes)
-      rawServiceDataByStateKey = accumulationPost.rawServiceDataByStateKey.toMap
-    )
-
-  /**
-   * Merge service accounts from accumulation and preimage states.
-   */
-  private def mergeServiceAccounts(
-    accumulationAccounts: List[AccumulationServiceItem],
-    preimageAccounts: List[PreimageAccount]
-  ): List[AccumulationServiceItem] =
-    // Build map from accumulation accounts
-    val accountMap = accumulationAccounts.map(a => a.id -> a).toMap.to(scala.collection.mutable.Map)
-
-    // Merge preimage data into accounts
-    for preimageAccount <- preimageAccounts do
-      accountMap.get(preimageAccount.id).foreach { existing =>
-        // Update preimages and lookup metadata
-        val updatedData = existing.data.copy(
-          preimages = preimageAccount.data.preimages.map(p =>
-            io.forge.jam.core.types.preimage.PreimageHash(p.hash, p.blob)
-          ),
-          preimagesStatus = preimageAccount.data.lookupMeta.map { meta =>
-            io.forge.jam.protocol.accumulation.PreimagesStatusMapEntry(
-              hash = meta.key.hash,
-              status = meta.value
-            )
-          }
-        )
-        accountMap(preimageAccount.id) = AccumulationServiceItem(preimageAccount.id, updatedData)
-      }
-
-    accountMap.values.toList.sortBy(_.id)
-
-  /**
    * Imports a block and returns just the computed SafroleState for comparison.
    * This is useful for trace testing where we want to compare typed state.
    */
@@ -715,10 +578,10 @@ object InputExtractor:
   import io.forge.jam.core.types.tickets.TicketEnvelope
 
   /**
-   * Extract SafroleInput from block and state.
+   * Extract SafroleInput from block.
    * The entropy source in the header is a VRF signature from which we extract the output.
    */
-  def extractSafroleInput(block: Block, state: SafroleState): SafroleInput =
+  def extractSafroleInput(block: Block): SafroleInput =
     val header = block.header
     val tickets = block.extrinsic.tickets
 
@@ -745,21 +608,15 @@ object InputExtractor:
     )
 
   /**
-   * Extract SafroleInput from block and FullJamState.
-   */
-  def extractSafroleInput(block: Block, state: FullJamState): SafroleInput =
-    extractSafroleInput(block, state.toSafroleState())
-
-  /**
    * Extract DisputeInput from block.
    */
   def extractDisputeInput(block: Block): DisputeInput =
     DisputeInput(disputes = block.extrinsic.disputes)
 
   /**
-   * Extract AssuranceInput from block and state.
+   * Extract AssuranceInput from block.
    */
-  def extractAssuranceInput(block: Block, state: FullJamState): AssuranceInput =
+  def extractAssuranceInput(block: Block): AssuranceInput =
     AssuranceInput(
       assurances = block.extrinsic.assurances,
       slot = block.header.slot.value.toLong,
@@ -797,9 +654,9 @@ object InputExtractor:
     )
 
   /**
-   * Extract AuthInput from block and state.
+   * Extract AuthInput from block.
    */
-  def extractAuthInput(block: Block, state: FullJamState): AuthInput =
+  def extractAuthInput(block: Block): AuthInput =
     // Consumed authorizations come from guarantees
     val auths = block.extrinsic.guarantees.map { guarantee =>
       Auth(
@@ -822,9 +679,9 @@ object InputExtractor:
     )
 
   /**
-   * Extract StatInput from block and state.
+   * Extract StatInput from block.
    */
-  def extractStatInput(block: Block, state: FullJamState): StatInput =
+  def extractStatInput(block: Block): StatInput =
     StatInput(
       slot = block.header.slot.value.toLong,
       authorIndex = block.header.authorIndex.toInt.toLong,

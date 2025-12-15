@@ -36,7 +36,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(2)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
 
     // hashFilled(2) should be removed, and a new item from queue added
     postState.authPools(0) should not contain hashFilled(2)
@@ -64,7 +64,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input42, preState, twoCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input42, preState, twoCoreConfig)
 
     // Core 0 should get item from queue at index 42 % 80 = 42
     postState.authPools(0) should contain(queue1(42))
@@ -91,7 +91,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
 
     postState.authPools(0) should not contain hashFilled(1) // consumed item removed
     postState.authPools(0) should contain(queue(10)) // new item from queue added
@@ -114,7 +114,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stf(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
 
     // Pool should still be at max size 8
     postState.authPools(0).size shouldBe 8
@@ -143,7 +143,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val postState = AuthorizationTransition.stf(
+          val postState = AuthorizationTransition.stfInternal(
             testCase.input,
             testCase.preState,
             ChainConfig.TINY
@@ -170,7 +170,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val postState = AuthorizationTransition.stf(
+          val postState = AuthorizationTransition.stfInternal(
             testCase.input,
             testCase.preState,
             ChainConfig.FULL

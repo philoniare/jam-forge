@@ -3,6 +3,8 @@ package io.forge.jam.protocol.history
 import io.forge.jam.core.{JamBytes, Hashing, ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.history.HistoryTypes.*
+import io.forge.jam.protocol.state.JamState
+import monocle.syntax.all.*
 
 /**
  * History State Transition Function.
@@ -19,7 +21,28 @@ object HistoryTransition:
   private val PeakPrefix: Array[Byte] = "peak".getBytes("US-ASCII")
 
   /**
-   * Execute the History STF.
+   * Execute the History STF using unified JamState.
+   *
+   * Reads: recentHistory (beta)
+   * Writes: recentHistory (beta)
+   *
+   * @param input The historical input containing header hash, parent state root,
+   *              accumulate root, and work packages.
+   * @param state The unified JamState.
+   * @param config The chain configuration (for max cores validation).
+   * @return The updated JamState.
+   */
+  def stf(input: HistoricalInput, state: JamState, config: ChainConfig = ChainConfig.FULL): JamState =
+    // Convert JamState fields to HistoricalState for existing logic
+    val preState = HistoricalState(beta = state.beta)
+
+    val postState = stfInternal(input, preState, config)
+
+    // Update JamState with results
+    state.focus(_.beta).replace(postState.beta)
+
+  /**
+   * Internal History STF implementation using HistoricalState.
    *
    * @param input The historical input containing header hash, parent state root,
    *              accumulate root, and work packages.
@@ -27,7 +50,11 @@ object HistoryTransition:
    * @param config The chain configuration (for max cores validation).
    * @return The post-transition state.
    */
-  def stf(input: HistoricalInput, preState: HistoricalState, config: ChainConfig = ChainConfig.FULL): HistoricalState =
+  def stfInternal(
+    input: HistoricalInput,
+    preState: HistoricalState,
+    config: ChainConfig = ChainConfig.FULL
+  ): HistoricalState =
     input.validate(config)
 
     val history = preState.beta.history

@@ -7,6 +7,8 @@ import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicK
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.protocol.safrole.SafroleTypes.*
+import io.forge.jam.protocol.state.{JamState, ValidatorState, EntropyBuffer, SafroleGamma}
+import monocle.syntax.all.*
 import spire.math.UByte
 
 /**
@@ -27,14 +29,62 @@ import spire.math.UByte
 object SafroleTransition:
 
   /**
-   * Execute the Safrole STF.
+   * Execute the Safrole STF using unified JamState.
+   *
+   * Reads: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ), postOffenders
+   * Writes: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ)
+   *
+   * @param input The safrole input containing slot, entropy, and tickets extrinsic.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @return Tuple of (updated JamState, output).
+   */
+  def stf(
+    input: SafroleInput,
+    state: JamState,
+    config: ChainConfig
+  ): (JamState, SafroleOutput) =
+    // Extract SafroleState from JamState using lenses
+    val preState = SafroleState(
+      tau = JamState.tauLens.get(state),
+      eta = JamState.etaLens.get(state),
+      lambda = JamState.lambdaLens.get(state),
+      kappa = JamState.kappaLens.get(state),
+      gammaK = JamState.gammaKLens.get(state),
+      iota = JamState.iotaLens.get(state),
+      gammaA = JamState.gammaALens.get(state),
+      gammaS = JamState.gammaSLens.get(state),
+      gammaZ = JamState.gammaZLens.get(state),
+      postOffenders = JamState.postOffendersLens.get(state)
+    )
+
+    // Execute the internal STF logic
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Apply results back to JamState using focus syntax
+    val updatedState = state
+      .focus(_.tau).replace(postState.tau)
+      .focus(_.entropy.pool).replace(postState.eta)
+      .focus(_.validators.previous).replace(postState.lambda)
+      .focus(_.validators.current).replace(postState.kappa)
+      .focus(_.validators.nextEpoch).replace(postState.gammaK)
+      .focus(_.validators.queue).replace(postState.iota)
+      .focus(_.gamma.a).replace(postState.gammaA)
+      .focus(_.gamma.s).replace(postState.gammaS)
+      .focus(_.gamma.z).replace(postState.gammaZ)
+      .focus(_.postOffenders).replace(postState.postOffenders)
+
+    (updatedState, output)
+
+  /**
+   * Internal Safrole STF implementation using SafroleState.
    *
    * @param input The safrole input containing slot, entropy, and tickets extrinsic.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
    * @return Tuple of (post-transition state, output).
    */
-  def stf(
+  def stfInternal(
     input: SafroleInput,
     preState: SafroleState,
     config: ChainConfig
@@ -80,7 +130,7 @@ object SafroleTransition:
     // Check for tickets_mark condition: same epoch, crossing cutoff, accumulator full
     val ticketsMark = Option.when(
       ctx.crossingTicketCutoff(config.ticketCutoff) &&
-      preState.gammaA.size == config.epochLength
+        preState.gammaA.size == config.epochLength
     )(transformTicketsSequence(preState.gammaA))
 
     // Save pre-epoch gammaZ for ticket verification
@@ -128,10 +178,10 @@ object SafroleTransition:
 
     // Rotate entropy values
     val newEta = List(
-      originalEta0,        // eta[0] stays (will be updated later by entropy accumulation)
-      originalEta0,        // eta[1] = old eta[0]
-      preState.eta(1),     // eta[2] = old eta[1]
-      preState.eta(2)      // eta[3] = old eta[2]
+      originalEta0, // eta[0] stays (will be updated later by entropy accumulation)
+      originalEta0, // eta[1] = old eta[0]
+      preState.eta(1), // eta[2] = old eta[1]
+      preState.eta(2) // eta[3] = old eta[2]
     )
 
     // Rotate validator sets
@@ -158,8 +208,8 @@ object SafroleTransition:
 
     // Determine sealing sequence
     val useTickets = ctx.newEpoch == ctx.prevEpoch + 1 &&
-                     ctx.prevPhase >= config.ticketCutoff &&
-                     preState.gammaA.size == config.epochLength
+      ctx.prevPhase >= config.ticketCutoff &&
+      preState.gammaA.size == config.epochLength
 
     val newGammaS: TicketsOrKeys =
       if useTickets then

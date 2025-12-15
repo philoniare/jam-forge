@@ -116,7 +116,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
     val input = ReportInput(guarantees = List(guarantee), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail - some validation error should occur
     output.err shouldBe defined
@@ -174,7 +174,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
     val input = ReportInput(guarantees = List(guarantee), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail due to unauthorized core or insufficient signatures
     output.err shouldBe defined
@@ -233,7 +233,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
     val input = ReportInput(guarantees = List(guarantee), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail - either due to gas or insufficient signatures
     output.err shouldBe defined
@@ -292,7 +292,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
     val input = ReportInput(guarantees = List(guarantee), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail - an error should occur during validation
     // The actual error depends on validation order (could be InsufficientGuarantees or AnchorNotRecent)
@@ -361,7 +361,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
     val input = ReportInput(guarantees = List(guarantee), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail due to anchor not recent
     output.err shouldBe defined
@@ -426,7 +426,7 @@ class ReportTest extends AnyFunSuite with Matchers:
 
     val input = ReportInput(guarantees = List(guarantee1, guarantee2), slot = 10)
 
-    val (postState, output) = ReportTransition.stf(input, preState, TinyConfig)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
 
     // Should fail due to duplicate package
     output.err shouldBe defined
@@ -449,7 +449,7 @@ class ReportTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = ReportTransition.stf(
+          val (postState, output) = ReportTransition.stfInternal(
             testCase.input,
             testCase.preState,
             TinyConfig
@@ -473,7 +473,7 @@ class ReportTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           // Test state transition
-          val (postState, output) = ReportTransition.stf(
+          val (postState, output) = ReportTransition.stfInternal(
             testCase.input,
             testCase.preState,
             FullConfig
