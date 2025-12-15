@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import org.bouncycastle.jcajce.provider.digest.Keccak
@@ -250,7 +250,7 @@ object AccumulationTransition:
     // 15. Get transfer stats from outerResult
     val transferStats = outerResult.transferStatsMap
 
-    (finalState, AccumulationOutput(outputHash, accumulationStats, transferStats))
+    (finalState, StfResult.success(AccumulationOutputData(outputHash, accumulationStats, transferStats)))
 
   /**
    * Merging privilege updates.

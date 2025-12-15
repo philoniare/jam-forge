@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.preimage
 
-import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
@@ -8,6 +8,8 @@ import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 import spire.math.UInt
+import io.forge.jam.core.StfResult.given_JamEncoder_Unit
+import io.forge.jam.core.StfResult.given_JamDecoder_Unit
 
 /**
  * Types for the Preimages State Transition Function.
@@ -74,7 +76,7 @@ object PreimageTypes:
         var pos = offset
         val (key, keyBytes) = bytes.decodeAs[PreimageHistoryKey](pos)
         pos += keyBytes
-        val length = (arr(pos).toInt & 0xFF)
+        val length = (arr(pos).toInt & 0xff)
         pos += 1
         val value = (0 until length).map { _ =>
           val ts = codec.decodeU32LE(arr, pos).toLong
@@ -204,10 +206,21 @@ object PreimageTypes:
         val (exports, exp) = codec.decodeCompactInteger(arr, pos); pos += exp
         val (accumulateCount, ac) = codec.decodeCompactInteger(arr, pos); pos += ac
         val (accumulateGasUsed, agu) = codec.decodeCompactInteger(arr, pos); pos += agu
-        (ServiceActivityRecord(
-          providedCount.toInt, providedSize, refinementCount, refinementGasUsed,
-          imports, extrinsicCount, extrinsicSize, exports, accumulateCount, accumulateGasUsed
-        ), pos - offset)
+        (
+          ServiceActivityRecord(
+            providedCount.toInt,
+            providedSize,
+            refinementCount,
+            refinementGasUsed,
+            imports,
+            extrinsicCount,
+            extrinsicSize,
+            exports,
+            accumulateCount,
+            accumulateGasUsed
+          ),
+          pos - offset
+        )
 
     given Decoder[ServiceActivityRecord] =
       Decoder.instance { cursor =>
@@ -223,8 +236,16 @@ object PreimageTypes:
           accumulateCount <- cursor.getOrElse[Long]("accumulate_count")(0)
           accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
         yield ServiceActivityRecord(
-          providedCount, providedSize, refinementCount, refinementGasUsed,
-          imports, extrinsicCount, extrinsicSize, exports, accumulateCount, accumulateGasUsed
+          providedCount,
+          providedSize,
+          refinementCount,
+          refinementGasUsed,
+          imports,
+          extrinsicCount,
+          extrinsicSize,
+          exports,
+          accumulateCount,
+          accumulateGasUsed
         )
       }
 
@@ -337,14 +358,8 @@ object PreimageTypes:
     case PreimagesNotSortedUnique
 
   object PreimageErrorCode:
-    given JamEncoder[PreimageErrorCode] with
-      def encode(a: PreimageErrorCode): JamBytes =
-        JamBytes(Array(a.ordinal.toByte))
-
-    given JamDecoder[PreimageErrorCode] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageErrorCode, Int) =
-        val ordinal = bytes.toArray(offset).toInt & 0xFF
-        (PreimageErrorCode.fromOrdinal(ordinal), 1)
+    given JamEncoder[PreimageErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
+    given JamDecoder[PreimageErrorCode] = CodecDerivation.enumDecoder(PreimageErrorCode.fromOrdinal)
 
     given Decoder[PreimageErrorCode] =
       Decoder.instance { cursor =>
@@ -357,45 +372,20 @@ object PreimageTypes:
   /**
    * Output from the Preimages STF.
    */
-  final case class PreimageOutput(
-    ok: Option[Unit] = None,
-    err: Option[PreimageErrorCode] = None
-  )
+  type PreimageOutput = StfResult[Unit, PreimageErrorCode]
 
   object PreimageOutput:
-    def success: PreimageOutput = PreimageOutput(ok = Some(()))
-    def error(code: PreimageErrorCode): PreimageOutput = PreimageOutput(err = Some(code))
-
-    given JamEncoder[PreimageOutput] with
-      def encode(a: PreimageOutput): JamBytes =
-        a.err match
-          case Some(errCode) =>
-            val builder = JamBytes.newBuilder
-            builder += 1.toByte
-            builder ++= errCode.encode
-            builder.result()
-          case None =>
-            JamBytes(Array(0.toByte))
-
-    given JamDecoder[PreimageOutput] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageOutput, Int) =
-        val arr = bytes.toArray
-        val tag = arr(offset).toInt & 0xFF
-        if tag == 0 then
-          (PreimageOutput(ok = Some(())), 1)
-        else
-          val (errCode, _) = bytes.decodeAs[PreimageErrorCode](offset + 1)
-          (PreimageOutput(err = Some(errCode)), 2)
-
-    given Decoder[PreimageOutput] =
+    given JamEncoder[PreimageOutput] = StfResult.stfResultEncoder[Unit, PreimageErrorCode]
+    given JamDecoder[PreimageOutput] = StfResult.stfResultDecoder[Unit, PreimageErrorCode]
+    given circeDecoder: Decoder[PreimageOutput] =
       Decoder.instance { cursor =>
         val okResult = cursor.downField("ok").focus
         val errResult = cursor.get[PreimageErrorCode]("err")
 
         if okResult.isDefined then
-          Right(PreimageOutput(ok = Some(())))
+          Right(StfResult.success(()))
         else
-          errResult.map(err => PreimageOutput(err = Some(err)))
+          errResult.map(err => StfResult.error(err))
       }
 
   /**
@@ -409,6 +399,8 @@ object PreimageTypes:
   )
 
   object PreimageCase:
+    import PreimageOutput.circeDecoder
+
     given JamEncoder[PreimageCase] with
       def encode(a: PreimageCase): JamBytes =
         val builder = JamBytes.newBuilder

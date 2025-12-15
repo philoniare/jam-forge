@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, Hashing, constants}
+import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult}
 import io.forge.jam.core.JamBytes.compareUnsigned
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature, Timeslot}
 import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
@@ -345,8 +345,8 @@ object DisputeTransition:
     // Validate disputes
     validateDisputes(input.disputes, preState, config) match
       case Some(error) =>
-        (preState, DisputeOutput(err = Some(error)))
+        (preState, StfResult.error(error))
       case None =>
         // Process disputes and get new state + offenders mark
         val (postState, offendersMark) = processDisputes(input.disputes, preState, config)
-        (postState, DisputeOutput(ok = Some(DisputeOutputMarks(offendersMark))))
+        (postState, StfResult.success(DisputeOutputMarks(offendersMark)))

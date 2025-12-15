@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.safrole
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec, StfResult}
 import io.forge.jam.core.JamBytes.compareUnsigned
 import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
@@ -41,12 +41,12 @@ object SafroleTransition:
   ): (SafroleState, SafroleOutput) =
     try
       if input.slot <= preState.tau then
-        (preState, SafroleOutput(err = Some(SafroleErrorCode.BadSlot)))
+        (preState, StfResult.error(SafroleErrorCode.BadSlot))
       else
         processValidSlot(input, preState, config)
     catch
       case _: Exception =>
-        (preState, SafroleOutput(err = Some(SafroleErrorCode.Reserved)))
+        (preState, StfResult.error(SafroleErrorCode.Reserved))
 
   /** Epoch timing context extracted from slot values */
   private case class EpochContext(
@@ -101,7 +101,7 @@ object SafroleTransition:
 
     ticketResult match
       case Left(error) =>
-        (stateAfterEpoch, SafroleOutput(err = Some(error)))
+        (stateAfterEpoch, StfResult.error(error))
       case Right(stateAfterTickets) =>
         // Process entropy accumulation and update timeslot
         val newEta0 = Hashing.blake2b256(preState.eta.head.bytes ++ input.entropy.bytes)
@@ -109,7 +109,7 @@ object SafroleTransition:
           eta = newEta0 :: stateAfterTickets.eta.tail,
           tau = input.slot
         )
-        (finalState, SafroleOutput(ok = Some(SafroleOutputData(epochMark, ticketsMark))))
+        (finalState, StfResult.success(SafroleOutputData(epochMark, ticketsMark)))
 
   /**
    * Handle epoch transition.

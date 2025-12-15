@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs, encodeFixedList, decodeFixedList}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
@@ -128,14 +128,8 @@ object AssuranceTypes:
     case NotSortedOrUniqueAssurers
 
   object AssuranceErrorCode:
-    given JamEncoder[AssuranceErrorCode] with
-      def encode(a: AssuranceErrorCode): JamBytes =
-        JamBytes(Array(a.ordinal.toByte))
-
-    given JamDecoder[AssuranceErrorCode] with
-      def decode(bytes: JamBytes, offset: Int): (AssuranceErrorCode, Int) =
-        val ordinal = bytes.toArray(offset).toInt & 0xFF
-        (AssuranceErrorCode.fromOrdinal(ordinal), 1)
+    given JamEncoder[AssuranceErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
+    given JamDecoder[AssuranceErrorCode] = CodecDerivation.enumDecoder(AssuranceErrorCode.fromOrdinal)
 
     given Decoder[AssuranceErrorCode] =
       Decoder.instance { cursor =>
@@ -177,50 +171,26 @@ object AssuranceTypes:
   /**
    * Output from the Assurances STF.
    */
-  final case class AssuranceOutput(
-    ok: Option[AssuranceOutputMarks] = None,
-    err: Option[AssuranceErrorCode] = None
-  )
+  type AssuranceOutput = StfResult[AssuranceOutputMarks, AssuranceErrorCode]
 
   object AssuranceOutput:
-    given JamEncoder[AssuranceOutput] with
-      def encode(a: AssuranceOutput): JamBytes =
-        val builder = JamBytes.newBuilder
-        a.ok match
-          case Some(marks) =>
-            builder += 0.toByte
-            builder ++= marks.encode
-          case None =>
-            builder += 1.toByte
-            builder ++= a.err.get.encode
-        builder.result()
+    given JamEncoder[AssuranceOutput] = StfResult.stfResultEncoder[AssuranceOutputMarks, AssuranceErrorCode]
+    given JamDecoder[AssuranceOutput] = StfResult.stfResultDecoder[AssuranceOutputMarks, AssuranceErrorCode]
 
-    given JamDecoder[AssuranceOutput] with
-      def decode(bytes: JamBytes, offset: Int): (AssuranceOutput, Int) =
-        var pos = offset
-        val discriminator = bytes.toArray(pos).toInt & 0xFF
-        pos += 1
-        if discriminator == 0 then
-          val (marks, marksBytes) = bytes.decodeAs[AssuranceOutputMarks](pos)
-          (AssuranceOutput(ok = Some(marks)), 1 + marksBytes)
-        else
-          val (err, errBytes) = bytes.decodeAs[AssuranceErrorCode](pos)
-          (AssuranceOutput(err = Some(err)), 1 + errBytes)
-
-    given Decoder[AssuranceOutput] =
+    given circeDecoder: Decoder[AssuranceOutput] =
       Decoder.instance { cursor =>
         val okResult = cursor.get[AssuranceOutputMarks]("ok")
         val errResult = cursor.get[AssuranceErrorCode]("err")
         (okResult, errResult) match
-          case (Right(ok), _) => Right(AssuranceOutput(ok = Some(ok)))
-          case (_, Right(err)) => Right(AssuranceOutput(err = Some(err)))
+          case (Right(ok), _) => Right(StfResult.success(ok))
+          case (_, Right(err)) => Right(StfResult.error(err))
           case (Left(_), Left(_)) =>
             // Try to determine which field is present
             cursor.downField("ok").focus match
               case Some(_) =>
-                cursor.get[AssuranceOutputMarks]("ok").map(ok => AssuranceOutput(ok = Some(ok)))
+                cursor.get[AssuranceOutputMarks]("ok").map(ok => StfResult.success(ok))
               case None =>
-                cursor.get[AssuranceErrorCode]("err").map(err => AssuranceOutput(err = Some(err)))
+                cursor.get[AssuranceErrorCode]("err").map(err => StfResult.error(err))
       }
 
   /**
@@ -234,6 +204,8 @@ object AssuranceTypes:
   )
 
   object AssuranceCase:
+    import AssuranceOutput.circeDecoder
+
     /** Create a config-aware decoder for AssuranceCase */
     def decoder(coreCount: Int, validatorCount: Int): JamDecoder[AssuranceCase] = new JamDecoder[AssuranceCase]:
       def decode(bytes: JamBytes, offset: Int): (AssuranceCase, Int) =

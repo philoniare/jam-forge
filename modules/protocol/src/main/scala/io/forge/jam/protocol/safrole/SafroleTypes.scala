@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.safrole
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec, CodecDerivation, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs, encodeFixedList, decodeFixedList}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
@@ -44,7 +44,7 @@ object SafroleTypes:
     /** Create a decoder that knows the expected epoch length */
     def decoder(epochLength: Int): JamDecoder[TicketsOrKeys] = new JamDecoder[TicketsOrKeys]:
       def decode(bytes: JamBytes, offset: Int): (TicketsOrKeys, Int) =
-        val discriminator = bytes(offset).toInt & 0xFF
+        val discriminator = bytes(offset).toInt & 0xff
         var pos = offset + 1
         if discriminator == 0 then
           // Tickets variant
@@ -89,8 +89,10 @@ object SafroleTypes:
     postOffenders: List[Ed25519PublicKey]
   ):
     require(eta.size == 4, s"Entropy buffer must have 4 elements, got ${eta.size}")
-    require(gammaZ.length == BandersnatchRingCommitmentSize,
-      s"Ring commitment must be $BandersnatchRingCommitmentSize bytes, got ${gammaZ.length}")
+    require(
+      gammaZ.length == BandersnatchRingCommitmentSize,
+      s"Ring commitment must be $BandersnatchRingCommitmentSize bytes, got ${gammaZ.length}"
+    )
 
   object SafroleState:
     given JamEncoder[SafroleState] with
@@ -227,14 +229,8 @@ object SafroleTypes:
     case DuplicateTicket
 
   object SafroleErrorCode:
-    given JamEncoder[SafroleErrorCode] with
-      def encode(a: SafroleErrorCode): JamBytes =
-        JamBytes(Array(a.ordinal.toByte))
-
-    given JamDecoder[SafroleErrorCode] with
-      def decode(bytes: JamBytes, offset: Int): (SafroleErrorCode, Int) =
-        val ordinal = bytes.toArray(offset).toInt & 0xFF
-        (SafroleErrorCode.fromOrdinal(ordinal), 1)
+    given JamEncoder[SafroleErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
+    given JamDecoder[SafroleErrorCode] = CodecDerivation.enumDecoder(SafroleErrorCode.fromOrdinal)
 
     given Decoder[SafroleErrorCode] = Decoder.instance { cursor =>
       cursor.as[String].map {
@@ -273,32 +269,33 @@ object SafroleTypes:
         builder.result()
 
     /** Create a decoder that knows the validator count and epoch length */
-    def decoder(validatorCount: Int, epochLength: Int): JamDecoder[SafroleOutputData] = new JamDecoder[SafroleOutputData]:
-      def decode(bytes: JamBytes, offset: Int): (SafroleOutputData, Int) =
-        var pos = offset
+    def decoder(validatorCount: Int, epochLength: Int): JamDecoder[SafroleOutputData] =
+      new JamDecoder[SafroleOutputData]:
+        def decode(bytes: JamBytes, offset: Int): (SafroleOutputData, Int) =
+          var pos = offset
 
-        // epochMark - optional (discriminator byte + content)
-        val epochMarkDiscriminator = bytes(pos).toInt & 0xFF
-        pos += 1
-        val epochMark = if epochMarkDiscriminator == 0 then
-          None
-        else
-          val epochMarkDecoder = EpochMark.decoder(validatorCount)
-          val (mark, markConsumed) = epochMarkDecoder.decode(bytes, pos)
-          pos += markConsumed
-          Some(mark)
+          // epochMark - optional (discriminator byte + content)
+          val epochMarkDiscriminator = bytes(pos).toInt & 0xff
+          pos += 1
+          val epochMark = if epochMarkDiscriminator == 0 then
+            None
+          else
+            val epochMarkDecoder = EpochMark.decoder(validatorCount)
+            val (mark, markConsumed) = epochMarkDecoder.decode(bytes, pos)
+            pos += markConsumed
+            Some(mark)
 
-        // ticketsMark - optional (discriminator byte + fixed list)
-        val ticketsMarkDiscriminator = bytes(pos).toInt & 0xFF
-        pos += 1
-        val ticketsMark = if ticketsMarkDiscriminator == 0 then
-          None
-        else
-          val (tickets, ticketsConsumed) = decodeFixedList[TicketMark](bytes, pos, epochLength)
-          pos += ticketsConsumed
-          Some(tickets)
+          // ticketsMark - optional (discriminator byte + fixed list)
+          val ticketsMarkDiscriminator = bytes(pos).toInt & 0xff
+          pos += 1
+          val ticketsMark = if ticketsMarkDiscriminator == 0 then
+            None
+          else
+            val (tickets, ticketsConsumed) = decodeFixedList[TicketMark](bytes, pos, epochLength)
+            pos += ticketsConsumed
+            Some(tickets)
 
-        (SafroleOutputData(epochMark, ticketsMark), pos - offset)
+          (SafroleOutputData(epochMark, ticketsMark), pos - offset)
 
     given Decoder[SafroleOutputData] = Decoder.instance { cursor =>
       for
@@ -310,50 +307,38 @@ object SafroleTypes:
   /**
    * Output from the Safrole STF.
    */
-  final case class SafroleOutput(
-    ok: Option[SafroleOutputData] = None,
-    err: Option[SafroleErrorCode] = None
-  )
+  type SafroleOutput = StfResult[SafroleOutputData, SafroleErrorCode]
 
   object SafroleOutput:
-    given JamEncoder[SafroleOutput] with
-      def encode(a: SafroleOutput): JamBytes =
-        val builder = JamBytes.newBuilder
-        a.ok match
-          case Some(data) =>
-            builder += 0.toByte
-            builder ++= data.encode
-          case None =>
-            builder += 1.toByte
-            builder ++= a.err.get.encode
-        builder.result()
-
-    /** Create a decoder that knows the validator count and epoch length */
+    /**
+     * Create a config-aware decoder for SafroleOutput.
+     */
     def decoder(validatorCount: Int, epochLength: Int): JamDecoder[SafroleOutput] = new JamDecoder[SafroleOutput]:
       def decode(bytes: JamBytes, offset: Int): (SafroleOutput, Int) =
         var pos = offset
-        val discriminator = bytes.toArray(pos).toInt & 0xFF
+        val discriminator = bytes.toArray(pos).toInt & 0xff
         pos += 1
         if discriminator == 0 then
           val outputDataDecoder = SafroleOutputData.decoder(validatorCount, epochLength)
           val (data, dataBytes) = outputDataDecoder.decode(bytes, pos)
-          (SafroleOutput(ok = Some(data)), 1 + dataBytes)
+          (StfResult.success(data), 1 + dataBytes)
         else
           val (err, errBytes) = bytes.decodeAs[SafroleErrorCode](pos)
-          (SafroleOutput(err = Some(err)), 1 + errBytes)
+          (StfResult.error(err), 1 + errBytes)
 
-    given Decoder[SafroleOutput] = Decoder.instance { cursor =>
+    // Circe JSON decoder for SafroleOutput
+    given circeDecoder: Decoder[SafroleOutput] = Decoder.instance { cursor =>
       val okResult = cursor.get[SafroleOutputData]("ok")
       val errResult = cursor.get[SafroleErrorCode]("err")
       (okResult, errResult) match
-        case (Right(ok), _) => Right(SafroleOutput(ok = Some(ok)))
-        case (_, Right(err)) => Right(SafroleOutput(err = Some(err)))
+        case (Right(ok), _) => Right(StfResult.success(ok))
+        case (_, Right(err)) => Right(StfResult.error(err))
         case (Left(_), Left(_)) =>
           cursor.downField("ok").focus match
             case Some(_) =>
-              cursor.get[SafroleOutputData]("ok").map(ok => SafroleOutput(ok = Some(ok)))
+              cursor.get[SafroleOutputData]("ok").map(ok => StfResult.success(ok))
             case None =>
-              cursor.get[SafroleErrorCode]("err").map(err => SafroleOutput(err = Some(err)))
+              cursor.get[SafroleErrorCode]("err").map(err => StfResult.error(err))
     }
 
   /**
@@ -367,6 +352,8 @@ object SafroleTypes:
   )
 
   object SafroleCase:
+    import SafroleOutput.circeDecoder
+
     /** Create a config-aware decoder for SafroleCase */
     def decoder(validatorCount: Int, epochLength: Int): JamDecoder[SafroleCase] = new JamDecoder[SafroleCase]:
       def decode(bytes: JamBytes, offset: Int): (SafroleCase, Int) =
@@ -381,7 +368,7 @@ object SafroleTypes:
         val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
         pos += preStateBytes
 
-        // output
+        // output - use config-aware decoder
         val outputDecoder = SafroleOutput.decoder(validatorCount, epochLength)
         val (output, outputBytes) = outputDecoder.decode(bytes, pos)
         pos += outputBytes
@@ -398,7 +385,13 @@ object SafroleTypes:
         val builder = JamBytes.newBuilder
         builder ++= a.input.encode
         builder ++= a.preState.encode
-        builder ++= a.output.encode
+        a.output.ok match
+          case Some(data) =>
+            builder += 0.toByte
+            builder ++= data.encode
+          case None =>
+            builder += 1.toByte
+            builder ++= a.output.err.get.encode
         builder ++= a.postState.encode
         builder.result()
 

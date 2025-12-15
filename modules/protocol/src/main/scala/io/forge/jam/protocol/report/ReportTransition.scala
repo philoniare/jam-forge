@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants, StfResult}
 import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, ValidatorIndex}
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
@@ -82,7 +82,7 @@ object ReportTransition:
     yield processedGuarantees
 
     result match
-      case Left(err) => (preState, ReportOutput.error(err))
+      case Left(err) => (preState, StfResult.error(err))
       case Right((reports, packages, guarantors)) =>
         val postState = preState.copy(
           availAssignments = updateAvailAssignments(preState.availAssignments, reports, input.slot),
@@ -93,7 +93,7 @@ object ReportTransition:
           reported = packages.sortBy(_.workPackageHash.toHex),
           reporters = guarantors.distinct.sortBy(_.toHex)
         )
-        (postState, ReportOutput.success(outputMarks))
+        (postState, StfResult.success(outputMarks))
 
   /**
    * Process all guarantees and collect results.

@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.{JamBytes, codec, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
@@ -195,11 +195,23 @@ object ServiceActivityRecord:
       val (transferGasUsed, transferGasUsedBytes) = codec.decodeCompactInteger(arr, pos)
       pos += transferGasUsedBytes
 
-      (ServiceActivityRecord(
-        providedCount.toInt, providedSize, refinementCount, refinementGasUsed,
-        imports, extrinsicCount, extrinsicSize, exports, accumulateCount, accumulateGasUsed,
-        transferCount, transferGasUsed
-      ), pos - offset)
+      (
+        ServiceActivityRecord(
+          providedCount.toInt,
+          providedSize,
+          refinementCount,
+          refinementGasUsed,
+          imports,
+          extrinsicCount,
+          extrinsicSize,
+          exports,
+          accumulateCount,
+          accumulateGasUsed,
+          transferCount,
+          transferGasUsed
+        ),
+        pos - offset
+      )
 
   given Decoder[ServiceActivityRecord] = Decoder.instance { cursor =>
     for
@@ -216,9 +228,18 @@ object ServiceActivityRecord:
       transferCount <- cursor.getOrElse[Long]("on_transfers_count")(0)
       transferGasUsed <- cursor.getOrElse[Long]("on_transfers_gas_used")(0)
     yield ServiceActivityRecord(
-      providedCount, providedSize, refinementCount, refinementGasUsed,
-      imports, extrinsicCount, extrinsicSize, exports, accumulateCount, accumulateGasUsed,
-      transferCount, transferGasUsed
+      providedCount,
+      providedSize,
+      refinementCount,
+      refinementGasUsed,
+      imports,
+      extrinsicCount,
+      extrinsicSize,
+      exports,
+      accumulateCount,
+      accumulateGasUsed,
+      transferCount,
+      transferGasUsed
     )
   }
 
@@ -513,7 +534,8 @@ final case class AccumulationState(
     AccumulationState(
       slot = slot,
       entropy = JamBytes(entropy.toArray),
-      readyQueue = readyQueue.map(_.map(r => AccumulationReadyRecord(r.report, r.dependencies.map(d => JamBytes(d.toArray))))),
+      readyQueue =
+        readyQueue.map(_.map(r => AccumulationReadyRecord(r.report, r.dependencies.map(d => JamBytes(d.toArray))))),
       accumulated = accumulated.map(_.map(h => JamBytes(h.toArray))),
       privileges = privileges.copy(),
       statistics = statistics.map(_.copy()),
@@ -667,24 +689,26 @@ extension (state: PartialState)
    * Convert PartialState back to sorted list of AccumulationServiceItems.
    */
   def toAccumulationServiceItems(): List[AccumulationServiceItem] =
-    state.accounts.toList.map { case (id, account) =>
-      AccumulationServiceItem(
-        id = id,
-        data = AccumulationServiceData(
-          service = account.info,
-          storage = account.storage.toList
-            .sortBy(_._1.toHex)
-            .map { case (key, value) => StorageMapEntry(key, value) },
-          preimages = account.preimages.toList
-            .sortBy(_._1.toHex)
-            .map { case (hash, blob) => PreimageHash(hash, blob) },
-          preimagesStatus = account.preimageRequests.toList
-            .sortBy(_._1.hash.toHex)
-            .map { case (key, request) =>
-              PreimagesStatusMapEntry(key.hash, request.requestedAt)
-            }
+    state.accounts.toList.map {
+      case (id, account) =>
+        AccumulationServiceItem(
+          id = id,
+          data = AccumulationServiceData(
+            service = account.info,
+            storage = account.storage.toList
+              .sortBy(_._1.toHex)
+              .map { case (key, value) => StorageMapEntry(key, value) },
+            preimages = account.preimages.toList
+              .sortBy(_._1.toHex)
+              .map { case (hash, blob) => PreimageHash(hash, blob) },
+            preimagesStatus = account.preimageRequests.toList
+              .sortBy(_._1.hash.toHex)
+              .map {
+                case (key, request) =>
+                  PreimagesStatusMapEntry(key.hash, request.requestedAt)
+              }
+          )
         )
-      )
     }.sortBy(_.id)
 
 /**
@@ -733,50 +757,79 @@ object AccumulationInput:
   }
 
 /**
- * Output from the accumulation STF.
+ * Output data from the accumulation STF.
+ *
  * @param ok The accumulation root hash
  * @param accumulationStats Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
  * @param transferStats Per-service transfer statistics: serviceId -> (count, gasUsed)
  */
-final case class AccumulationOutput(
+final case class AccumulationOutputData(
   ok: JamBytes,
   accumulationStats: Map[Long, (Long, Int)] = Map.empty,
   transferStats: Map[Long, (Long, Long)] = Map.empty
 )
 
-object AccumulationOutput:
-  given JamEncoder[AccumulationOutput] with
-    def encode(a: AccumulationOutput): JamBytes =
+object AccumulationOutputData:
+  given JamEncoder[AccumulationOutputData] with
+    def encode(a: AccumulationOutputData): JamBytes =
       val builder = JamBytes.newBuilder
-      builder += 0.toByte // discriminator for ok
       builder ++= codec.encodeCompactInteger(a.ok.length.toLong)
       builder ++= a.ok
       builder.result()
 
-  given JamDecoder[AccumulationOutput] with
+  given JamDecoder[AccumulationOutputData] with
+    def decode(bytes: JamBytes, offset: Int): (AccumulationOutputData, Int) =
+      val arr = bytes.toArray
+      var pos = offset
+
+      // ok - compact length + bytes
+      val (okLength, okLengthBytes) = codec.decodeCompactInteger(arr, pos)
+      pos += okLengthBytes
+      val ok = JamBytes(arr.slice(pos, pos + okLength.toInt))
+      pos += okLength.toInt
+
+      (AccumulationOutputData(ok), pos - offset)
+
+  given Decoder[AccumulationOutputData] = Decoder.instance { cursor =>
+    for
+      ok <- cursor.get[String]("ok")
+    yield AccumulationOutputData(JamBytes(parseHex(ok)))
+  }
+
+/**
+ * Output from the accumulation STF.
+ * Uses generic StfResult type with AccumulationOutputData as success type.
+ * Note: Nothing as error type since no error case currently exists.
+ */
+type AccumulationOutput = StfResult[AccumulationOutputData, Nothing]
+
+object AccumulationOutput:
+  given jamEncoder: JamEncoder[AccumulationOutput] with
+    def encode(a: AccumulationOutput): JamBytes =
+      val builder = JamBytes.newBuilder
+      builder += 0.toByte // discriminator for ok
+      a.ok.foreach(data => builder ++= data.encode)
+      builder.result()
+
+  given jamDecoder: JamDecoder[AccumulationOutput] with
     def decode(bytes: JamBytes, offset: Int): (AccumulationOutput, Int) =
       val arr = bytes.toArray
       var pos = offset
 
       // discriminator - 0 = ok, 1 = err
-      val discriminator = arr(pos).toInt & 0xFF
+      val discriminator = arr(pos).toInt & 0xff
       pos += 1
 
       if discriminator == 0 then
-        // ok - compact length + bytes
-        val (okLength, okLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += okLengthBytes
-        val ok = JamBytes(arr.slice(pos, pos + okLength.toInt))
-        pos += okLength.toInt
-        (AccumulationOutput(ok), pos - offset)
+        val (data, dataBytes) = bytes.decodeAs[AccumulationOutputData](pos)
+        (StfResult.success(data), 1 + dataBytes)
       else
-        // Error case - just use empty bytes for now
-        (AccumulationOutput(JamBytes.empty), pos - offset)
+        (StfResult.success(AccumulationOutputData(JamBytes.empty)), pos - offset)
 
-  given Decoder[AccumulationOutput] = Decoder.instance { cursor =>
+  given circeDecoder: Decoder[AccumulationOutput] = Decoder.instance { cursor =>
     for
       ok <- cursor.get[String]("ok")
-    yield AccumulationOutput(JamBytes(parseHex(ok)))
+    yield StfResult.success(AccumulationOutputData(JamBytes(parseHex(ok))))
   }
 
 /**
@@ -790,6 +843,9 @@ final case class AccumulationCase(
 )
 
 object AccumulationCase:
+  // Import the custom codecs from AccumulationOutput companion
+  import AccumulationOutput.{jamEncoder, jamDecoder, circeDecoder}
+
   /** Create a config-aware decoder for AccumulationCase */
   def decoder(coresCount: Int, epochLength: Int): JamDecoder[AccumulationCase] = new JamDecoder[AccumulationCase]:
     def decode(bytes: JamBytes, offset: Int): (AccumulationCase, Int) =
@@ -802,7 +858,7 @@ object AccumulationCase:
       val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
       pos += preStateBytes
 
-      val (output, outputBytes) = bytes.decodeAs[AccumulationOutput](pos)
+      val (output, outputBytes) = jamDecoder.decode(bytes, pos)
       pos += outputBytes
 
       val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
@@ -815,7 +871,7 @@ object AccumulationCase:
       val builder = JamBytes.newBuilder
       builder ++= a.input.encode
       builder ++= a.preState.encode
-      builder ++= a.output.encode
+      builder ++= jamEncoder.encode(a.output)
       builder ++= a.postState.encode
       builder.result()
 
@@ -823,7 +879,7 @@ object AccumulationCase:
     for
       input <- cursor.get[AccumulationInput]("input")
       preState <- cursor.get[AccumulationState]("pre_state")
-      output <- cursor.get[AccumulationOutput]("output")
+      output <- cursor.get[AccumulationOutput]("output")(circeDecoder)
       postState <- cursor.get[AccumulationState]("post_state")
     yield AccumulationCase(input, preState, output, postState)
   }

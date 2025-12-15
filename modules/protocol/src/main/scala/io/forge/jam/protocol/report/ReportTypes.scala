@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, Gas}
 import io.forge.jam.core.types.workpackage.{SegmentRootLookup, AvailabilityAssignment}
@@ -62,8 +62,19 @@ object ReportTypes:
         val (exports, d6) = codec.decodeCompactInteger(arr, pos); pos += d6
         val (bundleSize, d7) = codec.decodeCompactInteger(arr, pos); pos += d7
         val (gasUsed, d8) = codec.decodeCompactInteger(arr, pos); pos += d8
-        (CoreStatisticsRecord(daLoad, popularity, imports, extrinsicCount,
-          extrinsicSize, exports, bundleSize, gasUsed), pos - offset)
+        (
+          CoreStatisticsRecord(
+            daLoad,
+            popularity,
+            imports,
+            extrinsicCount,
+            extrinsicSize,
+            exports,
+            bundleSize,
+            gasUsed
+          ),
+          pos - offset
+        )
 
     given Decoder[CoreStatisticsRecord] =
       Decoder.instance { cursor =>
@@ -76,8 +87,16 @@ object ReportTypes:
           exports <- cursor.getOrElse[Long]("exports")(0)
           bundleSize <- cursor.getOrElse[Long]("bundle_size")(0)
           gasUsed <- cursor.getOrElse[Long]("gas_used")(0)
-        yield CoreStatisticsRecord(daLoad, popularity, imports, extrinsicCount,
-          extrinsicSize, exports, bundleSize, gasUsed)
+        yield CoreStatisticsRecord(
+          daLoad,
+          popularity,
+          imports,
+          extrinsicCount,
+          extrinsicSize,
+          exports,
+          bundleSize,
+          gasUsed
+        )
       }
 
   /**
@@ -126,9 +145,21 @@ object ReportTypes:
         val (accumulateGasUsed, d8) = codec.decodeCompactInteger(arr, pos); pos += d8
         val (transferCount, d9) = codec.decodeCompactInteger(arr, pos); pos += d9
         val (transferGasUsed, d10) = codec.decodeCompactInteger(arr, pos); pos += d10
-        (ServiceActivityRecord(refinementCount, refinementGasUsed, extrinsicCount,
-          extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed,
-          transferCount, transferGasUsed), pos - offset)
+        (
+          ServiceActivityRecord(
+            refinementCount,
+            refinementGasUsed,
+            extrinsicCount,
+            extrinsicSize,
+            imports,
+            exports,
+            accumulateCount,
+            accumulateGasUsed,
+            transferCount,
+            transferGasUsed
+          ),
+          pos - offset
+        )
 
     given Decoder[ServiceActivityRecord] =
       Decoder.instance { cursor =>
@@ -143,9 +174,18 @@ object ReportTypes:
           accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
           transferCount <- cursor.getOrElse[Long]("transfer_count")(0)
           transferGasUsed <- cursor.getOrElse[Long]("transfer_gas_used")(0)
-        yield ServiceActivityRecord(refinementCount, refinementGasUsed, extrinsicCount,
-          extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed,
-          transferCount, transferGasUsed)
+        yield ServiceActivityRecord(
+          refinementCount,
+          refinementGasUsed,
+          extrinsicCount,
+          extrinsicSize,
+          imports,
+          exports,
+          accumulateCount,
+          accumulateGasUsed,
+          transferCount,
+          transferGasUsed
+        )
       }
 
   /**
@@ -203,7 +243,7 @@ object ReportTypes:
 
         // availAssignments - fixed size (coresCount), optional items
         val availAssignments = (0 until coresCount).map { _ =>
-          val optionByte = arr(pos).toInt & 0xFF
+          val optionByte = arr(pos).toInt & 0xff
           pos += 1
           if optionByte == 0 then None
           else
@@ -251,8 +291,21 @@ object ReportTypes:
         val (servicesStatistics, servicesStatsBytes) = bytes.decodeAs[List[ServiceStatisticsEntry]](pos)
         pos += servicesStatsBytes
 
-        (ReportState(availAssignments, currValidators, prevValidators, entropy, offenders,
-          recentBlocks, authPools, accounts, coresStatistics, servicesStatistics), pos - offset)
+        (
+          ReportState(
+            availAssignments,
+            currValidators,
+            prevValidators,
+            entropy,
+            offenders,
+            recentBlocks,
+            authPools,
+            accounts,
+            coresStatistics,
+            servicesStatistics
+          ),
+          pos - offset
+        )
 
     def encoder(coresCount: Int): JamEncoder[ReportState] = new JamEncoder[ReportState]:
       def encode(a: ReportState): JamBytes =
@@ -309,8 +362,18 @@ object ReportTypes:
           accounts <- cursor.get[List[ServiceAccount]]("accounts")
           coresStatistics <- cursor.get[List[CoreStatisticsRecord]]("cores_statistics")
           servicesStatistics <- cursor.getOrElse[List[ServiceStatisticsEntry]]("services_statistics")(List.empty)
-        yield ReportState(availAssignments, currValidators, prevValidators, entropy, offenders,
-          recentBlocks, authPools, accounts, coresStatistics, servicesStatistics)
+        yield ReportState(
+          availAssignments,
+          currValidators,
+          prevValidators,
+          entropy,
+          offenders,
+          recentBlocks,
+          authPools,
+          accounts,
+          coresStatistics,
+          servicesStatistics
+        )
       }
 
   /**
@@ -348,7 +411,8 @@ object ReportTypes:
         for
           guarantees <- cursor.get[List[GuaranteeExtrinsic]]("guarantees")
           slot <- cursor.get[Long]("slot")
-          knownPackages <- cursor.getOrElse[List[String]]("known_packages")(List.empty).map(_.map(h => Hash(parseHex(h))))
+          knownPackages <-
+            cursor.getOrElse[List[String]]("known_packages")(List.empty).map(_.map(h => Hash(parseHex(h))))
         yield ReportInput(guarantees, slot, knownPackages)
       }
 
@@ -385,14 +449,8 @@ object ReportTypes:
     case DuplicateGuarantors
 
   object ReportErrorCode:
-    given JamEncoder[ReportErrorCode] with
-      def encode(a: ReportErrorCode): JamBytes =
-        JamBytes(Array(a.ordinal.toByte))
-
-    given JamDecoder[ReportErrorCode] with
-      def decode(bytes: JamBytes, offset: Int): (ReportErrorCode, Int) =
-        val ordinal = bytes.toArray(offset).toInt & 0xFF
-        (ReportErrorCode.fromOrdinal(ordinal), 1)
+    given JamEncoder[ReportErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
+    given JamDecoder[ReportErrorCode] = CodecDerivation.enumDecoder(ReportErrorCode.fromOrdinal)
 
     given Decoder[ReportErrorCode] =
       Decoder.instance { cursor =>
@@ -464,47 +522,21 @@ object ReportTypes:
   /**
    * Report output - success or error.
    */
-  final case class ReportOutput(
-    ok: Option[ReportOutputMarks] = None,
-    err: Option[ReportErrorCode] = None
-  )
+  type ReportOutput = StfResult[ReportOutputMarks, ReportErrorCode]
 
   object ReportOutput:
-    def success(marks: ReportOutputMarks): ReportOutput = ReportOutput(ok = Some(marks))
-    def error(code: ReportErrorCode): ReportOutput = ReportOutput(err = Some(code))
+    given JamEncoder[ReportOutput] = StfResult.stfResultEncoder[ReportOutputMarks, ReportErrorCode]
+    given JamDecoder[ReportOutput] = StfResult.stfResultDecoder[ReportOutputMarks, ReportErrorCode]
 
-    given JamEncoder[ReportOutput] with
-      def encode(a: ReportOutput): JamBytes =
-        val builder = JamBytes.newBuilder
-        a.err match
-          case Some(errCode) =>
-            builder += 1.toByte
-            builder ++= errCode.encode
-          case None =>
-            builder += 0.toByte
-            a.ok.foreach(marks => builder ++= marks.encode)
-        builder.result()
-
-    given JamDecoder[ReportOutput] with
-      def decode(bytes: JamBytes, offset: Int): (ReportOutput, Int) =
-        val arr = bytes.toArray
-        val tag = arr(offset).toInt & 0xFF
-        if tag == 0 then
-          val (marks, consumed) = bytes.decodeAs[ReportOutputMarks](offset + 1)
-          (ReportOutput(ok = Some(marks)), 1 + consumed)
-        else
-          val (errCode, _) = bytes.decodeAs[ReportErrorCode](offset + 1)
-          (ReportOutput(err = Some(errCode)), 2)
-
-    given Decoder[ReportOutput] =
+    given circeDecoder: Decoder[ReportOutput] =
       Decoder.instance { cursor =>
         val okResult = cursor.downField("ok").focus
         val errResult = cursor.get[ReportErrorCode]("err")
 
         if okResult.isDefined then
-          cursor.get[ReportOutputMarks]("ok").map(marks => ReportOutput(ok = Some(marks)))
+          cursor.get[ReportOutputMarks]("ok").map(marks => StfResult.success(marks))
         else
-          errResult.map(err => ReportOutput(err = Some(err)))
+          errResult.map(err => StfResult.error(err))
       }
 
   /**
@@ -518,6 +550,8 @@ object ReportTypes:
   )
 
   object ReportCase:
+    import ReportOutput.circeDecoder
+
     def decoder(coresCount: Int, validatorsCount: Int): JamDecoder[ReportCase] = new JamDecoder[ReportCase]:
       def decode(bytes: JamBytes, offset: Int): (ReportCase, Int) =
         var pos = offset

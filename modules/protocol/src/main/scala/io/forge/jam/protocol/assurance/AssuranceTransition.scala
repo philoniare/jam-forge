@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants, StfResult}
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
@@ -193,19 +193,19 @@ object AssuranceTransition:
 
     // Validate core engagement
     if !validateCoreEngagement(input.assurances, preState) then
-      (postTimeoutState, AssuranceOutput(err = Some(AssuranceErrorCode.CoreNotEngaged)))
+      (postTimeoutState, StfResult.error(AssuranceErrorCode.CoreNotEngaged))
     else
       // Validate assurances
       validateAssurances(input, preState) match
         case Some(error) =>
-          (preState, AssuranceOutput(err = Some(error)))
+          (preState, StfResult.error(error))
         case None =>
           // Find available cores and reports
           val availableCores = findAvailableCores(input, preState, config)
           val availableReports = processAvailableReports(availableCores, preState)
 
           if availableReports.isEmpty then
-            (postTimeoutState, AssuranceOutput(ok = Some(AssuranceOutputMarks(List.empty))))
+            (postTimeoutState, StfResult.success(AssuranceOutputMarks(List.empty)))
           else
             val finalState = updateStateWithAvailableReports(postTimeoutState, availableReports)
-            (finalState, AssuranceOutput(ok = Some(AssuranceOutputMarks(availableReports))))
+            (finalState, StfResult.success(AssuranceOutputMarks(availableReports)))

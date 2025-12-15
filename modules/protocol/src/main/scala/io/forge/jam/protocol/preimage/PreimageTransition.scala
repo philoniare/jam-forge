@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.preimage
 
 import io.forge.jam.core.JamBytes.compareUnsigned
-import io.forge.jam.core.Hashing
+import io.forge.jam.core.{Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
@@ -110,11 +110,11 @@ object PreimageTransition:
             validationError = Some(PreimageErrorCode.PreimageUnneeded)
 
     if validationError.isDefined then
-      return (preState, PreimageOutput.error(validationError.get))
+      return (preState, StfResult.error(validationError.get))
 
     // Then validate that preimages are sorted and unique by (requester, hash)
     if !arePreimagesSortedAndUnique(input.preimages) then
-      return (preState, PreimageOutput.error(PreimageErrorCode.PreimagesNotSortedUnique))
+      return (preState, StfResult.error(PreimageErrorCode.PreimagesNotSortedUnique))
 
     // Track statistics updates by service ID
     val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)
@@ -183,4 +183,4 @@ object PreimageTransition:
     val mergedStatistics = (existingNotUpdated ++ updatedStatistics).sortBy(_.id)
 
     val postState = preState.copy(accounts = updatedAccounts, statistics = mergedStatistics)
-    (postState, PreimageOutput.success)
+    (postState, StfResult.success(()))

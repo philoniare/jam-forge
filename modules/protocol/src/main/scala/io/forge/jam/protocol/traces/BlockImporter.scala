@@ -275,7 +275,8 @@ class BlockImporter(
         config
       )
 
-      val accumulateRoot = accumulationOutput.ok
+      val accumulationOutputData = accumulationOutput.ok.get
+      val accumulateRoot = accumulationOutputData.ok
 
       // Step 6: Run History STF
       val historyInput = InputExtractor.extractHistoryInput(block, Hash(accumulateRoot.toArray))
@@ -318,7 +319,7 @@ class BlockImporter(
       val finalServiceStats = computeFinalServiceStatistics(
         guarantees = block.extrinsic.guarantees,
         preimages = block.extrinsic.preimages,
-        accumulationStats = accumulationOutput.accumulationStats
+        accumulationStats = accumulationOutputData.accumulationStats
       )
 
       // Step 12: Merge all post-states into unified FullJamState

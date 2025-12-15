@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.{ChainConfig, JamBytes, codec, CodecDerivation, StfResult}
 import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.types.extrinsic.Dispute
@@ -105,7 +105,7 @@ object DisputeTypes:
 
         // rho - fixed size list (coreCount) of optional AvailabilityAssignment
         val rho = (0 until coreCount).map { _ =>
-          val discriminator = arr(pos).toInt & 0xFF
+          val discriminator = arr(pos).toInt & 0xff
           pos += 1
           if discriminator == 0 then
             None
@@ -184,14 +184,8 @@ object DisputeTypes:
     case CulpritsVerdictNotBad
 
   object DisputeErrorCode:
-    given JamEncoder[DisputeErrorCode] with
-      def encode(a: DisputeErrorCode): JamBytes =
-        JamBytes(Array(a.ordinal.toByte))
-
-    given JamDecoder[DisputeErrorCode] with
-      def decode(bytes: JamBytes, offset: Int): (DisputeErrorCode, Int) =
-        val ordinal = bytes.toArray(offset).toInt & 0xFF
-        (DisputeErrorCode.fromOrdinal(ordinal), 1)
+    given JamEncoder[DisputeErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
+    given JamDecoder[DisputeErrorCode] = CodecDerivation.enumDecoder(DisputeErrorCode.fromOrdinal)
 
     given Decoder[DisputeErrorCode] =
       Decoder.instance { cursor =>
@@ -241,49 +235,26 @@ object DisputeTypes:
   /**
    * Output from the Disputes STF.
    */
-  final case class DisputeOutput(
-    ok: Option[DisputeOutputMarks] = None,
-    err: Option[DisputeErrorCode] = None
-  )
+  type DisputeOutput = StfResult[DisputeOutputMarks, DisputeErrorCode]
 
   object DisputeOutput:
-    given JamEncoder[DisputeOutput] with
-      def encode(a: DisputeOutput): JamBytes =
-        val builder = JamBytes.newBuilder
-        a.ok match
-          case Some(marks) =>
-            builder += 0.toByte
-            builder ++= marks.encode
-          case None =>
-            builder += 1.toByte
-            builder ++= a.err.get.encode
-        builder.result()
+    given JamEncoder[DisputeOutput] = StfResult.stfResultEncoder[DisputeOutputMarks, DisputeErrorCode]
+    given JamDecoder[DisputeOutput] = StfResult.stfResultDecoder[DisputeOutputMarks, DisputeErrorCode]
 
-    given JamDecoder[DisputeOutput] with
-      def decode(bytes: JamBytes, offset: Int): (DisputeOutput, Int) =
-        var pos = offset
-        val discriminator = bytes.toArray(pos).toInt & 0xFF
-        pos += 1
-        if discriminator == 0 then
-          val (marks, marksBytes) = bytes.decodeAs[DisputeOutputMarks](pos)
-          (DisputeOutput(ok = Some(marks)), 1 + marksBytes)
-        else
-          val (err, errBytes) = bytes.decodeAs[DisputeErrorCode](pos)
-          (DisputeOutput(err = Some(err)), 1 + errBytes)
-
-    given Decoder[DisputeOutput] =
+    // Circe JSON decoder for DisputeOutput
+    given circeDecoder: Decoder[DisputeOutput] =
       Decoder.instance { cursor =>
         val okResult = cursor.get[DisputeOutputMarks]("ok")
         val errResult = cursor.get[DisputeErrorCode]("err")
         (okResult, errResult) match
-          case (Right(ok), _) => Right(DisputeOutput(ok = Some(ok)))
-          case (_, Right(err)) => Right(DisputeOutput(err = Some(err)))
+          case (Right(ok), _) => Right(StfResult.success(ok))
+          case (_, Right(err)) => Right(StfResult.error(err))
           case (Left(_), Left(_)) =>
             cursor.downField("ok").focus match
               case Some(_) =>
-                cursor.get[DisputeOutputMarks]("ok").map(ok => DisputeOutput(ok = Some(ok)))
+                cursor.get[DisputeOutputMarks]("ok").map(ok => StfResult.success(ok))
               case None =>
-                cursor.get[DisputeErrorCode]("err").map(err => DisputeOutput(err = Some(err)))
+                cursor.get[DisputeErrorCode]("err").map(err => StfResult.error(err))
       }
 
   /**
@@ -297,21 +268,24 @@ object DisputeTypes:
   )
 
   object DisputeCase:
+    import DisputeOutput.circeDecoder
+
     /** Create a config-aware decoder for DisputeCase */
-    def decoder(coreCount: Int, validatorCount: Int, votesPerVerdict: Int): JamDecoder[DisputeCase] = new JamDecoder[DisputeCase]:
-      def decode(bytes: JamBytes, offset: Int): (DisputeCase, Int) =
-        var pos = offset
-        val inputDecoder = DisputeInput.decoder(votesPerVerdict)
-        val (input, inputBytes) = inputDecoder.decode(bytes, pos)
-        pos += inputBytes
-        val stateDecoder = DisputeState.decoder(coreCount, validatorCount)
-        val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += preStateBytes
-        val (output, outputBytes) = bytes.decodeAs[DisputeOutput](pos)
-        pos += outputBytes
-        val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += postStateBytes
-        (DisputeCase(input, preState, output, postState), pos - offset)
+    def decoder(coreCount: Int, validatorCount: Int, votesPerVerdict: Int): JamDecoder[DisputeCase] =
+      new JamDecoder[DisputeCase]:
+        def decode(bytes: JamBytes, offset: Int): (DisputeCase, Int) =
+          var pos = offset
+          val inputDecoder = DisputeInput.decoder(votesPerVerdict)
+          val (input, inputBytes) = inputDecoder.decode(bytes, pos)
+          pos += inputBytes
+          val stateDecoder = DisputeState.decoder(coreCount, validatorCount)
+          val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
+          pos += preStateBytes
+          val (output, outputBytes) = bytes.decodeAs[DisputeOutput](pos)
+          pos += outputBytes
+          val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
+          pos += postStateBytes
+          (DisputeCase(input, preState, output, postState), pos - offset)
 
     /** Create a config-aware encoder for DisputeCase */
     given JamEncoder[DisputeCase] with
