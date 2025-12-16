@@ -304,10 +304,6 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       s"ServiceActivityRecord accumulateCount mismatch for $context in test case: $testCaseName"
     expected.accumulateGasUsed shouldBe actual.accumulateGasUsed withClue
       s"ServiceActivityRecord accumulateGasUsed mismatch for $context in test case: $testCaseName"
-    expected.transferCount shouldBe actual.transferCount withClue
-      s"ServiceActivityRecord transferCount mismatch for $context in test case: $testCaseName"
-    expected.transferGasUsed shouldBe actual.transferGasUsed withClue
-      s"ServiceActivityRecord transferGasUsed mismatch for $context in test case: $testCaseName"
 
   /**
    * Compare AccumulationServiceItem instances.

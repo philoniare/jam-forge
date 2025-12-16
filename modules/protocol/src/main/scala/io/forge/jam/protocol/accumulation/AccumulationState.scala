@@ -64,7 +64,7 @@ final case class Privileges(
   bless: Long,
   assign: List[Long],
   designate: Long,
-  register: Long = 0L, // Default for v0.7.0 compatibility
+  register: Long,
   alwaysAcc: List[AlwaysAccItem]
 )
 
@@ -90,8 +90,9 @@ object Privileges:
       val designate = codec.decodeU32LE(arr, pos).toLong
       pos += 4
 
-      // NOTE: register field removed for v0.7.0 compatibility (fuzz-proto tests)
-      // Will be re-added when upgrading to v0.7.1 test vectors
+      // register - 4 bytes
+      val register = codec.decodeU32LE(arr, pos).toLong
+      pos += 4
 
       // alwaysAcc - compact length prefix + fixed-size items
       val (alwaysAccLength, alwaysAccLengthBytes) = codec.decodeCompactInteger(arr, pos)
@@ -102,7 +103,7 @@ object Privileges:
         item
       }.toList
 
-      (Privileges(bless, assign, designate, 0L, alwaysAcc), pos - offset)
+      (Privileges(bless, assign, designate, register, alwaysAcc), pos - offset)
 
   given JamEncoder[Privileges] with
     def encode(a: Privileges): JamBytes =
@@ -111,8 +112,7 @@ object Privileges:
       for assigner <- a.assign do
         builder ++= codec.encodeU32LE(UInt(assigner.toInt))
       builder ++= codec.encodeU32LE(UInt(a.designate.toInt))
-      // NOTE: register field removed for v0.7.0 compatibility (fuzz-proto tests)
-      // Will be re-added when upgrading to v0.7.1 test vectors
+      builder ++= codec.encodeU32LE(UInt(a.register.toInt))
       builder ++= codec.encodeCompactInteger(a.alwaysAcc.size.toLong)
       for item <- a.alwaysAcc do
         builder ++= item.encode
@@ -123,7 +123,6 @@ object Privileges:
       bless <- cursor.get[Long]("bless")
       assign <- cursor.get[List[Long]]("assign")
       designate <- cursor.get[Long]("designate")
-      // NOTE: register field optional for v0.7.0 compatibility (fuzz-proto tests)
       register <- cursor.getOrElse[Long]("register")(0L)
       alwaysAcc <- cursor.get[List[AlwaysAccItem]]("always_acc")
     yield Privileges(bless, assign, designate, register, alwaysAcc)
@@ -142,9 +141,7 @@ final case class ServiceActivityRecord(
   extrinsicSize: Long = 0,
   exports: Long = 0,
   accumulateCount: Long = 0,
-  accumulateGasUsed: Long = 0,
-  transferCount: Long = 0,
-  transferGasUsed: Long = 0
+  accumulateGasUsed: Long = 0
 )
 
 object ServiceActivityRecord:
@@ -161,8 +158,6 @@ object ServiceActivityRecord:
       builder ++= codec.encodeCompactInteger(a.exports)
       builder ++= codec.encodeCompactInteger(a.accumulateCount)
       builder ++= codec.encodeCompactInteger(a.accumulateGasUsed)
-      builder ++= codec.encodeCompactInteger(a.transferCount)
-      builder ++= codec.encodeCompactInteger(a.transferGasUsed)
       builder.result()
 
   given JamDecoder[ServiceActivityRecord] with
@@ -190,10 +185,6 @@ object ServiceActivityRecord:
       pos += accumulateCountBytes
       val (accumulateGasUsed, accumulateGasUsedBytes) = codec.decodeCompactInteger(arr, pos)
       pos += accumulateGasUsedBytes
-      val (transferCount, transferCountBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += transferCountBytes
-      val (transferGasUsed, transferGasUsedBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += transferGasUsedBytes
 
       (
         ServiceActivityRecord(
@@ -206,9 +197,7 @@ object ServiceActivityRecord:
           extrinsicSize,
           exports,
           accumulateCount,
-          accumulateGasUsed,
-          transferCount,
-          transferGasUsed
+          accumulateGasUsed
         ),
         pos - offset
       )
@@ -225,8 +214,6 @@ object ServiceActivityRecord:
       exports <- cursor.getOrElse[Long]("exports")(0)
       accumulateCount <- cursor.getOrElse[Long]("accumulate_count")(0)
       accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
-      transferCount <- cursor.getOrElse[Long]("on_transfers_count")(0)
-      transferGasUsed <- cursor.getOrElse[Long]("on_transfers_gas_used")(0)
     yield ServiceActivityRecord(
       providedCount,
       providedSize,
@@ -237,9 +224,7 @@ object ServiceActivityRecord:
       extrinsicSize,
       exports,
       accumulateCount,
-      accumulateGasUsed,
-      transferCount,
-      transferGasUsed
+      accumulateGasUsed
     )
   }
 
@@ -419,7 +404,7 @@ object AccumulationServiceData:
     for
       service <- cursor.get[ServiceInfo]("service")
       storage <- cursor.getOrElse[List[StorageMapEntry]]("storage")(List.empty)
-      preimages <- cursor.getOrElse[List[PreimageHash]]("preimages")(List.empty)
+      preimages <- cursor.getOrElse[List[PreimageHash]]("preimages_blob")(List.empty)
       preimagesStatus <- cursor.getOrElse[List[PreimagesStatusMapEntry]]("preimages_status")(List.empty)
     yield AccumulationServiceData(service, storage, preimages, preimagesStatus)
   }

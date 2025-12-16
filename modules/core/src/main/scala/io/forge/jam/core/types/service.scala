@@ -16,7 +16,7 @@ object service:
    * Service info for validation.
    */
   final case class ServiceInfo(
-    // version: Int = 0,
+    version: Int = 0,
     codeHash: Hash,
     balance: Long,
     minItemGas: Long,
@@ -30,13 +30,12 @@ object service:
   )
 
   object ServiceInfo:
-    // val Size: Int = 89  // v0.7.1 with version byte
-    val Size: Int = 88  // v0.7.0 without version byte
+    val Size: Int = 89
 
     given JamEncoder[ServiceInfo] with
       def encode(a: ServiceInfo): JamBytes =
         val builder = JamBytes.newBuilder
-        // builder += a.version.toByte
+        builder += a.version.toByte
         builder ++= a.codeHash.bytes
         builder ++= codec.encodeU64LE(ULong(a.balance))
         builder ++= codec.encodeU64LE(ULong(a.minItemGas))
@@ -53,8 +52,8 @@ object service:
       def decode(bytes: JamBytes, offset: Int): (ServiceInfo, Int) =
         val arr = bytes.toArray
         var pos = offset
-        // val version = arr(pos).toInt & 0xFF
-        // pos += 1
+        val version = arr(pos).toInt & 0xff
+        pos += 1
         val codeHash = Hash(arr.slice(pos, pos + 32))
         pos += 32
         val balance = codec.decodeU64LE(arr, pos).signed
@@ -77,7 +76,7 @@ object service:
         pos += 4
         (
           ServiceInfo(
-            // version,
+            version,
             codeHash,
             balance,
             minItemGas,
@@ -95,7 +94,7 @@ object service:
     given Decoder[ServiceInfo] =
       Decoder.instance { cursor =>
         for
-          // version <- cursor.getOrElse[Int]("version")(0)
+          version <- cursor.getOrElse[Int]("version")(0)
           codeHash <- cursor.get[String]("code_hash").map(h => Hash(parseHex(h)))
           balance <- cursor.get[Long]("balance")
           minItemGas <- cursor.get[Long]("min_item_gas")
@@ -107,7 +106,7 @@ object service:
           lastAccumulationSlot <- cursor.getOrElse[Long]("last_accumulation_slot")(0)
           parentService <- cursor.getOrElse[Long]("parent_service")(0)
         yield ServiceInfo(
-          // version,
+          version,
           codeHash,
           balance,
           minItemGas,

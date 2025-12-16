@@ -517,12 +517,18 @@ object AccumulationTransition:
     val initialState = partialState.deepCopy()
     val transferStatsMap = mutable.Map.empty[Long, (Long, Long)] // serviceId -> (count, gasUsed)
 
-    // Group work items by service (NO transfers here - v0.7.0 separates them)
+    // Group work items AND transfers by service (v0.7.1 - unified accumulate entry point)
     val serviceOperands = mutable.Map.empty[Long, mutable.ListBuffer[AccumulationOperand]]
 
     logger.debug(
       s"[executeAccumulation] Processing ${reports.size} reports, alwaysAccers=${alwaysAccers.size}, deferredTransfers=${deferredTransfers.size}"
     )
+
+    // Add deferred transfers as operands (v0.7.1 - transfers processed in accumulate)
+    for transfer <- deferredTransfers do
+      serviceOperands.getOrElseUpdate(transfer.destination, mutable.ListBuffer.empty) +=
+        AccumulationOperand.Transfer(transfer)
+
     for report <- reports do
       logger.debug(s"[executeAccumulation] Report has ${report.results.size} results")
       for result <- report.results do
@@ -539,7 +545,7 @@ object AccumulationTransition:
         serviceOperands.getOrElseUpdate(result.serviceId.value.toLong, mutable.ListBuffer.empty) +=
           AccumulationOperand.WorkItem(operand)
 
-    // Collect all services to accumulate (work items + always-accers only, NOT transfer destinations)
+    // Collect all services to accumulate (work items + always-accers + transfer destinations)
     val servicesToAccumulate = mutable.Set.empty[Long]
     servicesToAccumulate ++= serviceOperands.keys
     servicesToAccumulate ++= alwaysAccers.keys
@@ -560,7 +566,8 @@ object AccumulationTransition:
       val operands = serviceOperands.getOrElse(serviceId, mutable.ListBuffer.empty).toList
       val alwaysAccGas = alwaysAccers.getOrElse(serviceId, 0L)
       val workItemGas = operands.collect { case AccumulationOperand.WorkItem(op) => op.gasLimit }.sum
-      val totalGasLimit = workItemGas + alwaysAccGas // No transfer gas here - handled separately
+      val transferGas = operands.collect { case AccumulationOperand.Transfer(t) => t.gasLimit }.sum
+      val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
       val serviceInitialState = initialState.deepCopy()
 
@@ -614,41 +621,15 @@ object AccumulationTransition:
     else
       finalState
 
-    // Execute on_transfer for incoming deferred transfers (v0.7.0 - separate entry point PC=10)
     logger.debug(
-      s"[executeAccumulation] deferredTransfers.size=${deferredTransfers.size} newDeferredTransfers.size=${newDeferredTransfers.size}"
+      s"[executeAccumulation FINAL] rawServiceDataByStateKey.size=${stateAfterPreimages.rawServiceDataByStateKey.size}"
     )
-    val stateAfterTransfers = if deferredTransfers.nonEmpty then
-      // Group transfers by destination service
-      val transfersByService = deferredTransfers.groupBy(_.destination)
-      var currentState = stateAfterPreimages
-
-      for (serviceId, transfers) <- transfersByService.toList.sortBy(_._1) do
-        val transferResult = executor.executeOnTransfer(
-          accounts = currentState.accounts,
-          timeslot = timeslot,
-          serviceId = serviceId,
-          transfers = transfers,
-          entropy = entropy,
-          rawServiceDataByStateKey = currentState.rawServiceDataByStateKey
-        )
-        // Track transfer statistics for this service
-        val prevStats = transferStatsMap.getOrElse(serviceId, (0L, 0L))
-        transferStatsMap(serviceId) = (prevStats._1 + transfers.size, prevStats._2 + transferResult.gasUsed)
-
-      currentState
-    else
-      stateAfterPreimages
-
-    logger.debug(
-      s"[executeAccumulation FINAL] rawServiceDataByStateKey.size=${stateAfterTransfers.rawServiceDataByStateKey.size}"
-    )
-    stateAfterTransfers.rawServiceDataByStateKey.foreach {
+    stateAfterPreimages.rawServiceDataByStateKey.foreach {
       case (k, v) =>
         logger.debug(s"[executeAccumulation FINAL] key=${k.toHex.take(32)}... valueLen=${v.length}")
     }
     AccumulationExecResult(
-      stateAfterTransfers,
+      stateAfterPreimages,
       gasUsedMap.toMap,
       commitments.toSet,
       newDeferredTransfers.toList,
@@ -780,9 +761,7 @@ object AccumulationTransition:
           id = serviceId,
           record = ServiceActivityRecord(
             accumulateCount = workItems,
-            accumulateGasUsed = accGasUsed,
-            transferCount = transferCount,
-            transferGasUsed = transferGasUsed
+            accumulateGasUsed = accGasUsed
           )
         )
 

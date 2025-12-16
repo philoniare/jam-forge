@@ -91,7 +91,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
 
   private def createTestServiceInfo(balance: Long = 100000L): ServiceInfo =
     ServiceInfo(
-      // version = 0,
+      version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
       balance = balance,
       minItemGas = 10L,
@@ -226,7 +226,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     // Create context with very low balance
     val serviceIndex = 100L
     val info = ServiceInfo(
-      // version = 0,
+      version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
       balance = 10L, // Very low balance
       minItemGas = 10L,
@@ -345,7 +345,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     val destId = 200L
 
     val sourceInfo = ServiceInfo(
-      // version = 0,
+      version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
       balance = 10000L,
       minItemGas = 10L,
@@ -358,7 +358,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
       parentService = 0L
     )
     val destInfo = ServiceInfo(
-      // version = 0,
+      version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
       balance = 1000L,
       minItemGas = 10L,
@@ -453,7 +453,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
 
     val sourceAccount = createTestAccount(10000L)
     val destInfo = ServiceInfo(
-      // version = 0,
+      version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
       balance = 1000L,
       minItemGas = 10L,

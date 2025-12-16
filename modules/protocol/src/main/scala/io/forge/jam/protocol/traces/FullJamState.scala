@@ -412,9 +412,6 @@ final case class FullJamState(
       // accumulates: count + gas (both compact)
       builder ++= codec.encodeCompactInteger(entry.record.accumulateCount)
       builder ++= codec.encodeCompactInteger(entry.record.accumulateGasUsed)
-      // transfers: count + gas (both compact)
-      builder ++= codec.encodeCompactInteger(entry.record.transferCount)
-      builder ++= codec.encodeCompactInteger(entry.record.transferGasUsed)
 
     builder.result()
 

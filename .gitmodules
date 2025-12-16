@@ -3,7 +3,7 @@
 	url = https://github.com/gavofyork/graypaper
 [submodule "jamtestvectors"]
 	path = jamtestvectors
-	url = https://github.com/w3f/jamtestvectors
+	url = https://github.com/davxy/jam-test-vectors
 [submodule "modules/crypto/native/ark-vrf"]
 	path = modules/crypto/native/ark-vrf
 	url = https://github.com/davxy/ark-vrf

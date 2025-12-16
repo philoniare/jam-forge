@@ -644,7 +644,7 @@ class AccumulationHostCalls(
     // Create new account with calculated threshold balance
     val newAccount = ServiceAccount(
       info = ServiceInfo(
-        // version = 0,
+        version = 0,
         codeHash = codeHash,
         balance = thresholdBalance,
         minItemGas = minAccumulateGas,

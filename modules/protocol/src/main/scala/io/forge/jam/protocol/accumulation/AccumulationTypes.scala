@@ -66,7 +66,7 @@ object AccumulationOperand:
     override def encode(): Array[Byte] =
       val op = operand
 
-      // val variant = codec.encodeCompactInteger(0) // Add back on v0.7.1
+      val variant = codec.encodeCompactInteger(0)
       val gasLimitBytes = codec.encodeCompactInteger(op.gasLimit)
       val resultBytes = op.result match
         case ExecutionResult.Ok(output) =>
@@ -76,8 +76,8 @@ object AccumulationOperand:
           Array[Byte](2) // Tag 2 for Panic (UInt8)
 
       val authTraceLen = codec.encodeCompactInteger(op.authTrace.length.toLong)
-      // variant ++
-      op.packageHash.toArray ++ op.segmentRoot.toArray ++ op.authorizerHash.toArray ++
+      variant ++
+        op.packageHash.toArray ++ op.segmentRoot.toArray ++ op.authorizerHash.toArray ++
         op.payloadHash.toArray ++ gasLimitBytes ++ resultBytes ++ authTraceLen ++ op.authTrace.toArray
 
   /**
