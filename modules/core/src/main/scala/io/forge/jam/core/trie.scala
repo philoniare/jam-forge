@@ -64,7 +64,7 @@ object MerkleTrie:
     // right[0:32] - full 32 bytes of right hash
     System.arraycopy(rightBytes, 0, result, 32, 32)
 
-    JamBytes.wrap(result)
+    JamBytes(result)
 
   /**
    * Encode a leaf node
@@ -74,11 +74,11 @@ object MerkleTrie:
 
     if value.length <= 32 then
       // Short value: embed directly
-      result(0) = (0x80 | value.length).toByte
+      result(0) = (0x80 | value.length.toInt).toByte
       // key[0:31] - first 31 bytes of key
       key.copyToArray(result, 1, 0, 31)
       // value bytes
-      value.copyToArray(result, 32, 0, value.length)
+      value.copyToArray(result, 32, 0, value.length.toInt)
       // padding with zeros (already zero-initialized)
     else
       // Long value: hash it
@@ -89,4 +89,4 @@ object MerkleTrie:
       val valueHash = Hashing.blake2b256(value)
       System.arraycopy(valueHash.bytes, 0, result, 32, 32)
 
-    JamBytes.wrap(result)
+    JamBytes(result)

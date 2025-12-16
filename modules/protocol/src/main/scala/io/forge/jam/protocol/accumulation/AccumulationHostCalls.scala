@@ -189,9 +189,9 @@ class AccumulationHostCalls(
       preimage = context.x.rawServiceDataByStateKey.get(blobStateKey)
 
     // Calculate actual offset and length based on preimage data (or 0 if not found)
-    val dataSize = preimage.map(_.length).getOrElse(0)
-    val actualOffset = math.min(offset, dataSize)
-    val actualLength = math.min(length, dataSize - actualOffset)
+    val dataSize: Long = preimage.map(_.length.toLong).getOrElse(0L)
+    val actualOffset = math.min(offset.toLong, dataSize).toInt
+    val actualLength = math.min(length.toLong, dataSize - actualOffset).toInt
 
     // Check if output address is writable - PANIC if not
     if !isMemoryWritable(instance, outputAddr, actualLength) then

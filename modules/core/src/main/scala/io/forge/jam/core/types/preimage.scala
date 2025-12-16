@@ -1,8 +1,11 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import _root_.scodec.*
+import _root_.scodec.bits.*
+import _root_.scodec.codecs.*
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 
@@ -24,25 +27,11 @@ object preimage:
   )
 
   object PreimageHash:
-    given JamEncoder[PreimageHash] with
-      def encode(a: PreimageHash): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.hash.bytes
-        builder ++= codec.encodeCompactInteger(a.blob.length.toLong)
-        builder ++= a.blob.toArray
-        builder.result()
-
-    given JamDecoder[PreimageHash] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageHash, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val hash = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val (blobLength, blobLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += blobLengthBytes
-        val blob = JamBytes(arr.slice(pos, pos + blobLength.toInt))
-        pos += blobLength.toInt
-        (PreimageHash(hash, blob), pos - offset)
+    given Codec[PreimageHash] =
+      (hashCodec :: variableSizeBytes(compactInt, bytes)).xmap(
+        { case (hash, blob) => PreimageHash(hash, JamBytes.fromByteVector(blob)) },
+        ph => (ph.hash, ph.blob.toByteVector)
+      )
 
     given Decoder[PreimageHash] =
       Decoder.instance { cursor =>

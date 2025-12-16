@@ -10,6 +10,7 @@ import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.state.{JamState, ValidatorState, EntropyBuffer, SafroleGamma}
 import monocle.syntax.all.*
 import spire.math.UByte
+import scodec.bits.ByteVector
 
 /**
  * Safrole State Transition Function.
@@ -174,7 +175,7 @@ object SafroleTransition:
         validator.copy(
           bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
           ed25519 = Ed25519PublicKey(new Array[Byte](32)),
-          metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
+          metadata = ByteVector.fill(ValidatorKey.MetadataSize.toLong)(0)
         )
       else
         validator

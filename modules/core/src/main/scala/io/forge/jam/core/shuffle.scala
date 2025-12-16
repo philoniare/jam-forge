@@ -52,7 +52,7 @@ object Shuffle:
     (0 until length).map { i =>
       val counter = i / 8
       val counterBytes = intToLeBytes(counter)
-      val preimage = JamBytes(entropy.bytes) ++ counterBytes
+      val preimage = JamBytes(entropy.bytes) ++ JamBytes(counterBytes)
 
       val hashed = Hashing.blake2b256(preimage)
       val offset = (4 * i) % 32

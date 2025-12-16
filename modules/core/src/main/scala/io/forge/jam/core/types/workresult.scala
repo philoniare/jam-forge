@@ -1,8 +1,10 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import scodec.*
+import scodec.bits.*
+import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
+import io.forge.jam.core.scodec.JamCodecs.compactInteger
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
@@ -12,6 +14,12 @@ import spire.math.{UShort, UInt}
  * Work result related types
  */
 object workresult:
+
+  // Helper codec for Hash (32 bytes)
+  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
+    bv => Hash.fromByteVectorUnsafe(bv),
+    h => h.toByteVector
+  )
 
   /**
    * Refine load statistics for a work result.
@@ -25,43 +33,19 @@ object workresult:
   )
 
   object RefineLoad:
-    given JamEncoder[RefineLoad] with
-      def encode(a: RefineLoad): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeCompactInteger(a.gasUsed.toLong)
-        builder ++= codec.encodeCompactInteger(a.imports.toLong)
-        builder ++= codec.encodeCompactInteger(a.extrinsicCount.toLong)
-        builder ++= codec.encodeCompactInteger(a.extrinsicSize.toLong)
-        builder ++= codec.encodeCompactInteger(a.exports.toLong)
-        builder.result()
-
-    given JamDecoder[RefineLoad] with
-      def decode(bytes: JamBytes, offset: Int): (RefineLoad, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-
-        val (gasUsed, gasUsedBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += gasUsedBytes
-
-        val (imports, importsBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += importsBytes
-
-        val (extrinsicCount, extrinsicCountBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += extrinsicCountBytes
-
-        val (extrinsicSize, extrinsicSizeBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += extrinsicSizeBytes
-
-        val (exports, exportsBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += exportsBytes
-
-        (RefineLoad(
-          Gas(gasUsed),
-          UShort(imports.toInt),
-          UShort(extrinsicCount.toInt),
-          UInt(extrinsicSize.toInt),
-          UShort(exports.toInt)
-        ), pos - offset)
+    given Codec[RefineLoad] =
+      (compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger).xmap(
+        { case (gasUsed, imports, extrinsicCount, extrinsicSize, exports) =>
+          RefineLoad(
+            Gas(gasUsed),
+            UShort(imports.toInt),
+            UShort(extrinsicCount.toInt),
+            UInt(extrinsicSize.toInt),
+            UShort(exports.toInt)
+          )
+        },
+        rl => (rl.gasUsed.toLong, rl.imports.toLong, rl.extrinsicCount.toLong, rl.extrinsicSize.toLong, rl.exports.toLong)
+      )
 
     given Decoder[RefineLoad] = Decoder.instance { cursor =>
       for
@@ -94,53 +78,20 @@ object workresult:
   )
 
   object WorkResult:
-    given JamEncoder[WorkResult] with
-      def encode(a: WorkResult): JamBytes =
-        val builder = JamBytes.newBuilder
-        // serviceId - 4 bytes
-        builder ++= codec.encodeU32LE(a.serviceId.value)
-        // codeHash - 32 bytes
-        builder ++= a.codeHash.bytes
-        // payloadHash - 32 bytes
-        builder ++= a.payloadHash.bytes
-        // accumulateGas - 8 bytes
-        builder ++= codec.encodeU64LE(a.accumulateGas.value)
-        // result - ExecutionResult (variable)
-        builder ++= a.result.encode
-        // refineLoad - RefineLoad (variable)
-        builder ++= a.refineLoad.encode
-        builder.result()
-
-    given JamDecoder[WorkResult] with
-      def decode(bytes: JamBytes, offset: Int): (WorkResult, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-
-        // serviceId - 4 bytes
-        val serviceId = ServiceId(codec.decodeU32LE(arr, pos))
-        pos += 4
-
-        // codeHash - 32 bytes
-        val codeHash = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        // payloadHash - 32 bytes
-        val payloadHash = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        // accumulateGas - 8 bytes
-        val accumulateGas = Gas(codec.decodeU64LE(arr, pos))
-        pos += 8
-
-        // result - ExecutionResult (variable)
-        val (result, resultBytes) = bytes.decodeAs[ExecutionResult](pos)
-        pos += resultBytes
-
-        // refineLoad - RefineLoad (variable)
-        val (refineLoad, refineLoadBytes) = bytes.decodeAs[RefineLoad](pos)
-        pos += refineLoadBytes
-
-        (WorkResult(serviceId, codeHash, payloadHash, accumulateGas, result, refineLoad), pos - offset)
+    given Codec[WorkResult] =
+      (uint32L :: hashCodec :: hashCodec :: int64L :: summon[Codec[ExecutionResult]] :: summon[Codec[RefineLoad]]).xmap(
+        { case (serviceId, codeHash, payloadHash, gas, result, refineLoad) =>
+          WorkResult(
+            ServiceId(UInt(serviceId.toInt)),
+            codeHash,
+            payloadHash,
+            Gas(gas),
+            result,
+            refineLoad
+          )
+        },
+        wr => (wr.serviceId.value.toLong & 0xFFFFFFFFL, wr.codeHash, wr.payloadHash, wr.accumulateGas.toLong, wr.result, wr.refineLoad)
+      )
 
     given Decoder[WorkResult] = Decoder.instance { cursor =>
       for

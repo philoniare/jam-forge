@@ -1,6 +1,5 @@
 package io.forge.jam.protocol.pipeline
 
-import io.forge.jam.core.codec.encode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
@@ -9,6 +8,7 @@ import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.pipeline.PipelineTypes.*
 import io.forge.jam.protocol.pipeline.StfLifters.*
 import monocle.syntax.all.*
+import _root_.scodec.Codec
 
 /**
  * Intermediate validation and state modification steps for the pipeline.
@@ -33,7 +33,7 @@ object IntermediateSteps:
       else new Array[Byte](32)
 
     // Encode header for aux data (unsigned header = full header minus 96-byte seal at the end)
-    val fullHeaderBytes = block.header.encode.toArray
+    val fullHeaderBytes = summon[Codec[io.forge.jam.core.types.header.Header]].encode(block.header).require.bytes.toArray
     val encodedHeader = fullHeaderBytes.dropRight(96)
 
     state.gamma.s match

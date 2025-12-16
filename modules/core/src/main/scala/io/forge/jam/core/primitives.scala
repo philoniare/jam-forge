@@ -3,8 +3,8 @@ package io.forge.jam.core
 import scala.annotation.targetName
 import spire.math.{UByte, UShort, UInt, ULong}
 import io.circe.Decoder
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.json.JsonHelpers
+import _root_.scodec.bits.ByteVector
 
 /**
  * Core primitive types for JAM using Spire unsigned types.
@@ -12,54 +12,66 @@ import io.forge.jam.core.json.JsonHelpers
  * These types provide the foundation for the entire JAM implementation,
  * offering type-safe wrappers around unsigned integers with zero-cost
  * abstractions via Scala 3 opaque types.
+ *
+ * Types that represent fixed-size byte sequences (Hash, PublicKey types)
+ * use ByteVector internally for efficient, immutable byte storage with
+ * zero-copy operations where possible.
  */
 object primitives:
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Hash Types (32 bytes = 256 bits)
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
   /**
    * A 256-bit hash value (32 bytes).
    * Used for Blake2b-256 hashes throughout the protocol.
    * Uses content-based equality.
+   *
+   * Internally uses ByteVector for efficient, immutable byte storage.
    */
-  final case class Hash private (private val underlying: Array[Byte]):
-    def bytes: Array[Byte] = underlying.clone()
-    def toHex: String = underlying.map(b => f"${b & 0xff}%02x").mkString
-    def size: Int = underlying.length
+  final case class Hash private (private val underlying: ByteVector):
+    /** Returns a defensive copy of the underlying bytes (for Java interop) */
+    def bytes: Array[Byte] = underlying.toArray
+    /** Returns the underlying ByteVector (zero-copy) */
+    def toByteVector: ByteVector = underlying
+    def toHex: String = underlying.toHex
+    def size: Int = underlying.size.toInt
 
     override def equals(obj: Any): Boolean = obj match
-      case that: Hash => java.util.Arrays.equals(this.underlying, that.underlying)
+      case that: Hash => this.underlying == that.underlying
       case _ => false
 
-    override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
+    override def hashCode(): Int = underlying.hashCode
 
   object Hash:
     val Size: Int = 32
 
     def apply(bytes: Array[Byte]): Hash =
       require(bytes.length == Size, s"Hash must be $Size bytes, got ${bytes.length}")
-      new Hash(bytes.clone())
+      new Hash(ByteVector(bytes))
 
-    def zero: Hash = new Hash(new Array[Byte](Size))
+    def zero: Hash = new Hash(ByteVector.fill(Size.toLong)(0))
+
+    /** Create Hash from ByteVector. Returns None if wrong size. */
+    def fromByteVector(bv: ByteVector): Option[Hash] =
+      if bv.size == Size then Some(new Hash(bv))
+      else None
+
+    /** Unsafe version that throws on wrong size */
+    def fromByteVectorUnsafe(bv: ByteVector): Hash =
+      require(bv.size == Size, s"Hash must be $Size bytes, got ${bv.size}")
+      new Hash(bv)
 
     def fromHex(hex: String): Either[String, Hash] =
       if hex.length != Size * 2 then
         Left(s"Hex string must be ${Size * 2} characters")
       else
-        try
-          val bytes = hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
-          Right(new Hash(bytes))
-        catch
-          case _: NumberFormatException => Left("Invalid hex string")
-
-    given JamEncoder[Hash] with
-      def encode(a: Hash): JamBytes = JamBytes(a.bytes)
-
-    given JamDecoder[Hash] with
-      def decode(bytes: JamBytes, offset: Int): (Hash, Int) =
-        (Hash(bytes.toArray.slice(offset, offset + Size)), Size)
+        ByteVector.fromHex(hex) match
+          case Some(byteVec) =>
+            if byteVec.size == Size then Right(new Hash(byteVec))
+            else Left(s"Hash must be $Size bytes, got ${byteVec.size}")
+          case None => Left("Invalid hex string")
 
     given Decoder[Hash] = Decoder.decodeString.emap { hex =>
       val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
@@ -69,35 +81,55 @@ object primitives:
         fromHex(cleanHex).left.map(err => s"Invalid hash: $err")
     }
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Bandersnatch Types
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
-  /** Bandersnatch public key (32 bytes) */
-  final case class BandersnatchPublicKey private (private val underlying: Array[Byte]):
-    def bytes: Array[Byte] = underlying.clone()
+  /**
+   * Bandersnatch public key (32 bytes).
+   * Internally uses ByteVector for efficient, immutable byte storage.
+   */
+  final case class BandersnatchPublicKey private (private val underlying: ByteVector):
+    /** Returns a defensive copy of the underlying bytes (for Java interop) */
+    def bytes: Array[Byte] = underlying.toArray
+    /** Returns the underlying ByteVector (zero-copy) */
+    def toByteVector: ByteVector = underlying
+
     override def equals(obj: Any): Boolean = obj match
-      case that: BandersnatchPublicKey => java.util.Arrays.equals(this.underlying, that.underlying)
+      case that: BandersnatchPublicKey => this.underlying == that.underlying
       case _ => false
-    override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
+
+    override def hashCode(): Int = underlying.hashCode
 
   object BandersnatchPublicKey:
     val Size: Int = 32
+
     def apply(bytes: Array[Byte]): BandersnatchPublicKey =
       require(bytes.length == Size)
-      new BandersnatchPublicKey(bytes.clone())
-    def zero: BandersnatchPublicKey = new BandersnatchPublicKey(new Array[Byte](Size))
+      new BandersnatchPublicKey(ByteVector(bytes))
+
+    def zero: BandersnatchPublicKey = new BandersnatchPublicKey(ByteVector.fill(Size.toLong)(0))
+
+    /** Create BandersnatchPublicKey from ByteVector. Returns None if wrong size. */
+    def fromByteVector(bv: ByteVector): Option[BandersnatchPublicKey] =
+      if bv.size == Size then Some(new BandersnatchPublicKey(bv))
+      else None
+
+    /** Unsafe version that throws on wrong size */
+    def fromByteVectorUnsafe(bv: ByteVector): BandersnatchPublicKey =
+      require(bv.size == Size, s"BandersnatchPublicKey must be $Size bytes, got ${bv.size}")
+      new BandersnatchPublicKey(bv)
 
     given Decoder[BandersnatchPublicKey] = Decoder.decodeString.emap { hex =>
       val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
       if cleanHex.length != Size * 2 then
         Left(s"BandersnatchPublicKey must be $Size bytes, got ${cleanHex.length / 2} bytes")
       else
-        try
-          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
-          Right(BandersnatchPublicKey(bytes))
-        catch
-          case _: NumberFormatException => Left("Invalid hex character")
+        ByteVector.fromHex(cleanHex) match
+          case Some(byteVec) =>
+            if byteVec.size == Size then Right(new BandersnatchPublicKey(byteVec))
+            else Left(s"BandersnatchPublicKey must be $Size bytes")
+          case None => Left("Invalid hex character")
     }
 
   /** Bandersnatch signature (96 bytes) */
@@ -114,41 +146,53 @@ object primitives:
       require(bytes.length == Size)
       new BandersnatchSignature(bytes.clone())
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Ed25519 Types
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
-  /** Ed25519 public key (32 bytes) */
-  final case class Ed25519PublicKey private (private val underlying: Array[Byte]):
-    def bytes: Array[Byte] = underlying.clone()
+  /**
+   * Ed25519 public key (32 bytes).
+   * Internally uses ByteVector for efficient, immutable byte storage.
+   */
+  final case class Ed25519PublicKey private (private val underlying: ByteVector):
+    /** Returns a defensive copy of the underlying bytes (for Java interop) */
+    def bytes: Array[Byte] = underlying.toArray
+    /** Returns the underlying ByteVector (zero-copy) */
+    def toByteVector: ByteVector = underlying
+
     override def equals(obj: Any): Boolean = obj match
-      case that: Ed25519PublicKey => java.util.Arrays.equals(this.underlying, that.underlying)
+      case that: Ed25519PublicKey => this.underlying == that.underlying
       case _ => false
-    override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
+
+    override def hashCode(): Int = underlying.hashCode
 
   object Ed25519PublicKey:
     val Size: Int = 32
+
     def apply(bytes: Array[Byte]): Ed25519PublicKey =
       require(bytes.length == Size)
-      new Ed25519PublicKey(bytes.clone())
+      new Ed25519PublicKey(ByteVector(bytes))
 
-    given JamEncoder[Ed25519PublicKey] with
-      def encode(a: Ed25519PublicKey): JamBytes = JamBytes(a.bytes)
+    /** Create Ed25519PublicKey from ByteVector. Returns None if wrong size. */
+    def fromByteVector(bv: ByteVector): Option[Ed25519PublicKey] =
+      if bv.size == Size then Some(new Ed25519PublicKey(bv))
+      else None
 
-    given JamDecoder[Ed25519PublicKey] with
-      def decode(bytes: JamBytes, offset: Int): (Ed25519PublicKey, Int) =
-        (Ed25519PublicKey(bytes.toArray.slice(offset, offset + Size)), Size)
+    /** Unsafe version that throws on wrong size */
+    def fromByteVectorUnsafe(bv: ByteVector): Ed25519PublicKey =
+      require(bv.size == Size, s"Ed25519PublicKey must be $Size bytes, got ${bv.size}")
+      new Ed25519PublicKey(bv)
 
     given Decoder[Ed25519PublicKey] = Decoder.decodeString.emap { hex =>
       val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
       if cleanHex.length != Size * 2 then
         Left(s"Ed25519PublicKey must be $Size bytes, got ${cleanHex.length / 2} bytes")
       else
-        try
-          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
-          Right(Ed25519PublicKey(bytes))
-        catch
-          case _: NumberFormatException => Left("Invalid hex character")
+        ByteVector.fromHex(cleanHex) match
+          case Some(byteVec) =>
+            if byteVec.size == Size then Right(new Ed25519PublicKey(byteVec))
+            else Left(s"Ed25519PublicKey must be $Size bytes")
+          case None => Left("Invalid hex character")
     }
 
   /** Ed25519 signature (64 bytes) */
@@ -177,23 +221,42 @@ object primitives:
           case _: NumberFormatException => Left("Invalid hex character")
     }
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // BLS Types
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
-  /** BLS public key (144 bytes) */
-  final case class BlsPublicKey private (private val underlying: Array[Byte]):
-    def bytes: Array[Byte] = underlying.clone()
+  /**
+   * BLS public key (144 bytes).
+   * Internally uses ByteVector for efficient, immutable byte storage.
+   */
+  final case class BlsPublicKey private (private val underlying: ByteVector):
+    /** Returns a defensive copy of the underlying bytes (for Java interop) */
+    def bytes: Array[Byte] = underlying.toArray
+    /** Returns the underlying ByteVector (zero-copy) */
+    def toByteVector: ByteVector = underlying
+
     override def equals(obj: Any): Boolean = obj match
-      case that: BlsPublicKey => java.util.Arrays.equals(this.underlying, that.underlying)
+      case that: BlsPublicKey => this.underlying == that.underlying
       case _ => false
-    override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
+
+    override def hashCode(): Int = underlying.hashCode
 
   object BlsPublicKey:
     val Size: Int = 144
+
     def apply(bytes: Array[Byte]): BlsPublicKey =
       require(bytes.length == Size)
-      new BlsPublicKey(bytes.clone())
+      new BlsPublicKey(ByteVector(bytes))
+
+    /** Create BlsPublicKey from ByteVector. Returns None if wrong size. */
+    def fromByteVector(bv: ByteVector): Option[BlsPublicKey] =
+      if bv.size == Size then Some(new BlsPublicKey(bv))
+      else None
+
+    /** Unsafe version that throws on wrong size */
+    def fromByteVectorUnsafe(bv: ByteVector): BlsPublicKey =
+      require(bv.size == Size, s"BlsPublicKey must be $Size bytes, got ${bv.size}")
+      new BlsPublicKey(bv)
 
   /** BLS signature (48 bytes) */
   final case class BlsSignature private (private val underlying: Array[Byte]):
@@ -209,9 +272,9 @@ object primitives:
       require(bytes.length == Size)
       new BlsSignature(bytes.clone())
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Protocol Identifiers
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
   /** Service identifier (32-bit) */
   opaque type ServiceId = UInt
@@ -257,9 +320,9 @@ object primitives:
     @targetName("validatorIndexToInt")
     def toInt: Int = vi.toInt
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Time and Epochs
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
   /** Timeslot (32-bit) - time is measured in slots */
   opaque type Timeslot = UInt
@@ -295,9 +358,9 @@ object primitives:
     @targetName("epochIndexToInt")
     def toInt: Int = e.signed
 
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
   // Gas and Balance
-  // ══════════════════════════════════════════════════════════════════════════
+  // ============================================================================
 
   /** Gas amount (64-bit unsigned) */
   opaque type Gas = ULong

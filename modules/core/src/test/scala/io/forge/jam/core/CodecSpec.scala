@@ -17,39 +17,39 @@ class CodecSpec extends AnyFlatSpec with Matchers:
     for v <- values do
       val encoded = v.encode
       encoded.length shouldBe 1
-      encoded(0) shouldBe v
+      encoded(0) shouldBe v.toByte
   }
 
   "JamEncoder[UShort]" should "encode 2 bytes little-endian" in {
     val v = UShort(0x1234)
     val encoded = v.encode
     encoded.length shouldBe 2
-    encoded(0) shouldBe UByte(0x34)
-    encoded(1) shouldBe UByte(0x12)
+    encoded(0) shouldBe 0x34.toByte
+    encoded(1) shouldBe 0x12.toByte
   }
 
   "JamEncoder[UInt]" should "encode 4 bytes little-endian" in {
     val v = UInt(0x12345678)
     val encoded = v.encode
     encoded.length shouldBe 4
-    encoded(0) shouldBe UByte(0x78)
-    encoded(1) shouldBe UByte(0x56)
-    encoded(2) shouldBe UByte(0x34)
-    encoded(3) shouldBe UByte(0x12)
+    encoded(0) shouldBe 0x78.toByte
+    encoded(1) shouldBe 0x56.toByte
+    encoded(2) shouldBe 0x34.toByte
+    encoded(3) shouldBe 0x12.toByte
   }
 
   "JamEncoder[ULong]" should "encode 8 bytes little-endian" in {
     val v = ULong(0x123456789ABCDEFL)
     val encoded = v.encode
     encoded.length shouldBe 8
-    encoded(0) shouldBe UByte(0xEF)
-    encoded(1) shouldBe UByte(0xCD)
-    encoded(2) shouldBe UByte(0xAB)
-    encoded(3) shouldBe UByte(0x89)
-    encoded(4) shouldBe UByte(0x67)
-    encoded(5) shouldBe UByte(0x45)
-    encoded(6) shouldBe UByte(0x23)
-    encoded(7) shouldBe UByte(0x01)
+    encoded(0) shouldBe 0xEF.toByte
+    encoded(1) shouldBe 0xCD.toByte
+    encoded(2) shouldBe 0xAB.toByte
+    encoded(3) shouldBe 0x89.toByte
+    encoded(4) shouldBe 0x67.toByte
+    encoded(5) shouldBe 0x45.toByte
+    encoded(6) shouldBe 0x23.toByte
+    encoded(7) shouldBe 0x01.toByte
   }
 
   // ============================================================================
@@ -100,12 +100,12 @@ class CodecSpec extends AnyFlatSpec with Matchers:
     val empty = JamBytes.empty
     val emptyEncoded = empty.encode
     emptyEncoded.length shouldBe 1
-    emptyEncoded(0) shouldBe UByte(0)
+    emptyEncoded(0) shouldBe 0.toByte
 
     val small = JamBytes(Array[Byte](1, 2, 3, 4, 5))
     val smallEncoded = small.encode
     smallEncoded.length shouldBe 6
-    smallEncoded(0) shouldBe UByte(5)
+    smallEncoded(0) shouldBe 5.toByte
     smallEncoded.slice(1, 6) shouldBe small
 
     val medium = JamBytes.fill(200)(0x42.toByte)
@@ -134,11 +134,11 @@ class CodecSpec extends AnyFlatSpec with Matchers:
   "JamEncoder[CompactInt]" should "encode compact integers correctly" in {
     val zero = CompactInt(0)
     zero.encode.length shouldBe 1
-    zero.encode(0) shouldBe UByte(0)
+    zero.encode(0) shouldBe 0.toByte
 
     val small = CompactInt(42)
     small.encode.length shouldBe 1
-    small.encode(0) shouldBe UByte(42)
+    small.encode(0) shouldBe 42.toByte
 
     val medium = CompactInt(128)
     medium.encode.length shouldBe 2
@@ -170,14 +170,14 @@ class CodecSpec extends AnyFlatSpec with Matchers:
     val none: Option[UInt] = None
     val encoded = none.encode
     encoded.length shouldBe 1
-    encoded(0) shouldBe UByte(0)
+    encoded(0) shouldBe 0.toByte
   }
 
   it should "encode Some as 1 byte prefix followed by value" in {
     val some: Option[UInt] = Some(UInt(0x12345678))
     val encoded = some.encode
     encoded.length shouldBe 5
-    encoded(0) shouldBe UByte(1)
+    encoded(0) shouldBe 1.toByte
     encoded.slice(1, 5) shouldBe UInt(0x12345678).encode
   }
 
@@ -198,14 +198,14 @@ class CodecSpec extends AnyFlatSpec with Matchers:
     val empty: List[UByte] = Nil
     val encoded = empty.encode
     encoded.length shouldBe 1
-    encoded(0) shouldBe UByte(0)
+    encoded(0) shouldBe 0.toByte
   }
 
   it should "encode non-empty list with compact length prefix" in {
     val list: List[UShort] = List(UShort(1), UShort(2), UShort(3))
     val encoded = list.encode
     encoded.length shouldBe 7
-    encoded(0) shouldBe UByte(3)
+    encoded(0) shouldBe 3.toByte
   }
 
   "JamDecoder[List]" should "round-trip correctly" in {

@@ -1,15 +1,34 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import scodec.*
+import scodec.bits.*
+import scodec.codecs.*
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
 
 /**
  * Historical types.
  */
 object history:
+
+  // ============================================================================
+  // Private Codec Helpers
+  // ============================================================================
+
+  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
+    bv => Hash.fromByteVectorUnsafe(bv),
+    h => h.toByteVector
+  )
+
+  private def optionCodec[A](codec: Codec[A]): Codec[Option[A]] =
+    discriminated[Option[A]].by(byte)
+      .subcaseP(0) { case None => None }(provide(None))
+      .subcaseP(1) { case Some(v) => Some(v) }(codec.xmap(Some(_), _.get))
+
+  private def compactPrefixedList[A](codec: Codec[A]): Codec[List[A]] =
+    listOfN(JamCodecs.compactInt, codec)
 
   /**
    * A reported work package with its hash and exports root.
@@ -25,16 +44,11 @@ object history:
   object ReportedWorkPackage:
     val Size: Int = Hash.Size * 2 // 64 bytes
 
-    given JamEncoder[ReportedWorkPackage] with
-      def encode(a: ReportedWorkPackage): JamBytes =
-        JamBytes(a.hash.bytes ++ a.exportsRoot.bytes)
-
-    given JamDecoder[ReportedWorkPackage] with
-      def decode(bytes: JamBytes, offset: Int): (ReportedWorkPackage, Int) =
-        val arr = bytes.toArray
-        val hash = Hash(arr.slice(offset, offset + Hash.Size))
-        val exportsRoot = Hash(arr.slice(offset + Hash.Size, offset + Size))
-        (ReportedWorkPackage(hash, exportsRoot), Size)
+    given Codec[ReportedWorkPackage] =
+      (hashCodec :: hashCodec).xmap(
+        { case (hash, exportsRoot) => ReportedWorkPackage(hash, exportsRoot) },
+        rwp => (rwp.hash, rwp.exportsRoot)
+      )
 
     given Decoder[ReportedWorkPackage] =
       Decoder.instance { cursor =>
@@ -56,29 +70,13 @@ object history:
   )
 
   object HistoricalBeta:
-    given JamEncoder[HistoricalBeta] with
-      def encode(a: HistoricalBeta): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.headerHash.bytes
-        builder ++= a.beefyRoot.bytes
-        builder ++= a.stateRoot.bytes
-        val sortedReported = a.reported.sortBy(_.hash.toHex)
-        builder ++= sortedReported.encode
-        builder.result()
-
-    given JamDecoder[HistoricalBeta] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalBeta, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val headerHash = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val beefyRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val stateRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val (reported, reportedBytes) = bytes.decodeAs[List[ReportedWorkPackage]](pos)
-        pos += reportedBytes
-        (HistoricalBeta(headerHash, beefyRoot, stateRoot, reported), pos - offset)
+    given Codec[HistoricalBeta] =
+      (hashCodec :: hashCodec :: hashCodec :: compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
+        { case (headerHash, beefyRoot, stateRoot, reported) =>
+          HistoricalBeta(headerHash, beefyRoot, stateRoot, reported)
+        },
+        hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.reported.sortBy(_.hash.toHex))
+      )
 
     given Decoder[HistoricalBeta] =
       Decoder.instance { cursor =>
@@ -101,13 +99,11 @@ object history:
   object HistoricalMmr:
     val empty: HistoricalMmr = HistoricalMmr(List.empty)
 
-    given JamEncoder[HistoricalMmr] with
-      def encode(a: HistoricalMmr): JamBytes = a.peaks.encode
-
-    given JamDecoder[HistoricalMmr] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalMmr, Int) =
-        val (peaks, consumed) = bytes.decodeAs[List[Option[Hash]]](offset)
-        (HistoricalMmr(peaks), consumed)
+    given Codec[HistoricalMmr] =
+      compactPrefixedList(optionCodec(hashCodec)).xmap(
+        peaks => HistoricalMmr(peaks),
+        hmr => hmr.peaks
+      )
 
     given Decoder[HistoricalMmr] =
       Decoder.instance { cursor =>
@@ -125,21 +121,11 @@ object history:
   )
 
   object HistoricalBetaContainer:
-    given JamEncoder[HistoricalBetaContainer] with
-      def encode(a: HistoricalBetaContainer): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.history.encode
-        builder ++= a.mmr.encode
-        builder.result()
-
-    given JamDecoder[HistoricalBetaContainer] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalBetaContainer, Int) =
-        var pos = offset
-        val (history, historyBytes) = bytes.decodeAs[List[HistoricalBeta]](pos)
-        pos += historyBytes
-        val (mmr, mmrBytes) = bytes.decodeAs[HistoricalMmr](pos)
-        pos += mmrBytes
-        (HistoricalBetaContainer(history, mmr), pos - offset)
+    given Codec[HistoricalBetaContainer] =
+      (compactPrefixedList(Codec[HistoricalBeta]) :: Codec[HistoricalMmr]).xmap(
+        { case (history, mmr) => HistoricalBetaContainer(history, mmr) },
+        hbc => (hbc.history, hbc.mmr)
+      )
 
     given Decoder[HistoricalBetaContainer] =
       Decoder.instance { cursor =>

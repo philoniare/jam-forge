@@ -2,6 +2,7 @@ package io.forge.jam.core.json
 
 import io.circe.{Decoder, HCursor, Json}
 import io.forge.jam.core.JamBytes
+import _root_.scodec.bits.ByteVector
 import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.{WorkItem, WorkItemImportSegment, WorkItemExtrinsic}

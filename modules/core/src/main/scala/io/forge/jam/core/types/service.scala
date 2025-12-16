@@ -1,16 +1,22 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import scodec.*
+import scodec.bits.*
+import scodec.codecs.*
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.{UInt, ULong}
 
 /**
  * Service-related types.
  */
 object service:
+
+  // Helper codec for Hash (32 bytes)
+  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
+    bv => Hash.fromByteVectorUnsafe(bv),
+    h => h.toByteVector
+  )
 
   /**
    * Service info for validation.
@@ -32,64 +38,47 @@ object service:
   object ServiceInfo:
     val Size: Int = 89
 
-    given JamEncoder[ServiceInfo] with
-      def encode(a: ServiceInfo): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder += a.version.toByte
-        builder ++= a.codeHash.bytes
-        builder ++= codec.encodeU64LE(ULong(a.balance))
-        builder ++= codec.encodeU64LE(ULong(a.minItemGas))
-        builder ++= codec.encodeU64LE(ULong(a.minMemoGas))
-        builder ++= codec.encodeU64LE(ULong(a.bytesUsed))
-        builder ++= codec.encodeU64LE(ULong(a.depositOffset))
-        builder ++= codec.encodeU32LE(UInt(a.items))
-        builder ++= codec.encodeU32LE(UInt(a.creationSlot.toInt))
-        builder ++= codec.encodeU32LE(UInt(a.lastAccumulationSlot.toInt))
-        builder ++= codec.encodeU32LE(UInt(a.parentService.toInt))
-        builder.result()
-
-    given JamDecoder[ServiceInfo] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceInfo, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val version = arr(pos).toInt & 0xff
-        pos += 1
-        val codeHash = Hash(arr.slice(pos, pos + 32))
-        pos += 32
-        val balance = codec.decodeU64LE(arr, pos).signed
-        pos += 8
-        val minItemGas = codec.decodeU64LE(arr, pos).signed
-        pos += 8
-        val minMemoGas = codec.decodeU64LE(arr, pos).signed
-        pos += 8
-        val bytesUsed = codec.decodeU64LE(arr, pos).signed
-        pos += 8
-        val depositOffset = codec.decodeU64LE(arr, pos).signed
-        pos += 8
-        val items = codec.decodeU32LE(arr, pos).signed
-        pos += 4
-        val creationSlot = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        val lastAccumulationSlot = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        val parentService = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        (
+    given Codec[ServiceInfo] =
+      (byte ::
+       hashCodec ::
+       int64L ::
+       int64L ::
+       int64L ::
+       int64L ::
+       int64L ::
+       uint32L ::
+       uint32L ::
+       uint32L ::
+       uint32L).xmap(
+        { case (version, codeHash, balance, minItemGas, minMemoGas, bytesUsed, depositOffset, items, creationSlot, lastAccumulationSlot, parentService) =>
           ServiceInfo(
-            version,
-            codeHash,
-            balance,
-            minItemGas,
-            minMemoGas,
-            bytesUsed,
-            depositOffset,
-            items,
-            creationSlot,
-            lastAccumulationSlot,
-            parentService
-          ),
-          Size
+            version = version.toInt & 0xFF,
+            codeHash = codeHash,
+            balance = balance,
+            minItemGas = minItemGas,
+            minMemoGas = minMemoGas,
+            bytesUsed = bytesUsed,
+            depositOffset = depositOffset,
+            items = items.toInt,
+            creationSlot = creationSlot & 0xFFFFFFFFL,
+            lastAccumulationSlot = lastAccumulationSlot & 0xFFFFFFFFL,
+            parentService = parentService & 0xFFFFFFFFL
+          )
+        },
+        si => (
+          si.version.toByte,
+          si.codeHash,
+          si.balance,
+          si.minItemGas,
+          si.minMemoGas,
+          si.bytesUsed,
+          si.depositOffset,
+          si.items.toLong & 0xFFFFFFFFL,
+          si.creationSlot & 0xFFFFFFFFL,
+          si.lastAccumulationSlot & 0xFFFFFFFFL,
+          si.parentService & 0xFFFFFFFFL
         )
+      )
 
     given Decoder[ServiceInfo] =
       Decoder.instance { cursor =>
@@ -130,13 +119,10 @@ object service:
   object ServiceData:
     val Size: Int = ServiceInfo.Size
 
-    given JamEncoder[ServiceData] with
-      def encode(a: ServiceData): JamBytes = a.service.encode
-
-    given JamDecoder[ServiceData] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceData, Int) =
-        val (service, consumed) = bytes.decodeAs[ServiceInfo](offset)
-        (ServiceData(service), consumed)
+    given Codec[ServiceData] = summon[Codec[ServiceInfo]].xmap(
+      ServiceData.apply,
+      _.service
+    )
 
     given Decoder[ServiceData] =
       Decoder.instance(cursor => cursor.get[ServiceInfo]("service").map(ServiceData.apply))
@@ -152,19 +138,11 @@ object service:
   object ServiceAccount:
     val Size: Int = 4 + ServiceData.Size
 
-    given JamEncoder[ServiceAccount] with
-      def encode(a: ServiceAccount): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeU32LE(UInt(a.id.toInt))
-        builder ++= a.data.encode
-        builder.result()
-
-    given JamDecoder[ServiceAccount] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceAccount, Int) =
-        val arr = bytes.toArray
-        val id = codec.decodeU32LE(arr, offset).toLong
-        val (data, dataBytes) = bytes.decodeAs[ServiceData](offset + 4)
-        (ServiceAccount(id, data), 4 + dataBytes)
+    given Codec[ServiceAccount] =
+      (uint32L :: summon[Codec[ServiceData]]).xmap(
+        { case (id, data) => ServiceAccount(id & 0xFFFFFFFFL, data) },
+        sa => (sa.id & 0xFFFFFFFFL, sa.data)
+      )
 
     given Decoder[ServiceAccount] =
       Decoder.instance { cursor =>

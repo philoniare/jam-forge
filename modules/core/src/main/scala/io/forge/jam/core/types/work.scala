@@ -1,16 +1,32 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import _root_.scodec.*
+import _root_.scodec.bits.*
+import _root_.scodec.codecs.*
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519Signature}
+import io.forge.jam.core.scodec.JamCodecs.compactInteger
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.{UByte, UShort, UInt}
+import spire.math.{UShort, UInt}
 
 /**
  * Work-related simple types
  */
 object work:
+
+  // Helper codec for Hash (32 bytes)
+  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
+    bv => Hash.fromByteVectorUnsafe(bv),
+    h => h.toByteVector
+  )
+
+  // Helper codec for Ed25519Signature (64 bytes)
+  private val ed25519SigCodec: Codec[Ed25519Signature] =
+    fixedSizeBytes(Ed25519Signature.Size.toLong, bytes).xmap(
+      bv => Ed25519Signature(bv.toArray),
+      sig => ByteVector(sig.bytes)
+    )
 
   /**
    * Package specification containing hash, length, erasure root, exports root, and exports count.
@@ -27,25 +43,13 @@ object work:
   object PackageSpec:
     val Size: Int = Hash.Size + 4 + Hash.Size + Hash.Size + 2 // 102 bytes
 
-    given JamEncoder[PackageSpec] with
-      def encode(a: PackageSpec): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.hash.bytes
-        builder ++= codec.encodeU32LE(a.length)
-        builder ++= a.erasureRoot.bytes
-        builder ++= a.exportsRoot.bytes
-        builder ++= codec.encodeU16LE(a.exportsCount)
-        builder.result()
-
-    given JamDecoder[PackageSpec] with
-      def decode(bytes: JamBytes, offset: Int): (PackageSpec, Int) =
-        val arr = bytes.toArray
-        val hash = Hash(arr.slice(offset, offset + Hash.Size))
-        val length = codec.decodeU32LE(arr, offset + Hash.Size)
-        val erasureRoot = Hash(arr.slice(offset + 36, offset + 68))
-        val exportsRoot = Hash(arr.slice(offset + 68, offset + 100))
-        val exportsCount = codec.decodeU16LE(arr, offset + 100)
-        (PackageSpec(hash, length, erasureRoot, exportsRoot, exportsCount), Size)
+    given Codec[PackageSpec] =
+      (hashCodec :: uint32L :: hashCodec :: hashCodec :: uint16L).xmap(
+        { case (hash, length, erasureRoot, exportsRoot, exportsCount) =>
+          PackageSpec(hash, UInt(length.toInt), erasureRoot, exportsRoot, UShort(exportsCount))
+        },
+        ps => (ps.hash, ps.length.toLong & 0xFFFFFFFFL, ps.erasureRoot, ps.exportsRoot, ps.exportsCount.toInt)
+      )
 
     given Decoder[PackageSpec] = Decoder.instance { cursor =>
       for
@@ -78,30 +82,34 @@ object work:
     private val OkTag: Byte = 0x00
     private val PanicTag: Byte = 0x02
 
-    given JamEncoder[ExecutionResult] with
-      def encode(a: ExecutionResult): JamBytes = a match
-        case ExecutionResult.Ok(output) =>
-          val builder = JamBytes.newBuilder
-          builder += OkTag
-          builder ++= codec.encodeCompactInteger(output.length.toLong)
-          builder ++= output
-          builder.result()
-        case ExecutionResult.Panic =>
-          JamBytes(Array(PanicTag))
+    given Codec[ExecutionResult] = new Codec[ExecutionResult]:
+      override def sizeBound: SizeBound = SizeBound.unknown
 
-    given JamDecoder[ExecutionResult] with
-      def decode(bytes: JamBytes, offset: Int): (ExecutionResult, Int) =
-        val tag = bytes.signedAt(offset)
-        tag match
-          case OkTag =>
-            val (length, lengthBytes) = codec.decodeCompactInteger(bytes.toArray, offset + 1)
-            val output = bytes.slice(offset + 1 + lengthBytes, offset + 1 + lengthBytes + length.toInt)
-            (ExecutionResult.Ok(output), 1 + lengthBytes + length.toInt)
-          case PanicTag =>
-            (ExecutionResult.Panic, 1)
-          case _ =>
-            // Unknown tag, treat as Panic for robustness
-            (ExecutionResult.Panic, 1)
+      override def encode(value: ExecutionResult): Attempt[BitVector] = value match
+        case ExecutionResult.Ok(output) =>
+          for
+            prefix <- byte.encode(OkTag)
+            lengthBits <- compactInteger.encode(output.length.toLong)
+            dataBits <- bytes.encode(output.toByteVector)
+          yield prefix ++ lengthBits ++ dataBits
+        case ExecutionResult.Panic =>
+          byte.encode(PanicTag)
+
+      override def decode(bits: BitVector): Attempt[DecodeResult[ExecutionResult]] =
+        byte.decode(bits).flatMap { result =>
+          result.value match
+            case OkTag =>
+              compactInteger.decode(result.remainder).flatMap { lenResult =>
+                fixedSizeBytes(lenResult.value, bytes).decode(lenResult.remainder).map { dataResult =>
+                  DecodeResult(ExecutionResult.Ok(JamBytes.fromByteVector(dataResult.value)), dataResult.remainder)
+                }
+              }
+            case PanicTag =>
+              Attempt.successful(DecodeResult(ExecutionResult.Panic, result.remainder))
+            case _ =>
+              // Unknown tag, treat as Panic for robustness
+              Attempt.successful(DecodeResult(ExecutionResult.Panic, result.remainder))
+        }
 
     given Decoder[ExecutionResult] = Decoder.instance { cursor =>
       val ok = cursor.get[String]("ok").toOption
@@ -127,21 +135,13 @@ object work:
   object Vote:
     val Size: Int = 1 + 2 + Ed25519Signature.Size // 67 bytes
 
-    given JamEncoder[Vote] with
-      def encode(a: Vote): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder += (if a.vote then 1.toByte else 0.toByte)
-        builder ++= codec.encodeU16LE(a.validatorIndex.value)
-        builder ++= a.signature.bytes
-        builder.result()
-
-    given JamDecoder[Vote] with
-      def decode(bytes: JamBytes, offset: Int): (Vote, Int) =
-        val arr = bytes.toArray
-        val vote = arr(offset) != 0
-        val validatorIndex = ValidatorIndex(codec.decodeU16LE(arr, offset + 1))
-        val signature = Ed25519Signature(arr.slice(offset + 3, offset + 3 + Ed25519Signature.Size))
-        (Vote(vote, validatorIndex, signature), Size)
+    given Codec[Vote] =
+      (byte :: uint16L :: ed25519SigCodec).xmap(
+        { case (voteByte, idx, sig) =>
+          Vote(voteByte != 0, ValidatorIndex(idx), sig)
+        },
+        v => ((if v.vote then 1 else 0).toByte, v.validatorIndex.value.toInt, v.signature)
+      )
 
     given Decoder[Vote] = Decoder.instance { cursor =>
       for

@@ -1,13 +1,11 @@
 package io.forge.jam.protocol.traces
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{encode, decodeAs}
+import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.types.history.HistoricalBetaContainer
-import io.forge.jam.core.types.history.HistoricalBetaContainer.given
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import io.forge.jam.protocol.accumulation.{
@@ -17,10 +15,12 @@ import io.forge.jam.protocol.accumulation.{
   Privileges
 }
 import io.forge.jam.core.types.service.ServiceInfo
-import io.forge.jam.core.types.service.ServiceInfo.given
 import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import org.slf4j.LoggerFactory
+import _root_.scodec.bits.ByteVector
+import _root_.scodec.Codec
+import io.forge.jam.core.scodec.{JamCodecs, FullJamStateCodecs}
 
 /**
  * Unified JAM state container holding all state components.
@@ -126,7 +126,7 @@ final case class FullJamState(
     // Recent history (0x03) - always re-encode (modified by History STF)
     builder += KeyValue(
       StateKeys.simpleKey(StateKeys.RECENT_HISTORY),
-      recentHistory.encode
+      summon[Codec[HistoricalBetaContainer]].encode(recentHistory).require.bytes
     )
 
     // Safrole gamma state (0x04) - always re-encode (modified by Safrole STF at epoch boundaries)
@@ -203,7 +203,7 @@ final case class FullJamState(
       val serviceKey = encodeServiceAccountKey(item.id)
       builder += KeyValue(
         serviceKey,
-        item.data.service.encode
+        summon[Codec[ServiceInfo]].encode(item.data.service).require.bytes
       )
 
     // Service storage data (prefix 0x00) - use ONLY rawServiceDataByStateKey as source of truth
@@ -225,12 +225,9 @@ final case class FullJamState(
    * Format: For each core, compact length prefix + N x 32-byte hashes
    */
   private def encodeAuthPools(pools: List[List[Hash]]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for pool <- pools do
-      builder ++= codec.encodeCompactInteger(pool.size.toLong)
-      for hash <- pool do
-        builder ++= hash.bytes
-    builder.result()
+    val poolCodec: Codec[List[Hash]] = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
+    val codec = JamCodecs.fixedSizeList(poolCodec, pools.length)
+    JamBytes.fromByteVector(codec.encode(pools).require.bytes)
 
   /**
    * Encode service account key.
@@ -248,19 +245,14 @@ final case class FullJamState(
   // Encoding helpers
 
   private def encodeTimeslot(tau: Long): JamBytes =
-    JamBytes(codec.encodeU32LE(spire.math.UInt(tau.toInt)))
+    JamBytes.fromByteVector(FullJamStateCodecs.timeslotCodec.encode(tau).require.bytes)
 
   private def encodeEntropyPool(eta: List[Hash]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for hash <- eta do
-      builder ++= hash.bytes
-    builder.result()
+    JamBytes.fromByteVector(FullJamStateCodecs.entropyPoolCodec.encode(eta).require.bytes)
 
   private def encodeValidatorList(validators: List[ValidatorKey]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for v <- validators do
-      builder ++= v.encode
-    builder.result()
+    val codec = FullJamStateCodecs.validatorListCodec(validators.length)
+    JamBytes.fromByteVector(codec.encode(validators).require.bytes)
 
   private def encodeSafroleGammaState(
     gammaK: List[ValidatorKey],
@@ -268,128 +260,62 @@ final case class FullJamState(
     gammaS: TicketsOrKeys,
     gammaA: List[TicketMark]
   ): JamBytes =
-    val builder = JamBytes.newBuilder
+    // Convert TicketsOrKeys to FullJamStateCodecs.TicketsOrKeysData
+    val gammaS_data = gammaS match
+      case TicketsOrKeys.Tickets(tickets) => FullJamStateCodecs.TicketsOrKeysData.Tickets(tickets)
+      case TicketsOrKeys.Keys(keys) => FullJamStateCodecs.TicketsOrKeysData.Keys(keys)
 
-    // gammaK - fixed list of validators
-    for v <- gammaK do
-      builder ++= v.encode
-
-    // gammaZ - 144 bytes
-    builder ++= gammaZ
-
-    // gammaS - TicketsOrKeys
-    builder ++= gammaS.encode
-
-    // gammaA - compact length prefix + TicketMark items
-    builder ++= gammaA.encode
-
-    builder.result()
+    val codec = FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, gammaS.length)
+    JamBytes.fromByteVector(codec.encode((gammaK, gammaZ.toByteVector, gammaS_data, gammaA)).require.bytes)
 
   /**
    * Encode authorization queues.
-   * Format: For each core, 80 x 32-byte hashes
+   * Format: For each core, 80 x 32-byte hashes (fixed size)
    */
   private def encodeAuthQueues(queues: List[List[Hash]]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for queue <- queues do
-      // Each queue has exactly 80 hashes
-      for hash <- queue.take(80) do
-        builder ++= hash.bytes
-      // Pad with zeros if less than 80
-      for _ <- queue.size until 80 do
-        builder ++= Hash.zero.bytes
-    builder.result()
+    val queueSize = if queues.nonEmpty then queues.head.length else 80
+    val codec = FullJamStateCodecs.authQueuesCodec(queues.length, queueSize)
+    JamBytes.fromByteVector(codec.encode(queues).require.bytes)
 
   /**
    * Encode reports (rho) - availability assignments.
    */
   private def encodeReports(reports: List[Option[AvailabilityAssignment]]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for reportOpt <- reports do
-      reportOpt match
-        case None =>
-          builder += 0.toByte // None marker
-        case Some(assignment) =>
-          builder += 1.toByte // Some marker
-          builder ++= assignment.encode
-    builder.result()
+    val codec = FullJamStateCodecs.reportsCodec(reports.length)(using summon[Codec[AvailabilityAssignment]])
+    JamBytes.fromByteVector(codec.encode(reports).require.bytes)
 
   /**
    * Encode activity statistics (alpha) in v0.7.0+ format.
    * Format: accumulator (validator stats), previous (validator stats), core stats, service stats
    */
   private def encodeActivityStatistics(config: ChainConfig): JamBytes =
-    import spire.math.UInt
-    val builder = JamBytes.newBuilder
-
     // Pad to validator count
     val paddedCurrent = activityStatsCurrent.padTo(config.validatorCount, StatCount.zero)
     val paddedLast = activityStatsLast.padTo(config.validatorCount, StatCount.zero)
-
-    // Accumulator (current validator stats) - fixed-size array, no length prefix
-    for stat <- paddedCurrent do
-      builder ++= codec.encodeU32LE(UInt(stat.blocks.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.tickets.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.preImages.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.preImagesSize.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.guarantees.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.assurances.toInt))
-
-    // Previous (last validator stats) - fixed-size array, no length prefix
-    for stat <- paddedLast do
-      builder ++= codec.encodeU32LE(UInt(stat.blocks.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.tickets.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.preImages.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.preImagesSize.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.guarantees.toInt))
-      builder ++= codec.encodeU32LE(UInt(stat.assurances.toInt))
-
-    // Core stats - fixed-size array (coresCount), each field compact-encoded
     val paddedCoreStats = coreStatistics.padTo(config.coresCount, CoreStatisticsRecord.zero)
-    for stat <- paddedCoreStats do
-      builder ++= codec.encodeCompactInteger(stat.daLoad) // dataSize (package.length + segmentsSize)
-      builder ++= codec.encodeCompactInteger(stat.popularity) // assuranceCount
-      builder ++= codec.encodeCompactInteger(stat.imports)
-      builder ++= codec.encodeCompactInteger(stat.extrinsicCount)
-      builder ++= codec.encodeCompactInteger(stat.extrinsicSize)
-      builder ++= codec.encodeCompactInteger(stat.exports)
-      builder ++= codec.encodeCompactInteger(stat.bundleSize) // packageSize
-      builder ++= codec.encodeCompactInteger(stat.gasUsed)
 
-    // Service stats - sorted map with compact length prefix
-    val sortedServiceStats = serviceStatistics.sortBy(_.id)
-    builder ++= codec.encodeCompactInteger(sortedServiceStats.size.toLong)
+    // Convert to FullJamStateCodecs types
+    val statsData = FullJamStateCodecs.ActivityStatisticsData(
+      accumulator = paddedCurrent.map(s => FullJamStateCodecs.StatCountData(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances)),
+      previous = paddedLast.map(s => FullJamStateCodecs.StatCountData(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances)),
+      core = paddedCoreStats.map(c => FullJamStateCodecs.CoreStatisticsData(c.daLoad, c.popularity, c.imports, c.extrinsicCount, c.extrinsicSize, c.exports, c.bundleSize, c.gasUsed)),
+      service = serviceStatistics.map(e => FullJamStateCodecs.ServiceStatisticsData(
+        e.id, 0L, 0L, // preimages count/size
+        e.record.refinementCount, e.record.refinementGasUsed,
+        e.record.imports, e.record.extrinsicCount, e.record.extrinsicSize, e.record.exports,
+        e.record.accumulateCount, e.record.accumulateGasUsed
+      ))
+    )
 
-    for entry <- sortedServiceStats do
-      builder ++= codec.encodeU32LE(UInt(entry.id.toInt))
-      // Encode ServiceStatistics in v0.7.0 format
-      // preimages: count + size (both compact)
-      builder ++= codec.encodeCompactInteger(0L) // preimages count
-      builder ++= codec.encodeCompactInteger(0L) // preimages size
-      // refines: count + gas (both compact)
-      builder ++= codec.encodeCompactInteger(entry.record.refinementCount)
-      builder ++= codec.encodeCompactInteger(entry.record.refinementGasUsed)
-      // imports, extrinsics, exports (all compact)
-      builder ++= codec.encodeCompactInteger(entry.record.imports)
-      builder ++= codec.encodeCompactInteger(entry.record.extrinsicCount)
-      builder ++= codec.encodeCompactInteger(entry.record.extrinsicSize)
-      builder ++= codec.encodeCompactInteger(entry.record.exports)
-      // accumulates: count + gas (both compact)
-      builder ++= codec.encodeCompactInteger(entry.record.accumulateCount)
-      builder ++= codec.encodeCompactInteger(entry.record.accumulateGasUsed)
-
-    builder.result()
+    JamBytes.fromByteVector(FullJamStateCodecs.activityStatisticsCodec(config.validatorCount, config.coresCount).encode(statsData).require.bytes)
 
   /**
    * Encode accumulation history.
    */
   private def encodeAccumulationHistory(history: List[List[JamBytes]]): JamBytes =
-    val builder = JamBytes.newBuilder
-    for slot <- history do
-      builder ++= codec.encodeCompactInteger(slot.size.toLong)
-      for hash <- slot do
-        builder ++= hash
-    builder.result()
+    val historyBv = history.map(_.map(_.toByteVector))
+    val codec = FullJamStateCodecs.accumulationHistoryCodec(history.length)
+    JamBytes.fromByteVector(codec.encode(historyBv).require.bytes)
 
 object FullJamState:
   private val logger = LoggerFactory.getLogger(getClass)
@@ -748,7 +674,7 @@ object FullJamState:
       BandersnatchPublicKey.zero,
       Ed25519PublicKey(new Array[Byte](Ed25519PublicKey.Size)),
       BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
-      JamBytes.zeros(ValidatorKey.MetadataSize)
+      ByteVector.fill(ValidatorKey.MetadataSize.toLong)(0)
     )
     val emptyValidators = List.fill(config.validatorCount)(emptyValidatorKey)
     val emptyEntropy = List.fill(4)(Hash.zero)

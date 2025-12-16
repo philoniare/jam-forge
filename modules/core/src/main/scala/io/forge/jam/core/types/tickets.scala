@@ -1,10 +1,12 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import io.forge.jam.core.{JamBytes, primitives}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.{parseHex, parseHexBytesFixed}
 import io.circe.Decoder
+import _root_.scodec.*
+import _root_.scodec.bits.*
+import _root_.scodec.codecs.*
 import spire.math.UByte
 
 /**
@@ -28,18 +30,13 @@ object tickets:
   object TicketEnvelope:
     val Size: Int = 1 + RingVrfSignatureSize // 785 bytes
 
-    given JamEncoder[TicketEnvelope] with
-      def encode(a: TicketEnvelope): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeU8(a.attempt)
-        builder ++= a.signature
-        builder.result()
-
-    given JamDecoder[TicketEnvelope] with
-      def decode(bytes: JamBytes, offset: Int): (TicketEnvelope, Int) =
-        val attempt = codec.decodeU8(bytes.toArray, offset)
-        val signature = bytes.slice(offset + 1, offset + 1 + RingVrfSignatureSize)
-        (TicketEnvelope(attempt, signature), Size)
+    given Codec[TicketEnvelope] =
+      (byte :: fixedSizeBytes(RingVrfSignatureSize.toLong, bytes)).xmap(
+        { case (attemptByte, sigBytes) =>
+          TicketEnvelope(UByte(attemptByte), JamBytes.fromByteVector(sigBytes))
+        },
+        te => (te.attempt.toByte, te.signature.toByteVector)
+      )
 
     given Decoder[TicketEnvelope] = Decoder.instance { cursor =>
       for
@@ -62,23 +59,18 @@ object tickets:
   object TicketMark:
     val Size: Int = Hash.Size + 1 // 33 bytes
 
-    given JamEncoder[TicketMark] with
-      def encode(a: TicketMark): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.id
-        builder ++= codec.encodeU8(a.attempt)
-        builder.result()
-
-    given JamDecoder[TicketMark] with
-      def decode(bytes: JamBytes, offset: Int): (TicketMark, Int) =
-        val id = bytes.slice(offset, offset + Hash.Size)
-        val attempt = codec.decodeU8(bytes.toArray, offset + Hash.Size)
-        (TicketMark(id, attempt), Size)
+    given Codec[TicketMark] =
+      (fixedSizeBytes(Hash.Size.toLong, bytes) :: byte).xmap(
+        { case (idBytes, attemptByte) =>
+          TicketMark(JamBytes.fromByteVector(idBytes), UByte(attemptByte))
+        },
+        tm => (tm.id.toByteVector, tm.attempt.toByte)
+      )
 
     given Decoder[TicketMark] = Decoder.instance { cursor =>
       for
         idHex <- cursor.get[String]("id")
         attempt <- cursor.get[Int]("attempt")
-        id <- parseHexBytesFixed(idHex, Hash.Size).map(JamBytes(_))
+        id <- parseHexBytesFixed(idHex, Hash.Size).map(bytes => JamBytes(bytes))
       yield TicketMark(id, UByte(attempt))
     }

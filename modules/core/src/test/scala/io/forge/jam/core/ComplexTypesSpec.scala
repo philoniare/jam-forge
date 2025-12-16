@@ -4,9 +4,9 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UByte, UShort, UInt}
 import java.nio.file.{Files, Paths}
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.bits.{BitVector, ByteVector}
 
-import codec.*
-import codec.{encode, decodeAs}
 import primitives.*
 import types.context.*
 import types.workitem.*
@@ -22,6 +22,18 @@ import types.dispute.*
 
 class ComplexTypesSpec extends AnyFlatSpec with Matchers:
 
+  // Helper method to encode using scodec Codec
+  private def encode[A](value: A)(using codec: Codec[A]): JamBytes =
+    JamBytes.fromByteVector(codec.encode(value).require.bytes)
+
+  // Helper method to decode using scodec Codec
+  private def decode[A](bytes: JamBytes)(using codec: Codec[A]): (A, Long) =
+    codec.decode(BitVector(bytes.toByteVector)) match
+      case Attempt.Successful(DecodeResult(value, remainder)) =>
+        (value, bytes.length - remainder.bytes.size)
+      case Attempt.Failure(err) =>
+        throw new RuntimeException(s"Decode failed: $err")
+
   // ============================================================================
   // Test 1: Context encode/decode (with prerequisites list)
   // ============================================================================
@@ -35,7 +47,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(42),
       prerequisites = List.empty
     )
-    val encoded = ctx.encode
+    val encoded = encode(ctx)
     // 4 * 32 + 4 + 1 (compact 0) = 133 bytes
     encoded.length shouldBe 133
   }
@@ -51,7 +63,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(0),
       prerequisites = List(prereq1, prereq2)
     )
-    val encoded = ctx.encode
+    val encoded = encode(ctx)
     // 4 * 32 + 4 + 1 (compact 2) + 2 * 32 = 197 bytes
     encoded.length shouldBe 197
   }
@@ -66,8 +78,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       lookupAnchorSlot = Timeslot(12345),
       prerequisites = List(prereq)
     )
-    val encoded = ctx.encode
-    val (decoded, consumed) = encoded.decodeAs[Context](0)
+    val encoded = encode(ctx)
+    val (decoded, consumed) = decode[Context](encoded)
     consumed shouldBe encoded.length
     decoded.anchor.toHex shouldBe ctx.anchor.toHex
     decoded.stateRoot.toHex shouldBe ctx.stateRoot.toHex
@@ -93,12 +105,12 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       extrinsic = List.empty,
       exportCount = UShort(0)
     )
-    val encoded = item.encode
+    val encoded = encode(item)
     // service is little-endian
-    encoded(0) shouldBe UByte(0x78)
-    encoded(1) shouldBe UByte(0x56)
-    encoded(2) shouldBe UByte(0x34)
-    encoded(3) shouldBe UByte(0x12)
+    encoded(0) shouldBe 0x78.toByte
+    encoded(1) shouldBe 0x56.toByte
+    encoded(2) shouldBe 0x34.toByte
+    encoded(3) shouldBe 0x12.toByte
   }
 
   it should "round-trip correctly with import segments and extrinsics" in {
@@ -117,8 +129,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       ),
       exportCount = UShort(5)
     )
-    val encoded = item.encode
-    val (decoded, consumed) = encoded.decodeAs[WorkItem](0)
+    val encoded = encode(item)
+    val (decoded, consumed) = decode[WorkItem](encoded)
     consumed shouldBe encoded.length
     decoded.service.toInt shouldBe item.service.toInt
     decoded.payload shouldBe item.payload
@@ -140,7 +152,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Ok(JamBytes(Array[Byte](0xAA.toByte, 0xBB.toByte, 0xCC.toByte))),
       refineLoad = RefineLoad(Gas(0L), UShort(0), UShort(0), UInt(0), UShort(0))
     )
-    val encoded = result.encode
+    val encoded = encode(result)
     // Fixed part: 4 + 32 + 32 + 8 = 76 bytes
     // Then result tag (0x00) + compact length (3) + 3 bytes = 5 bytes
     // Then refineLoad: 5 compact zeros = 5 bytes
@@ -157,8 +169,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Panic,
       refineLoad = RefineLoad(Gas(0L), UShort(0), UShort(0), UInt(0), UShort(0))
     )
-    val encoded = result.encode
-    val (decoded, consumed) = encoded.decodeAs[WorkResult](0)
+    val encoded = encode(result)
+    val (decoded, _) = decode[WorkResult](encoded)
     decoded.result shouldBe ExecutionResult.Panic
   }
 
@@ -171,8 +183,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       result = ExecutionResult.Ok(JamBytes(Array.tabulate(50)(i => (i * 2).toByte))),
       refineLoad = RefineLoad(Gas(100L), UShort(5), UShort(3), UInt(1000), UShort(2))
     )
-    val encoded = result.encode
-    val (decoded, consumed) = encoded.decodeAs[WorkResult](0)
+    val encoded = encode(result)
+    val (decoded, consumed) = decode[WorkResult](encoded)
     consumed shouldBe encoded.length
     decoded.serviceId.toInt shouldBe result.serviceId.toInt
     decoded.result match
@@ -181,10 +193,11 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   }
 
   // ============================================================================
-  // Test 4: Extrinsic structure encoding
+  // Test 4: Extrinsic structure encoding (config-dependent)
   // ============================================================================
 
   "JamExtrinsic" should "encode empty extrinsic correctly" in {
+    val config = ChainConfig.TINY
     val ext = JamExtrinsic(
       tickets = List.empty,
       preimages = List.empty,
@@ -192,7 +205,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       assurances = List.empty,
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
-    val encoded = ext.encode
+    val codec = JamExtrinsic.extrinsicCodec(config)
+    val encoded = codec.encode(ext).require.bytes
     // 4 compact zeros for the 4 lists (tickets, preimages, guarantees, assurances)
     // + 3 compact zeros for dispute (verdicts, culprits, faults)
     // = 7 bytes total
@@ -200,6 +214,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "round-trip empty extrinsic correctly" in {
+    val config = ChainConfig.TINY
     val ext = JamExtrinsic(
       tickets = List.empty,
       preimages = List.empty,
@@ -207,10 +222,9 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       assurances = List.empty,
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
-    val encoded = ext.encode
-    val config = ChainConfig.TINY
-    val (decoded, consumed) = types.block.Extrinsic.decoder(config).decode(encoded, 0)
-    consumed shouldBe encoded.length
+    val codec = JamExtrinsic.extrinsicCodec(config)
+    val encoded = codec.encode(ext).require.bytes
+    val decoded = codec.decode(BitVector(encoded)).require.value
     decoded.tickets shouldBe empty
     decoded.preimages shouldBe empty
     decoded.guarantees shouldBe empty
@@ -219,10 +233,11 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   }
 
   // ============================================================================
-  // Test 5: Block structure encoding
+  // Test 5: Block structure encoding (config-dependent)
   // ============================================================================
 
   "JamBlock" should "encode header and extrinsic in sequence" in {
+    val config = ChainConfig.TINY
     val header = Header(
       parent = Hash.zero,
       parentStateRoot = Hash.zero,
@@ -245,7 +260,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val block = JamBlock(header, extrinsic)
-    val encoded = block.encode
+    val codec = JamBlock.blockCodec(config)
+    val encoded = codec.encode(block).require.bytes
 
     // Header: 32*3 (hashes) + 4 (slot) + 1 (no epoch) + 1 (no tickets) + 2 (author) + 96 (entropy) + 1 (no offenders) + 96 (seal) = 297
     // Extrinsic: 7 bytes (4 empty lists + 3 empty dispute lists)
@@ -254,6 +270,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "round-trip correctly" in {
+    val config = ChainConfig.TINY
     val header = Header(
       parent = Hash(Array.tabulate(32)(_.toByte)),
       parentStateRoot = Hash(Array.tabulate(32)(i => (i + 50).toByte)),
@@ -276,10 +293,9 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     )
 
     val block = JamBlock(header, extrinsic)
-    val encoded = block.encode
-    val config = ChainConfig.TINY
-    val (decoded, consumed) = types.block.Block.decoder(config).decode(encoded, 0)
-    consumed shouldBe encoded.length
+    val codec = JamBlock.blockCodec(config)
+    val encoded = codec.encode(block).require.bytes
+    val decoded = codec.decode(BitVector(encoded)).require.value
     decoded.header.slot.toInt shouldBe 999
     decoded.header.authorIndex.toInt shouldBe 5
   }
@@ -318,8 +334,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       items = List(item)
     )
 
-    val encoded = pkg.encode
-    val (decoded, consumed) = encoded.decodeAs[WorkPackage](0)
+    val encoded = encode(pkg)
+    val (decoded, consumed) = decode[WorkPackage](encoded)
     consumed shouldBe encoded.length
     decoded.authCodeHost.toInt shouldBe 42
     decoded.items.length shouldBe 1
@@ -368,8 +384,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       results = List(result)
     )
 
-    val encoded = report.encode
-    val (decoded, consumed) = encoded.decodeAs[WReport](0)
+    val encoded = encode(report)
+    val (decoded, consumed) = decode[WReport](encoded)
     consumed shouldBe encoded.length
     decoded.coreIndex.toInt shouldBe 2
     decoded.results.length shouldBe 1

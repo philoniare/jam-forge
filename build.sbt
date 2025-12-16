@@ -11,6 +11,7 @@ ThisBuild / scalacOptions ++= Seq(
 
 // Common dependency versions
 val catsVersion = "2.10.0"
+val scodecVersion = "2.2.1"
 
 // Detect OS for native library paths
 val osName = System.getProperty("os.name").toLowerCase
@@ -41,6 +42,7 @@ lazy val core = (project in file("modules/core"))
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
       "org.typelevel" %% "spire" % "0.18.0",
+      "org.scodec" %% "scodec-core" % scodecVersion,
       "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
       "io.circe" %% "circe-core" % "0.14.6",
       "io.circe" %% "circe-parser" % "0.14.6",

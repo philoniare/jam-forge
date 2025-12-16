@@ -1,15 +1,41 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
 import io.circe.Decoder
+import _root_.scodec.*
+import _root_.scodec.bits.*
+import _root_.scodec.codecs.*
 
 /**
  * Epoch-related types
  */
 object epoch:
+
+  // Private codecs for primitive types
+  private val hashCodec: Codec[Hash] = fixedSizeBytes(32L, bytes).xmap(
+    bv => Hash.fromByteVectorUnsafe(bv),
+    h => h.toByteVector
+  )
+
+  private val bandersnatchKeyCodec: Codec[BandersnatchPublicKey] =
+    fixedSizeBytes(32L, bytes).xmap(
+      bv => BandersnatchPublicKey.fromByteVectorUnsafe(bv),
+      k => k.toByteVector
+    )
+
+  private val ed25519KeyCodec: Codec[Ed25519PublicKey] =
+    fixedSizeBytes(32L, bytes).xmap(
+      bv => Ed25519PublicKey.fromByteVectorUnsafe(bv),
+      k => k.toByteVector
+    )
+
+  private val blsKeyCodec: Codec[BlsPublicKey] =
+    fixedSizeBytes(144L, bytes).xmap(
+      bv => BlsPublicKey.fromByteVectorUnsafe(bv),
+      k => k.toByteVector
+    )
 
   /**
    * Short-form validator key used in EpochMark.
@@ -24,16 +50,11 @@ object epoch:
   object EpochValidatorKey:
     val Size: Int = BandersnatchPublicKey.Size + Ed25519PublicKey.Size // 64 bytes
 
-    given JamEncoder[EpochValidatorKey] with
-      def encode(a: EpochValidatorKey): JamBytes =
-        JamBytes(a.bandersnatch.bytes ++ a.ed25519.bytes)
-
-    given JamDecoder[EpochValidatorKey] with
-      def decode(bytes: JamBytes, offset: Int): (EpochValidatorKey, Int) =
-        val arr = bytes.toArray
-        val bandersnatch = BandersnatchPublicKey(arr.slice(offset, offset + BandersnatchPublicKey.Size))
-        val ed25519 = Ed25519PublicKey(arr.slice(offset + BandersnatchPublicKey.Size, offset + Size))
-        (EpochValidatorKey(bandersnatch, ed25519), Size)
+    given Codec[EpochValidatorKey] =
+      (bandersnatchKeyCodec :: ed25519KeyCodec).xmap(
+        { case (b, e) => EpochValidatorKey(b, e) },
+        evk => (evk.bandersnatch, evk.ed25519)
+      )
 
     given Decoder[EpochValidatorKey] =
       Decoder.instance { cursor =>
@@ -60,40 +81,21 @@ object epoch:
     def size(validatorCount: Int): Int =
       Hash.Size + Hash.Size + validatorCount * EpochValidatorKey.Size
 
-    given JamEncoder[EpochMark] with
-      def encode(a: EpochMark): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.entropy.bytes
-        builder ++= a.ticketsEntropy.bytes
-        for validator <- a.validators do
-          builder ++= validator.encode
-        builder.result()
-
     /**
-     * Create a decoder that knows the expected validator count.
+     * Create a codec that knows the expected validator count.
      * EpochMark has a config-dependent size, so we need the validator count.
      */
-    def decoder(validatorCount: Int): JamDecoder[EpochMark] = new JamDecoder[EpochMark]:
-      def decode(bytes: JamBytes, offset: Int): (EpochMark, Int) =
-        val arr = bytes.toArray
-        val entropy = Hash(arr.slice(offset, offset + Hash.Size))
-        val ticketsEntropy = Hash(arr.slice(offset + Hash.Size, offset + Hash.Size * 2))
-
-        var pos = offset + Hash.Size * 2
-        val validators = (0 until validatorCount).map { _ =>
-          val (validator, consumed) = bytes.decodeAs[EpochValidatorKey](pos)
-          pos += consumed
-          validator
-        }.toList
-
-        val totalSize = Hash.Size * 2 + validatorCount * EpochValidatorKey.Size
-        (EpochMark(entropy, ticketsEntropy, validators), totalSize)
+    def epochMarkCodec(validatorCount: Int): Codec[EpochMark] =
+      (hashCodec :: hashCodec :: vectorOfN(provide(validatorCount), summon[Codec[EpochValidatorKey]]).xmap(_.toList, _.toVector)).xmap(
+        { case (e, te, vs) => EpochMark(e, te, vs) },
+        em => (em.entropy, em.ticketsEntropy, em.validators)
+      )
 
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: JamBytes, offset: Int, config: ChainConfig): (EpochMark, Int) =
-      decoder(config.validatorCount).decode(bytes, offset)
+    def fromBytes(bytes: ByteVector, config: ChainConfig): Attempt[DecodeResult[EpochMark]] =
+      epochMarkCodec(config.validatorCount).decode(bytes.bits)
 
     given Decoder[EpochMark] =
       Decoder.instance { cursor =>
@@ -121,27 +123,11 @@ object epoch:
     val Size: Int = 336 // 32 + 32 + 144 + 128
     val MetadataSize: Int = 128
 
-    given JamEncoder[ValidatorKey] with
-      def encode(a: ValidatorKey): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.bandersnatch.bytes
-        builder ++= a.ed25519.bytes
-        builder ++= a.bls.bytes
-        builder ++= a.metadata
-        builder.result()
-
-    given JamDecoder[ValidatorKey] with
-      def decode(bytes: JamBytes, offset: Int): (ValidatorKey, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val bandersnatch = BandersnatchPublicKey(arr.slice(pos, pos + BandersnatchPublicKey.Size))
-        pos += BandersnatchPublicKey.Size
-        val ed25519 = Ed25519PublicKey(arr.slice(pos, pos + Ed25519PublicKey.Size))
-        pos += Ed25519PublicKey.Size
-        val bls = BlsPublicKey(arr.slice(pos, pos + BlsPublicKey.Size))
-        pos += BlsPublicKey.Size
-        val metadata = JamBytes(arr.slice(pos, pos + MetadataSize))
-        (ValidatorKey(bandersnatch, ed25519, bls, metadata), Size)
+    given Codec[ValidatorKey] =
+      (bandersnatchKeyCodec :: ed25519KeyCodec :: blsKeyCodec :: fixedSizeBytes(128L, bytes)).xmap(
+        { case (b, e, bls, meta) => ValidatorKey(b, e, bls, JamBytes.fromByteVector(meta)) },
+        vk => (vk.bandersnatch, vk.ed25519, vk.bls, vk.metadata.toByteVector)
+      )
 
     given Decoder[ValidatorKey] =
       Decoder.instance { cursor =>
@@ -153,6 +139,6 @@ object epoch:
           bandersnatch <- parseHexBytesFixed(bandersnatchHex, BandersnatchPublicKey.Size).map(BandersnatchPublicKey(_))
           ed25519 <- parseHexBytesFixed(ed25519Hex, Ed25519PublicKey.Size).map(Ed25519PublicKey(_))
           bls <- parseHexBytesFixed(blsHex, BlsPublicKey.Size).map(BlsPublicKey(_))
-          metadata <- parseHexBytesFixed(metadataHex, MetadataSize).map(JamBytes(_))
+          metadata <- parseHexBytesFixed(metadataHex, MetadataSize).map(bytes => JamBytes(bytes))
         yield ValidatorKey(bandersnatch, ed25519, bls, metadata)
       }

@@ -1,11 +1,12 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
+import scodec.*
+import scodec.bits.*
+import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, Timeslot}
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.UInt
 
 /**
  * Refinement context types.
@@ -36,51 +37,19 @@ object context:
     /** Fixed part size (without prerequisites) */
     val FixedSize: Int = Hash.Size * 4 + 4 // 132 bytes
 
-    given JamEncoder[Context] with
-      def encode(a: Context): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.anchor.bytes
-        builder ++= a.stateRoot.bytes
-        builder ++= a.beefyRoot.bytes
-        builder ++= a.lookupAnchor.bytes
-        builder ++= codec.encodeU32LE(a.lookupAnchorSlot.value)
-        // prerequisites - compact length prefix followed by hashes
-        builder ++= codec.encodeCompactInteger(a.prerequisites.length.toLong)
-        for prereq <- a.prerequisites do
-          builder ++= prereq.bytes
-        builder.result()
-
-    given JamDecoder[Context] with
-      def decode(bytes: JamBytes, offset: Int): (Context, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-
-        val anchor = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        val stateRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        val beefyRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        val lookupAnchor = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        val lookupAnchorSlot = Timeslot(codec.decodeU32LE(arr, pos))
-        pos += 4
-
-        // prerequisites - compact length prefix followed by hashes
-        val (prereqsLength, prereqsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += prereqsLengthBytes
-
-        val prerequisites = (0 until prereqsLength.toInt).map { _ =>
-          val hash = Hash(arr.slice(pos, pos + Hash.Size))
-          pos += Hash.Size
-          hash
-        }.toList
-
-        (Context(anchor, stateRoot, beefyRoot, lookupAnchor, lookupAnchorSlot, prerequisites), pos - offset)
+    given Codec[Context] =
+      (hashCodec ::               // anchor
+       hashCodec ::               // stateRoot
+       hashCodec ::               // beefyRoot
+       hashCodec ::               // lookupAnchor
+       uint32L ::                 // lookupAnchorSlot (4 bytes LE unsigned)
+       listOfN(compactInt, hashCodec)  // prerequisites with compact length prefix
+      ).xmap(
+        { case (anchor, stateRoot, beefyRoot, lookupAnchor, slot, prereqs) =>
+          Context(anchor, stateRoot, beefyRoot, lookupAnchor, Timeslot(slot.toInt), prereqs)
+        },
+        c => (c.anchor, c.stateRoot, c.beefyRoot, c.lookupAnchor, c.lookupAnchorSlot.value.toLong & 0xFFFFFFFFL, c.prerequisites)
+      )
 
     given Decoder[Context] = Decoder.instance { cursor =>
       for

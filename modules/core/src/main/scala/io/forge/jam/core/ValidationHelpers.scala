@@ -1,6 +1,7 @@
 package io.forge.jam.core
 
 import io.forge.jam.core.JamBytes.compareUnsigned
+import scala.math.Ordering.Implicits.infixOrderingOps
 
 /**
  * Shared validation utilities for STF implementations.

@@ -1,8 +1,11 @@
 package io.forge.jam.core.types
 
 import io.circe.Decoder
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import scodec.*
+import scodec.bits.*
+import scodec.codecs.*
+import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.scodec.JamCodecs.compactPrefixedList
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.extrinsic.{Preimage, GuaranteeExtrinsic, AssuranceExtrinsic, Dispute}
@@ -31,86 +34,29 @@ object block:
   )
 
   object Extrinsic:
-    given JamEncoder[Extrinsic] with
-      def encode(a: Extrinsic): JamBytes =
-        val builder = JamBytes.newBuilder
-        // tickets - compact length prefix + fixed-size items
-        builder ++= codec.encodeCompactInteger(a.tickets.length.toLong)
-        for ticket <- a.tickets do
-          builder ++= ticket.encode
-        // preimages - compact length prefix + variable-size items
-        builder ++= codec.encodeCompactInteger(a.preimages.length.toLong)
-        for preimage <- a.preimages do
-          builder ++= preimage.encode
-        // guarantees - compact length prefix + variable-size items
-        builder ++= codec.encodeCompactInteger(a.guarantees.length.toLong)
-        for guarantee <- a.guarantees do
-          builder ++= guarantee.encode
-        // assurances - compact length prefix + config-dependent items
-        builder ++= codec.encodeCompactInteger(a.assurances.length.toLong)
-        for assurance <- a.assurances do
-          builder ++= assurance.encode
-        // disputes - variable size
-        builder ++= a.disputes.encode
-        builder.result()
+    /**
+     * Create a codec for Extrinsic with config-dependent sizes.
+     *
+     * @param coresCount The number of cores (affects assurance bitfield size)
+     * @param votesPerVerdict The number of votes per verdict (affects dispute encoding)
+     */
+    def extrinsicCodec(coresCount: Int, votesPerVerdict: Int): Codec[Extrinsic] =
+      (compactPrefixedList(summon[Codec[TicketEnvelope]]) ::
+       compactPrefixedList(summon[Codec[Preimage]]) ::
+       compactPrefixedList(summon[Codec[GuaranteeExtrinsic]]) ::
+       compactPrefixedList(AssuranceExtrinsic.codec(coresCount)) ::
+       Dispute.codec(votesPerVerdict)).xmap(
+        { case (tickets, preimages, guarantees, assurances, disputes) =>
+          Extrinsic(tickets, preimages, guarantees, assurances, disputes)
+        },
+        e => (e.tickets, e.preimages, e.guarantees, e.assurances, e.disputes)
+      )
 
     /**
-     * Create a decoder that knows the config-dependent sizes.
+     * Create a codec that knows the config-dependent sizes.
      */
-    def decoder(config: ChainConfig): JamDecoder[Extrinsic] =
-      decoder(config.coresCount, config.votesPerVerdict)
-
-    /**
-     * Create a decoder that knows the cores count and votes per verdict.
-     */
-    def decoder(coresCount: Int, votesPerVerdict: Int): JamDecoder[Extrinsic] = new JamDecoder[Extrinsic]:
-      def decode(bytes: JamBytes, offset: Int): (Extrinsic, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-
-        // tickets - compact length prefix + fixed-size items
-        val (ticketsLength, ticketsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += ticketsLengthBytes
-        val tickets = (0 until ticketsLength.toInt).map { _ =>
-          val (ticket, consumed) = bytes.decodeAs[TicketEnvelope](pos)
-          pos += consumed
-          ticket
-        }.toList
-
-        // preimages - compact length prefix + variable-size items
-        val (preimagesLength, preimagesLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += preimagesLengthBytes
-        val preimages = (0 until preimagesLength.toInt).map { _ =>
-          val (preimage, consumed) = bytes.decodeAs[Preimage](pos)
-          pos += consumed
-          preimage
-        }.toList
-
-        // guarantees - compact length prefix + variable-size items
-        val (guaranteesLength, guaranteesLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += guaranteesLengthBytes
-        val guarantees = (0 until guaranteesLength.toInt).map { _ =>
-          val (guarantee, consumed) = bytes.decodeAs[GuaranteeExtrinsic](pos)
-          pos += consumed
-          guarantee
-        }.toList
-
-        // assurances - compact length prefix + config-dependent items
-        val (assurancesLength, assurancesLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += assurancesLengthBytes
-        val assuranceDecoder = AssuranceExtrinsic.decoder(coresCount)
-        val assurances = (0 until assurancesLength.toInt).map { _ =>
-          val (assurance, consumed) = assuranceDecoder.decode(bytes, pos)
-          pos += consumed
-          assurance
-        }.toList
-
-        // disputes - variable size (config-dependent)
-        val disputeDecoder = Dispute.decoder(votesPerVerdict)
-        val (disputes, disputesConsumed) = disputeDecoder.decode(bytes, pos)
-        pos += disputesConsumed
-
-        (Extrinsic(tickets, preimages, guarantees, assurances, disputes), pos - offset)
+    def extrinsicCodec(config: ChainConfig): Codec[Extrinsic] =
+      extrinsicCodec(config.coresCount, config.votesPerVerdict)
 
     given Decoder[Extrinsic] = Decoder.instance { cursor =>
       for
@@ -132,46 +78,30 @@ object block:
 
   object Block:
     /**
-     * Encoder that works for any block (config-independent encoding).
+     * Create a codec for Block with config-dependent sizes.
+     *
+     * @param validatorCount The number of validators
+     * @param epochLength The epoch length in slots
+     * @param coresCount The number of cores
+     * @param votesPerVerdict The number of votes per verdict
      */
-    given JamEncoder[Block] with
-      def encode(a: Block): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.header.encode
-        builder ++= a.extrinsic.encode
-        builder.result()
+    def blockCodec(validatorCount: Int, epochLength: Int, coresCount: Int, votesPerVerdict: Int): Codec[Block] =
+      (Header.headerCodec(validatorCount, epochLength) :: Extrinsic.extrinsicCodec(coresCount, votesPerVerdict)).xmap(
+        { case (header, extrinsic) => Block(header, extrinsic) },
+        b => (b.header, b.extrinsic)
+      )
 
     /**
-     * Create a decoder that knows the config-dependent sizes.
+     * Create a codec that knows the config-dependent sizes.
      */
-    def decoder(config: ChainConfig): JamDecoder[Block] =
-      decoder(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
-
-    /**
-     * Create a decoder that knows all config-dependent parameters.
-     */
-    def decoder(validatorCount: Int, epochLength: Int, coresCount: Int, votesPerVerdict: Int): JamDecoder[Block] =
-      new JamDecoder[Block]:
-        def decode(bytes: JamBytes, offset: Int): (Block, Int) =
-          var pos = offset
-
-          // header - variable size (config-dependent)
-          val headerDecoder = Header.decoder(validatorCount, epochLength)
-          val (header, headerBytes) = headerDecoder.decode(bytes, pos)
-          pos += headerBytes
-
-          // extrinsic - variable size (config-dependent)
-          val extrinsicDecoder = Extrinsic.decoder(coresCount, votesPerVerdict)
-          val (extrinsic, extrinsicBytes) = extrinsicDecoder.decode(bytes, pos)
-          pos += extrinsicBytes
-
-          (Block(header, extrinsic), pos - offset)
+    def blockCodec(config: ChainConfig): Codec[Block] =
+      blockCodec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
 
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: JamBytes, offset: Int, config: ChainConfig): (Block, Int) =
-      decoder(config).decode(bytes, offset)
+    def fromBytes(bytes: ByteVector, config: ChainConfig): Attempt[DecodeResult[Block]] =
+      blockCodec(config).decode(bytes.bits)
 
     given Decoder[Block] = Decoder.instance { cursor =>
       for
