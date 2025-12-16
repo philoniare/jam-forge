@@ -1,26 +1,26 @@
 package io.forge.jam.protocol.traces
 
 import io.forge.jam.core.{ChainConfig, JamBytes, codec}
+import io.forge.jam.core.codec.{encode, decodeAs}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.types.history.HistoricalBetaContainer
+import io.forge.jam.core.types.history.HistoricalBetaContainer.given
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import io.forge.jam.protocol.accumulation.{
   AccumulationServiceItem,
   AccumulationServiceData,
   AccumulationReadyRecord,
-  Privileges,
-  AlwaysAccItem
+  Privileges
 }
 import io.forge.jam.core.types.service.ServiceInfo
+import io.forge.jam.core.types.service.ServiceInfo.given
 import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import org.slf4j.LoggerFactory
-
-import scala.collection.mutable
 
 /**
  * Unified JAM state container holding all state components.
@@ -99,6 +99,8 @@ final case class FullJamState(
   rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty
 ):
 
+  private val logger = LoggerFactory.getLogger(getClass)
+
   /**
    * Convert back to raw keyvals for state root computation.
    */
@@ -124,14 +126,14 @@ final case class FullJamState(
     // Recent history (0x03) - always re-encode (modified by History STF)
     builder += KeyValue(
       StateKeys.simpleKey(StateKeys.RECENT_HISTORY),
-      encodeRecentHistory(recentHistory)
+      recentHistory.encode
     )
 
     // Safrole gamma state (0x04) - always re-encode (modified by Safrole STF at epoch boundaries)
     val safroleKey = StateKeys.simpleKey(StateKeys.SAFROLE_STATE)
     builder += KeyValue(
       safroleKey,
-      encodeSafroleGammaState(safroleGammaK, safroleGammaZ, safroleGammaS, safroleGammaA, config)
+      encodeSafroleGammaState(safroleGammaK, safroleGammaZ, safroleGammaS, safroleGammaA)
     )
 
     // Judgements (0x05) - pass through original if available
@@ -201,7 +203,7 @@ final case class FullJamState(
       val serviceKey = encodeServiceAccountKey(item.id)
       builder += KeyValue(
         serviceKey,
-        encodeServiceInfo(item.data.service)
+        item.data.service.encode
       )
 
     // Service storage data (prefix 0x00) - use ONLY rawServiceDataByStateKey as source of truth
@@ -243,24 +245,6 @@ final case class FullJamState(
     key(7) = ((serviceId >> 24) & 0xff).toByte
     JamBytes(key)
 
-  /**
-   * Encode ServiceInfo without version prefix (88 bytes).
-   */
-  private def encodeServiceInfo(info: ServiceInfo): JamBytes =
-    import spire.math.{UInt, ULong}
-    val builder = JamBytes.newBuilder
-    builder ++= info.codeHash.bytes
-    builder ++= codec.encodeU64LE(ULong(info.balance))
-    builder ++= codec.encodeU64LE(ULong(info.minItemGas))
-    builder ++= codec.encodeU64LE(ULong(info.minMemoGas))
-    builder ++= codec.encodeU64LE(ULong(info.bytesUsed))
-    builder ++= codec.encodeU64LE(ULong(info.depositOffset))
-    builder ++= codec.encodeU32LE(UInt(info.items))
-    builder ++= codec.encodeU32LE(UInt(info.creationSlot.toInt))
-    builder ++= codec.encodeU32LE(UInt(info.lastAccumulationSlot.toInt))
-    builder ++= codec.encodeU32LE(UInt(info.parentService.toInt))
-    builder.result()
-
   // Encoding helpers
 
   private def encodeTimeslot(tau: Long): JamBytes =
@@ -273,7 +257,6 @@ final case class FullJamState(
     builder.result()
 
   private def encodeValidatorList(validators: List[ValidatorKey]): JamBytes =
-    import io.forge.jam.core.codec.encode
     val builder = JamBytes.newBuilder
     for v <- validators do
       builder ++= v.encode
@@ -283,10 +266,8 @@ final case class FullJamState(
     gammaK: List[ValidatorKey],
     gammaZ: JamBytes,
     gammaS: TicketsOrKeys,
-    gammaA: List[TicketMark],
-    config: ChainConfig
+    gammaA: List[TicketMark]
   ): JamBytes =
-    import io.forge.jam.core.codec.encode
     val builder = JamBytes.newBuilder
 
     // gammaK - fixed list of validators
@@ -320,17 +301,9 @@ final case class FullJamState(
     builder.result()
 
   /**
-   * Encode recent history (beta).
-   */
-  private def encodeRecentHistory(history: HistoricalBetaContainer): JamBytes =
-    import io.forge.jam.core.codec.encode
-    history.encode
-
-  /**
    * Encode reports (rho) - availability assignments.
    */
   private def encodeReports(reports: List[Option[AvailabilityAssignment]]): JamBytes =
-    import io.forge.jam.core.codec.encode
     val builder = JamBytes.newBuilder
     for reportOpt <- reports do
       reportOpt match
@@ -346,9 +319,7 @@ final case class FullJamState(
    * Format: accumulator (validator stats), previous (validator stats), core stats, service stats
    */
   private def encodeActivityStatistics(config: ChainConfig): JamBytes =
-    import io.forge.jam.core.codec.encode
-    import io.forge.jam.core.codec.encodeFixedList
-    import spire.math.{UInt, ULong}
+    import spire.math.UInt
     val builder = JamBytes.newBuilder
 
     // Pad to validator count
@@ -364,8 +335,6 @@ final case class FullJamState(
       builder ++= codec.encodeU32LE(UInt(stat.guarantees.toInt))
       builder ++= codec.encodeU32LE(UInt(stat.assurances.toInt))
 
-    val afterAccumulator = builder.result()
-
     // Previous (last validator stats) - fixed-size array, no length prefix
     for stat <- paddedLast do
       builder ++= codec.encodeU32LE(UInt(stat.blocks.toInt))
@@ -375,11 +344,9 @@ final case class FullJamState(
       builder ++= codec.encodeU32LE(UInt(stat.guarantees.toInt))
       builder ++= codec.encodeU32LE(UInt(stat.assurances.toInt))
 
-    val afterPrevious = builder.result()
-
     // Core stats - fixed-size array (coresCount), each field compact-encoded
     val paddedCoreStats = coreStatistics.padTo(config.coresCount, CoreStatisticsRecord.zero)
-    for (stat, idx) <- paddedCoreStats.zipWithIndex do
+    for stat <- paddedCoreStats do
       builder ++= codec.encodeCompactInteger(stat.daLoad) // dataSize (package.length + segmentsSize)
       builder ++= codec.encodeCompactInteger(stat.popularity) // assuranceCount
       builder ++= codec.encodeCompactInteger(stat.imports)
@@ -388,8 +355,6 @@ final case class FullJamState(
       builder ++= codec.encodeCompactInteger(stat.exports)
       builder ++= codec.encodeCompactInteger(stat.bundleSize) // packageSize
       builder ++= codec.encodeCompactInteger(stat.gasUsed)
-
-    val afterCore = builder.result()
 
     // Service stats - sorted map with compact length prefix
     val sortedServiceStats = serviceStatistics.sortBy(_.id)
@@ -598,7 +563,6 @@ object FullJamState:
    * Decode recent history from keyvals.
    */
   private def decodeRecentHistory(keyvals: List[KeyValue]): HistoricalBetaContainer =
-    import io.forge.jam.core.codec.decodeAs
     val historyKv = keyvals.find(kv =>
       (kv.key.toArray(0).toInt & 0xff) == (StateKeys.RECENT_HISTORY.toInt & 0xff)
     )
@@ -728,8 +692,7 @@ object FullJamState:
         ((keyBytes(7).toInt & 0xff) << 24)
 
       val valueBytes = kv.value.toArray
-      // Decode ServiceInfo (88 bytes without version prefix)
-      val serviceInfo = decodeServiceInfoNoVersion(valueBytes)
+      val (serviceInfo, _) = JamBytes(valueBytes).decodeAs[ServiceInfo](0)
 
       AccumulationServiceItem(
         id = serviceId.toLong,
@@ -743,61 +706,10 @@ object FullJamState:
     }.sortBy(_.id)
 
   /**
-   * Decode ServiceInfo without version prefix (88 bytes).
-   * Format:
-   *   codeHash: 32 bytes
-   *   balance: 8 bytes LE
-   *   minItemGas: 8 bytes LE
-   *   minMemoGas: 8 bytes LE
-   *   bytesUsed: 8 bytes LE
-   *   depositOffset: 8 bytes LE
-   *   items: 4 bytes LE
-   *   creationSlot: 4 bytes LE
-   *   lastAccumulationSlot: 4 bytes LE
-   *   parentService: 4 bytes LE
-   */
-  private def decodeServiceInfoNoVersion(bytes: Array[Byte]): ServiceInfo =
-    var pos = 0
-    val codeHash = Hash(bytes.slice(pos, pos + 32))
-    pos += 32
-    val balance = codec.decodeU64LE(bytes, pos).signed
-    pos += 8
-    val minItemGas = codec.decodeU64LE(bytes, pos).signed
-    pos += 8
-    val minMemoGas = codec.decodeU64LE(bytes, pos).signed
-    pos += 8
-    val bytesUsed = codec.decodeU64LE(bytes, pos).signed
-    pos += 8
-    val depositOffset = codec.decodeU64LE(bytes, pos).signed
-    pos += 8
-    val items = codec.decodeU32LE(bytes, pos).signed
-    pos += 4
-    val creationSlot = codec.decodeU32LE(bytes, pos).toLong
-    pos += 4
-    val lastAccumulationSlot = codec.decodeU32LE(bytes, pos).toLong
-    pos += 4
-    val parentService = codec.decodeU32LE(bytes, pos).toLong
-
-    ServiceInfo(
-      // version = 0,
-      codeHash = codeHash,
-      balance = balance,
-      minItemGas = minItemGas,
-      minMemoGas = minMemoGas,
-      bytesUsed = bytesUsed,
-      depositOffset = depositOffset,
-      items = items,
-      creationSlot = creationSlot,
-      lastAccumulationSlot = lastAccumulationSlot,
-      parentService = parentService
-    )
-
-  /**
    * Decode reports (rho) from keyvals (0x0A).
    * Format: coresCount * Option[AvailabilityAssignment]
    */
   private def decodeReports(keyvals: List[KeyValue], coresCount: Int): List[Option[AvailabilityAssignment]] =
-    import io.forge.jam.core.codec.decodeAs
     val reportsKv = keyvals.find(kv =>
       (kv.key.toArray(0).toInt & 0xff) == (StateKeys.REPORTS.toInt & 0xff)
     )
