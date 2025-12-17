@@ -67,7 +67,7 @@ object ConformanceServerApp extends IOApp:
 
   private def runServer(config: ServerConfig): IO[ExitCode] =
     for
-      _ <- IO.println(s"JAM Forge Conformance Testing Server v0.7.0")
+      _ <- IO.println(s"JAM Forge Conformance Testing Server v0.7.1")
       _ <- IO.println(s"Socket path: ${config.socketPath}")
       _ <- IO.println(s"Log path: ${config.logPath}")
       _ <- IO.println("Starting server...")

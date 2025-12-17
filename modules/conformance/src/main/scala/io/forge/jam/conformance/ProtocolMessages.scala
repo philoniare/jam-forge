@@ -16,8 +16,10 @@ import _root_.scodec.Codec
 object Features:
   /** Target has access to block ancestry of up to L items */
   val ANCESTRY: Int = 0x01
+
   /** Simple forking: forks are supported with max depth 1 */
   val FORKS: Int = 0x02
+
   /** All supported features for M1 conformance */
   val ALL_M1: Int = ANCESTRY | FORKS
 
@@ -31,8 +33,8 @@ final case class Version(
 )
 
 object Version:
-  val JAM_VERSION: Version = Version(UByte(0), UByte(7), UByte(0))
-  val APP_VERSION: Version = Version(UByte(0), UByte(1), UByte(0))
+  val JAM_VERSION: Version = Version(UByte(0), UByte(7), UByte(1))
+  val APP_VERSION: Version = Version(UByte(0), UByte(1), UByte(1))
 
   given Codec[Version] =
     (JamCodecs.ubyteCodec :: JamCodecs.ubyteCodec :: JamCodecs.ubyteCodec).xmap(
@@ -75,9 +77,10 @@ object PeerInfo:
     val stringCodec: Codec[String] = variableSizeBytesLong(JamCodecs.compactInteger, _root_.scodec.codecs.utf8)
 
     (JamCodecs.ubyteCodec :: JamCodecs.uintCodec :: summon[Codec[Version]] ::
-     summon[Codec[Version]] :: stringCodec).xmap(
-      { case (fuzzVersion, fuzzFeatures, jamVersion, appVersion, appName) =>
-        PeerInfo(fuzzVersion, fuzzFeatures, jamVersion, appVersion, appName)
+      summon[Codec[Version]] :: stringCodec).xmap(
+      {
+        case (fuzzVersion, fuzzFeatures, jamVersion, appVersion, appName) =>
+          PeerInfo(fuzzVersion, fuzzFeatures, jamVersion, appVersion, appName)
       },
       p => (p.fuzzVersion, p.fuzzFeatures, p.jamVersion, p.appVersion, p.appName)
     )
@@ -95,7 +98,7 @@ object AncestryItem:
     import _root_.scodec.codecs.*
     (uint32L :: JamCodecs.hashCodec).xmap(
       { case (slotVal, headerHash) => AncestryItem(Timeslot(slotVal.toInt), headerHash) },
-      a => (a.slot.value.toLong & 0xFFFFFFFFL, a.headerHash)
+      a => (a.slot.value.toLong & 0xffffffffL, a.headerHash)
     )
 
 /**
@@ -112,8 +115,8 @@ object Initialize:
 
   def codec(config: ChainConfig): Codec[Initialize] =
     (Header.headerCodec(config) ::
-     JamCodecs.compactPrefixedList(summon[Codec[KeyValue]]) ::
-     JamCodecs.compactPrefixedList(summon[Codec[AncestryItem]])).xmap(
+      JamCodecs.compactPrefixedList(summon[Codec[KeyValue]]) ::
+      JamCodecs.compactPrefixedList(summon[Codec[AncestryItem]])).xmap(
       { case (header, keyvals, ancestry) => Initialize(header, keyvals, ancestry) },
       i => (i.header, i.keyvals, i.ancestry)
     )
@@ -180,7 +183,7 @@ object State:
 final case class Error(message: String)
 
 object Error:
-  val DISCRIMINANT: Int = 0xFF
+  val DISCRIMINANT: Int = 0xff
 
   given Codec[Error] =
     import _root_.scodec.codecs.*
@@ -232,7 +235,7 @@ object ProtocolMessage:
    * The discriminant byte indicates message type.
    */
   def decodeMessage(bytes: JamBytes, offset: Int, config: ChainConfig): (ProtocolMessage, Int) =
-    val discriminant = bytes.toArray(offset) & 0xFF
+    val discriminant = bytes.toArray(offset) & 0xff
     val bodyOffset = offset + 1
 
     discriminant match
