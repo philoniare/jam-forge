@@ -1,7 +1,8 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.conformance.ConformanceCodecs.encode
+import _root_.scodec.Codec
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
 import org.slf4j.LoggerFactory
@@ -349,16 +350,16 @@ class ConformanceTestRunner(
    * Parse and print statistics field-by-field for debugging.
    */
   private def parseAndPrintStatistics(bytes: Array[Byte]): Unit =
-    import io.forge.jam.core.codec
+    import io.forge.jam.core.scodec.JamCodecs
     var pos = 0
 
     def readU32LE(): Long =
-      val v = codec.decodeU32LE(bytes, pos).toLong
+      val v = JamCodecs.decodeU32LE(bytes, pos).toLong
       pos += 4
       v
 
     def readCompact(): Long =
-      val (v, len) = codec.decodeCompactInteger(bytes, pos)
+      val (v, len) = JamCodecs.decodeCompactInteger(bytes, pos)
       pos += len
       v
 

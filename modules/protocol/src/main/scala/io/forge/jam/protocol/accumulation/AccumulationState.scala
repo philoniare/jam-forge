@@ -12,6 +12,7 @@ import _root_.scodec.{Codec, Attempt, DecodeResult}
 import _root_.scodec.bits.BitVector
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.JamCodecs.jamBytesCodec
 
 import scala.collection.mutable
 
@@ -278,29 +279,6 @@ object AccumulationReadyRecord:
       r => (r.report, r.dependencies)
     )
 
-  @deprecated("Old decoder removed", "0.7.0")
-  private def oldDecode: Unit =
-    // Old implementation
-    val bytes = JamBytes.empty
-    val offset = 0
-    val arr = bytes.toArray
-    var pos = offset
-
-    // report - variable size
-    val report = null
-    val reportBytes = 0
-      pos += reportBytes
-
-      // dependencies - compact length + 32-byte hashes
-      val (depsLength, depsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += depsLengthBytes
-      val dependencies = (0 until depsLength.toInt).map { _ =>
-        val dep = JamBytes(arr.slice(pos, pos + 32))
-        pos += 32
-        dep
-      }.toList
-
-      (AccumulationReadyRecord(report, dependencies), pos - offset)
 
   given Decoder[AccumulationReadyRecord] = Decoder.instance { cursor =>
     for
@@ -382,90 +360,25 @@ final case class AccumulationState(
     )
 
 object AccumulationState:
-  /** Create a config-aware decoder for AccumulationState */
-  def decoder(coresCount: Int, epochLength: Int): JamDecoder[AccumulationState] = new JamDecoder[AccumulationState]:
-    def decode(bytes: JamBytes, offset: Int): (AccumulationState, Int) =
-      val arr = bytes.toArray
-      var pos = offset
+  def codec(coresCount: Int, epochLength: Int): Codec[AccumulationState] =
+    val readyQueueCodec: Codec[List[List[AccumulationReadyRecord]]] =
+      JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]), epochLength)
 
-      // slot - 4 bytes
-      val slot = codec.decodeU32LE(arr, pos).toLong
-      pos += 4
+    val accumulatedCodec: Codec[List[List[JamBytes]]] =
+      JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(summon[Codec[JamBytes]]), epochLength)
 
-      // entropy - 32 bytes
-      val entropy = JamBytes(arr.slice(pos, pos + 32))
-      pos += 32
-
-      // readyQueue - fixed size list (epochLength), each inner list is variable
-      val readyQueue = (0 until epochLength).map { _ =>
-        val (innerLength, innerLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += innerLengthBytes
-        (0 until innerLength.toInt).map { _ =>
-          val (record, recordBytes) = bytes.decodeAs[AccumulationReadyRecord](pos)
-          pos += recordBytes
-          record
-        }.toList
-      }.toList
-
-      // accumulated - fixed size list (epochLength), each inner list is variable 32-byte hashes
-      val accumulated = (0 until epochLength).map { _ =>
-        val (innerLength, innerLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += innerLengthBytes
-        (0 until innerLength.toInt).map { _ =>
-          val hash = JamBytes(arr.slice(pos, pos + 32))
-          pos += 32
-          hash
-        }.toList
-      }.toList
-
-      // privileges - variable size
-      val privilegesDecoder = Privileges.decoder(coresCount)
-      val (privileges, privilegesBytes) = privilegesDecoder.decode(bytes, pos)
-      pos += privilegesBytes
-
-      // statistics - compact length + variable-size items
-      val (statsLength, statsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += statsLengthBytes
-      val statistics = (0 until statsLength.toInt).map { _ =>
-        val (entry, entryBytes) = bytes.decodeAs[ServiceStatisticsEntry](pos)
-        pos += entryBytes
-        entry
-      }.toList
-
-      // accounts - compact length + variable-size items
-      val (accountsLength, accountsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += accountsLengthBytes
-      val accounts = (0 until accountsLength.toInt).map { _ =>
-        val (item, itemBytes) = bytes.decodeAs[AccumulationServiceItem](pos)
-        pos += itemBytes
-        item
-      }.toList
-
-      (AccumulationState(slot, entropy, readyQueue, accumulated, privileges, statistics, accounts), pos - offset)
-
-  given JamEncoder[AccumulationState] with
-    def encode(a: AccumulationState): JamBytes =
-      val builder = JamBytes.newBuilder
-      builder ++= codec.encodeU32LE(UInt(a.slot.toInt))
-      builder ++= a.entropy
-      // readyQueue - nested list with fixed outer size
-      for inner <- a.readyQueue do
-        builder ++= codec.encodeCompactInteger(inner.size.toLong)
-        for record <- inner do
-          builder ++= record.encode
-      // accumulated - nested list with fixed outer size
-      for inner <- a.accumulated do
-        builder ++= codec.encodeCompactInteger(inner.size.toLong)
-        for hash <- inner do
-          builder ++= hash
-      builder ++= a.privileges.encode
-      builder ++= codec.encodeCompactInteger(a.statistics.size.toLong)
-      for stat <- a.statistics do
-        builder ++= stat.encode
-      builder ++= codec.encodeCompactInteger(a.accounts.size.toLong)
-      for account <- a.accounts do
-        builder ++= account.encode
-      builder.result()
+    (uint32L ::
+     JamCodecs.hashCodec ::
+     readyQueueCodec ::
+     accumulatedCodec ::
+     Privileges.codec(coresCount) ::
+     JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]]) ::
+     JamCodecs.compactPrefixedList(summon[Codec[AccumulationServiceItem]])).xmap(
+      { case (slot, entropy, readyQueue, accumulated, privileges, statistics, accounts) =>
+        AccumulationState(slot & 0xFFFFFFFFL, JamBytes.fromByteVector(entropy.toByteVector), readyQueue, accumulated, privileges, statistics, accounts)
+      },
+      a => (a.slot & 0xFFFFFFFFL, Hash(a.entropy.toArray), a.readyQueue, a.accumulated, a.privileges, a.statistics, a.accounts)
+    )
 
   given Decoder[AccumulationState] = Decoder.instance { cursor =>
     for
@@ -526,34 +439,11 @@ final case class AccumulationInput(
 )
 
 object AccumulationInput:
-  given JamEncoder[AccumulationInput] with
-    def encode(a: AccumulationInput): JamBytes =
-      val builder = JamBytes.newBuilder
-      builder ++= codec.encodeU32LE(UInt(a.slot.toInt))
-      builder ++= codec.encodeCompactInteger(a.reports.size.toLong)
-      for report <- a.reports do
-        builder ++= report.encode
-      builder.result()
-
-  given JamDecoder[AccumulationInput] with
-    def decode(bytes: JamBytes, offset: Int): (AccumulationInput, Int) =
-      val arr = bytes.toArray
-      var pos = offset
-
-      // slot - 4 bytes
-      val slot = codec.decodeU32LE(arr, pos).toLong
-      pos += 4
-
-      // reports - compact length + variable-size items
-      val (reportsLength, reportsLengthBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += reportsLengthBytes
-      val reports = (0 until reportsLength.toInt).map { _ =>
-        val (report, reportBytes) = bytes.decodeAs[WorkReport](pos)
-        pos += reportBytes
-        report
-      }.toList
-
-      (AccumulationInput(slot, reports), pos - offset)
+  given Codec[AccumulationInput] =
+    (uint32L :: JamCodecs.compactPrefixedList(summon[Codec[WorkReport]])).xmap(
+      { case (slot, reports) => AccumulationInput(slot & 0xFFFFFFFFL, reports) },
+      i => (i.slot & 0xFFFFFFFFL, i.reports)
+    )
 
   given Decoder[AccumulationInput] = Decoder.instance { cursor =>
     for
@@ -576,25 +466,13 @@ final case class AccumulationOutputData(
 )
 
 object AccumulationOutputData:
-  given JamEncoder[AccumulationOutputData] with
-    def encode(a: AccumulationOutputData): JamBytes =
-      val builder = JamBytes.newBuilder
-      builder ++= codec.encodeCompactInteger(a.ok.length.toLong)
-      builder ++= a.ok
-      builder.result()
-
-  given JamDecoder[AccumulationOutputData] with
-    def decode(bytes: JamBytes, offset: Int): (AccumulationOutputData, Int) =
-      val arr = bytes.toArray
-      var pos = offset
-
-      // ok - compact length + bytes
-      val (okLength, okLengthBytes) = codec.decodeCompactInteger(arr, pos)
-      pos += okLengthBytes
-      val ok = JamBytes(arr.slice(pos, pos + okLength.toInt))
-      pos += okLength.toInt
-
-      (AccumulationOutputData(ok), pos - offset)
+  // AccumulationOutputData codec - only used for decoding in tests
+  // Encoding is handled via custom logic in AccumulationOutput
+  given Codec[AccumulationOutputData] =
+    variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]).xmap(
+      ok => AccumulationOutputData(ok),
+      a => a.ok
+    )
 
   given Decoder[AccumulationOutputData] = Decoder.instance { cursor =>
     for
@@ -610,33 +488,36 @@ object AccumulationOutputData:
 type AccumulationOutput = StfResult[AccumulationOutputData, Nothing]
 
 object AccumulationOutput:
-  given jamEncoder: JamEncoder[AccumulationOutput] with
-    def encode(a: AccumulationOutput): JamBytes =
-      val builder = JamBytes.newBuilder
-      builder += 0.toByte // discriminator for ok
-      a.foreach(data => builder ++= data.encode)
-      builder.result()
-
-  given jamDecoder: JamDecoder[AccumulationOutput] with
-    def decode(bytes: JamBytes, offset: Int): (AccumulationOutput, Int) =
-      val arr = bytes.toArray
-      var pos = offset
-
-      // discriminator - 0 = ok, 1 = err
-      val discriminator = arr(pos).toInt & 0xff
-      pos += 1
-
-      if discriminator == 0 then
-        val (data, dataBytes) = bytes.decodeAs[AccumulationOutputData](pos)
-        (StfResult.success(data), 1 + dataBytes)
-      else
-        (StfResult.success(AccumulationOutputData(JamBytes.empty)), pos - offset)
-
-  given circeDecoder: Decoder[AccumulationOutput] = Decoder.instance { cursor =>
+  given Decoder[AccumulationOutput] = Decoder.instance { cursor =>
     for
       ok <- cursor.get[String]("ok")
     yield StfResult.success(AccumulationOutputData(JamBytes(parseHex(ok))))
   }
+
+// Custom codec for AccumulationOutput (StfResult[AccumulationOutputData, Nothing])
+// Since error type is Nothing, we only encode/decode success case with discriminator 0
+given accumulationOutputCodec: Codec[AccumulationOutput] = new Codec[AccumulationOutput]:
+  def sizeBound = _root_.scodec.SizeBound.unknown
+
+  def encode(value: AccumulationOutput) =
+    val dataCodec = summon[Codec[AccumulationOutputData]]
+    value match
+      case Right(data) =>
+        for
+          discriminator <- uint8.encode(0)
+          encoded <- dataCodec.encode(data)
+        yield discriminator ++ encoded
+      case Left(_) =>
+        // This should never happen since error type is Nothing
+        Attempt.failure(_root_.scodec.Err("Cannot encode error in AccumulationOutput"))
+
+  def decode(bits: BitVector) =
+    for
+      discriminator <- uint8.decode(bits)
+      _ <- if discriminator.value == 0 then Attempt.successful(())
+           else Attempt.failure(_root_.scodec.Err(s"Invalid discriminator: ${discriminator.value}"))
+      result <- summon[Codec[AccumulationOutputData]].decode(discriminator.remainder)
+    yield result.map(data => Right(data))
 
 /**
  * Test case for accumulation STF.
@@ -649,43 +530,26 @@ final case class AccumulationCase(
 )
 
 object AccumulationCase:
-  // Import the custom codecs from AccumulationOutput companion
-  import AccumulationOutput.{jamEncoder, jamDecoder, circeDecoder}
+  import AccumulationOutput.given
 
-  /** Create a config-aware decoder for AccumulationCase */
-  def decoder(coresCount: Int, epochLength: Int): JamDecoder[AccumulationCase] = new JamDecoder[AccumulationCase]:
-    def decode(bytes: JamBytes, offset: Int): (AccumulationCase, Int) =
-      var pos = offset
-
-      val (input, inputBytes) = bytes.decodeAs[AccumulationInput](pos)
-      pos += inputBytes
-
-      val stateDecoder = AccumulationState.decoder(coresCount, epochLength)
-      val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
-      pos += preStateBytes
-
-      val (output, outputBytes) = jamDecoder.decode(bytes, pos)
-      pos += outputBytes
-
-      val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
-      pos += postStateBytes
-
-      (AccumulationCase(input, preState, output, postState), pos - offset)
-
-  given JamEncoder[AccumulationCase] with
-    def encode(a: AccumulationCase): JamBytes =
-      val builder = JamBytes.newBuilder
-      builder ++= a.input.encode
-      builder ++= a.preState.encode
-      builder ++= jamEncoder.encode(a.output)
-      builder ++= a.postState.encode
-      builder.result()
+  /** Create a config-aware codec for AccumulationCase */
+  def codec(coresCount: Int, epochLength: Int): Codec[AccumulationCase] =
+    val stateCodec = AccumulationState.codec(coresCount, epochLength)
+    (summon[Codec[AccumulationInput]] ::
+     stateCodec ::
+     accumulationOutputCodec ::
+     stateCodec).xmap(
+      { case (input, preState, output, postState) =>
+        AccumulationCase(input, preState, output, postState)
+      },
+      c => (c.input, c.preState, c.output, c.postState)
+    )
 
   given Decoder[AccumulationCase] = Decoder.instance { cursor =>
     for
       input <- cursor.get[AccumulationInput]("input")
       preState <- cursor.get[AccumulationState]("pre_state")
-      output <- cursor.get[AccumulationOutput]("output")(circeDecoder)
+      output <- cursor.get[AccumulationOutput]("output")
       postState <- cursor.get[AccumulationState]("post_state")
     yield AccumulationCase(input, preState, output, postState)
   }

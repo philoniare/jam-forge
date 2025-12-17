@@ -1,10 +1,12 @@
 package io.forge.jam.protocol.history
 
-import io.forge.jam.core.{JamBytes, codec, ChainConfig, constants}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.codecs.*
+import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.history.{ReportedWorkPackage, HistoricalBeta, HistoricalMmr, HistoricalBetaContainer}
 import io.forge.jam.core.json.JsonHelpers.parseHash
+import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
 
 /**
@@ -27,14 +29,12 @@ object HistoryTypes:
   )
 
   object HistoricalState:
-    given JamEncoder[HistoricalState] with
-      def encode(a: HistoricalState): JamBytes =
-        summon[JamEncoder[HistoricalBetaContainer]].encode(a.beta)
+    given Codec[HistoricalState] =
+      Codec[HistoricalBetaContainer].xmap(
+        beta => HistoricalState(beta),
+        hs => hs.beta
+      )
 
-    given JamDecoder[HistoricalState] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalState, Int) =
-        val (beta, consumed) = summon[JamDecoder[HistoricalBetaContainer]].decode(bytes, offset)
-        (HistoricalState(beta), consumed)
 
     given Decoder[HistoricalState] =
       Decoder.instance { cursor =>
@@ -66,35 +66,14 @@ object HistoryTypes:
       }
 
   object HistoricalInput:
-    given JamEncoder[HistoricalInput] with
-      def encode(a: HistoricalInput): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.headerHash.bytes
-        builder ++= a.parentStateRoot.bytes
-        builder ++= a.accumulateRoot.bytes
-        builder ++= codec.encodeCompactInteger(a.workPackages.length.toLong)
-        for pkg <- a.workPackages do
-          builder ++= summon[JamEncoder[ReportedWorkPackage]].encode(pkg)
-        builder.result()
+    given Codec[HistoricalInput] =
+      (JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
+        { case (headerHash, parentStateRoot, accumulateRoot, workPackages) =>
+          HistoricalInput(headerHash, parentStateRoot, accumulateRoot, workPackages)
+        },
+        hi => (hi.headerHash, hi.parentStateRoot, hi.accumulateRoot, hi.workPackages)
+      )
 
-    given JamDecoder[HistoricalInput] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalInput, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val headerHash = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val parentStateRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val accumulateRoot = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-        val (length, lengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += lengthBytes
-        val workPackages = (0 until length.toInt).map { _ =>
-          val (pkg, consumed) = summon[JamDecoder[ReportedWorkPackage]].decode(bytes, pos)
-          pos += consumed
-          pkg
-        }.toList
-        (HistoricalInput(headerHash, parentStateRoot, accumulateRoot, workPackages), pos - offset)
 
     given Decoder[HistoricalInput] =
       Decoder.instance { cursor =>
@@ -119,24 +98,14 @@ object HistoryTypes:
   )
 
   object HistoricalCase:
-    given JamEncoder[HistoricalCase] with
-      def encode(a: HistoricalCase): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= summon[JamEncoder[HistoricalInput]].encode(a.input)
-        builder ++= summon[JamEncoder[HistoricalState]].encode(a.preState)
-        builder ++= summon[JamEncoder[HistoricalState]].encode(a.postState)
-        builder.result()
+    given Codec[HistoricalCase] =
+      (Codec[HistoricalInput] :: Codec[HistoricalState] :: Codec[HistoricalState]).xmap(
+        { case (input, preState, postState) =>
+          HistoricalCase(input, preState, postState)
+        },
+        hc => (hc.input, hc.preState, hc.postState)
+      )
 
-    given JamDecoder[HistoricalCase] with
-      def decode(bytes: JamBytes, offset: Int): (HistoricalCase, Int) =
-        var pos = offset
-        val (input, inputBytes) = summon[JamDecoder[HistoricalInput]].decode(bytes, pos)
-        pos += inputBytes
-        val (preState, preStateBytes) = summon[JamDecoder[HistoricalState]].decode(bytes, pos)
-        pos += preStateBytes
-        val (postState, postStateBytes) = summon[JamDecoder[HistoricalState]].decode(bytes, pos)
-        pos += postStateBytes
-        (HistoricalCase(input, preState, postState), pos - offset)
 
     given Decoder[HistoricalCase] =
       Decoder.instance { cursor =>

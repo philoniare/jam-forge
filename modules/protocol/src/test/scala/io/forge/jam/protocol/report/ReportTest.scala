@@ -56,7 +56,7 @@ class ReportTest extends AnyFunSuite with Matchers:
       bandersnatch = io.forge.jam.core.primitives.BandersnatchPublicKey(Array.fill(32)(0.toByte)),
       ed25519 = io.forge.jam.core.primitives.Ed25519PublicKey(Array.fill(32)(0.toByte)),
       bls = io.forge.jam.core.primitives.BlsPublicKey(Array.fill(144)(0.toByte)),
-      metadata = ByteVector.fill(128L)(0)
+      metadata = JamBytes.zeros(128)
     )
     val defaultAuthPools = if authPools.isEmpty then List.fill(cores)(List.empty) else authPools
 

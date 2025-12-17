@@ -2,8 +2,10 @@ package io.forge.jam.conformance
 
 import cats.effect.IO
 import fs2.io.net.Socket
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.JamCodecs.encode
+import _root_.scodec.Codec
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
 import spire.math.UInt
@@ -59,7 +61,7 @@ class ProtocolHandler(
       case Some(lengthChunk) if lengthChunk.size < 4 =>
         IO.pure(None)
       case Some(lengthChunk) =>
-        val length = codec.decodeU32LE(lengthChunk.toArray, 0).signed
+        val length = JamCodecs.decodeU32LE(lengthChunk.toArray, 0).signed
         if length <= 0 || length > 10_000_000 then
           IO.raiseError(new IllegalArgumentException(s"Invalid message length: $length"))
         else

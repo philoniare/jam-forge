@@ -4,8 +4,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey, ValidatorIndex, ServiceId, Ed25519Signature, Timeslot, CoreIndex, Gas}
+import _root_.scodec.Codec
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Dispute, GuaranteeExtrinsic, Verdict}
 import io.forge.jam.core.types.tickets.TicketEnvelope
@@ -246,6 +247,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
+          given statCaseCodec: Codec[StatCase] = StatCase.codec(ChainConfig.TINY)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
@@ -273,6 +275,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
+          given statCaseCodec: Codec[StatCase] = StatCase.codec(ChainConfig.FULL)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 

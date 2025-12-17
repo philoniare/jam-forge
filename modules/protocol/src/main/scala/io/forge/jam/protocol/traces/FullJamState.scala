@@ -18,8 +18,9 @@ import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import org.slf4j.LoggerFactory
-import _root_.scodec.bits.ByteVector
+import _root_.scodec.bits.{ByteVector, BitVector}
 import _root_.scodec.Codec
+import _root_.scodec.codecs._
 import io.forge.jam.core.scodec.{JamCodecs, FullJamStateCodecs}
 
 /**
@@ -126,7 +127,7 @@ final case class FullJamState(
     // Recent history (0x03) - always re-encode (modified by History STF)
     builder += KeyValue(
       StateKeys.simpleKey(StateKeys.RECENT_HISTORY),
-      summon[Codec[HistoricalBetaContainer]].encode(recentHistory).require.bytes
+      JamBytes.fromByteVector(summon[Codec[HistoricalBetaContainer]].encode(recentHistory).require.bytes)
     )
 
     // Safrole gamma state (0x04) - always re-encode (modified by Safrole STF at epoch boundaries)
@@ -203,7 +204,7 @@ final case class FullJamState(
       val serviceKey = encodeServiceAccountKey(item.id)
       builder += KeyValue(
         serviceKey,
-        summon[Codec[ServiceInfo]].encode(item.data.service).require.bytes
+        JamBytes.fromByteVector(summon[Codec[ServiceInfo]].encode(item.data.service).require.bytes)
       )
 
     // Service storage data (prefix 0x00) - use ONLY rawServiceDataByStateKey as source of truth
@@ -261,11 +262,11 @@ final case class FullJamState(
     gammaA: List[TicketMark]
   ): JamBytes =
     // Convert TicketsOrKeys to FullJamStateCodecs.TicketsOrKeysData
-    val gammaS_data = gammaS match
-      case TicketsOrKeys.Tickets(tickets) => FullJamStateCodecs.TicketsOrKeysData.Tickets(tickets)
-      case TicketsOrKeys.Keys(keys) => FullJamStateCodecs.TicketsOrKeysData.Keys(keys)
+    val (gammaS_data, gammaS_length) = gammaS match
+      case TicketsOrKeys.Tickets(tickets) => (FullJamStateCodecs.TicketsOrKeysData.Tickets(tickets), tickets.length)
+      case TicketsOrKeys.Keys(keys) => (FullJamStateCodecs.TicketsOrKeysData.Keys(keys), keys.length)
 
-    val codec = FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, gammaS.length)
+    val codec = FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, gammaS_length)
     JamBytes.fromByteVector(codec.encode((gammaK, gammaZ.toByteVector, gammaS_data, gammaA)).require.bytes)
 
   /**
@@ -435,42 +436,66 @@ object FullJamState:
         )
 
       case Some(kv) =>
-        val bytes = kv.value.toArray
-        var pos = 0
+        val bits = BitVector(kv.value.toByteVector)
+        var bitPos = 0L
 
         // Decode accumulator (current validator stats) - fixed-size array
         val currentStats = scala.collection.mutable.ListBuffer[StatCount]()
         for _ <- 0 until validatorCount do
-          val blocks = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val tickets = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val preImages = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val preImagesSize = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val guarantees = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val assurances = codec.decodeU32LE(bytes, pos).toLong; pos += 4
+          val blocks = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val tickets = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val preImages = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val preImagesSize = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val guarantees = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val assurances = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
           currentStats += StatCount(blocks, tickets, preImages, preImagesSize, guarantees, assurances)
 
         // Decode previous (last validator stats) - fixed-size array
         val lastStats = scala.collection.mutable.ListBuffer[StatCount]()
         for _ <- 0 until validatorCount do
-          val blocks = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val tickets = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val preImages = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val preImagesSize = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val guarantees = codec.decodeU32LE(bytes, pos).toLong; pos += 4
-          val assurances = codec.decodeU32LE(bytes, pos).toLong; pos += 4
+          val blocks = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val tickets = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val preImages = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val preImagesSize = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val guarantees = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
+          val assurances = uint32L.decode(bits.drop(bitPos)).require.value & 0xFFFFFFFFL; bitPos += 32
           lastStats += StatCount(blocks, tickets, preImages, preImagesSize, guarantees, assurances)
 
         // Decode core stats - fixed-size array, each field compact-encoded
         val coreStats = scala.collection.mutable.ListBuffer[CoreStatisticsRecord]()
         for _ <- 0 until coresCount do
-          val (daLoad, daLoadLen) = codec.decodeCompactInteger(bytes, pos); pos += daLoadLen
-          val (popularity, popularityLen) = codec.decodeCompactInteger(bytes, pos); pos += popularityLen
-          val (imports, importsLen) = codec.decodeCompactInteger(bytes, pos); pos += importsLen
-          val (extrinsicCount, extrinsicCountLen) = codec.decodeCompactInteger(bytes, pos); pos += extrinsicCountLen
-          val (extrinsicSize, extrinsicSizeLen) = codec.decodeCompactInteger(bytes, pos); pos += extrinsicSizeLen
-          val (exports, exportsLen) = codec.decodeCompactInteger(bytes, pos); pos += exportsLen
-          val (bundleSize, bundleSizeLen) = codec.decodeCompactInteger(bytes, pos); pos += bundleSizeLen
-          val (gasUsed, gasUsedLen) = codec.decodeCompactInteger(bytes, pos); pos += gasUsedLen
+          val daLoadResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val daLoad = daLoadResult.value
+          bitPos += (bits.drop(bitPos).size - daLoadResult.remainder.size)
+
+          val popularityResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val popularity = popularityResult.value
+          bitPos += (bits.drop(bitPos).size - popularityResult.remainder.size)
+
+          val importsResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val imports = importsResult.value
+          bitPos += (bits.drop(bitPos).size - importsResult.remainder.size)
+
+          val extrinsicCountResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val extrinsicCount = extrinsicCountResult.value
+          bitPos += (bits.drop(bitPos).size - extrinsicCountResult.remainder.size)
+
+          val extrinsicSizeResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val extrinsicSize = extrinsicSizeResult.value
+          bitPos += (bits.drop(bitPos).size - extrinsicSizeResult.remainder.size)
+
+          val exportsResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val exports = exportsResult.value
+          bitPos += (bits.drop(bitPos).size - exportsResult.remainder.size)
+
+          val bundleSizeResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val bundleSize = bundleSizeResult.value
+          bitPos += (bits.drop(bitPos).size - bundleSizeResult.remainder.size)
+
+          val gasUsedResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+          val gasUsed = gasUsedResult.value
+          bitPos += (bits.drop(bitPos).size - gasUsedResult.remainder.size)
+
           coreStats += CoreStatisticsRecord(
             daLoad = daLoad,
             popularity = popularity,
@@ -497,8 +522,8 @@ object FullJamState:
       case None =>
         HistoricalBetaContainer()
       case Some(kv) =>
-        val (container, _) = kv.value.decodeAs[HistoricalBetaContainer](0)
-        container
+        val result = summon[Codec[HistoricalBetaContainer]].decode(BitVector(kv.value.toByteVector))
+        result.require.value
 
   /**
    * Decode authorization pools from keyvals.
@@ -516,24 +541,26 @@ object FullJamState:
         List.fill(coresCount)(List.empty[Hash])
 
       case Some(kv) =>
-        val bytes = kv.value.toArray
-        var offset = 0
+        val bits = BitVector(kv.value.toByteVector)
+        var bitPos = 0L
         val pools = scala.collection.mutable.ListBuffer[List[Hash]]()
 
         for _ <- 0 until coresCount do
-          if offset >= bytes.length then
+          if bitPos >= bits.size then
             pools += List.empty[Hash]
           else
             // Read compact length for this core's pool
-            val (poolLen, lenBytes) = codec.decodeCompactInteger(bytes, offset)
-            offset += lenBytes
+            val poolLenResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+            val poolLen = poolLenResult.value
+            bitPos += (bits.drop(bitPos).size - poolLenResult.remainder.size)
 
             // Read poolLen hashes
             val hashes = scala.collection.mutable.ListBuffer[Hash]()
             for _ <- 0 until poolLen.toInt do
-              if offset + 32 <= bytes.length then
-                hashes += Hash(bytes.slice(offset, offset + 32))
-                offset += 32
+              if bitPos + 256 <= bits.size then
+                val hashBytes = bits.drop(bitPos).take(256).toByteArray
+                hashes += Hash(hashBytes)
+                bitPos += 256
 
             pools += hashes.toList
 
@@ -550,18 +577,19 @@ object FullJamState:
     historyKv match
       case None => List.fill(epochLength)(List.empty)
       case Some(kv) =>
-        val bytes = kv.value.toArray
-        var pos = 0
+        val bits = BitVector(kv.value.toByteVector)
+        var bitPos = 0L
         val slots = scala.collection.mutable.ListBuffer[List[JamBytes]]()
         for _ <- 0 until epochLength do
-          if pos < bytes.length then
-            val (count, countLen) = codec.decodeCompactInteger(bytes, pos)
-            pos += countLen
+          if bitPos < bits.size then
+            val countResult = JamCodecs.compactInteger.decode(bits.drop(bitPos)).require
+            val count = countResult.value
+            bitPos += (bits.drop(bitPos).size - countResult.remainder.size)
             val hashes = scala.collection.mutable.ListBuffer[JamBytes]()
             for _ <- 0 until count.toInt do
-              val hash = JamBytes(bytes.slice(pos, pos + Hash.Size))
-              hashes += hash
-              pos += Hash.Size
+              val hashBytes = bits.drop(bitPos).take(Hash.Size * 8L).toByteArray
+              hashes += JamBytes(hashBytes)
+              bitPos += Hash.Size * 8L
             slots += hashes.toList
           else
             slots += List.empty
@@ -618,7 +646,8 @@ object FullJamState:
         ((keyBytes(7).toInt & 0xff) << 24)
 
       val valueBytes = kv.value.toArray
-      val (serviceInfo, _) = JamBytes(valueBytes).decodeAs[ServiceInfo](0)
+      val result = summon[Codec[ServiceInfo]].decode(BitVector(valueBytes))
+      val serviceInfo = result.require.value
 
       AccumulationServiceItem(
         id = serviceId.toLong,
@@ -660,8 +689,10 @@ object FullJamState:
               reports += None
             else
               // marker == 1, decode AvailabilityAssignment
-              val (assignment, consumed) = bytes.decodeAs[AvailabilityAssignment](pos)
-              pos += consumed
+              val result = summon[Codec[AvailabilityAssignment]].decode(BitVector(bytes.drop(pos).toByteVector))
+              val assignment = result.require.value
+              val consumed = (((bytes.length - pos) * 8 - result.require.remainder.size.toInt) / 8).toInt
+              pos = pos + consumed
               reports += Some(assignment)
 
         reports.toList
@@ -674,7 +705,7 @@ object FullJamState:
       BandersnatchPublicKey.zero,
       Ed25519PublicKey(new Array[Byte](Ed25519PublicKey.Size)),
       BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
-      ByteVector.fill(ValidatorKey.MetadataSize.toLong)(0)
+      JamBytes.zeros(ValidatorKey.MetadataSize)
     )
     val emptyValidators = List.fill(config.validatorCount)(emptyValidatorKey)
     val emptyEntropy = List.fill(4)(Hash.zero)

@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{JamBytes, codec}
+import io.forge.jam.core.JamBytes
+import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.work.ExecutionResult
@@ -66,16 +67,16 @@ object AccumulationOperand:
     override def encode(): Array[Byte] =
       val op = operand
 
-      val variant = codec.encodeCompactInteger(0)
-      val gasLimitBytes = codec.encodeCompactInteger(op.gasLimit)
+      val variant = JamCodecs.encodeCompactInteger(0)
+      val gasLimitBytes = JamCodecs.encodeCompactInteger(op.gasLimit)
       val resultBytes = op.result match
         case ExecutionResult.Ok(output) =>
-          val len = codec.encodeCompactInteger(output.length.toLong)
+          val len = JamCodecs.encodeCompactInteger(output.length.toLong)
           Array[Byte](0) ++ len ++ output.toArray // Tag 0 for Success (UInt8)
         case ExecutionResult.Panic =>
           Array[Byte](2) // Tag 2 for Panic (UInt8)
 
-      val authTraceLen = codec.encodeCompactInteger(op.authTrace.length.toLong)
+      val authTraceLen = JamCodecs.encodeCompactInteger(op.authTrace.length.toLong)
       variant ++
         op.packageHash.toArray ++ op.segmentRoot.toArray ++ op.authorizerHash.toArray ++
         op.payloadHash.toArray ++ gasLimitBytes ++ resultBytes ++ authTraceLen ++ op.authTrace.toArray
@@ -86,12 +87,12 @@ object AccumulationOperand:
    */
   final case class Transfer(transfer: DeferredTransfer) extends AccumulationOperand:
     override def encode(): Array[Byte] =
-      codec.encodeCompactInteger(1) ++
-        codec.encodeU32LE(UInt(transfer.source.toInt)) ++
-        codec.encodeU32LE(UInt(transfer.destination.toInt)) ++
-        codec.encodeU64LE(ULong(transfer.amount)) ++
+      JamCodecs.encodeCompactInteger(1) ++
+        JamCodecs.encodeU32LE(UInt(transfer.source.toInt)) ++
+        JamCodecs.encodeU32LE(UInt(transfer.destination.toInt)) ++
+        JamCodecs.encodeU64LE(ULong(transfer.amount)) ++
         transfer.memo.toArray ++
-        codec.encodeU64LE(ULong(transfer.gasLimit))
+        JamCodecs.encodeU64LE(ULong(transfer.gasLimit))
 
 /**
  * Key for preimage requests (hash + length).

@@ -256,3 +256,33 @@ object JamCodecs:
     for i <- 0 until 8 do
       result(1 + i) = ((x >> (8 * i)) & 0xFF).toByte
     result
+
+  /** Extension method to encode values using scodec Codec */
+  extension [A](value: A)
+    def encode(using codec: Codec[A]): JamBytes =
+      JamBytes.fromByteVector(codec.encode(value).require.bytes)
+
+  /** Helper to encode compact integer directly to byte array */
+  def encodeCompactInteger(value: Long): Array[Byte] =
+    compactInteger.encode(value).require.toByteArray
+
+  /** Helper to decode compact integer from byte array at offset - returns (value, bytesConsumed) */
+  def decodeCompactInteger(data: Array[Byte], offset: Int): (Long, Int) =
+    val bits = BitVector(data).drop(offset * 8L)
+    val result = compactInteger.decode(bits).require
+    val consumed = ((bits.size - result.remainder.size) / 8).toInt
+    (result.value, consumed)
+
+  /** Helper to decode u32 little-endian from byte array at offset */
+  def decodeU32LE(data: Array[Byte], offset: Int): spire.math.UInt =
+    val bits = BitVector(data).drop(offset * 8L)
+    val result = uint32L.decode(bits).require
+    spire.math.UInt((result.value & 0xFFFFFFFFL).toInt)
+
+  /** Helper to encode u32 little-endian to byte array */
+  def encodeU32LE(value: spire.math.UInt): Array[Byte] =
+    uint32L.encode(value.toLong & 0xFFFFFFFFL).require.toByteArray
+
+  /** Helper to encode u64 little-endian to byte array */
+  def encodeU64LE(value: spire.math.ULong): Array[Byte] =
+    int64L.encode(value.signed).require.toByteArray

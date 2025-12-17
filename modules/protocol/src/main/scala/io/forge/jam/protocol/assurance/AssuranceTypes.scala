@@ -1,14 +1,17 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs, encodeFixedList, decodeFixedList}
+import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
 import io.circe.Decoder
-import spire.math.UInt
+import spire.math.{UByte, UInt}
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.codecs.*
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec, given}
 
 /**
  * Types for the Assurances State Transition Function.
@@ -29,42 +32,14 @@ object AssuranceTypes:
   )
 
   object AssuranceInput:
-    given JamEncoder[AssuranceInput] with
-      def encode(a: AssuranceInput): JamBytes =
-        val builder = JamBytes.newBuilder
-        // assurances - compact length prefix + items (uses listEncoder)
-        builder ++= a.assurances.encode
-        // slot - 4 bytes
-        builder ++= codec.encodeU32LE(UInt(a.slot.toInt))
-        // parent - 32 bytes
-        builder ++= a.parent.bytes
-        builder.result()
-
-    /** Create a decoder that knows the cores count */
-    def decoder(coreCount: Int): JamDecoder[AssuranceInput] = new JamDecoder[AssuranceInput]:
-      def decode(bytes: JamBytes, offset: Int): (AssuranceInput, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-
-        // assurances - compact length prefix + fixed-size items
-        val (assurancesLength, assurancesLengthBytes) = codec.decodeCompactInteger(arr, pos)
-        pos += assurancesLengthBytes
-        val assuranceDecoder = AssuranceExtrinsic.decoder(coreCount)
-        val assurances = (0 until assurancesLength.toInt).map { _ =>
-          val (assurance, consumed) = assuranceDecoder.decode(bytes, pos)
-          pos += consumed
-          assurance
-        }.toList
-
-        // slot - 4 bytes
-        val slot = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-
-        // parent - 32 bytes
-        val parent = Hash(arr.slice(pos, pos + Hash.Size))
-        pos += Hash.Size
-
-        (AssuranceInput(assurances, slot, parent), pos - offset)
+    /** Create a codec that knows the cores count */
+    def codec(coreCount: Int): Codec[AssuranceInput] =
+      (compactPrefixedList(AssuranceExtrinsic.codec(coreCount)) :: uint32L :: hashCodec).xmap(
+        { case (assurances, slot, parent) =>
+          AssuranceInput(assurances, slot & 0xFFFFFFFFL, parent)
+        },
+        ai => (ai.assurances, ai.slot & 0xFFFFFFFFL, ai.parent)
+      )
 
     given Decoder[AssuranceInput] =
       Decoder.instance { cursor =>
@@ -85,29 +60,15 @@ object AssuranceTypes:
   )
 
   object AssuranceState:
-    given JamEncoder[AssuranceState] with
-      def encode(a: AssuranceState): JamBytes =
-        val builder = JamBytes.newBuilder
-        // availAssignments - fixed size list (coreCount) of optional AvailabilityAssignment
-        builder ++= encodeFixedList(a.availAssignments)
-        // currValidators - fixed size list (validatorCount)
-        builder ++= encodeFixedList(a.currValidators)
-        builder.result()
-
-    /** Create a decoder that knows the cores and validator counts */
-    def decoder(coreCount: Int, validatorCount: Int): JamDecoder[AssuranceState] = new JamDecoder[AssuranceState]:
-      def decode(bytes: JamBytes, offset: Int): (AssuranceState, Int) =
-        var pos = offset
-
-        // availAssignments - fixed size list (coreCount) of optional AvailabilityAssignment
-        val (availAssignments, availConsumed) = decodeFixedList[Option[AvailabilityAssignment]](bytes, pos, coreCount)
-        pos += availConsumed
-
-        // currValidators - fixed size list (validatorCount)
-        val (currValidators, validatorsConsumed) = decodeFixedList[ValidatorKey](bytes, pos, validatorCount)
-        pos += validatorsConsumed
-
-        (AssuranceState(availAssignments, currValidators), pos - offset)
+    /** Create a codec that knows the cores and validator counts */
+    def codec(coreCount: Int, validatorCount: Int): Codec[AssuranceState] =
+      (fixedSizeList(optionCodec(summon[Codec[AvailabilityAssignment]]), coreCount) ::
+       fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)).xmap(
+        { case (availAssignments, currValidators) =>
+          AssuranceState(availAssignments, currValidators)
+        },
+        as => (as.availAssignments, as.currValidators)
+      )
 
     given Decoder[AssuranceState] =
       Decoder.instance { cursor =>
@@ -128,8 +89,11 @@ object AssuranceTypes:
     case NotSortedOrUniqueAssurers
 
   object AssuranceErrorCode:
-    given JamEncoder[AssuranceErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
-    given JamDecoder[AssuranceErrorCode] = CodecDerivation.enumDecoder(AssuranceErrorCode.fromOrdinal)
+    given Codec[AssuranceErrorCode] =
+      ubyteCodec.xmap(
+        b => AssuranceErrorCode.fromOrdinal(b.toInt),
+        e => UByte(e.ordinal)
+      )
 
     given Decoder[AssuranceErrorCode] =
       Decoder.instance { cursor =>
@@ -150,16 +114,11 @@ object AssuranceTypes:
   )
 
   object AssuranceOutputMarks:
-    given JamEncoder[AssuranceOutputMarks] with
-      def encode(a: AssuranceOutputMarks): JamBytes =
-        // Uses listEncoder for compact length prefix + items
-        a.reported.encode
-
-    given JamDecoder[AssuranceOutputMarks] with
-      def decode(bytes: JamBytes, offset: Int): (AssuranceOutputMarks, Int) =
-        // Uses listDecoder for compact length prefix + items
-        val (reported, consumed) = bytes.decodeAs[List[WorkReport]](offset)
-        (AssuranceOutputMarks(reported), consumed)
+    given Codec[AssuranceOutputMarks] =
+      compactPrefixedList(summon[Codec[WorkReport]]).xmap(
+        reported => AssuranceOutputMarks(reported),
+        aom => aom.reported
+      )
 
     given Decoder[AssuranceOutputMarks] =
       Decoder.instance { cursor =>
@@ -174,8 +133,11 @@ object AssuranceTypes:
   type AssuranceOutput = StfResult[AssuranceOutputMarks, AssuranceErrorCode]
 
   object AssuranceOutput:
-    given JamEncoder[AssuranceOutput] = StfResult.stfResultEncoder[AssuranceOutputMarks, AssuranceErrorCode]
-    given JamDecoder[AssuranceOutput] = StfResult.stfResultDecoder[AssuranceOutputMarks, AssuranceErrorCode]
+    given Codec[AssuranceOutput] =
+      stfResultCodec[AssuranceOutputMarks, AssuranceErrorCode](
+        using summon[Codec[AssuranceOutputMarks]],
+        summon[Codec[AssuranceErrorCode]]
+      )
 
     given circeDecoder: Decoder[AssuranceOutput] =
       Decoder.instance { cursor =>
@@ -204,33 +166,20 @@ object AssuranceTypes:
   )
 
   object AssuranceCase:
-    import AssuranceOutput.{given_JamEncoder_AssuranceOutput, given_JamDecoder_AssuranceOutput, circeDecoder}
+    import AssuranceOutput.circeDecoder
+    import AssuranceOutput.given Codec[AssuranceOutput]
 
-    /** Create a config-aware decoder for AssuranceCase */
-    def decoder(coreCount: Int, validatorCount: Int): JamDecoder[AssuranceCase] = new JamDecoder[AssuranceCase]:
-      def decode(bytes: JamBytes, offset: Int): (AssuranceCase, Int) =
-        var pos = offset
-        val inputDecoder = AssuranceInput.decoder(coreCount)
-        val (input, inputBytes) = inputDecoder.decode(bytes, pos)
-        pos += inputBytes
-        val stateDecoder = AssuranceState.decoder(coreCount, validatorCount)
-        val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += preStateBytes
-        val (output, outputBytes) = bytes.decodeAs[AssuranceOutput](pos)
-        pos += outputBytes
-        val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += postStateBytes
-        (AssuranceCase(input, preState, output, postState), pos - offset)
-
-    /** Create a config-aware encoder for AssuranceCase */
-    given JamEncoder[AssuranceCase] with
-      def encode(a: AssuranceCase): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.input.encode
-        builder ++= a.preState.encode
-        builder ++= a.output.encode
-        builder ++= a.postState.encode
-        builder.result()
+    /** Create a config-aware codec for AssuranceCase */
+    def codec(coreCount: Int, validatorCount: Int): Codec[AssuranceCase] =
+      (AssuranceInput.codec(coreCount) ::
+       AssuranceState.codec(coreCount, validatorCount) ::
+       summon[Codec[AssuranceOutput]] ::
+       AssuranceState.codec(coreCount, validatorCount)).xmap(
+        { case (input, preState, output, postState) =>
+          AssuranceCase(input, preState, output, postState)
+        },
+        ac => (ac.input, ac.preState, ac.output, ac.postState)
+      )
 
     given Decoder[AssuranceCase] =
       Decoder.instance { cursor =>

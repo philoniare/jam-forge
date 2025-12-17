@@ -1,15 +1,17 @@
 package io.forge.jam.protocol.preimage
 
-import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.bits.*
+import _root_.scodec.codecs.*
+import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
+import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactInt, compactPrefixedList}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 import spire.math.UInt
-import io.forge.jam.core.StfResult.given_JamEncoder_Unit
-import io.forge.jam.core.StfResult.given_JamDecoder_Unit
 
 /**
  * Types for the Preimages State Transition Function.
@@ -29,19 +31,11 @@ object PreimageTypes:
   )
 
   object PreimageHistoryKey:
-    given JamEncoder[PreimageHistoryKey] with
-      def encode(a: PreimageHistoryKey): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.hash.encode
-        builder ++= codec.encodeU32LE(UInt(a.length.toInt))
-        builder.result()
-
-    given JamDecoder[PreimageHistoryKey] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageHistoryKey, Int) =
-        val arr = bytes.toArray
-        val (hash, _) = bytes.decodeAs[Hash](offset)
-        val length = codec.decodeU32LE(arr, offset + Hash.Size).toLong
-        (PreimageHistoryKey(hash, length), Hash.Size + 4)
+    given Codec[PreimageHistoryKey] =
+      (hashCodec :: uint32L).xmap(
+        { case (hash, length) => PreimageHistoryKey(hash, length & 0xFFFFFFFFL) },
+        key => (key.hash, key.length & 0xFFFFFFFFL)
+      )
 
     given Decoder[PreimageHistoryKey] =
       Decoder.instance { cursor =>
@@ -60,30 +54,11 @@ object PreimageTypes:
   )
 
   object PreimageHistory:
-    given JamEncoder[PreimageHistory] with
-      def encode(a: PreimageHistory): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.key.encode
-        // value is a fixed-width 1-byte length followed by 4-byte timestamps
-        builder += a.value.size.toByte
-        for ts <- a.value do
-          builder ++= codec.encodeU32LE(UInt(ts.toInt))
-        builder.result()
-
-    given JamDecoder[PreimageHistory] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageHistory, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (key, keyBytes) = bytes.decodeAs[PreimageHistoryKey](pos)
-        pos += keyBytes
-        val length = (arr(pos).toInt & 0xff)
-        pos += 1
-        val value = (0 until length).map { _ =>
-          val ts = codec.decodeU32LE(arr, pos).toLong
-          pos += 4
-          ts
-        }.toList
-        (PreimageHistory(key, value), pos - offset)
+    given Codec[PreimageHistory] =
+      (summon[Codec[PreimageHistoryKey]] :: listOfN(uint8, uint32L)).xmap(
+        { case (key, timestamps) => PreimageHistory(key, timestamps.map(_ & 0xFFFFFFFFL)) },
+        hist => (hist.key, hist.value.map(_ & 0xFFFFFFFFL))
+      )
 
     given Decoder[PreimageHistory] =
       Decoder.instance { cursor =>
@@ -102,21 +77,11 @@ object PreimageTypes:
   )
 
   object AccountInfo:
-    given JamEncoder[AccountInfo] with
-      def encode(a: AccountInfo): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.preimages.encode
-        builder ++= a.lookupMeta.encode
-        builder.result()
-
-    given JamDecoder[AccountInfo] with
-      def decode(bytes: JamBytes, offset: Int): (AccountInfo, Int) =
-        var pos = offset
-        val (preimages, preimagesBytes) = bytes.decodeAs[List[PreimageHash]](pos)
-        pos += preimagesBytes
-        val (lookupMeta, lookupMetaBytes) = bytes.decodeAs[List[PreimageHistory]](pos)
-        pos += lookupMetaBytes
-        (AccountInfo(preimages, lookupMeta), pos - offset)
+    given Codec[AccountInfo] =
+      (compactPrefixedList(summon[Codec[PreimageHash]]) :: compactPrefixedList(summon[Codec[PreimageHistory]])).xmap(
+        { case (preimages, lookupMeta) => AccountInfo(preimages, lookupMeta) },
+        ai => (ai.preimages, ai.lookupMeta)
+      )
 
     given Decoder[AccountInfo] =
       Decoder.instance { cursor =>
@@ -135,22 +100,11 @@ object PreimageTypes:
   )
 
   object PreimageAccount:
-    given JamEncoder[PreimageAccount] with
-      def encode(a: PreimageAccount): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeU32LE(UInt(a.id.toInt))
-        builder ++= a.data.encode
-        builder.result()
-
-    given JamDecoder[PreimageAccount] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageAccount, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val id = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        val (data, consumed) = bytes.decodeAs[AccountInfo](pos)
-        pos += consumed
-        (PreimageAccount(id, data), pos - offset)
+    given Codec[PreimageAccount] =
+      (uint32L :: summon[Codec[AccountInfo]]).xmap(
+        { case (id, data) => PreimageAccount(id & 0xFFFFFFFFL, data) },
+        pa => (pa.id & 0xFFFFFFFFL, pa.data)
+      )
 
     given Decoder[PreimageAccount] =
       Decoder.instance { cursor =>
@@ -177,50 +131,16 @@ object PreimageTypes:
   )
 
   object ServiceActivityRecord:
-    given JamEncoder[ServiceActivityRecord] with
-      def encode(a: ServiceActivityRecord): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeCompactInteger(a.providedCount.toLong)
-        builder ++= codec.encodeCompactInteger(a.providedSize)
-        builder ++= codec.encodeCompactInteger(a.refinementCount)
-        builder ++= codec.encodeCompactInteger(a.refinementGasUsed)
-        builder ++= codec.encodeCompactInteger(a.imports)
-        builder ++= codec.encodeCompactInteger(a.extrinsicCount)
-        builder ++= codec.encodeCompactInteger(a.extrinsicSize)
-        builder ++= codec.encodeCompactInteger(a.exports)
-        builder ++= codec.encodeCompactInteger(a.accumulateCount)
-        builder ++= codec.encodeCompactInteger(a.accumulateGasUsed)
-        builder.result()
-
-    given JamDecoder[ServiceActivityRecord] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceActivityRecord, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (providedCount, pc) = codec.decodeCompactInteger(arr, pos); pos += pc
-        val (providedSize, ps) = codec.decodeCompactInteger(arr, pos); pos += ps
-        val (refinementCount, rc) = codec.decodeCompactInteger(arr, pos); pos += rc
-        val (refinementGasUsed, rgu) = codec.decodeCompactInteger(arr, pos); pos += rgu
-        val (imports, imp) = codec.decodeCompactInteger(arr, pos); pos += imp
-        val (extrinsicCount, ec) = codec.decodeCompactInteger(arr, pos); pos += ec
-        val (extrinsicSize, es) = codec.decodeCompactInteger(arr, pos); pos += es
-        val (exports, exp) = codec.decodeCompactInteger(arr, pos); pos += exp
-        val (accumulateCount, ac) = codec.decodeCompactInteger(arr, pos); pos += ac
-        val (accumulateGasUsed, agu) = codec.decodeCompactInteger(arr, pos); pos += agu
-        (
-          ServiceActivityRecord(
-            providedCount.toInt,
-            providedSize,
-            refinementCount,
-            refinementGasUsed,
-            imports,
-            extrinsicCount,
-            extrinsicSize,
-            exports,
-            accumulateCount,
-            accumulateGasUsed
-          ),
-          pos - offset
-        )
+    given Codec[ServiceActivityRecord] =
+      (compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger ::
+       compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger).xmap(
+        { case (pc, ps, rc, rgu, imp, ec, es, exp, ac, agu) =>
+          ServiceActivityRecord(pc.toInt, ps, rc, rgu, imp, ec, es, exp, ac, agu)
+        },
+        sar => (sar.providedCount.toLong, sar.providedSize, sar.refinementCount, sar.refinementGasUsed,
+                sar.imports, sar.extrinsicCount, sar.extrinsicSize, sar.exports,
+                sar.accumulateCount, sar.accumulateGasUsed)
+      )
 
     given Decoder[ServiceActivityRecord] =
       Decoder.instance { cursor =>
@@ -258,22 +178,11 @@ object PreimageTypes:
   )
 
   object ServiceStatisticsEntry:
-    given JamEncoder[ServiceStatisticsEntry] with
-      def encode(a: ServiceStatisticsEntry): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeU32LE(UInt(a.id.toInt))
-        builder ++= a.record.encode
-        builder.result()
-
-    given JamDecoder[ServiceStatisticsEntry] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceStatisticsEntry, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val id = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        val (record, consumed) = bytes.decodeAs[ServiceActivityRecord](pos)
-        pos += consumed
-        (ServiceStatisticsEntry(id, record), pos - offset)
+    given Codec[ServiceStatisticsEntry] =
+      (uint32L :: summon[Codec[ServiceActivityRecord]]).xmap(
+        { case (id, record) => ServiceStatisticsEntry(id & 0xFFFFFFFFL, record) },
+        sse => (sse.id & 0xFFFFFFFFL, sse.record)
+      )
 
     given Decoder[ServiceStatisticsEntry] =
       Decoder.instance { cursor =>
@@ -292,21 +201,11 @@ object PreimageTypes:
   )
 
   object PreimageState:
-    given JamEncoder[PreimageState] with
-      def encode(a: PreimageState): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.accounts.encode
-        builder ++= a.statistics.encode
-        builder.result()
-
-    given JamDecoder[PreimageState] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageState, Int) =
-        var pos = offset
-        val (accounts, accountsBytes) = bytes.decodeAs[List[PreimageAccount]](pos)
-        pos += accountsBytes
-        val (statistics, statisticsBytes) = bytes.decodeAs[List[ServiceStatisticsEntry]](pos)
-        pos += statisticsBytes
-        (PreimageState(accounts, statistics), pos - offset)
+    given Codec[PreimageState] =
+      (compactPrefixedList(summon[Codec[PreimageAccount]]) :: compactPrefixedList(summon[Codec[ServiceStatisticsEntry]])).xmap(
+        { case (accounts, statistics) => PreimageState(accounts, statistics) },
+        ps => (ps.accounts, ps.statistics)
+      )
 
     given Decoder[PreimageState] =
       Decoder.instance { cursor =>
@@ -325,22 +224,11 @@ object PreimageTypes:
   )
 
   object PreimageInput:
-    given JamEncoder[PreimageInput] with
-      def encode(a: PreimageInput): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.preimages.encode
-        builder ++= codec.encodeU32LE(UInt(a.slot.toInt))
-        builder.result()
-
-    given JamDecoder[PreimageInput] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageInput, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (preimages, preimagesBytes) = bytes.decodeAs[List[Preimage]](pos)
-        pos += preimagesBytes
-        val slot = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        (PreimageInput(preimages, slot), pos - offset)
+    given Codec[PreimageInput] =
+      (compactPrefixedList(summon[Codec[Preimage]]) :: uint32L).xmap(
+        { case (preimages, slot) => PreimageInput(preimages, slot & 0xFFFFFFFFL) },
+        pi => (pi.preimages, pi.slot & 0xFFFFFFFFL)
+      )
 
     given Decoder[PreimageInput] =
       Decoder.instance { cursor =>
@@ -358,8 +246,10 @@ object PreimageTypes:
     case PreimagesNotSortedUnique
 
   object PreimageErrorCode:
-    given JamEncoder[PreimageErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
-    given JamDecoder[PreimageErrorCode] = CodecDerivation.enumDecoder(PreimageErrorCode.fromOrdinal)
+    given Codec[PreimageErrorCode] = uint8.xmap(
+      ordinal => PreimageErrorCode.fromOrdinal(ordinal),
+      err => err.ordinal
+    )
 
     given Decoder[PreimageErrorCode] =
       Decoder.instance { cursor =>
@@ -375,8 +265,11 @@ object PreimageTypes:
   type PreimageOutput = StfResult[Unit, PreimageErrorCode]
 
   object PreimageOutput:
-    given JamEncoder[PreimageOutput] = StfResult.stfResultEncoder[Unit, PreimageErrorCode]
-    given JamDecoder[PreimageOutput] = StfResult.stfResultDecoder[Unit, PreimageErrorCode]
+    // Unit codec encodes to zero bytes
+    given unitCodec: Codec[Unit] = provide(())
+
+    given Codec[PreimageOutput] = JamCodecs.stfResultCodec[Unit, PreimageErrorCode]
+
     given circeDecoder: Decoder[PreimageOutput] =
       Decoder.instance { cursor =>
         val okResult = cursor.downField("ok").focus
@@ -399,29 +292,14 @@ object PreimageTypes:
   )
 
   object PreimageCase:
-    import PreimageOutput.{given_JamEncoder_PreimageOutput, given_JamDecoder_PreimageOutput, circeDecoder}
+    import PreimageOutput.{circeDecoder, given}
 
-    given JamEncoder[PreimageCase] with
-      def encode(a: PreimageCase): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.input.encode
-        builder ++= a.preState.encode
-        builder ++= a.output.encode
-        builder ++= a.postState.encode
-        builder.result()
-
-    given JamDecoder[PreimageCase] with
-      def decode(bytes: JamBytes, offset: Int): (PreimageCase, Int) =
-        var pos = offset
-        val (input, inputBytes) = bytes.decodeAs[PreimageInput](pos)
-        pos += inputBytes
-        val (preState, preStateBytes) = bytes.decodeAs[PreimageState](pos)
-        pos += preStateBytes
-        val (output, outputBytes) = bytes.decodeAs[PreimageOutput](pos)
-        pos += outputBytes
-        val (postState, postStateBytes) = bytes.decodeAs[PreimageState](pos)
-        pos += postStateBytes
-        (PreimageCase(input, preState, output, postState), pos - offset)
+    given Codec[PreimageCase] =
+      (summon[Codec[PreimageInput]] :: summon[Codec[PreimageState]] ::
+       summon[Codec[PreimageOutput]] :: summon[Codec[PreimageState]]).xmap(
+        { case (input, preState, output, postState) => PreimageCase(input, preState, output, postState) },
+        pc => (pc.input, pc.preState, pc.output, pc.postState)
+      )
 
     given Decoder[PreimageCase] =
       Decoder.instance { cursor =>

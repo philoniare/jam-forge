@@ -2,7 +2,6 @@ package io.forge.jam.core.types
 
 import io.circe.Decoder
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
@@ -235,37 +234,6 @@ object header:
     def fromBytes(bytes: ByteVector, offset: Int, config: ChainConfig): Attempt[DecodeResult[Header]] =
       headerCodec(config).decode(bytes.drop(offset.toLong).bits)
 
-    // ============================================================================
-    // Legacy JamEncoder/JamDecoder compatibility
-    // ============================================================================
-
-    /**
-     * Legacy JamEncoder for backward compatibility.
-     * Uses scodec under the hood.
-     */
-    given JamEncoder[Header] with
-      def encode(h: Header): JamBytes =
-        val codec = summon[Codec[Header]]
-        JamBytes(codec.encode(h).require.toByteVector.toArray)
-
-    /**
-     * Legacy decoder factory for backward compatibility.
-     * Returns a JamDecoder that wraps the scodec codec.
-     */
-    def decoder(config: ChainConfig): JamDecoder[Header] =
-      decoder(config.validatorCount, config.epochLength)
-
-    /**
-     * Legacy decoder factory for backward compatibility.
-     * Returns a JamDecoder that wraps the scodec codec.
-     */
-    def decoder(validatorCount: Int, epochLength: Int): JamDecoder[Header] = new JamDecoder[Header]:
-      def decode(bytes: JamBytes, offset: Int): (Header, Int) =
-        val codec = headerCodec(validatorCount, epochLength)
-        val bv = ByteVector(bytes.toArray).drop(offset.toLong)
-        val result = codec.decode(bv.bits).require
-        val bytesConsumed = ((bv.bits.size - result.remainder.size) / 8).toInt
-        (result.value, bytesConsumed)
 
     // ============================================================================
     // JSON Decoder

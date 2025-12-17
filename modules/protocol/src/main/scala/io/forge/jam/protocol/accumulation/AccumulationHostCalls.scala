@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import spire.math.ULong
@@ -1195,7 +1196,7 @@ class AccumulationHostCalls(
   private def encodeOperandsList(): Array[Byte] =
     val buffer = mutable.ListBuffer.empty[Byte]
     // Gray Paper natural number encode the array length
-    buffer ++= codec.encodeCompactInteger(operands.size.toLong)
+    buffer ++= JamCodecs.encodeCompactInteger(operands.size.toLong)
     // Encode each operand using its existing encode() method (includes variant)
     for operand <- operands do
       buffer ++= operand.encode()

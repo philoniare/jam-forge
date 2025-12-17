@@ -4,7 +4,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
+import _root_.scodec.Codec
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.pvm.engine.PvmTraceWriter
 

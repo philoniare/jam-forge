@@ -1,9 +1,12 @@
 package io.forge.jam.protocol.safrole
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec, StfResult}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.JamBytes.compareUnsigned
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
+import _root_.scodec.Codec
+import _root_.scodec.bits.BitVector
+import _root_.scodec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.protocol.safrole.SafroleTypes.*
@@ -11,6 +14,7 @@ import io.forge.jam.protocol.state.{JamState, ValidatorState, EntropyBuffer, Saf
 import monocle.syntax.all.*
 import spire.math.UByte
 import scodec.bits.ByteVector
+import scala.math.Ordering.Implicits.infixOrderingOps
 
 /**
  * Safrole State Transition Function.
@@ -175,7 +179,7 @@ object SafroleTransition:
         validator.copy(
           bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
           ed25519 = Ed25519PublicKey(new Array[Byte](32)),
-          metadata = ByteVector.fill(ValidatorKey.MetadataSize.toLong)(0)
+          metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
         )
       else
         validator
@@ -312,8 +316,10 @@ object SafroleTransition:
   ): List[BandersnatchPublicKey] =
     val keys = validators.map(_.bandersnatch)
     (0 until epochLength).map { i =>
-      val slotEntropy = Hashing.blake2b256(entropy.bytes ++ codec.encodeU32LE(spire.math.UInt(i)))
-      val index = (codec.decodeU32LE(slotEntropy.bytes.take(4).toArray).toLong % validators.size).toInt
+      val iEncoded = uint32L.encode(i.toLong & 0xFFFFFFFFL).require.toByteArray
+      val slotEntropy = Hashing.blake2b256(entropy.bytes ++ iEncoded)
+      val indexResult = uint32L.decode(BitVector(slotEntropy.bytes.take(4).toArray)).require
+      val index = ((indexResult.value & 0xFFFFFFFFL) % validators.size).toInt
       keys(index)
     }.toList
 

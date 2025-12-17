@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{JamBytes, codec, CodecDerivation, StfResult}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.{Hash, Gas}
 import io.forge.jam.core.types.workpackage.{SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
@@ -9,8 +8,12 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.service.ServiceAccount
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
 import spire.math.{UInt, ULong}
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.codecs.{*, given}
+import _root_.scodec.bits.BitVector
 
 /**
  * Types for the Reports State Transition Function.
@@ -37,44 +40,16 @@ object ReportTypes:
   object CoreStatisticsRecord:
     def zero: CoreStatisticsRecord = CoreStatisticsRecord()
 
-    given JamEncoder[CoreStatisticsRecord] with
-      def encode(a: CoreStatisticsRecord): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeCompactInteger(a.daLoad)
-        builder ++= codec.encodeCompactInteger(a.popularity)
-        builder ++= codec.encodeCompactInteger(a.imports)
-        builder ++= codec.encodeCompactInteger(a.extrinsicCount)
-        builder ++= codec.encodeCompactInteger(a.extrinsicSize)
-        builder ++= codec.encodeCompactInteger(a.exports)
-        builder ++= codec.encodeCompactInteger(a.bundleSize)
-        builder ++= codec.encodeCompactInteger(a.gasUsed)
-        builder.result()
-
-    given JamDecoder[CoreStatisticsRecord] with
-      def decode(bytes: JamBytes, offset: Int): (CoreStatisticsRecord, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (daLoad, d1) = codec.decodeCompactInteger(arr, pos); pos += d1
-        val (popularity, d2) = codec.decodeCompactInteger(arr, pos); pos += d2
-        val (imports, d3) = codec.decodeCompactInteger(arr, pos); pos += d3
-        val (extrinsicCount, d4) = codec.decodeCompactInteger(arr, pos); pos += d4
-        val (extrinsicSize, d5) = codec.decodeCompactInteger(arr, pos); pos += d5
-        val (exports, d6) = codec.decodeCompactInteger(arr, pos); pos += d6
-        val (bundleSize, d7) = codec.decodeCompactInteger(arr, pos); pos += d7
-        val (gasUsed, d8) = codec.decodeCompactInteger(arr, pos); pos += d8
-        (
-          CoreStatisticsRecord(
-            daLoad,
-            popularity,
-            imports,
-            extrinsicCount,
-            extrinsicSize,
-            exports,
-            bundleSize,
-            gasUsed
-          ),
-          pos - offset
-        )
+    given Codec[CoreStatisticsRecord] =
+      (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+       JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+        { case (daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed) =>
+          CoreStatisticsRecord(daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed)
+        },
+        record => (record.daLoad, record.popularity, record.imports, record.extrinsicCount,
+                   record.extrinsicSize, record.exports, record.bundleSize, record.gasUsed)
+      )
 
     given Decoder[CoreStatisticsRecord] =
       Decoder.instance { cursor =>
@@ -114,44 +89,16 @@ object ReportTypes:
   )
 
   object ServiceActivityRecord:
-    given JamEncoder[ServiceActivityRecord] with
-      def encode(a: ServiceActivityRecord): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeCompactInteger(a.refinementCount)
-        builder ++= codec.encodeCompactInteger(a.refinementGasUsed)
-        builder ++= codec.encodeCompactInteger(a.extrinsicCount)
-        builder ++= codec.encodeCompactInteger(a.extrinsicSize)
-        builder ++= codec.encodeCompactInteger(a.imports)
-        builder ++= codec.encodeCompactInteger(a.exports)
-        builder ++= codec.encodeCompactInteger(a.accumulateCount)
-        builder ++= codec.encodeCompactInteger(a.accumulateGasUsed)
-        builder.result()
-
-    given JamDecoder[ServiceActivityRecord] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceActivityRecord, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (refinementCount, d1) = codec.decodeCompactInteger(arr, pos); pos += d1
-        val (refinementGasUsed, d2) = codec.decodeCompactInteger(arr, pos); pos += d2
-        val (extrinsicCount, d3) = codec.decodeCompactInteger(arr, pos); pos += d3
-        val (extrinsicSize, d4) = codec.decodeCompactInteger(arr, pos); pos += d4
-        val (imports, d5) = codec.decodeCompactInteger(arr, pos); pos += d5
-        val (exports, d6) = codec.decodeCompactInteger(arr, pos); pos += d6
-        val (accumulateCount, d7) = codec.decodeCompactInteger(arr, pos); pos += d7
-        val (accumulateGasUsed, d8) = codec.decodeCompactInteger(arr, pos); pos += d8
-        (
-          ServiceActivityRecord(
-            refinementCount,
-            refinementGasUsed,
-            extrinsicCount,
-            extrinsicSize,
-            imports,
-            exports,
-            accumulateCount,
-            accumulateGasUsed
-          ),
-          pos - offset
-        )
+    given Codec[ServiceActivityRecord] =
+      (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+       JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+        { case (refinementCount, refinementGasUsed, extrinsicCount, extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed) =>
+          ServiceActivityRecord(refinementCount, refinementGasUsed, extrinsicCount, extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed)
+        },
+        record => (record.refinementCount, record.refinementGasUsed, record.extrinsicCount, record.extrinsicSize,
+                   record.imports, record.exports, record.accumulateCount, record.accumulateGasUsed)
+      )
 
     given Decoder[ServiceActivityRecord] =
       Decoder.instance { cursor =>
@@ -185,19 +132,13 @@ object ReportTypes:
   )
 
   object ServiceStatisticsEntry:
-    given JamEncoder[ServiceStatisticsEntry] with
-      def encode(a: ServiceStatisticsEntry): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= codec.encodeU32LE(UInt(a.id.toInt))
-        builder ++= a.record.encode
-        builder.result()
-
-    given JamDecoder[ServiceStatisticsEntry] with
-      def decode(bytes: JamBytes, offset: Int): (ServiceStatisticsEntry, Int) =
-        val arr = bytes.toArray
-        val id = codec.decodeU32LE(arr, offset).toLong
-        val (record, recordBytes) = bytes.decodeAs[ServiceActivityRecord](offset + 4)
-        (ServiceStatisticsEntry(id, record), 4 + recordBytes)
+    given Codec[ServiceStatisticsEntry] =
+      (uint32L :: summon[Codec[ServiceActivityRecord]]).xmap(
+        { case (id, record) =>
+          ServiceStatisticsEntry((id & 0xFFFFFFFFL), record)
+        },
+        entry => (entry.id & 0xFFFFFFFFL, entry.record)
+      )
 
     given Decoder[ServiceStatisticsEntry] =
       Decoder.instance { cursor =>
@@ -224,118 +165,28 @@ object ReportTypes:
   )
 
   object ReportState:
-    def decoder(coresCount: Int, validatorsCount: Int): JamDecoder[ReportState] = new JamDecoder[ReportState]:
-      def decode(bytes: JamBytes, offset: Int): (ReportState, Int) =
-        val arr = bytes.toArray
-        var pos = offset
+    def codec(coresCount: Int, validatorsCount: Int): Codec[ReportState] =
+      val availAssignmentsCodec = JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coresCount)
+      val currValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
+      val prevValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
+      val entropyCodec = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
+      val offendersCodec = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
+      val recentBlocksCodec = summon[Codec[HistoricalBetaContainer]]
+      val authPoolsCodec = JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(JamCodecs.hashCodec), coresCount)
+      val accountsCodec = JamCodecs.compactPrefixedList(summon[Codec[ServiceAccount]])
+      val coresStatisticsCodec = JamCodecs.fixedSizeList(summon[Codec[CoreStatisticsRecord]], coresCount)
+      val servicesStatisticsCodec = JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]])
 
-        // availAssignments - fixed size (coresCount), optional items
-        val availAssignments = (0 until coresCount).map { _ =>
-          val optionByte = arr(pos).toInt & 0xff
-          pos += 1
-          if optionByte == 0 then None
-          else
-            val (assignment, consumed) = bytes.decodeAs[AvailabilityAssignment](pos)
-            pos += consumed
-            Some(assignment)
-        }.toList
-
-        // currValidators - fixed size (validatorsCount)
-        val (currValidators, currValidatorsBytes) = codec.decodeFixedList[ValidatorKey](bytes, pos, validatorsCount)
-        pos += currValidatorsBytes
-
-        // prevValidators - fixed size (validatorsCount)
-        val (prevValidators, prevValidatorsBytes) = codec.decodeFixedList[ValidatorKey](bytes, pos, validatorsCount)
-        pos += prevValidatorsBytes
-
-        // entropy - 4 hashes
-        val (entropy, entropyBytes) = codec.decodeFixedList[Hash](bytes, pos, 4)
-        pos += entropyBytes
-
-        // offenders - variable size list
-        val (offenders, offendersBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += offendersBytes
-
-        // recentBlocks
-        val (recentBlocks, recentBlocksBytes) = bytes.decodeAs[HistoricalBetaContainer](pos)
-        pos += recentBlocksBytes
-
-        // authPools - fixed size outer (coresCount), variable inner
-        val authPools = (0 until coresCount).map { _ =>
-          val (pool, poolBytes) = bytes.decodeAs[List[Hash]](pos)
-          pos += poolBytes
-          pool
-        }.toList
-
-        // accounts - variable size
-        val (accounts, accountsBytes) = bytes.decodeAs[List[ServiceAccount]](pos)
-        pos += accountsBytes
-
-        // coresStatistics - fixed size (coresCount)
-        val (coresStatistics, coreStatsBytes) = codec.decodeFixedList[CoreStatisticsRecord](bytes, pos, coresCount)
-        pos += coreStatsBytes
-
-        // servicesStatistics - variable size
-        val (servicesStatistics, servicesStatsBytes) = bytes.decodeAs[List[ServiceStatisticsEntry]](pos)
-        pos += servicesStatsBytes
-
-        (
-          ReportState(
-            availAssignments,
-            currValidators,
-            prevValidators,
-            entropy,
-            offenders,
-            recentBlocks,
-            authPools,
-            accounts,
-            coresStatistics,
-            servicesStatistics
-          ),
-          pos - offset
-        )
-
-    def encoder(coresCount: Int): JamEncoder[ReportState] = new JamEncoder[ReportState]:
-      def encode(a: ReportState): JamBytes =
-        val builder = JamBytes.newBuilder
-
-        // availAssignments - no length prefix for fixed-size outer list
-        for assignment <- a.availAssignments do
-          assignment match
-            case None => builder += 0.toByte
-            case Some(av) =>
-              builder += 1.toByte
-              builder ++= av.encode
-
-        // currValidators - no length prefix
-        builder ++= codec.encodeFixedList(a.currValidators)
-
-        // prevValidators - no length prefix
-        builder ++= codec.encodeFixedList(a.prevValidators)
-
-        // entropy - no length prefix (4 fixed hashes)
-        builder ++= codec.encodeFixedList(a.entropy)
-
-        // offenders - variable size
-        builder ++= a.offenders.encode
-
-        // recentBlocks
-        builder ++= a.recentBlocks.encode
-
-        // authPools - fixed outer, variable inner
-        for pool <- a.authPools do
-          builder ++= pool.encode
-
-        // accounts - variable size
-        builder ++= a.accounts.encode
-
-        // coresStatistics - no length prefix (fixed size)
-        builder ++= codec.encodeFixedList(a.coresStatistics)
-
-        // servicesStatistics - variable size
-        builder ++= a.servicesStatistics.encode
-
-        builder.result()
+      (availAssignmentsCodec :: currValidatorsCodec :: prevValidatorsCodec ::
+       entropyCodec :: offendersCodec :: recentBlocksCodec :: authPoolsCodec ::
+       accountsCodec :: coresStatisticsCodec :: servicesStatisticsCodec).xmap(
+        { case (availAssignments, currValidators, prevValidators, entropy, offenders, recentBlocks, authPools, accounts, coresStatistics, servicesStatistics) =>
+          ReportState(availAssignments, currValidators, prevValidators, entropy, offenders, recentBlocks, authPools, accounts, coresStatistics, servicesStatistics)
+        },
+        state => (state.availAssignments, state.currValidators, state.prevValidators, state.entropy,
+                  state.offenders, state.recentBlocks, state.authPools, state.accounts,
+                  state.coresStatistics, state.servicesStatistics)
+      )
 
     given Decoder[ReportState] =
       Decoder.instance { cursor =>
@@ -374,25 +225,15 @@ object ReportTypes:
   )
 
   object ReportInput:
-    given JamEncoder[ReportInput] with
-      def encode(a: ReportInput): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.guarantees.encode
-        builder ++= codec.encodeU32LE(UInt(a.slot.toInt))
-        builder ++= a.knownPackages.encode
-        builder.result()
-
-    given JamDecoder[ReportInput] with
-      def decode(bytes: JamBytes, offset: Int): (ReportInput, Int) =
-        val arr = bytes.toArray
-        var pos = offset
-        val (guarantees, guaranteesBytes) = bytes.decodeAs[List[GuaranteeExtrinsic]](pos)
-        pos += guaranteesBytes
-        val slot = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-        val (knownPackages, knownPackagesBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += knownPackagesBytes
-        (ReportInput(guarantees, slot, knownPackages), pos - offset)
+    given Codec[ReportInput] =
+      (JamCodecs.compactPrefixedList(summon[Codec[GuaranteeExtrinsic]]) ::
+       uint32L ::
+       JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
+        { case (guarantees, slot, knownPackages) =>
+          ReportInput(guarantees, slot & 0xFFFFFFFFL, knownPackages)
+        },
+        input => (input.guarantees, input.slot & 0xFFFFFFFFL, input.knownPackages)
+      )
 
     given Decoder[ReportInput] =
       Decoder.instance { cursor =>
@@ -437,8 +278,10 @@ object ReportTypes:
     case DuplicateGuarantors
 
   object ReportErrorCode:
-    given JamEncoder[ReportErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
-    given JamDecoder[ReportErrorCode] = CodecDerivation.enumDecoder(ReportErrorCode.fromOrdinal)
+    given Codec[ReportErrorCode] = byte.xmap(
+      b => ReportErrorCode.fromOrdinal(b.toInt & 0xFF),
+      e => e.ordinal.toByte
+    )
 
     given Decoder[ReportErrorCode] =
       Decoder.instance { cursor =>
@@ -483,21 +326,14 @@ object ReportTypes:
   )
 
   object ReportOutputMarks:
-    given JamEncoder[ReportOutputMarks] with
-      def encode(a: ReportOutputMarks): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.reported.encode
-        builder ++= a.reporters.encode
-        builder.result()
-
-    given JamDecoder[ReportOutputMarks] with
-      def decode(bytes: JamBytes, offset: Int): (ReportOutputMarks, Int) =
-        var pos = offset
-        val (reported, reportedBytes) = bytes.decodeAs[List[SegmentRootLookup]](pos)
-        pos += reportedBytes
-        val (reporters, reportersBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += reportersBytes
-        (ReportOutputMarks(reported, reporters), pos - offset)
+    given Codec[ReportOutputMarks] =
+      (JamCodecs.compactPrefixedList(summon[Codec[SegmentRootLookup]]) ::
+       JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
+        { case (reported, reporters) =>
+          ReportOutputMarks(reported, reporters)
+        },
+        marks => (marks.reported, marks.reporters)
+      )
 
     given Decoder[ReportOutputMarks] =
       Decoder.instance { cursor =>
@@ -513,8 +349,7 @@ object ReportTypes:
   type ReportOutput = StfResult[ReportOutputMarks, ReportErrorCode]
 
   object ReportOutput:
-    given JamEncoder[ReportOutput] = StfResult.stfResultEncoder[ReportOutputMarks, ReportErrorCode]
-    given JamDecoder[ReportOutput] = StfResult.stfResultDecoder[ReportOutputMarks, ReportErrorCode]
+    given Codec[ReportOutput] = JamCodecs.stfResultCodec[ReportOutputMarks, ReportErrorCode]
 
     given circeDecoder: Decoder[ReportOutput] =
       Decoder.instance { cursor =>
@@ -538,31 +373,17 @@ object ReportTypes:
   )
 
   object ReportCase:
-    import ReportOutput.{given_JamEncoder_ReportOutput, given_JamDecoder_ReportOutput, circeDecoder}
+    import ReportOutput.{circeDecoder, given}
 
-    def decoder(coresCount: Int, validatorsCount: Int): JamDecoder[ReportCase] = new JamDecoder[ReportCase]:
-      def decode(bytes: JamBytes, offset: Int): (ReportCase, Int) =
-        var pos = offset
-        val (input, inputBytes) = bytes.decodeAs[ReportInput](pos)
-        pos += inputBytes
-        val stateDecoder = ReportState.decoder(coresCount, validatorsCount)
-        val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += preStateBytes
-        val (output, outputBytes) = bytes.decodeAs[ReportOutput](pos)
-        pos += outputBytes
-        val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
-        pos += postStateBytes
-        (ReportCase(input, preState, output, postState), pos - offset)
-
-    def encoder(coresCount: Int): JamEncoder[ReportCase] = new JamEncoder[ReportCase]:
-      def encode(a: ReportCase): JamBytes =
-        val stateEncoder = ReportState.encoder(coresCount)
-        val builder = JamBytes.newBuilder
-        builder ++= a.input.encode
-        builder ++= stateEncoder.encode(a.preState)
-        builder ++= a.output.encode
-        builder ++= stateEncoder.encode(a.postState)
-        builder.result()
+    def codec(coresCount: Int, validatorsCount: Int): Codec[ReportCase] =
+      val stateCodec = ReportState.codec(coresCount, validatorsCount)
+      (summon[Codec[ReportInput]] :: stateCodec ::
+       summon[Codec[ReportOutput]] :: stateCodec).xmap(
+        { case (input, preState, output, postState) =>
+          ReportCase(input, preState, output, postState)
+        },
+        testCase => (testCase.input, testCase.preState, testCase.output, testCase.postState)
+      )
 
     given Decoder[ReportCase] =
       Decoder.instance { cursor =>

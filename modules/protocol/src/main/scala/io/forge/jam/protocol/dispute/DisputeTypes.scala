@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, JamBytes, codec, CodecDerivation, StfResult}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode, decodeAs}
+import io.forge.jam.core.{ChainConfig, JamBytes, StfResult}
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.epoch.ValidatorKey
@@ -9,6 +8,10 @@ import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 import spire.math.UInt
+import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.bits.BitVector
+import _root_.scodec.codecs.*
+import io.forge.jam.core.scodec.JamCodecs
 
 /**
  * Types for the Disputes State Transition Function.
@@ -33,27 +36,16 @@ object DisputeTypes:
   object Psi:
     def empty: Psi = Psi(List.empty, List.empty, List.empty, List.empty)
 
-    given JamEncoder[Psi] with
-      def encode(a: Psi): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.good.encode
-        builder ++= a.bad.encode
-        builder ++= a.wonky.encode
-        builder ++= a.offenders.encode
-        builder.result()
-
-    given JamDecoder[Psi] with
-      def decode(bytes: JamBytes, offset: Int): (Psi, Int) =
-        var pos = offset
-        val (good, goodBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += goodBytes
-        val (bad, badBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += badBytes
-        val (wonky, wonkyBytes) = bytes.decodeAs[List[Hash]](pos)
-        pos += wonkyBytes
-        val (offenders, offendersBytes) = bytes.decodeAs[List[Ed25519PublicKey]](pos)
-        pos += offendersBytes
-        (Psi(good, bad, wonky, offenders), pos - offset)
+    given Codec[Psi] =
+      (JamCodecs.compactPrefixedList(JamCodecs.hashCodec) ::
+       JamCodecs.compactPrefixedList(JamCodecs.hashCodec) ::
+       JamCodecs.compactPrefixedList(JamCodecs.hashCodec) ::
+       JamCodecs.compactPrefixedList(JamCodecs.ed25519PublicKeyCodec)).xmap(
+        { case (good, bad, wonky, offenders) =>
+          Psi(good, bad, wonky, offenders)
+        },
+        psi => (psi.good, psi.bad, psi.wonky, psi.offenders)
+      )
 
     given Decoder[Psi] =
       Decoder.instance { cursor =>
@@ -77,54 +69,24 @@ object DisputeTypes:
   )
 
   object DisputeState:
-    given JamEncoder[DisputeState] with
-      def encode(a: DisputeState): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.psi.encode
-        // rho - fixed size list (coreCount) of optional AvailabilityAssignment
-        for assignment <- a.rho do
-          assignment match
-            case None =>
-              builder += 0.toByte
-            case Some(aa) =>
-              builder += 1.toByte
-              builder ++= aa.encode
-        builder ++= codec.encodeU32LE(UInt(a.tau.toInt))
-        builder ++= codec.encodeFixedList(a.kappa)
-        builder ++= codec.encodeFixedList(a.lambda)
-        builder.result()
+    /** Create a config-aware codec for DisputeState */
+    def codec(coreCount: Int, validatorCount: Int): Codec[DisputeState] =
+      given availabilityAssignmentCodec: Codec[AvailabilityAssignment] = summon[Codec[AvailabilityAssignment]]
 
-    /** Create a decoder that knows the cores and validator counts */
-    def decoder(coreCount: Int, validatorCount: Int): JamDecoder[DisputeState] = new JamDecoder[DisputeState]:
-      def decode(bytes: JamBytes, offset: Int): (DisputeState, Int) =
-        val arr = bytes.toArray
-        var pos = offset
+      val psiCodec = summon[Codec[Psi]]
+      val rhoCodec = JamCodecs.fixedSizeList(JamCodecs.optionCodec(availabilityAssignmentCodec), coreCount)
+      val tauCodec = uint32L.xmap(
+        l => l & 0xFFFFFFFFL,
+        tau => tau & 0xFFFFFFFFL
+      )
+      val validatorListCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
 
-        val (psi, psiBytes) = bytes.decodeAs[Psi](pos)
-        pos += psiBytes
-
-        // rho - fixed size list (coreCount) of optional AvailabilityAssignment
-        val rho = (0 until coreCount).map { _ =>
-          val discriminator = arr(pos).toInt & 0xff
-          pos += 1
-          if discriminator == 0 then
-            None
-          else
-            val (assignment, consumed) = bytes.decodeAs[AvailabilityAssignment](pos)
-            pos += consumed
-            Some(assignment)
-        }.toList
-
-        val tau = codec.decodeU32LE(arr, pos).toLong
-        pos += 4
-
-        val (kappa, kappaBytes) = codec.decodeFixedList[ValidatorKey](bytes, pos, validatorCount)
-        pos += kappaBytes
-
-        val (lambda, lambdaBytes) = codec.decodeFixedList[ValidatorKey](bytes, pos, validatorCount)
-        pos += lambdaBytes
-
-        (DisputeState(psi, rho, tau, kappa, lambda), pos - offset)
+      (psiCodec :: rhoCodec :: tauCodec :: validatorListCodec :: validatorListCodec).xmap(
+        { case (psi, rho, tau, kappa, lambda) =>
+          DisputeState(psi, rho, tau, kappa, lambda)
+        },
+        state => (state.psi, state.rho, state.tau, state.kappa, state.lambda)
+      )
 
     given Decoder[DisputeState] =
       Decoder.instance { cursor =>
@@ -145,16 +107,12 @@ object DisputeTypes:
   )
 
   object DisputeInput:
-    given JamEncoder[DisputeInput] with
-      def encode(a: DisputeInput): JamBytes =
-        a.disputes.encode
-
-    /** Create a decoder that knows the votes per verdict (typically 2/3 of validators + 1) */
-    def decoder(votesPerVerdict: Int): JamDecoder[DisputeInput] = new JamDecoder[DisputeInput]:
-      def decode(bytes: JamBytes, offset: Int): (DisputeInput, Int) =
-        val disputeDecoder = Dispute.decoder(votesPerVerdict)
-        val (disputes, consumed) = disputeDecoder.decode(bytes, offset)
-        (DisputeInput(disputes), consumed)
+    /** Create a config-aware codec for DisputeInput */
+    def codec(votesPerVerdict: Int): Codec[DisputeInput] =
+      Dispute.codec(votesPerVerdict).xmap(
+        disputes => DisputeInput(disputes),
+        input => input.disputes
+      )
 
     given Decoder[DisputeInput] =
       Decoder.instance { cursor =>
@@ -184,8 +142,10 @@ object DisputeTypes:
     case CulpritsVerdictNotBad
 
   object DisputeErrorCode:
-    given JamEncoder[DisputeErrorCode] = CodecDerivation.enumEncoder(_.ordinal)
-    given JamDecoder[DisputeErrorCode] = CodecDerivation.enumDecoder(DisputeErrorCode.fromOrdinal)
+    given Codec[DisputeErrorCode] = byte.xmap(
+      b => DisputeErrorCode.fromOrdinal(b.toInt & 0xFF),
+      e => e.ordinal.toByte
+    )
 
     given Decoder[DisputeErrorCode] =
       Decoder.instance { cursor =>
@@ -216,13 +176,11 @@ object DisputeTypes:
   )
 
   object DisputeOutputMarks:
-    given JamEncoder[DisputeOutputMarks] with
-      def encode(a: DisputeOutputMarks): JamBytes = a.offenders.encode
-
-    given JamDecoder[DisputeOutputMarks] with
-      def decode(bytes: JamBytes, offset: Int): (DisputeOutputMarks, Int) =
-        val (offenders, consumed) = bytes.decodeAs[List[Ed25519PublicKey]](offset)
-        (DisputeOutputMarks(offenders), consumed)
+    given Codec[DisputeOutputMarks] =
+      JamCodecs.compactPrefixedList(JamCodecs.ed25519PublicKeyCodec).xmap(
+        offenders => DisputeOutputMarks(offenders),
+        marks => marks.offenders
+      )
 
     // JSON uses "offenders_mark" field name
     given Decoder[DisputeOutputMarks] =
@@ -238,8 +196,10 @@ object DisputeTypes:
   type DisputeOutput = StfResult[DisputeOutputMarks, DisputeErrorCode]
 
   object DisputeOutput:
-    given JamEncoder[DisputeOutput] = StfResult.stfResultEncoder[DisputeOutputMarks, DisputeErrorCode]
-    given JamDecoder[DisputeOutput] = StfResult.stfResultDecoder[DisputeOutputMarks, DisputeErrorCode]
+    given Codec[DisputeOutput] = JamCodecs.stfResultCodec[DisputeOutputMarks, DisputeErrorCode](
+      using summon[Codec[DisputeOutputMarks]],
+      summon[Codec[DisputeErrorCode]]
+    )
 
     // Circe JSON decoder for DisputeOutput
     given circeDecoder: Decoder[DisputeOutput] =
@@ -268,34 +228,21 @@ object DisputeTypes:
   )
 
   object DisputeCase:
-    import DisputeOutput.{given_JamEncoder_DisputeOutput, given_JamDecoder_DisputeOutput, circeDecoder}
+    import DisputeOutput.circeDecoder
+    import DisputeOutput.given
 
-    /** Create a config-aware decoder for DisputeCase */
-    def decoder(coreCount: Int, validatorCount: Int, votesPerVerdict: Int): JamDecoder[DisputeCase] =
-      new JamDecoder[DisputeCase]:
-        def decode(bytes: JamBytes, offset: Int): (DisputeCase, Int) =
-          var pos = offset
-          val inputDecoder = DisputeInput.decoder(votesPerVerdict)
-          val (input, inputBytes) = inputDecoder.decode(bytes, pos)
-          pos += inputBytes
-          val stateDecoder = DisputeState.decoder(coreCount, validatorCount)
-          val (preState, preStateBytes) = stateDecoder.decode(bytes, pos)
-          pos += preStateBytes
-          val (output, outputBytes) = bytes.decodeAs[DisputeOutput](pos)
-          pos += outputBytes
-          val (postState, postStateBytes) = stateDecoder.decode(bytes, pos)
-          pos += postStateBytes
-          (DisputeCase(input, preState, output, postState), pos - offset)
+    /** Create a config-aware codec for DisputeCase */
+    def codec(coreCount: Int, validatorCount: Int, votesPerVerdict: Int): Codec[DisputeCase] =
+      val inputCodec = DisputeInput.codec(votesPerVerdict)
+      val stateCodec = DisputeState.codec(coreCount, validatorCount)
+      val outputCodec = summon[Codec[DisputeOutput]]
 
-    /** Create a config-aware encoder for DisputeCase */
-    given JamEncoder[DisputeCase] with
-      def encode(a: DisputeCase): JamBytes =
-        val builder = JamBytes.newBuilder
-        builder ++= a.input.encode
-        builder ++= a.preState.encode
-        builder ++= a.output.encode
-        builder ++= a.postState.encode
-        builder.result()
+      (inputCodec :: stateCodec :: outputCodec :: stateCodec).xmap(
+        { case (input, preState, output, postState) =>
+          DisputeCase(input, preState, output, postState)
+        },
+        testCase => (testCase.input, testCase.preState, testCase.output, testCase.postState)
+      )
 
     given Decoder[DisputeCase] =
       Decoder.instance { cursor =>

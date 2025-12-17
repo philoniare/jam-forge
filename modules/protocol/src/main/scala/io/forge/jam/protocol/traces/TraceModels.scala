@@ -1,9 +1,12 @@
 package io.forge.jam.protocol.traces
 
+import _root_.scodec.{Codec, Attempt, DecodeResult, Err}
+import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.codecs.*
 import io.circe.{Decoder, HCursor}
-import io.forge.jam.core.{ChainConfig, JamBytes, codec}
-import io.forge.jam.core.codec.{JamEncoder, JamDecoder, encode}
+import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 
@@ -19,33 +22,17 @@ final case class KeyValue(
 object KeyValue:
   val KEY_SIZE: Int = 31
 
-  /**
-   * Create KeyValue from bytes starting at offset.
-   * Returns the KeyValue and number of bytes consumed.
-   */
-  def fromBytes(data: Array[Byte], offset: Int = 0): (KeyValue, Int) =
-    val key = JamBytes(data.slice(offset, offset + KEY_SIZE))
-    val (valueLength, valueLengthBytes) = codec.decodeCompactInteger(data, offset + KEY_SIZE)
-    val valueEnd = offset + KEY_SIZE + valueLengthBytes + valueLength.toInt
-    val value = JamBytes(data.slice(offset + KEY_SIZE + valueLengthBytes, valueEnd))
-    (KeyValue(key, value), KEY_SIZE + valueLengthBytes + valueLength.toInt)
-
-  /**
-   * Encode KeyValue to bytes.
-   * Key is fixed 31 bytes, value is length-prefixed.
-   */
-  def encode(kv: KeyValue): JamBytes =
-    val keyBytes = kv.key.toArray
-    val lengthBytes = codec.encodeCompactInteger(kv.value.length.toLong)
-    val valueBytes = kv.value.toArray
-    JamBytes(keyBytes ++ lengthBytes ++ valueBytes)
-
-  given JamEncoder[KeyValue] with
-    def encode(a: KeyValue): JamBytes = KeyValue.encode(a)
-
-  given JamDecoder[KeyValue] with
-    def decode(bytes: JamBytes, offset: Int): (KeyValue, Int) =
-      fromBytes(bytes.toArray, offset)
+  given Codec[KeyValue] =
+    (fixedSizeBytes(KEY_SIZE.toLong, bytes) ::
+     variableSizeBytes(JamCodecs.compactInt, bytes)).xmap(
+      { case (keyBv, valueBv) =>
+        KeyValue(
+          key = JamBytes.fromByteVector(keyBv),
+          value = JamBytes.fromByteVector(valueBv)
+        )
+      },
+      kv => (kv.key.toByteVector, kv.value.toByteVector)
+    )
 
   given Decoder[KeyValue] = new Decoder[KeyValue]:
     def apply(c: HCursor): Decoder.Result[KeyValue] =
@@ -67,47 +54,18 @@ final case class RawState(
 
 object RawState:
   /**
-   * Create RawState from bytes starting at offset.
-   * Returns the RawState and number of bytes consumed.
-   */
-  def fromBytes(data: Array[Byte], offset: Int = 0): (RawState, Int) =
-    var currentOffset = offset
-    val stateRoot = Hash(data.slice(currentOffset, currentOffset + 32))
-    currentOffset += 32
-
-    val (keyvalsLength, keyvalsLengthBytes) = codec.decodeCompactInteger(data, currentOffset)
-    currentOffset += keyvalsLengthBytes
-
-    val keyvals = scala.collection.mutable.ListBuffer[KeyValue]()
-    for _ <- 0 until keyvalsLength.toInt do
-      val (kv, kvBytes) = KeyValue.fromBytes(data, currentOffset)
-      keyvals += kv
-      currentOffset += kvBytes
-
-    (RawState(stateRoot, keyvals.toList), currentOffset - offset)
-
-  /**
-   * Encode RawState to bytes.
-   */
-  def encode(state: RawState): JamBytes =
-    val builder = JamBytes.newBuilder
-    builder ++= state.stateRoot.bytes
-    builder ++= codec.encodeCompactInteger(state.keyvals.length.toLong)
-    for kv <- state.keyvals do
-      builder ++= KeyValue.encode(kv).toArray
-    builder.result()
-
-  /**
    * Create an empty raw state.
    */
   def empty: RawState = RawState(Hash.zero, List.empty)
 
-  given JamEncoder[RawState] with
-    def encode(a: RawState): JamBytes = RawState.encode(a)
-
-  given JamDecoder[RawState] with
-    def decode(bytes: JamBytes, offset: Int): (RawState, Int) =
-      fromBytes(bytes.toArray, offset)
+  given Codec[RawState] =
+    (JamCodecs.hashCodec ::
+     JamCodecs.compactPrefixedList(summon[Codec[KeyValue]])).xmap(
+      { case (stateRoot, keyvals) =>
+        RawState(stateRoot = stateRoot, keyvals = keyvals)
+      },
+      rs => (rs.stateRoot, rs.keyvals)
+    )
 
   given Decoder[RawState] = new Decoder[RawState]:
     def apply(c: HCursor): Decoder.Result[RawState] =
@@ -130,39 +88,17 @@ final case class TraceStep(
 
 object TraceStep:
   /**
-   * Create TraceStep from bytes with config parameters.
+   * Create a codec for TraceStep with config parameters.
    */
-  def fromBytes(
-    data: Array[Byte],
-    offset: Int = 0,
-    validatorCount: Int = TinyConfig.VALIDATORS_COUNT,
-    epochLength: Int = TinyConfig.EPOCH_LENGTH,
-    coresCount: Int = TinyConfig.CORES_COUNT,
-    votesPerVerdict: Int = TinyConfig.VALIDATORS_COUNT
-  ): (TraceStep, Int) =
-    var currentOffset = offset
-
-    val (preState, preStateBytes) = RawState.fromBytes(data, currentOffset)
-    currentOffset += preStateBytes
-
-    val blockDecoder = Block.decoder(validatorCount, epochLength, coresCount, votesPerVerdict)
-    val (block, blockBytes) = blockDecoder.decode(JamBytes(data), currentOffset)
-    currentOffset += blockBytes
-
-    val (postState, postStateBytes) = RawState.fromBytes(data, currentOffset)
-    currentOffset += postStateBytes
-
-    (TraceStep(preState, block, postState), currentOffset - offset)
-
-  /**
-   * Encode TraceStep to bytes.
-   */
-  def encodeStep(step: TraceStep): JamBytes =
-    val builder = JamBytes.newBuilder
-    builder ++= RawState.encode(step.preState).toArray
-    builder ++= step.block.encode.toArray
-    builder ++= RawState.encode(step.postState).toArray
-    builder.result()
+  def codec(validatorCount: Int, epochLength: Int, coresCount: Int, votesPerVerdict: Int): Codec[TraceStep] =
+    (summon[Codec[RawState]] ::
+     Block.blockCodec(validatorCount, epochLength, coresCount, votesPerVerdict) ::
+     summon[Codec[RawState]]).xmap(
+      { case (preState, block, postState) =>
+        TraceStep(preState = preState, block = block, postState = postState)
+      },
+      ts => (ts.preState, ts.block, ts.postState)
+    )
 
   /**
    * Create a JSON decoder for TraceStep.
@@ -176,9 +112,6 @@ object TraceStep:
         postState <- c.downField("post_state").as[RawState]
       yield TraceStep(preState, block, postState)
 
-  given JamEncoder[TraceStep] with
-    def encode(a: TraceStep): JamBytes = encodeStep(a)
-
 /**
  * Genesis state for a trace, containing initial header and state.
  */
@@ -189,33 +122,16 @@ final case class Genesis(
 
 object Genesis:
   /**
-   * Create Genesis from bytes with config parameters.
+   * Create a codec for Genesis with config parameters.
    */
-  def fromBytes(
-    data: Array[Byte],
-    offset: Int = 0,
-    validatorCount: Int = TinyConfig.VALIDATORS_COUNT,
-    epochLength: Int = TinyConfig.EPOCH_LENGTH
-  ): (Genesis, Int) =
-    var currentOffset = offset
-
-    val headerDecoder = Header.decoder(validatorCount, epochLength)
-    val (header, headerBytes) = headerDecoder.decode(JamBytes(data), currentOffset)
-    currentOffset += headerBytes
-
-    val (state, stateBytes) = RawState.fromBytes(data, currentOffset)
-    currentOffset += stateBytes
-
-    (Genesis(header, state), currentOffset - offset)
-
-  /**
-   * Encode Genesis to bytes.
-   */
-  def encodeGenesis(genesis: Genesis): JamBytes =
-    val builder = JamBytes.newBuilder
-    builder ++= genesis.header.encode.toArray
-    builder ++= RawState.encode(genesis.state).toArray
-    builder.result()
+  def codec(validatorCount: Int, epochLength: Int): Codec[Genesis] =
+    (Header.headerCodec(validatorCount, epochLength) ::
+     summon[Codec[RawState]]).xmap(
+      { case (header, state) =>
+        Genesis(header = header, state = state)
+      },
+      g => (g.header, g.state)
+    )
 
   /**
    * Create a JSON decoder for Genesis.
@@ -227,9 +143,6 @@ object Genesis:
         header <- c.downField("header").as[Header]
         state <- c.downField("state").as[RawState]
       yield Genesis(header, state)
-
-  given JamEncoder[Genesis] with
-    def encode(a: Genesis): JamBytes = encodeGenesis(a)
 
 /**
  * Configuration for tiny chain spec used by all traces.

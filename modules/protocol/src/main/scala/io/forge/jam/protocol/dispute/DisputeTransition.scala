@@ -13,6 +13,7 @@ import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.crypto.Ed25519
 import io.forge.jam.protocol.state.JamState
 import monocle.syntax.all.*
+import _root_.scodec.Codec
 
 /**
  * Disputes State Transition Function.
@@ -287,7 +288,7 @@ object DisputeTransition:
     val newRho = preState.rho.map { assignmentOpt =>
       assignmentOpt.flatMap { assignment =>
         val reportHash = Hashing.blake2b256(
-          WorkReport.given_JamEncoder_WorkReport.encode(assignment.report).toArray
+          summon[Codec[WorkReport]].encode(assignment.report).require.toByteArray
         )
 
         // Clear if the report is in bad or wonky

@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{JamBytes, Hashing, codec}
+import io.forge.jam.core.{JamBytes, Hashing}
+import io.forge.jam.core.scodec.JamCodecs
 import spire.math.{UInt, ULong}
 
 /**
@@ -24,7 +25,7 @@ object StateKey:
    */
   def computeServiceDataStateKey(serviceIndex: Long, discriminator: Long, data: JamBytes): JamBytes =
     // Encode discriminator as 4-byte little-endian using codec
-    val valEncoded = codec.encodeU32LE(UInt(discriminator.toInt))
+    val valEncoded = JamCodecs.encodeU32LE(UInt(discriminator.toInt))
 
     // h = valEncoded + data
     val h = valEncoded ++ data.toArray
@@ -33,7 +34,7 @@ object StateKey:
     val a = Hashing.blake2b256(h).bytes
 
     // Construct the state key by interleaving service index with hash
-    val serviceBytes = codec.encodeU32LE(UInt(serviceIndex.toInt))
+    val serviceBytes = JamCodecs.encodeU32LE(UInt(serviceIndex.toInt))
 
     val stateKey = new Array[Byte](31)
 
@@ -115,7 +116,7 @@ object StateKey:
 
     // 4-byte LE timeslot values using codec
     for ts <- timeslots do
-      builder ++= codec.encodeU32LE(UInt(ts.toInt))
+      builder ++= JamCodecs.encodeU32LE(UInt(ts.toInt))
 
     builder.result()
 
@@ -139,7 +140,7 @@ object StateKey:
     while i < count do
       val offset = 1 + i * 4
       if offset + 4 <= bytes.length then
-        val ts = codec.decodeU32LE(bytes, offset).toLong
+        val ts = JamCodecs.decodeU32LE(bytes, offset).toLong
         timeslots += ts
       i += 1
 

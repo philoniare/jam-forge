@@ -4,7 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.TestHelpers.hashFilled
@@ -139,6 +139,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
+          given authCaseCodec: _root_.scodec.Codec[AuthCase] = AuthCase.codec(ChainConfig.TINY)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
@@ -166,6 +167,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
+          given authCaseCodec: _root_.scodec.Codec[AuthCase] = AuthCase.codec(ChainConfig.FULL)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 

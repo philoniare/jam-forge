@@ -413,7 +413,8 @@ object InputExtractor:
    * Extract HistoricalInput from block and accumulate root.
    */
   def extractHistoryInput(block: Block, accumulateRoot: Hash): HistoricalInput =
-    import io.forge.jam.core.codec.encode
+    import io.forge.jam.core.scodec.JamCodecs.encode
+    import _root_.scodec.Codec
     val headerHash = Hashing.blake2b256(block.header.encode.toArray)
 
     val workPackages = block.extrinsic.guarantees.map { guarantee =>

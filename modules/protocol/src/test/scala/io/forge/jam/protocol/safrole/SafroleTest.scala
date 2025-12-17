@@ -4,7 +4,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
+import _root_.scodec.Codec
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.safrole.SafroleTypes.*
@@ -108,6 +109,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Encode the parsed JSON
+          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.validatorCount, TinyConfig.epochLength)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
       }
@@ -131,6 +133,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding matches expected binary
+          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.validatorCount, TinyConfig.epochLength)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 

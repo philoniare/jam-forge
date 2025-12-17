@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, codec}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.pvm.{InterruptKind, MemoryResult}
@@ -126,9 +127,9 @@ class AccumulationExecutor(val config: ChainConfig):
     operands: List[AccumulationOperand]
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
-    val inputData = codec.encodeCompactInteger(context.timeslot) ++
-      codec.encodeCompactInteger(context.serviceIndex) ++
-      codec.encodeCompactInteger(operands.size.toLong)
+    val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
+      JamCodecs.encodeCompactInteger(context.serviceIndex) ++
+      JamCodecs.encodeCompactInteger(operands.size.toLong)
 
     // Get or compile module
     val moduleOpt = getOrCompileModule(code)
@@ -374,8 +375,8 @@ class AccumulationExecutor(val config: ChainConfig):
     Some(preimage.drop(codeStart))
 
   private def calculateInitialIndex(serviceId: Long, entropy: JamBytes, timeslot: Long): Long =
-    val encodedServiceId = codec.encodeCompactInteger(serviceId)
-    val encodedTimeslot = codec.encodeCompactInteger(timeslot)
+    val encodedServiceId = JamCodecs.encodeCompactInteger(serviceId)
+    val encodedTimeslot = JamCodecs.encodeCompactInteger(timeslot)
     val data = encodedServiceId ++ entropy.toArray ++ encodedTimeslot
     val hash = Hashing.blake2b256(data)
     val hashBytes = hash.bytes.toArray

@@ -158,8 +158,9 @@ final class JamBytesList private (private val items: ArrayBuffer[JamBytes]) exte
    * Format: [compact-length][item0][item1]...
    */
   def encode(): Array[Byte] =
+    import io.forge.jam.core.scodec.JamCodecs
     val builder = JamBytes.newBuilder
-    builder ++= codec.encodeCompactInteger(size)
+    builder ++= JamCodecs.encodeCompactInteger(size)
     items.foreach(item => builder ++= item.toArray)
     builder.result().toArray
   
@@ -220,8 +221,9 @@ object JamBytesList:
    * @return Tuple of (decoded list, bytes consumed)
    */
   def fromBytes(data: Array[Byte], offset: Int = 0, itemSize: Int = 32): (JamBytesList, Int) =
+    import io.forge.jam.core.scodec.JamCodecs
     var currentOffset = offset
-    val (length, lengthBytes) = codec.decodeCompactInteger(data, currentOffset)
+    val (length, lengthBytes) = JamCodecs.decodeCompactInteger(data, currentOffset)
     currentOffset += lengthBytes
     
     val list = JamBytesList.empty
@@ -245,8 +247,9 @@ object JamBytesList:
     offset: Int,
     decoder: (Array[Byte], Int) => (JamBytes, Int)
   ): (JamBytesList, Int) =
+    import io.forge.jam.core.scodec.JamCodecs
     var currentOffset = offset
-    val (length, lengthBytes) = codec.decodeCompactInteger(data, currentOffset)
+    val (length, lengthBytes) = JamCodecs.decodeCompactInteger(data, currentOffset)
     currentOffset += lengthBytes
     
     val list = JamBytesList.empty

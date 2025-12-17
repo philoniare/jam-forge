@@ -2,8 +2,9 @@ package io.forge.jam.protocol.report
 
 import cats.syntax.all.*
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
-import io.forge.jam.core.codec.encode
+import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, ValidatorIndex}
+import _root_.scodec.Codec
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.ExecutionResult
