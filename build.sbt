@@ -27,6 +27,7 @@ else "dylib"
 
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
+lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
 lazy val benchmark = taskKey[Unit]("Run benchmark tests")
 
 lazy val root = (project in file("."))
@@ -155,8 +156,48 @@ lazy val crypto = (project in file("modules/crypto"))
         println(s"Ed25519-Zebra native library already exists: ${targetLib.absolutePath}")
       }
     },
-    // Run both native lib builds before compile
-    Compile / compile := (Compile / compile).dependsOn(buildNativeLib, buildEd25519ZebraLib).value,
+    // Erasure Coding native library build task
+    buildErasureCodingLib := {
+      val baseDir = (ThisBuild / baseDirectory).value
+      val rustProjectDir = baseDir / "modules" / "crypto" / "native" / "erasure-coding-wrapper"
+      val targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName
+      val libName = s"liberasure_coding_wrapper.$libSuffix"
+
+      val targetLib = targetDir / libName
+      val sourceLib = rustProjectDir / "target" / "release" / libName
+
+      if (!targetLib.exists()) {
+        println(s"Building Erasure Coding native library for $osDirName...")
+        targetDir.mkdirs()
+
+        val cargoPath =
+          try
+            if (osName.contains("win")) "where cargo".!!.trim
+            else "which cargo".!!.trim
+          catch {
+            case _: Exception => "cargo"
+          }
+
+        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
+        if (buildResult != 0) {
+          sys.error("Failed to build Erasure Coding native library with cargo")
+        }
+
+        if (sourceLib.exists()) {
+          IO.copyFile(sourceLib, targetLib)
+          if (!osName.contains("win")) {
+            s"chmod +x ${targetLib.absolutePath}".!
+          }
+          println(s"Erasure Coding native library built: ${targetLib.absolutePath}")
+        } else {
+          sys.error(s"Erasure Coding native library not found at: ${sourceLib.absolutePath}")
+        }
+      } else {
+        println(s"Erasure Coding native library already exists: ${targetLib.absolutePath}")
+      }
+    },
+    // Run all native lib builds before compile
+    Compile / compile := (Compile / compile).dependsOn(buildNativeLib, buildEd25519ZebraLib, buildErasureCodingLib).value,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
     Test / javaOptions ++= Seq(
