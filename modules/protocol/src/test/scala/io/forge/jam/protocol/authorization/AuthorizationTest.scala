@@ -3,7 +3,7 @@ package io.forge.jam.protocol.authorization
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.protocol.TestFileLoader
@@ -15,10 +15,6 @@ import io.forge.jam.protocol.authorization.AuthorizationTransition
  * Tests for the Authorization State Transition Function.
  */
 class AuthorizationTest extends AnyFunSuite with Matchers:
-
-  // Config for single-core unit tests
-  private val singleCoreConfig = ChainConfig.TINY.copy(coresCount = 1)
-  private val twoCoreConfig = ChainConfig.TINY.copy(coresCount = 2)
 
   test("authorization consumption from pool") {
     // Create a simple state with one core
@@ -36,7 +32,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(2)))
     )
 
-    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState)
 
     // hashFilled(2) should be removed, and a new item from queue added
     postState.authPools(0) should not contain hashFilled(2)
@@ -64,7 +60,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stfInternal(input42, preState, twoCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input42, preState)
 
     // Core 0 should get item from queue at index 42 % 80 = 42
     postState.authPools(0) should contain(queue1(42))
@@ -91,7 +87,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState)
 
     postState.authPools(0) should not contain hashFilled(1) // consumed item removed
     postState.authPools(0) should contain(queue(10)) // new item from queue added
@@ -114,7 +110,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
       auths = List(Auth(CoreIndex(0), hashFilled(1)))
     )
 
-    val postState = AuthorizationTransition.stfInternal(input, preState, singleCoreConfig)
+    val postState = AuthorizationTransition.stfInternal(input, preState)
 
     // Pool should still be at max size 8
     postState.authPools(0).size shouldBe 8
@@ -146,8 +142,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           // Test state transition
           val postState = AuthorizationTransition.stfInternal(
             testCase.input,
-            testCase.preState,
-            ChainConfig.TINY
+            testCase.preState
           )
           assertAuthStateEquals(testCase.postState, postState, testCaseName)
   }
@@ -174,8 +169,7 @@ class AuthorizationTest extends AnyFunSuite with Matchers:
           // Test state transition
           val postState = AuthorizationTransition.stfInternal(
             testCase.input,
-            testCase.preState,
-            ChainConfig.FULL
+            testCase.preState
           )
           assertAuthStateEquals(testCase.postState, postState, testCaseName)
   }

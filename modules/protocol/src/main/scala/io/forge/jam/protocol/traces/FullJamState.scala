@@ -543,7 +543,7 @@ object FullJamState:
             service = serviceInfo,
             storage = List.empty,
             preimages = List.empty,
-            preimagesStatus = List.empty
+            preimageRequests = List.empty
           )
         )
       }.sortBy(_.id)

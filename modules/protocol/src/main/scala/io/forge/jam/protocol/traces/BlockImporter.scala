@@ -358,7 +358,6 @@ object InputExtractor:
    * Extract SafroleInput from block.
    * The entropy source in the header is a VRF signature from which we extract the output.
    */
-  private val extractorLogger = org.slf4j.LoggerFactory.getLogger(getClass)
 
   def extractSafroleInput(block: Block): SafroleInput =
     val header = block.header
@@ -371,15 +370,12 @@ object InputExtractor:
         BandersnatchWrapper.ensureLibraryLoaded()
         val output = BandersnatchWrapper.getIetfVrfOutput(entropyBytes)
         if output != null && output.length == 32 then
-          extractorLogger.debug(s"[extractSafroleInput] VRF output extracted successfully: ${JamBytes(output).toHex.take(32)}...")
           Hash(output)
         else
-          extractorLogger.warn(s"[extractSafroleInput] Native VRF extraction returned invalid output, using fallback (first 32 bytes)")
           // Fallback: use first 32 bytes if native extraction fails
           Hash(entropyBytes.take(32))
       catch
         case e: Exception =>
-          extractorLogger.warn(s"[extractSafroleInput] Exception during VRF extraction: ${e.getMessage}, using fallback (first 32 bytes)")
           // Fallback: use first 32 bytes if native library unavailable
           Hash(entropyBytes.take(32))
 

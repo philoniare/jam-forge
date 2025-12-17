@@ -86,8 +86,8 @@ object PreimageTypes:
     given Decoder[AccountInfo] =
       Decoder.instance { cursor =>
         for
-          preimages <- cursor.get[List[PreimageHash]]("preimages")
-          lookupMeta <- cursor.get[List[PreimageHistory]]("lookup_meta")
+          preimages <- cursor.get[List[PreimageHash]]("preimage_blobs")
+          lookupMeta <- cursor.get[List[PreimageHistory]]("preimage_requests")
         yield AccountInfo(preimages, lookupMeta)
       }
 

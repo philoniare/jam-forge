@@ -164,15 +164,16 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     hostCalls.getGasCost(HostCall.CHECKPOINT, instance) shouldBe 10L
   }
 
-  test("gas cost for LOG should be 0") {
+  test("gas cost for LOG should be 10 (v0.7.2)") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
+    // v0.7.2: LOG now has standard gas cost of 10
+    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 10L
   }
 
-  test("gas cost for TRANSFER should be 10 + gasLimit from r9") {
+  test("gas cost for TRANSFER should be 10 upfront (v0.7.2)") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -181,7 +182,8 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     val gasLimit = 5000L
     instance.setReg(9, gasLimit)
 
-    hostCalls.getGasCost(HostCall.TRANSFER, instance) shouldBe (10L + gasLimit)
+    // v0.7.2: TRANSFER only charges 10 upfront; additional gasLimit charged on success
+    hostCalls.getGasCost(HostCall.TRANSFER, instance) shouldBe 10L
   }
 
   // ===========================================================================

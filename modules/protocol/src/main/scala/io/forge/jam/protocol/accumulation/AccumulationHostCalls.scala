@@ -63,12 +63,7 @@ class AccumulationHostCalls(
    */
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
-      case HostCall.LOG => 0L // LOG has 0 gas cost per JIP-1
-      case HostCall.TRANSFER =>
-        // 0.7.1: TRANSFER gas is 10 + gasLimit
-        val transferGasLimit = getReg(instance, 9).toLong
-        10L + transferGasLimit
-      case _ => 10L // Default gas cost for most host calls
+      case _ => 10L
 
   /**
    * Dispatch a host call based on its identifier.
@@ -745,8 +740,9 @@ class AccumulationHostCalls(
         req.requestedAt
       case None =>
         val expectedKey = StateKey.computePreimageInfoStateKey(ejectServiceId, derivedLength.toInt, preimageHash)
-        val matchingInfoEntry = context.x.rawServiceDataByStateKey.find { case (key, _) =>
-          java.util.Arrays.equals(key.toArray, expectedKey.toArray)
+        val matchingInfoEntry = context.x.rawServiceDataByStateKey.find {
+          case (key, _) =>
+            java.util.Arrays.equals(key.toArray, expectedKey.toArray)
         }
         matchingInfoEntry match
           case Some((_, infoValue)) =>
@@ -773,13 +769,14 @@ class AccumulationHostCalls(
     context.x.accounts(context.serviceIndex) = callerAccount.copy(info = updatedCallerInfo)
     context.x.accounts.remove(ejectServiceId)
 
-    val serviceIdBytes = java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(ejectServiceId.toInt).array()
+    val serviceIdBytes =
+      java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(ejectServiceId.toInt).array()
     val keysToRemove = context.x.rawServiceDataByStateKey.keys.filter { key =>
       key.length >= 8 &&
-        key.toArray(0) == serviceIdBytes(0) &&
-        key.toArray(2) == serviceIdBytes(1) &&
-        key.toArray(4) == serviceIdBytes(2) &&
-        key.toArray(6) == serviceIdBytes(3)
+      key.toArray(0) == serviceIdBytes(0) &&
+      key.toArray(2) == serviceIdBytes(1) &&
+      key.toArray(4) == serviceIdBytes(2) &&
+      key.toArray(6) == serviceIdBytes(3)
     }.toList
     keysToRemove.foreach(context.x.rawServiceDataByStateKey.remove)
 
@@ -791,7 +788,6 @@ class AccumulationHostCalls(
 
   /**
    * transfer (20): Queue a deferred transfer.
-   * 0.7.1: Gas is g = 10 + gasLimit (charged regardless of success/failure).
    */
   private def handleTransfer(instance: PvmInstance): Unit =
     val destination = (getReg(instance, 7) & ULong(0xffffffffL)).toLong
@@ -876,7 +872,10 @@ class AccumulationHostCalls(
       setReg(instance, 7, HostCallResult.CASH)
       return
 
-    // 5. Success - deduct balance and queue transfer
+    // 5. Success - charge additional gas on success
+    instance.setGas(instance.gas - gasLimit)
+
+    // 6. Deduct balance and queue transfer
     val updatedInfo = acc.info.copy(balance = balanceAfterTransfer)
     context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
 
@@ -1192,7 +1191,7 @@ class AccumulationHostCalls(
     buffer.write(encodeShort(config.coresCount)) // totalNumberOfCores (UInt16)
     buffer.write(encodeIntLE(config.preimageExpungePeriod)) // preimagePurgePeriod (UInt32)
     buffer.write(encodeIntLE(config.epochLength)) // epochLength (UInt32)
-    buffer.write(encodeLong(config.maxAccumulationGas)) // workReportAccumulationGas (UInt64)
+    buffer.write(encodeLong(config.reportAccGas)) // workReportAccumulationGas (UInt64)
     buffer.write(encodeLong(50_000_000L)) // workPackageIsAuthorizedGas (UInt64) - same for both configs
     buffer.write(encodeLong(config.maxRefineGas)) // workPackageRefineGas (UInt64)
     buffer.write(encodeLong(if isTiny then config.maxBlockGas else 3_500_000_000L)) // totalAccumulationGas (UInt64)
@@ -1299,17 +1298,6 @@ class AccumulationHostCalls(
       i += 1
     true
 
-  /** Read memory or throw panic exception */
-  private def readMemoryOrPanic(instance: PvmInstance, address: Int, size: Int, context: String): Array[Byte] =
-    val buffer = new Array[Byte](size)
-    if !readMemory(instance, address, buffer) then
-      throw new RuntimeException(s"$context PANIC: Failed to read from memory at 0x${address.toHexString} len $size")
-    buffer
-
-  /** Read 32-byte hash from memory or throw panic */
-  private def readHashOrPanic(instance: PvmInstance, address: Int, context: String): Array[Byte] =
-    readMemoryOrPanic(instance, address, 32, context)
-
   /** Write memory to PVM instance, returns true on success */
   private def writeMemory(instance: PvmInstance, address: Int, data: Array[Byte]): Boolean =
     var i = 0
@@ -1318,8 +1306,3 @@ class AccumulationHostCalls(
         return false
       i += 1
     true
-
-  /** Write memory or throw panic exception */
-  private def writeMemoryOrPanic(instance: PvmInstance, address: Int, data: Array[Byte], context: String): Unit =
-    if !writeMemory(instance, address, data) then
-      throw new RuntimeException(s"$context PANIC: Failed to write to memory at 0x${address.toHexString}")

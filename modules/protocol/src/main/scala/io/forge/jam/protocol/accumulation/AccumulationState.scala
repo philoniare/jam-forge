@@ -36,8 +36,8 @@ object AlwaysAccItem:
 
   given Codec[AlwaysAccItem] =
     (uint32L :: int64L).xmap(
-      { case (id, gas) => AlwaysAccItem(id & 0xFFFFFFFFL, gas) },
-      a => (a.id & 0xFFFFFFFFL, a.gas)
+      { case (id, gas) => AlwaysAccItem(id & 0xffffffffL, gas) },
+      a => (a.id & 0xffffffffL, a.gas)
     )
 
   given Decoder[AlwaysAccItem] = Decoder.instance { cursor =>
@@ -67,14 +67,28 @@ final case class Privileges(
 object Privileges:
   def codec(coresCount: Int): Codec[Privileges] =
     (uint32L ::
-     JamCodecs.fixedSizeList(uint32L, coresCount) ::
-     uint32L ::
-     uint32L ::
-     JamCodecs.compactPrefixedList(summon[Codec[AlwaysAccItem]])).xmap(
-      { case (bless, assign, designate, register, alwaysAcc) =>
-        Privileges(bless & 0xFFFFFFFFL, assign.map(_ & 0xFFFFFFFFL), designate & 0xFFFFFFFFL, register & 0xFFFFFFFFL, alwaysAcc)
+      JamCodecs.fixedSizeList(uint32L, coresCount) ::
+      uint32L ::
+      uint32L ::
+      JamCodecs.compactPrefixedList(summon[Codec[AlwaysAccItem]])).xmap(
+      {
+        case (bless, assign, designate, register, alwaysAcc) =>
+          Privileges(
+            bless & 0xffffffffL,
+            assign.map(_ & 0xffffffffL),
+            designate & 0xffffffffL,
+            register & 0xffffffffL,
+            alwaysAcc
+          )
       },
-      p => (p.bless & 0xFFFFFFFFL, p.assign.map(_ & 0xFFFFFFFFL), p.designate & 0xFFFFFFFFL, p.register & 0xFFFFFFFFL, p.alwaysAcc)
+      p =>
+        (
+          p.bless & 0xffffffffL,
+          p.assign.map(_ & 0xffffffffL),
+          p.designate & 0xffffffffL,
+          p.register & 0xffffffffL,
+          p.alwaysAcc
+        )
     )
 
   given Decoder[Privileges] = Decoder.instance { cursor =>
@@ -106,14 +120,26 @@ final case class ServiceActivityRecord(
 object ServiceActivityRecord:
   given Codec[ServiceActivityRecord] =
     (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger).xmap(
-      { case (pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
-        ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, ag)
+      JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+      JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+      JamCodecs.compactInteger).xmap(
+      {
+        case (pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
+          ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, ag)
       },
-      r => (r.providedCount.toLong, r.providedSize, r.refinementCount, r.refinementGasUsed,
-            r.imports, r.extrinsicCount, r.extrinsicSize, r.exports, r.accumulateCount, r.accumulateGasUsed)
+      r =>
+        (
+          r.providedCount.toLong,
+          r.providedSize,
+          r.refinementCount,
+          r.refinementGasUsed,
+          r.imports,
+          r.extrinsicCount,
+          r.extrinsicSize,
+          r.exports,
+          r.accumulateCount,
+          r.accumulateGasUsed
+        )
     )
 
   given Decoder[ServiceActivityRecord] = Decoder.instance { cursor =>
@@ -153,8 +179,8 @@ final case class ServiceStatisticsEntry(
 object ServiceStatisticsEntry:
   given Codec[ServiceStatisticsEntry] =
     (uint32L :: summon[Codec[ServiceActivityRecord]]).xmap(
-      { case (id, record) => ServiceStatisticsEntry(id & 0xFFFFFFFFL, record) },
-      e => (e.id & 0xFFFFFFFFL, e.record)
+      { case (id, record) => ServiceStatisticsEntry(id & 0xffffffffL, record) },
+      e => (e.id & 0xffffffffL, e.record)
     )
 
   given Decoder[ServiceStatisticsEntry] = Decoder.instance { cursor =>
@@ -175,7 +201,7 @@ final case class StorageMapEntry(
 object StorageMapEntry:
   given Codec[StorageMapEntry] =
     (variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]) ::
-     variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]])).xmap(
+      variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]])).xmap(
       { case (key, value) => StorageMapEntry(key, value) },
       e => (e.key, e.value)
     )
@@ -188,26 +214,25 @@ object StorageMapEntry:
   }
 
 /**
- * Preimage status entry with hash and status list.
+ * Preimage requests map key with hash and value list.
  */
-final case class PreimagesStatusMapEntry(
+final case class PreimageRequestsMapKey(
   hash: Hash,
-  status: List[Long]
+  value: List[Long]
 )
 
-object PreimagesStatusMapEntry:
-  given Codec[PreimagesStatusMapEntry] =
+object PreimageRequestsMapKey:
+  given Codec[PreimageRequestsMapKey] =
     (JamCodecs.hashCodec :: JamCodecs.compactPrefixedList(uint32L)).xmap(
-      { case (hash, status) => PreimagesStatusMapEntry(hash, status.map(_ & 0xFFFFFFFFL)) },
-      e => (e.hash, e.status.map(_ & 0xFFFFFFFFL))
+      { case (hash, value) => PreimageRequestsMapKey(hash, value.map(_ & 0xffffffffL)) },
+      e => (e.hash, e.value.map(_ & 0xffffffffL))
     )
 
-
-  given Decoder[PreimagesStatusMapEntry] = Decoder.instance { cursor =>
+  given Decoder[PreimageRequestsMapKey] = Decoder.instance { cursor =>
     for
-      hash <- cursor.get[String]("hash")
-      status <- cursor.get[List[Long]]("status")
-    yield PreimagesStatusMapEntry(Hash(parseHex(hash)), status)
+      hash <- cursor.downField("key").get[String]("hash")
+      value <- cursor.get[List[Long]]("value")
+    yield PreimageRequestsMapKey(Hash(parseHex(hash)), value)
   }
 
 /**
@@ -217,28 +242,29 @@ final case class AccumulationServiceData(
   service: ServiceInfo,
   storage: List[StorageMapEntry] = List.empty,
   preimages: List[PreimageHash] = List.empty,
-  preimagesStatus: List[PreimagesStatusMapEntry] = List.empty
+  preimageRequests: List[PreimageRequestsMapKey] = List.empty
 )
 
 object AccumulationServiceData:
   given Codec[AccumulationServiceData] =
     (summon[Codec[ServiceInfo]] ::
-     JamCodecs.compactPrefixedList(summon[Codec[StorageMapEntry]]) ::
-     JamCodecs.compactPrefixedList(summon[Codec[PreimageHash]]) ::
-     JamCodecs.compactPrefixedList(summon[Codec[PreimagesStatusMapEntry]])).xmap(
-      { case (service, storage, preimages, preimagesStatus) =>
-        AccumulationServiceData(service, storage, preimages, preimagesStatus)
+      JamCodecs.compactPrefixedList(summon[Codec[StorageMapEntry]]) ::
+      JamCodecs.compactPrefixedList(summon[Codec[PreimageHash]]) ::
+      JamCodecs.compactPrefixedList(summon[Codec[PreimageRequestsMapKey]])).xmap(
+      {
+        case (service, storage, preimages, preimageRequests) =>
+          AccumulationServiceData(service, storage, preimages, preimageRequests)
       },
-      a => (a.service, a.storage, a.preimages, a.preimagesStatus)
+      a => (a.service, a.storage, a.preimages, a.preimageRequests)
     )
 
   given Decoder[AccumulationServiceData] = Decoder.instance { cursor =>
     for
       service <- cursor.get[ServiceInfo]("service")
       storage <- cursor.getOrElse[List[StorageMapEntry]]("storage")(List.empty)
-      preimages <- cursor.getOrElse[List[PreimageHash]]("preimages_blob")(List.empty)
-      preimagesStatus <- cursor.getOrElse[List[PreimagesStatusMapEntry]]("preimages_status")(List.empty)
-    yield AccumulationServiceData(service, storage, preimages, preimagesStatus)
+      preimages <- cursor.getOrElse[List[PreimageHash]]("preimage_blobs")(List.empty)
+      preimageRequests <- cursor.getOrElse[List[PreimageRequestsMapKey]]("preimage_requests")(List.empty)
+    yield AccumulationServiceData(service, storage, preimages, preimageRequests)
   }
 
 /**
@@ -252,8 +278,8 @@ final case class AccumulationServiceItem(
 object AccumulationServiceItem:
   given Codec[AccumulationServiceItem] =
     (uint32L :: summon[Codec[AccumulationServiceData]]).xmap(
-      { case (id, data) => AccumulationServiceItem(id & 0xFFFFFFFFL, data) },
-      item => (item.id & 0xFFFFFFFFL, item.data)
+      { case (id, data) => AccumulationServiceItem(id & 0xffffffffL, data) },
+      item => (item.id & 0xffffffffL, item.data)
     )
 
   given Decoder[AccumulationServiceItem] = Decoder.instance { cursor =>
@@ -261,7 +287,7 @@ object AccumulationServiceItem:
       id <- cursor.get[Long]("id")
       data <- cursor.get[AccumulationServiceData]("data")
     // Ensure service ID is treated as unsigned 32-bit
-    yield AccumulationServiceItem(id & 0xFFFFFFFFL, data)
+    yield AccumulationServiceItem(id & 0xffffffffL, data)
   }
 
 /**
@@ -280,7 +306,6 @@ object AccumulationReadyRecord:
       { case (report, dependencies) => AccumulationReadyRecord(report, dependencies) },
       r => (r.report, r.dependencies)
     )
-
 
   given Decoder[AccumulationReadyRecord] = Decoder.instance { cursor =>
     for
@@ -347,10 +372,10 @@ final case class AccumulationState(
           info = item.data.service,
           storage = mutable.Map.from(item.data.storage.map(e => e.key -> e.value)),
           preimages = preimagesMap,
-          preimageRequests = mutable.Map.from(item.data.preimagesStatus.flatMap { status =>
+          preimageRequests = mutable.Map.from(item.data.preimageRequests.flatMap { req =>
             // Look up the preimage blob to get its length
-            preimagesMap.get(status.hash).map { blob =>
-              PreimageKey(status.hash, blob.length) -> PreimageRequest(status.status)
+            preimagesMap.get(req.hash).map { blob =>
+              PreimageKey(req.hash, blob.length) -> PreimageRequest(req.value)
             }
           }),
           lastAccumulated = item.data.service.lastAccumulationSlot
@@ -376,16 +401,34 @@ object AccumulationState:
       JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(summon[Codec[JamBytes]]), epochLength)
 
     (uint32L ::
-     JamCodecs.hashCodec ::
-     readyQueueCodec ::
-     accumulatedCodec ::
-     Privileges.codec(coresCount) ::
-     JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]]) ::
-     JamCodecs.compactPrefixedList(summon[Codec[AccumulationServiceItem]])).xmap(
-      { case (slot, entropy, readyQueue, accumulated, privileges, statistics, accounts) =>
-        AccumulationState(slot & 0xFFFFFFFFL, JamBytes.fromByteVector(entropy.toByteVector), readyQueue, accumulated, privileges, statistics, accounts)
+      JamCodecs.hashCodec ::
+      readyQueueCodec ::
+      accumulatedCodec ::
+      Privileges.codec(coresCount) ::
+      JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]]) ::
+      JamCodecs.compactPrefixedList(summon[Codec[AccumulationServiceItem]])).xmap(
+      {
+        case (slot, entropy, readyQueue, accumulated, privileges, statistics, accounts) =>
+          AccumulationState(
+            slot & 0xffffffffL,
+            JamBytes.fromByteVector(entropy.toByteVector),
+            readyQueue,
+            accumulated,
+            privileges,
+            statistics,
+            accounts
+          )
       },
-      a => (a.slot & 0xFFFFFFFFL, Hash(a.entropy.toArray), a.readyQueue, a.accumulated, a.privileges, a.statistics, a.accounts)
+      a =>
+        (
+          a.slot & 0xffffffffL,
+          Hash(a.entropy.toArray),
+          a.readyQueue,
+          a.accumulated,
+          a.privileges,
+          a.statistics,
+          a.accounts
+        )
     )
 
   given Decoder[AccumulationState] = Decoder.instance { cursor =>
@@ -428,11 +471,11 @@ extension (state: PartialState)
             preimages = account.preimages.toList
               .sortBy(_._1.toHex)
               .map { case (hash, blob) => PreimageHash(hash, blob) },
-            preimagesStatus = account.preimageRequests.toList
+            preimageRequests = account.preimageRequests.toList
               .sortBy(_._1.hash.toHex)
               .map {
                 case (key, request) =>
-                  PreimagesStatusMapEntry(key.hash, request.requestedAt)
+                  PreimageRequestsMapKey(key.hash, request.requestedAt)
               }
           )
         )
@@ -449,8 +492,8 @@ final case class AccumulationInput(
 object AccumulationInput:
   given Codec[AccumulationInput] =
     (uint32L :: JamCodecs.compactPrefixedList(summon[Codec[WorkReport]])).xmap(
-      { case (slot, reports) => AccumulationInput(slot & 0xFFFFFFFFL, reports) },
-      i => (i.slot & 0xFFFFFFFFL, i.reports)
+      { case (slot, reports) => AccumulationInput(slot & 0xffffffffL, reports) },
+      i => (i.slot & 0xffffffffL, i.reports)
     )
 
   given Decoder[AccumulationInput] = Decoder.instance { cursor =>
@@ -525,7 +568,7 @@ given accumulationOutputCodec: Codec[AccumulationOutput] = new Codec[Accumulatio
     for
       discriminator <- uint8.decode(bits)
       _ <- if discriminator.value == 0 then Attempt.successful(())
-           else Attempt.failure(_root_.scodec.Err(s"Invalid discriminator: ${discriminator.value}"))
+      else Attempt.failure(_root_.scodec.Err(s"Invalid discriminator: ${discriminator.value}"))
       result <- summon[Codec[AccumulationOutputData]].decode(discriminator.remainder)
     yield result.map(data => Right(data))
 
@@ -546,11 +589,12 @@ object AccumulationCase:
   def codec(coresCount: Int, epochLength: Int): Codec[AccumulationCase] =
     val stateCodec = AccumulationState.codec(coresCount, epochLength)
     (summon[Codec[AccumulationInput]] ::
-     stateCodec ::
-     accumulationOutputCodec ::
-     stateCodec).xmap(
-      { case (input, preState, output, postState) =>
-        AccumulationCase(input, preState, output, postState)
+      stateCodec ::
+      accumulationOutputCodec ::
+      stateCodec).xmap(
+      {
+        case (input, preState, output, postState) =>
+          AccumulationCase(input, preState, output, postState)
       },
       c => (c.input, c.preState, c.output, c.postState)
     )

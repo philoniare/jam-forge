@@ -68,13 +68,13 @@ final class PackedTarget private (val value: UInt) extends AnyRef:
 
 object PackedTarget:
   def pack(index: UInt, isJumpTargetValid: Boolean): PackedTarget =
-    val base = index & UInt(0x7FFFFFFF)
+    val base = index & UInt(0x7fffffff)
     val packed = if isJumpTargetValid then base | UInt(0x80000000) else base
     new PackedTarget(packed)
 
   def unpack(packed: PackedTarget): (Boolean, UInt) =
     val isValid = (packed.value.signed >>> 31) == 1
-    val offset = packed.value & UInt(0x7FFFFFFF)
+    val offset = packed.value & UInt(0x7fffffff)
     (isValid, offset)
 
 /**
@@ -125,12 +125,12 @@ final class InterpretedInstance private (
 
   def reg(regIdx: Int): Long =
     var value = regs(regIdx)
-    if !module.is64Bit then value = value & 0xFFFFFFFFL
+    if !module.is64Bit then value = value & 0xffffffffL
     value
 
   def setReg(regIdx: Int, value: Long): Unit =
     regs(regIdx) = if !module.is64Bit then
-      (value & 0xFFFFFFFFL).toInt.toLong
+      (value & 0xffffffffL).toInt.toLong
     else
       value
 
@@ -191,9 +191,6 @@ final class InterpretedInstance private (
         compileBlock(pc)
 
   override def jumpIndirect(pc: ProgramCounter, address: UInt): Option[UInt] =
-    // Debug: compare address with VmAddrReturnToHost
-    if PvmTraceWriter.isEnabled then
-      PvmTraceWriter.debug(s"[jumpIndirect] address=$address (signed=${address.signed}, hex=${address.signed.toHexString}) VmAddrReturnToHost=${Abi.VmAddrReturnToHost} (signed=${Abi.VmAddrReturnToHost.signed}) equal=${address == Abi.VmAddrReturnToHost}")
     if address == Abi.VmAddrReturnToHost then
       _programCounter = pc
       _programCounterValid = true
@@ -212,7 +209,6 @@ final class InterpretedInstance private (
 
   override def panic(pc: ProgramCounter): Option[UInt] =
     val stackTrace = Thread.currentThread().getStackTrace.take(10).map(_.toString).mkString("\n  ")
-    PvmTraceWriter.debug(s"[PVM PANIC] at pc=${pc.value} STACK:\n  $stackTrace")
     _programCounter = pc
     _programCounterValid = true
     _nextProgramCounter = None
@@ -254,7 +250,7 @@ final class InterpretedInstance private (
   override def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
     basicMemory.loadU8(address) match
       case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong & 0xFFL)
+        setReg64(dst, v.toLong & 0xffL)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
@@ -270,7 +266,7 @@ final class InterpretedInstance private (
   override def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
     basicMemory.loadU16(address) match
       case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong & 0xFFFFL)
+        setReg64(dst, v.toLong & 0xffffL)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
@@ -324,8 +320,6 @@ final class InterpretedInstance private (
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) =>
-        if PvmTraceWriter.isEnabled then
-          PvmTraceWriter.debug(s"[PANIC] storeU32 OutOfBounds at pc=$pc addr=0x${address.toLong.toHexString} src=$src value=0x${getReg(src).toHexString}")
         panic(pc)
 
   override def storeU64(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
@@ -400,12 +394,6 @@ final class InterpretedInstance private (
         continue = false
       else
         val compiled = compiledInstructions(offset.signed)
-
-        // Trace BEFORE charging gas
-        if PvmTraceWriter.isEnabled then
-          val opName = compiled.instruction.opcode.toString
-          PvmTraceWriter.trace(_instructionCounter, compiled.pc.toInt, _gas, opName, regs)
-
         // Charge gas if enabled
         if gasMetering then
           _gas -= 1
@@ -440,9 +428,7 @@ final class InterpretedInstance private (
         val blockStart = findStartOfBasicBlock(pc)
         blockStart.flatMap { start =>
           compileBlock(start)
-          compiledOffsetForBlock.get(pc.value).map { packed =>
-            PackedTarget.unpack(packed)._2
-          }
+          compiledOffsetForBlock.get(pc.value).map(packed => PackedTarget.unpack(packed)._2)
         }
 
   private def isJumpTargetValid(pc: ProgramCounter): Boolean =
@@ -504,9 +490,14 @@ object InterpretedInstance:
    * Creates an instance from a module with specific argument data.
    * This allows reusing a cached module with different input data per execution.
    */
-  def fromModule(module: InterpretedModule, argumentData: Array[Byte] = Array.empty, forceStepTracing: Boolean = false): InterpretedInstance =
+  def fromModule(
+    module: InterpretedModule,
+    argumentData: Array[Byte] = Array.empty,
+    forceStepTracing: Boolean = false
+  ): InterpretedInstance =
     val pageSize = module.memoryMap.pageSize.toLong
-    val actualRwDataLen = if module.blob.originalRwDataLen >= 0 then module.blob.originalRwDataLen else module.rwData.length
+    val actualRwDataLen =
+      if module.blob.originalRwDataLen >= 0 then module.blob.originalRwDataLen else module.rwData.length
     val pageAlignedRwDataLen = ((actualRwDataLen + pageSize - 1) / pageSize * pageSize).toInt
     val heapEmptyPagesSize = module.heapEmptyPages.toLong * pageSize
     val initialHeapSize = UInt((pageAlignedRwDataLen + heapEmptyPagesSize).toInt)

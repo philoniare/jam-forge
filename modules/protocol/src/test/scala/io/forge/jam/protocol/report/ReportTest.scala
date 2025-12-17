@@ -194,7 +194,7 @@ class ReportTest extends AnyFunSuite with Matchers:
     )
 
     // Create work report with gas exceeding limit
-    val excessiveGas = TinyConfig.maxAccumulationGas + 1
+    val excessiveGas = TinyConfig.reportAccGas + 1
 
     val workReport = WorkReport(
       packageSpec = PackageSpec(

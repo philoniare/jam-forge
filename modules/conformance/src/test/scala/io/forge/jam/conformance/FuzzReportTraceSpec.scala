@@ -22,7 +22,10 @@ import java.nio.file.{Files, Paths}
  * 2. Verify pre_state root matches computed root (sanity check)
  * 3. Import block using BlockImporter
  * 4. Compare actual post_state root with expected
+ *
+ * NOTE: Disabled until v0.7.2 traces are available.
  */
+@org.scalatest.Ignore
 class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors

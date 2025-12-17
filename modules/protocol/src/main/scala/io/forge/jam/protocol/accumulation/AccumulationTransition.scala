@@ -186,7 +186,7 @@ object AccumulationTransition:
 
     // Calculate total gas budget
     val sumPrivilegedGas = partialState.alwaysAccers.values.sum
-    val minTotalGas = config.maxAccumulationGas * config.coresCount + sumPrivilegedGas
+    val minTotalGas = config.reportAccGas * config.coresCount + sumPrivilegedGas
     val totalGasLimit = Math.max(config.maxBlockGas, minTotalGas)
 
     // Create executor (now directly uses PVM, no strategy pattern needed)

@@ -1,11 +1,8 @@
 package io.forge.jam.protocol.authorization
 
 import io.forge.jam.core.{ChainConfig, constants}
-import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
-import org.slf4j.LoggerFactory
 
 /**
  * Authorization State Transition Function.
@@ -14,7 +11,6 @@ import org.slf4j.LoggerFactory
  * from guarantee extrinsics and queue rotation based on timeslot.
  */
 object AuthorizationTransition:
-  private val logger = LoggerFactory.getLogger(getClass)
 
   /**
    * Execute the Authorization STF using unified JamState.
@@ -31,7 +27,7 @@ object AuthorizationTransition:
     // Extract AuthState using lens bundle
     val preState = JamState.AuthorizationLenses.extract(state)
 
-    val postState = stfInternal(input, preState, config)
+    val postState = stfInternal(input, preState)
 
     // Apply results back using lens bundle
     JamState.AuthorizationLenses.apply(state, postState)
@@ -44,7 +40,7 @@ object AuthorizationTransition:
    * @param config The chain configuration.
    * @return The post-transition state.
    */
-  def stfInternal(input: AuthInput, preState: AuthState, config: ChainConfig): AuthState =
+  def stfInternal(input: AuthInput, preState: AuthState): AuthState =
     // Group authorizations by core index
     val authsByCoreIndex = input.auths.groupBy(_.core.toInt)
 
@@ -68,8 +64,6 @@ object AuthorizationTransition:
         val poolWithNew = if coreQueue.nonEmpty then
           val queueIndex = (input.slot % coreQueue.size).toInt
           val newItem = coreQueue(queueIndex)
-          if coreIndex < 2 then
-            logger.debug(s"Core $coreIndex: adding queue[$queueIndex] = ${newItem.toHex.take(16)}...")
           poolAfterRemoval :+ newItem
         else
           poolAfterRemoval

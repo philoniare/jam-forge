@@ -358,9 +358,9 @@ class AccumulationTest extends AnyFunSuite with Matchers:
     expected.data.preimages.size shouldBe actual.data.preimages.size withClue
       s"Preimages size mismatch for service ${expected.id} in test case: $testCaseName"
 
-    // Compare preimagesStatus
-    expected.data.preimagesStatus.size shouldBe actual.data.preimagesStatus.size withClue
-      s"PreimagesStatus size mismatch for service ${expected.id} in test case: $testCaseName"
+    // Compare preimageRequests
+    expected.data.preimageRequests.size shouldBe actual.data.preimageRequests.size withClue
+      s"PreimageRequests size mismatch for service ${expected.id} in test case: $testCaseName"
 
   test("trace single test case for debugging") {
     val folderPath = "stf/accumulate/tiny"
@@ -372,8 +372,6 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case $testCaseName: $error")
       case Right(testCase) =>
-        // Enable tracing to file
-        PvmTraceWriter.enable("../scala_pvm_trace.txt")
         try
           val (postState, _, _, output) = AccumulationTransition.stfInternal(
             testCase.input,
@@ -387,8 +385,6 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           assertAccumulationOutputEquals(testCase.output, output, testCaseName)
           assertAccumulationStateEquals(testCase.postState, postState, testCaseName)
           info(s"PASSED: $testCaseName")
-        finally
-          PvmTraceWriter.disable()
   }
 
   test("full config state transition - all test vectors") {

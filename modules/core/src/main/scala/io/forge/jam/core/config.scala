@@ -37,7 +37,7 @@ final case class ChainConfig(
   /** Maximum number of dependencies per work report */
   maxDependencies: Int = 8,
   /** Maximum accumulation gas per work report */
-  maxAccumulationGas: Long = 10_000_000L,
+  reportAccGas: Long = 10_000_000L,
   /** Ticket cutoff phase within epoch (tickets rejected when phase >= ticketCutoff) */
   ticketCutoff: Int = 10,
   /** Maximum block history for accumulation */
@@ -77,6 +77,7 @@ object ChainConfig:
     numEcPiecesPerSegment = 1026,
     maxBlockGas = 20_000_000L,
     maxRefineGas = 1_000_000_000L,
+    reportAccGas = 10_000_000L,
     ticketCutoff = 10,
     maxBlockHistory = 8,
     authQueueSize = 80,
@@ -99,8 +100,9 @@ object ChainConfig:
     maxTicketsPerExtrinsic = 16,
     rotationPeriod = 10,
     numEcPiecesPerSegment = 6,
-    maxBlockGas = 3_410_000_000L,
+    maxBlockGas = 35_000_000L,
     maxRefineGas = 5_000_000_000L,
+    reportAccGas = 10_000_000L,
     ticketCutoff = 500,
     maxBlockHistory = 8,
     authQueueSize = 80,

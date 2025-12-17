@@ -1,20 +1,17 @@
 package io.forge.jam.protocol.report
 
-import cats.syntax.all.*
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
+import io.forge.jam.core.{ChainConfig, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.scodec.JamCodecs.encode
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, ValidatorIndex}
-import _root_.scodec.Codec
+import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.core.types.service.{ServiceAccount, ServiceData}
+import io.forge.jam.core.types.service.ServiceAccount
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.state.JamState
 import io.forge.jam.crypto.Ed25519
-import monocle.syntax.all.*
 
 /**
  * Reports State Transition Function.
@@ -171,7 +168,7 @@ object ReportTransition:
             config
           )
           _ <- require(!state.seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
-        yield {
+        yield
           val ctx = computeRotationContext(guarantee.slot.toInt.toLong, input.slot, config)
           val validators = selectValidatorSet(ctx, preState.currValidators, preState.prevValidators)
           val newGuarantors = guarantee.signatures.map(sig => Hash(validators(sig.validatorIndex.toInt).ed25519.bytes))
@@ -179,10 +176,12 @@ object ReportTransition:
           state.copy(
             seenCores = state.seenCores + guarantee.report.coreIndex.toInt,
             reports = state.reports :+ guarantee.report,
-            packages = state.packages :+ SegmentRootLookup(guarantee.report.packageSpec.hash, guarantee.report.packageSpec.exportsRoot),
+            packages = state.packages :+ SegmentRootLookup(
+              guarantee.report.packageSpec.hash,
+              guarantee.report.packageSpec.exportsRoot
+            ),
             guarantors = state.guarantors ++ newGuarantors
           )
-        }
       }
     }.map(s => (s.reports, s.packages, s.guarantors))
 
@@ -308,7 +307,7 @@ object ReportTransition:
       _ <- require(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
       _ <- require(
-        workReport.results.map(_.accumulateGas.toLong).sum <= config.maxAccumulationGas,
+        workReport.results.map(_.accumulateGas.toLong).sum <= config.reportAccGas,
         ReportErrorCode.WorkReportGasTooHigh
       )
       _ <- require(workReport.coreIndex.toInt < config.coresCount, ReportErrorCode.BadCoreIndex)
@@ -335,7 +334,7 @@ object ReportTransition:
   private def validateWorkResults(workReport: WorkReport, accounts: List[ServiceAccount]): ValidationResult =
     for result <- workReport.results do
       // Use toLong to preserve unsigned 32-bit service ID values
-      accounts.find(_.id == (result.serviceId.toInt.toLong & 0xFFFFFFFFL)) match
+      accounts.find(_.id == (result.serviceId.toInt.toLong & 0xffffffffL)) match
         case None => return Left(ReportErrorCode.BadServiceId)
         case Some(account) =>
           if result.codeHash != account.data.service.codeHash then
@@ -492,7 +491,7 @@ object ReportTransition:
 
     allResults
       // Use & 0xFFFFFFFFL to preserve unsigned 32-bit service ID values
-      .groupMapReduce(r => r.serviceId.toInt.toLong & 0xFFFFFFFFL)(computeServiceStats)(mergeServiceStats)
+      .groupMapReduce(r => r.serviceId.toInt.toLong & 0xffffffffL)(computeServiceStats)(mergeServiceStats)
       .map { case (id, record) => ServiceStatisticsEntry(id, record) }
       .toList
       .sortBy(_.id)
