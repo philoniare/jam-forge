@@ -2,14 +2,12 @@ package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.conformance.ConformanceCodecs.encode
-import _root_.scodec.Codec
-import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
-import org.slf4j.LoggerFactory
 
 import java.io.File
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
+import scala.util.boundary, boundary.break
 
 /**
  * Result of processing a single test case.
@@ -33,7 +31,6 @@ class ConformanceTestRunner(
   debugBlockIndex: Int = -1, // Set to specific index to debug that block only
   faultyMode: Boolean = false // When true, step 29 state root mismatch is expected
 ):
-  private val logger = LoggerFactory.getLogger(getClass)
   private val stateStore = new StateStore()
   private var blockImporter: BlockImporter = _
   private var sessionFeatures: Int = 0
@@ -50,37 +47,38 @@ class ConformanceTestRunner(
    * @return List of test results
    */
   def runTests(traceDir: Path, stopAfter: Int = 1000): List[TestResult] =
-    val results = mutable.ListBuffer[TestResult]()
+    boundary:
+      val results = mutable.ListBuffer[TestResult]()
 
-    // Find all fuzzer and target files
-    val files = traceDir.toFile.listFiles().filter(_.getName.endsWith(".bin"))
-    val fuzzerFiles = files.filter(_.getName.contains("fuzzer")).sortBy(_.getName)
-    val targetFiles = files.filter(_.getName.contains("target")).sortBy(_.getName)
+      // Find all fuzzer and target files
+      val files = traceDir.toFile.listFiles().filter(_.getName.endsWith(".bin"))
+      val fuzzerFiles = files.filter(_.getName.contains("fuzzer")).sortBy(_.getName)
+      val targetFiles = files.filter(_.getName.contains("target")).sortBy(_.getName)
 
-    if fuzzerFiles.length != targetFiles.length then
-      return List(TestResult.Error(
-        0,
-        "setup",
-        s"Mismatch: ${fuzzerFiles.length} fuzzer files, ${targetFiles.length} target files"
-      ))
+      if fuzzerFiles.length != targetFiles.length then
+        break(List(TestResult.Error(
+          0,
+          "setup",
+          s"Mismatch: ${fuzzerFiles.length} fuzzer files, ${targetFiles.length} target files"
+        )))
 
-    // Reset state for new test run
-    stateStore.clear()
-    blockImporter = null
-    sessionFeatures = 0
+      // Reset state for new test run
+      stateStore.clear()
+      blockImporter = null
+      sessionFeatures = 0
 
-    // Process file pairs
-    for ((fuzzerFile, targetFile), idx) <- fuzzerFiles.zip(targetFiles).take(stopAfter).zipWithIndex do
-      currentTestIndex = idx
-      val result = processTestCase(idx, fuzzerFile, targetFile)
-      results += result
+      // Process file pairs
+      for ((fuzzerFile, targetFile), idx) <- fuzzerFiles.zip(targetFiles).take(stopAfter).zipWithIndex do
+        currentTestIndex = idx
+        val result = processTestCase(idx, fuzzerFile, targetFile)
+        results += result
 
-      result match
-        case TestResult.Failure(_, _, _, _) | TestResult.Error(_, _, _) =>
-          // Stop on first failure
-          return results.toList
-        case _ => // continue
-    results.toList
+        result match
+          case TestResult.Failure(_, _, _, _) | TestResult.Error(_, _, _) =>
+            // Stop on first failure
+            break(results.toList)
+          case _ => // continue
+      results.toList
 
   /**
    * Process a single test case.
@@ -407,7 +405,7 @@ class ConformanceTestRunner(
     println(s"  --- Service Stats (starting at byte $pos) ---")
     val serviceCount = readCompact()
     println(s"    service count: $serviceCount")
-    for i <- 0 until serviceCount.toInt do
+    for _ <- 0 until serviceCount.toInt do
       val serviceId = readU32LE()
       val preimagesCount = readCompact()
       val preimagesSize = readCompact()

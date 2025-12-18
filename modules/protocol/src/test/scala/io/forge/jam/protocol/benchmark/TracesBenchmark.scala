@@ -1,58 +1,15 @@
 package io.forge.jam.protocol.benchmark
 
-import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
-import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.state.JamState
 import io.forge.jam.protocol.traces.{TraceStep, Genesis, FullJamState, InputExtractor, BlockImporter}
 import io.circe.Decoder
 
-// Import all JSON decoders from core types
-import io.forge.jam.core.JamBytes.given
-import io.forge.jam.core.primitives.Hash.given
-import io.forge.jam.core.primitives.BandersnatchPublicKey.given
-import io.forge.jam.core.primitives.Ed25519PublicKey.given
-import io.forge.jam.core.primitives.Ed25519Signature.given
-import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
-import io.forge.jam.core.types.tickets.TicketEnvelope.given
-import io.forge.jam.core.types.tickets.TicketMark.given
-import io.forge.jam.core.types.epoch.{EpochValidatorKey, EpochMark}
-import io.forge.jam.core.types.epoch.EpochValidatorKey.given
-import io.forge.jam.core.types.epoch.EpochMark.given
-import io.forge.jam.core.types.work.{PackageSpec, Vote, ExecutionResult}
-import io.forge.jam.core.types.work.PackageSpec.given
-import io.forge.jam.core.types.work.Vote.given
-import io.forge.jam.core.types.work.ExecutionResult.given
-import io.forge.jam.core.types.dispute.{Culprit, Fault, GuaranteeSignature}
-import io.forge.jam.core.types.dispute.Culprit.given
-import io.forge.jam.core.types.dispute.Fault.given
-import io.forge.jam.core.types.dispute.GuaranteeSignature.given
-import io.forge.jam.core.types.context.Context
-import io.forge.jam.core.types.context.Context.given
-import io.forge.jam.core.types.workitem.{WorkItemImportSegment, WorkItemExtrinsic, WorkItem}
-import io.forge.jam.core.types.workitem.WorkItemImportSegment.given
-import io.forge.jam.core.types.workitem.WorkItemExtrinsic.given
-import io.forge.jam.core.types.workitem.WorkItem.given
-import io.forge.jam.core.types.workresult.{RefineLoad, WorkResult}
-import io.forge.jam.core.types.workresult.RefineLoad.given
-import io.forge.jam.core.types.workresult.WorkResult.given
-import io.forge.jam.core.types.workpackage.{SegmentRootLookup, WorkPackage, WorkReport}
-import io.forge.jam.core.types.workpackage.SegmentRootLookup.given
-import io.forge.jam.core.types.workpackage.WorkPackage.given
-import io.forge.jam.core.types.workpackage.WorkReport.given
-import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Verdict, Dispute, GuaranteeExtrinsic}
-import io.forge.jam.core.types.extrinsic.Preimage.given
-import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic.given
-import io.forge.jam.core.types.extrinsic.Verdict.given
-import io.forge.jam.core.types.extrinsic.Dispute.given
-import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic.given
-import io.forge.jam.core.types.header.Header.given
-import io.forge.jam.core.types.block.{Extrinsic => BlockExtrinsic}
-import io.forge.jam.core.types.block.Extrinsic.given
+// Import Block JSON decoder (provides all needed decoders transitively)
 import io.forge.jam.core.types.block.Block.given
 
 /**

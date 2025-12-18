@@ -4,7 +4,6 @@ import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
 import org.bouncycastle.jcajce.provider.digest.Keccak
 
 import scala.collection.mutable
@@ -231,7 +230,6 @@ object AccumulationTransition:
     val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
     val transferStatsPerService: Map[Long, (Long, Long)] = Map.empty // TODO: compute from accumulation results
     val newStatistics = updateStatistics(
-      preState.statistics,
       gasUsedPerService,
       workItemsPerService,
       transferStatsPerService
@@ -476,8 +474,7 @@ object AccumulationTransition:
       alwaysAccers = alwaysAccers,
       timeslot = timeslot,
       entropy = entropy,
-      executor = executor,
-      config = config
+      executor = executor
     )
 
     val parallelGasUsed = parallelResult.gasUsedMap.values.sum
@@ -553,8 +550,7 @@ object AccumulationTransition:
     alwaysAccers: Map[Long, Long],
     timeslot: Long,
     entropy: JamBytes,
-    executor: AccumulationExecutor,
-    config: ChainConfig
+    executor: AccumulationExecutor
   ): AccumulationExecResult =
     val gasUsedMap = mutable.Map.empty[Long, Long]
     val commitments = mutable.Set.empty[Commitment]
@@ -764,7 +760,6 @@ object AccumulationTransition:
     state
 
   private def updateStatistics(
-    existing: List[ServiceStatisticsEntry],
     gasUsedPerService: Map[Long, Long],
     workItemsPerService: Map[Long, Int],
     transferStatsPerService: Map[Long, (Long, Long)]
@@ -778,7 +773,7 @@ object AccumulationTransition:
     for serviceId <- allServiceIds do
       val accGasUsed = gasUsedPerService.getOrElse(serviceId, 0L)
       val workItems = workItemsPerService.getOrElse(serviceId, 0)
-      val (transferCount, transferGasUsed) = transferStatsPerService.getOrElse(serviceId, (0L, 0L))
+      val (transferCount, _) = transferStatsPerService.getOrElse(serviceId, (0L, 0L))
 
       // Only include services that actually did something
       if accGasUsed > 0 || workItems > 0 || transferCount > 0 then

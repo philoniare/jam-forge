@@ -1,8 +1,7 @@
 package io.forge.jam.core.json
 
-import io.circe.{Decoder, HCursor, Json}
+import io.circe.Decoder
 import io.forge.jam.core.JamBytes
-import _root_.scodec.bits.ByteVector
 import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.{WorkItem, WorkItemImportSegment, WorkItemExtrinsic}
@@ -15,7 +14,7 @@ import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Verdict,
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.dispute.{Culprit, Fault, GuaranteeSignature}
-import spire.math.{UByte, UShort, UInt}
+import spire.math.{UShort, UInt}
 import decoders.given
 import simpletypes.given
 

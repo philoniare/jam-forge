@@ -1,7 +1,6 @@
 package io.forge.jam.pvm
 
 import io.circe.*
-import io.circe.generic.semiauto.*
 
 /**
  * Status of PVM execution.

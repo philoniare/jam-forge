@@ -4,7 +4,6 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import io.circe.Decoder
 import io.circe.parser.*
-import io.forge.jam.core.json.decoders.given
 import io.forge.jam.core.json.simpletypes.given
 import io.forge.jam.core.json.complextypes.given
 import io.forge.jam.core.types.header.Header

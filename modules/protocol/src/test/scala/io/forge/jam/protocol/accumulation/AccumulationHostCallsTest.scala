@@ -2,7 +2,7 @@ package io.forge.jam.protocol.accumulation
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import spire.math.ULong
@@ -89,7 +89,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
 
   private val testConfig = ChainConfig.TINY
 
-  private def createTestServiceInfo(balance: Long = 100000L): ServiceInfo =
+  private def createTestServiceInfo(balance: Long): ServiceInfo =
     ServiceInfo(
       version = 0,
       codeHash = Hash(JamBytes.zeros(32).toArray),
@@ -104,7 +104,7 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
       parentService = 0L
     )
 
-  private def createTestAccount(balance: Long = 100000L): ServiceAccount =
+  private def createTestAccount(balance: Long): ServiceAccount =
     ServiceAccount(
       info = createTestServiceInfo(balance),
       storage = mutable.Map.empty,

@@ -2,7 +2,7 @@ package io.forge.jam.core
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UInt, ULong}
+import spire.math.UInt
 import primitives.*
 
 class PrimitivesSpec extends AnyFlatSpec with Matchers:

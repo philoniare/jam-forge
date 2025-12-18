@@ -3,7 +3,6 @@ package io.forge.jam.pvm
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import io.forge.jam.pvm.program.*
-import spire.math.{UByte, UInt, ULong}
 
 /**
  * Tests for Program Binary Parsing
@@ -194,7 +193,7 @@ class ProgramParsingSpec extends AnyFlatSpec with Matchers:
     val bitmask = Array[Byte](0x09, 0x00)
     val codeLength = 8
 
-    val (skip, isNextInvalid) = Program.parseBitmaskSlow(bitmask, codeLength, 0)
+    val (skip, _) = Program.parseBitmaskSlow(bitmask, codeLength, 0)
     skip shouldBe 2 // Skip to next instruction at offset 3
   }
 

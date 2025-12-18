@@ -2,23 +2,19 @@ package io.forge.jam.core
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UByte, UShort, UInt}
-import java.nio.file.{Files, Paths}
+import spire.math.{UShort, UInt}
 import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.bits.BitVector
 
 import primitives.*
 import types.context.*
 import types.workitem.*
 import types.workresult.*
-import types.workpackage.{SegmentRootLookup, WorkPackage, WorkReport as WReport}
+import types.workpackage.{WorkPackage, WorkReport as WReport}
 import types.extrinsic.*
 import types.header.*
 import types.block.{Block as JamBlock, Extrinsic as JamExtrinsic}
 import types.work.*
-import types.epoch.*
-import types.tickets.*
-import types.dispute.*
 
 class ComplexTypesSpec extends AnyFlatSpec with Matchers:
 

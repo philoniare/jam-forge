@@ -1,7 +1,7 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.traces.{KeyValue, RawState}
+import io.forge.jam.protocol.traces.RawState
 
 import scala.collection.mutable
 

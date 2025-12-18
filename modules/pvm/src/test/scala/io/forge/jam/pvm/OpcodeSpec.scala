@@ -2,7 +2,7 @@ package io.forge.jam.pvm
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import types.*
+import io.forge.jam.pvm.{Opcode, Instruction}
 
 /**
  * Tests for Opcode enum and Instruction ADT.

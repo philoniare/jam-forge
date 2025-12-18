@@ -2,9 +2,8 @@ package io.forge.jam.pvm
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UByte, UInt, ULong}
+import spire.math.{UByte, UInt}
 import io.forge.jam.pvm.memory.*
-import io.forge.jam.pvm.types.*
 
 /**
  * Tests for the PVM memory model.
@@ -79,7 +78,7 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     val invalidAddress = UInt(0x1000) // In null page region
     val result = memory.loadU8(invalidAddress)
     result match
-      case MemoryResult.Segfault(addr, pageAddr) =>
+      case MemoryResult.Segfault(addr, _) =>
         // Segfault should report the address
         addr shouldBe invalidAddress
       case other =>

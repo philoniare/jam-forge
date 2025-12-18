@@ -2,7 +2,7 @@ package io.forge.jam.protocol
 
 import io.circe.{Decoder, parser}
 import java.io.File
-import java.nio.file.{Files, Paths}
+import java.nio.file.Files
 import scala.util.Try
 
 /**

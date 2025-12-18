@@ -4,7 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UByte, UShort, UInt}
 import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.bits.BitVector
 
 import primitives.*
 import types.tickets.*

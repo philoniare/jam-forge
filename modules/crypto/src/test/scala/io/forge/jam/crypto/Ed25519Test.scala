@@ -1,12 +1,11 @@
 package io.forge.jam.crypto
 
-import io.circe.{Decoder, HCursor, Json}
+import io.circe.{Decoder, HCursor}
 import io.circe.parser.*
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import scala.io.Source
-import scala.util.Try
 
 /**
  * Tests for Ed25519 signature verification with canonicity checks.
@@ -83,23 +82,18 @@ class Ed25519Test extends AnyFunSuite with Matchers:
   test("ZIP-215 compliance validation") {
     val vectors = loadTestVectors()
 
-    // Track results for fully canonical vectors (pk AND r canonical) - should VERIFY
-    var canonicalPkAccepted = 0
+    // Track failed canonical vectors (should all verify)
     var canonicalPkRejected = 0
     val canonicalPkRejectedNumbers = scala.collection.mutable.ListBuffer[Int]()
 
-    // Track results for non-canonical public keys (should be REJECTED)
+    // Track incorrectly accepted non-canonical inputs
     val nonCanonicalPkVectors = vectors.filter(!_.pk_canonical)
     var nonCanonicalPkAccepted = 0
-    var nonCanonicalPkRejected = 0
 
-    // Track results for non-canonical R values with canonical pk (should be REJECTED)
     val nonCanonicalRVectors = vectors.filter(v => v.pk_canonical && !v.r_canonical)
     var nonCanonicalRAccepted = 0
-    var nonCanonicalRRejected = 0
 
-    // Test canonical public keys with canonical R values - should verify successfully
-    // We filter for both pk_canonical AND r_canonical to test vectors that should pass
+    // Test canonical vectors - should verify successfully
     val fullyCanonicalVectors = vectors.filter(v => v.pk_canonical && v.r_canonical)
     for vector <- fullyCanonicalVectors do
       val pk = hexToBytes(vector.pk)
@@ -108,14 +102,11 @@ class Ed25519Test extends AnyFunSuite with Matchers:
       val msg = hexToBytes(vector.msg)
       val signature = r ++ s
 
-      // Use our Ed25519 module with ed25519-zebra
-      if Ed25519.verify(pk, msg, signature) then
-        canonicalPkAccepted += 1
-      else
+      if !Ed25519.verify(pk, msg, signature) then
         canonicalPkRejected += 1
         canonicalPkRejectedNumbers += vector.number
 
-    // Test non-canonical public keys - our wrapper should REJECT these
+    // Test non-canonical public keys - should be REJECTED
     for vector <- nonCanonicalPkVectors do
       val pk = hexToBytes(vector.pk)
       val r = hexToBytes(vector.r)
@@ -123,13 +114,10 @@ class Ed25519Test extends AnyFunSuite with Matchers:
       val msg = hexToBytes(vector.msg)
       val signature = r ++ s
 
-      // Use our Ed25519 module which has canonicity checks
       if Ed25519.verify(pk, msg, signature) then
         nonCanonicalPkAccepted += 1
-      else
-        nonCanonicalPkRejected += 1
 
-    // Test non-canonical R values - our wrapper should REJECT these
+    // Test non-canonical R values - should be REJECTED
     for vector <- nonCanonicalRVectors do
       val pk = hexToBytes(vector.pk)
       val r = hexToBytes(vector.r)
@@ -139,61 +127,15 @@ class Ed25519Test extends AnyFunSuite with Matchers:
 
       if Ed25519.verify(pk, msg, signature) then
         nonCanonicalRAccepted += 1
-      else
-        nonCanonicalRRejected += 1
 
-    // Print results
-    println("\n" + "=" * 60)
-    println("ZIP-215 COMPLIANCE TEST RESULTS")
-    println("=" * 60)
-
-    println(s"\n1. Fully Canonical Vectors (pk AND r canonical - should VERIFY):")
-    println(s"   Total: ${fullyCanonicalVectors.size}")
-    println(s"   Verified: $canonicalPkAccepted")
-    println(s"   Failed: $canonicalPkRejected")
-    if canonicalPkRejectedNumbers.nonEmpty then
-      println(s"   Failed vectors: ${canonicalPkRejectedNumbers.take(10)
-          .mkString(", ")}${if canonicalPkRejectedNumbers.size > 10 then "..." else ""}")
-
-    println(s"\n2. Non-Canonical Public Keys (should be REJECTED):")
-    println(s"   Total: ${nonCanonicalPkVectors.size}")
-    println(s"   Correctly rejected: $nonCanonicalPkRejected")
-    println(s"   Incorrectly accepted: $nonCanonicalPkAccepted")
-
-    println(s"\n3. Non-Canonical R Values (should be REJECTED):")
-    println(s"   Total: ${nonCanonicalRVectors.size}")
-    println(s"   Correctly rejected: $nonCanonicalRRejected")
-    println(s"   Incorrectly accepted: $nonCanonicalRAccepted")
-
-    // Determine overall compliance
-    val canonicalVectorsPass = canonicalPkRejected == 0
-    val canonicityChecksWorking = nonCanonicalPkAccepted == 0 && nonCanonicalRAccepted == 0
-    val fullyCompliant = canonicalVectorsPass && canonicityChecksWorking
-
-    println("\n" + "-" * 60)
-    println("COMPLIANCE SUMMARY:")
-    println("-" * 60)
-
-    if fullyCompliant then
-      println("✅ PASS: Implementation is ZIP-215 compliant!")
-      println("   - All fully canonical vectors verify successfully")
-      println("   - Canonicity checks correctly reject non-canonical inputs")
-    else
-      if !canonicalVectorsPass then
-        println(s"❌ FAIL: Canonical vectors not verifying correctly!")
-        println(s"   - Failed $canonicalPkRejected/${fullyCanonicalVectors.size} fully canonical vectors")
-
-      if !canonicityChecksWorking then
-        println(s"❌ FAIL: Canonicity checks not working correctly!")
-        if nonCanonicalPkAccepted > 0 then
-          println(s"   - Accepted $nonCanonicalPkAccepted non-canonical public keys")
-        if nonCanonicalRAccepted > 0 then
-          println(s"   - Accepted $nonCanonicalRAccepted non-canonical R values")
-
-    println("=" * 60 + "\n")
-
-    // Assert all three compliance requirements
-    canonicalPkRejected shouldBe 0
-    nonCanonicalPkAccepted shouldBe 0
-    nonCanonicalRAccepted shouldBe 0
+    // Assert all compliance requirements
+    withClue(s"Canonical vectors should verify (failed: ${canonicalPkRejectedNumbers.mkString(", ")})") {
+      canonicalPkRejected shouldBe 0
+    }
+    withClue("Non-canonical public keys should be rejected") {
+      nonCanonicalPkAccepted shouldBe 0
+    }
+    withClue("Non-canonical R values should be rejected") {
+      nonCanonicalRAccepted shouldBe 0
+    }
   }

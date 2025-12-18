@@ -12,7 +12,6 @@ import io.forge.jam.core.primitives.{
   Ed25519PublicKey,
   BlsPublicKey,
   ValidatorIndex,
-  ServiceId,
   Ed25519Signature,
   Timeslot,
   CoreIndex,
@@ -23,12 +22,10 @@ import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.core.types.context.Context
-import io.forge.jam.core.types.workresult.{WorkResult, RefineLoad}
-import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
 import io.forge.jam.protocol.assurance.AssuranceTransition
-import spire.math.{UByte, UInt, UShort}
+import spire.math.{UInt, UShort}
 
 /**
  * Tests for the Assurances State Transition Function.
@@ -69,7 +66,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
       JamBytes(Array.fill(128)(value.toByte))
     )
 
-  private def simpleWorkReport(coreIndex: Int = 0): WorkReport =
+  private def simpleWorkReport(coreIndex: Int): WorkReport =
     WorkReport(
       PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
       Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
@@ -81,7 +78,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
       List.empty
     )
 
-  private def initialState(validatorCount: Int, coreCount: Int, timeout: Long = 10L): AssuranceState =
+  private def initialState(validatorCount: Int, coreCount: Int, timeout: Long): AssuranceState =
     val assignments = (0 until coreCount).map { coreIndex =>
       Some(AvailabilityAssignment(simpleWorkReport(coreIndex), timeout))
     }.toList

@@ -1,6 +1,6 @@
 package io.forge.jam.core.json
 
-import io.circe.{Decoder, HCursor}
+import io.circe.Decoder
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}

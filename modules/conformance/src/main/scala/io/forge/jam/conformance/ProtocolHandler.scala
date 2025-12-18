@@ -5,10 +5,7 @@ import fs2.io.net.Socket
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.encode
-import _root_.scodec.Codec
-import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
-import spire.math.UInt
 
 /**
  * Protocol handler for the conformance testing session.
@@ -28,7 +25,6 @@ class ProtocolHandler(
 
   // Session features after negotiation
   private var sessionFeatures: Int = 0
-  private var handshakeComplete: Boolean = false
 
   /**
    * Handle a connection from the fuzzer.
@@ -153,7 +149,6 @@ class ProtocolHandler(
 
     val response = ProtocolMessage.PeerInfoMsg(PeerInfo.forTarget(targetFeatures))
     sendMessage(socket, response) *>
-      IO { handshakeComplete = true } *>
       logger.logInfo(
         s"Handshake complete, negotiated features=0x${sessionFeatures.toHexString} (ancestry=$hasAncestry, forks=$hasForks, skipAncestryValidation=$skipAncestryValidation)"
       )

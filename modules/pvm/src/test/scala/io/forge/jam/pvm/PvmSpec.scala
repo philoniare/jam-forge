@@ -2,13 +2,11 @@ package io.forge.jam.pvm
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import spire.math.UInt
 import io.circe.parser.decode
 import java.io.File
 import scala.io.Source
 import io.forge.jam.pvm.engine.*
-import io.forge.jam.pvm.program.{ProgramBlob, JumpTable}
-import io.forge.jam.pvm.memory.{BasicMemory, PageMap}
+import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
 
 /**
@@ -36,7 +34,7 @@ class PvmSpec extends AnyFlatSpec with Matchers:
 
       // Fill with memory contents
       memory.foreach { mem =>
-        pages.find(p => mem.address >= p.address && mem.address < p.address + p.length).foreach { page =>
+        pages.find(p => mem.address >= p.address && mem.address < p.address + p.length).foreach { _ =>
           val offset = (mem.address - firstPageAddr).toInt
           System.arraycopy(mem.contents, 0, data, offset, mem.contents.length)
         }

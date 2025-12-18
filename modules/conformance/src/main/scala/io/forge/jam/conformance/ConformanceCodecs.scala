@@ -1,8 +1,7 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.JamBytes
-import _root_.scodec.{Codec, Attempt}
-import _root_.scodec.bits.BitVector
+import _root_.scodec.Codec
 
 /**
  * Minimal codec bridge for conformance module.

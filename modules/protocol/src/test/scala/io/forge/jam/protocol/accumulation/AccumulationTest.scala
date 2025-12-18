@@ -3,11 +3,8 @@ package io.forge.jam.protocol.accumulation
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
-import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.scodec.JamCodecs.encode
-import _root_.scodec.Codec
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.TestFileLoader
-import io.forge.jam.pvm.engine.PvmTraceWriter
 
 class AccumulationTest extends AnyFunSuite with Matchers:
 
@@ -55,7 +52,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
     testDataResult match
       case Left(error) =>
         fail(s"Failed to load test data for $testCaseName: $error")
-      case Right((testCase, binaryData)) =>
+      case Right((_, binaryData)) =>
         // Verify binary data is not empty
         binaryData should not be empty withClue "Binary data should not be empty"
         // Verify binary data has reasonable size
@@ -372,19 +369,18 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case $testCaseName: $error")
       case Right(testCase) =>
-        try
-          val (postState, _, _, output) = AccumulationTransition.stfInternal(
-            testCase.input,
-            testCase.preState,
-            List.empty,
-            List.empty,
-            TinyConfig
-          )
+        val (postState, _, _, output) = AccumulationTransition.stfInternal(
+          testCase.input,
+          testCase.preState,
+          List.empty,
+          List.empty,
+          TinyConfig
+        )
 
-          // Compare output
-          assertAccumulationOutputEquals(testCase.output, output, testCaseName)
-          assertAccumulationStateEquals(testCase.postState, postState, testCaseName)
-          info(s"PASSED: $testCaseName")
+        // Compare output
+        assertAccumulationOutputEquals(testCase.output, output, testCaseName)
+        assertAccumulationStateEquals(testCase.postState, postState, testCaseName)
+        info(s"PASSED: $testCaseName")
   }
 
   test("full config state transition - all test vectors") {

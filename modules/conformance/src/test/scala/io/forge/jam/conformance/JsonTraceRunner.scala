@@ -1,48 +1,15 @@
 package io.forge.jam.conformance
 
 import io.circe.{Decoder, parser}
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.types.block.Block
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, KeyValue, RawState, StateMerklization, TraceStep}
-import org.slf4j.LoggerFactory
+import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, KeyValue, StateMerklization, TraceStep}
 
 import java.io.File
 import java.nio.file.{Files, Path}
 import scala.util.Try
 
-// Import all JSON decoders
-import io.forge.jam.core.JamBytes.given
-import io.forge.jam.core.primitives.Hash.given
-import io.forge.jam.core.primitives.BandersnatchPublicKey.given
-import io.forge.jam.core.primitives.Ed25519PublicKey.given
-import io.forge.jam.core.primitives.Ed25519Signature.given
-import io.forge.jam.core.types.tickets.TicketEnvelope.given
-import io.forge.jam.core.types.tickets.TicketMark.given
-import io.forge.jam.core.types.epoch.EpochValidatorKey.given
-import io.forge.jam.core.types.epoch.EpochMark.given
-import io.forge.jam.core.types.work.PackageSpec.given
-import io.forge.jam.core.types.work.Vote.given
-import io.forge.jam.core.types.work.ExecutionResult.given
-import io.forge.jam.core.types.dispute.Culprit.given
-import io.forge.jam.core.types.dispute.Fault.given
-import io.forge.jam.core.types.dispute.GuaranteeSignature.given
-import io.forge.jam.core.types.context.Context.given
-import io.forge.jam.core.types.workitem.WorkItemImportSegment.given
-import io.forge.jam.core.types.workitem.WorkItemExtrinsic.given
-import io.forge.jam.core.types.workitem.WorkItem.given
-import io.forge.jam.core.types.workresult.RefineLoad.given
-import io.forge.jam.core.types.workresult.WorkResult.given
-import io.forge.jam.core.types.workpackage.SegmentRootLookup.given
-import io.forge.jam.core.types.workpackage.WorkPackage.given
-import io.forge.jam.core.types.workpackage.WorkReport.given
-import io.forge.jam.core.types.extrinsic.Preimage.given
-import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic.given
-import io.forge.jam.core.types.extrinsic.Verdict.given
-import io.forge.jam.core.types.extrinsic.Dispute.given
-import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic.given
-import io.forge.jam.core.types.header.Header.given
-import io.forge.jam.core.types.block.Extrinsic.given
+// Import Block JSON decoder (provides all needed decoders transitively)
 import io.forge.jam.core.types.block.Block.given
 
 /**
@@ -88,8 +55,6 @@ class JsonTraceRunner(
   verbose: Boolean = false,
   compareKeyvals: Boolean = false
 ):
-  private val logger = LoggerFactory.getLogger(getClass)
-
   // Create decoder for TraceStep using imported givens
   given Decoder[TraceStep] = TraceStep.decoder
 
