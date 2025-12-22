@@ -5,6 +5,7 @@ import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
 import io.forge.jam.protocol.state.JamState
 import monocle.syntax.all.*
+import scodec.bits.ByteVector
 
 /**
  * Statistics State Transition Function.
@@ -64,23 +65,44 @@ object StatisticsTransition:
 
     // Update author's stats
     val authorIdx = input.authorIndex.toInt
-    val afterAuthor = updateStatAt(baseStats, authorIdx, stat =>
-      stat.copy(
-        blocks = stat.blocks + 1,
-        tickets = stat.tickets + input.extrinsic.tickets.size,
-        preImages = stat.preImages + input.extrinsic.preimages.size,
-        preImagesSize = stat.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
-      )
+    val afterAuthor = updateStatAt(
+      baseStats,
+      authorIdx,
+      stat =>
+        stat.copy(
+          blocks = stat.blocks + 1,
+          tickets = stat.tickets + input.extrinsic.tickets.size,
+          preImages = stat.preImages + input.extrinsic.preimages.size,
+          preImagesSize = stat.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
+        )
     )
 
-    // Collect unique reporters from guarantees
-    val reporters = input.extrinsic.guarantees
-      .flatMap(_.signatures.map(_.validatorIndex.toInt))
-      .toSet
+    // For each guarantee, determine which validator set to use based on epoch
+    val reporters: Set[ByteVector] = input.extrinsic.guarantees.flatMap { guarantee =>
+      val guaranteeEpoch = guarantee.slot.value.toLong / config.epochLength
+      // Use previous validators if guarantee is from a previous epoch, otherwise current
+      val validatorSet = if guaranteeEpoch < postEpoch && preState.prevValidators.nonEmpty then
+        preState.prevValidators
+      else
+        preState.currValidators
 
-    // Update guarantees - each unique validator gets +1 credit per block
-    val afterGuarantees = reporters.foldLeft(afterAuthor) { (stats, validatorIndex) =>
-      updateStatAt(stats, validatorIndex, stat => stat.copy(guarantees = stat.guarantees + 1))
+      // Extract Ed25519 keys for each signer
+      guarantee.signatures.flatMap { sig =>
+        val idx = sig.validatorIndex.toInt
+        if idx >= 0 && idx < validatorSet.size then
+          Some(sig.validatorIndex.toInt).map(i => validatorSet(i).ed25519.toByteVector)
+        else
+          None
+      }
+    }.toSet
+
+    // Update guarantees - for each validator v, check if their Ed25519 key is in reporters
+    val afterGuarantees = preState.currValidators.zipWithIndex.foldLeft(afterAuthor) {
+      case (stats, (validator, idx)) =>
+        if reporters.contains(validator.ed25519.toByteVector) then
+          updateStatAt(stats, idx, stat => stat.copy(guarantees = stat.guarantees + 1))
+        else
+          stats
     }
 
     // Update assurances using foldLeft
@@ -93,7 +115,8 @@ object StatisticsTransition:
       valsCurrStats = afterAssurances,
       valsLastStats = lastStats,
       slot = preState.slot,
-      currValidators = preState.currValidators
+      currValidators = preState.currValidators,
+      prevValidators = preState.prevValidators
     )
 
     (postState, None)

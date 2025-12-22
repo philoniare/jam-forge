@@ -43,31 +43,42 @@ object LiftedStfs:
   )
 
   // 3. Assurances STF
-  val assurances: StfStepWith[AssuranceOutputMarks] = liftStandard(
-    stf = AssuranceTransition.stf,
-    extractInput = ctx => InputExtractor.extractAssuranceInput(ctx.block),
-    wrapError = (e: AssuranceErrorCode) => PipelineError.AssuranceErr(e)
-  )
+  val assurances: StfStepWith[AssuranceOutputMarks] = StateT {
+    case (state, ctx) =>
+      val input = InputExtractor.extractAssuranceInput(ctx.block)
+      // Use pre-Safrole validators for assurance verification
+      val (newState, result) = AssuranceTransition.stfWithValidators(
+        input,
+        state,
+        ctx.config,
+        ctx.preSafroleValidators
+      )
+      result match
+        case Right(output) => Right(((newState, ctx), output))
+        case Left(err) => Left(PipelineError.AssuranceErr(err))
+  }
 
   // 4. Reports STF (special: has skipAncestryValidation param)
   def reports(skipAncestryValidation: Boolean): StfStepWith[ReportOutputMarks] = liftReport(
     stf = ReportTransition.stf,
-    extractInput = ctx => ReportInput(
-      guarantees = ctx.block.extrinsic.guarantees,
-      slot = ctx.block.header.slot.value.toLong
-    ),
+    extractInput = ctx =>
+      ReportInput(
+        guarantees = ctx.block.extrinsic.guarantees,
+        slot = ctx.block.header.slot.value.toLong
+      ),
     wrapError = (e: ReportErrorCode) => PipelineError.ReportErr(e),
     skipAncestryValidation = skipAncestryValidation
   )
 
   // 5. Accumulation STF (never fails - returns Either[Nothing, AccumulationOutputData])
-  val accumulation: StfStepWith[AccumulationOutputData] = StateT { case (state, ctx) =>
-    val input = InputExtractor.extractAccumulationInput(ctx.availableReports, ctx.block.header.slot.value.toLong)
-    val (newState, result) = AccumulationTransition.stf(input, state, ctx.config)
-    // Accumulation never returns Left, so we just extract Right
-    result match
-      case Right(output) => Right(((newState, ctx), output))
-      case Left(_) => Left(PipelineError.AccumulationErr("Accumulation failed"))
+  val accumulation: StfStepWith[AccumulationOutputData] = StateT {
+    case (state, ctx) =>
+      val input = InputExtractor.extractAccumulationInput(ctx.availableReports, ctx.block.header.slot.value.toLong)
+      val (newState, result) = AccumulationTransition.stf(input, state, ctx.config)
+      // Accumulation never returns Left, so we just extract Right
+      result match
+        case Right(output) => Right(((newState, ctx), output))
+        case Left(_) => Left(PipelineError.AccumulationErr("Accumulation failed"))
   }
 
   // 6. History STF (state-only, needs accumulateRoot from context)
@@ -83,21 +94,23 @@ object LiftedStfs:
   )
 
   // 8. Preimages STF (no config, uses pre-accumulation state for validation per GP §12.1)
-  val preimages: StfStepWith[Unit] = StateT { case (state, ctx) =>
-    val input = InputExtractor.extractPreimageInput(ctx.block, ctx.block.header.slot.value.toLong)
-    // Use pre-accumulation rawServiceDataByStateKey for validation
-    val preAccumState = ctx.preAccumulationRawServiceData.getOrElse(state.rawServiceDataByStateKey)
-    val (newState, output) = PreimageTransition.stfWithPreAccumState(input, state, preAccumState)
-    output match
-      case Left(err) =>
-        Left(PipelineError.PreimageErr(err))
-      case Right(_) =>
-        Right(((newState, ctx), ()))
+  val preimages: StfStepWith[Unit] = StateT {
+    case (state, ctx) =>
+      val input = InputExtractor.extractPreimageInput(ctx.block, ctx.block.header.slot.value.toLong)
+      // Use pre-accumulation rawServiceDataByStateKey for validation
+      val preAccumState = ctx.preAccumulationRawServiceData.getOrElse(state.rawServiceDataByStateKey)
+      val (newState, output) = PreimageTransition.stfWithPreAccumState(input, state, preAccumState)
+      output match
+        case Left(err) =>
+          Left(PipelineError.PreimageErr(err))
+        case Right(_) =>
+          Right(((newState, ctx), ()))
   }
 
   // 9. Statistics STF (returns Option, not Either - wrapping specially)
-  val statistics: StfStepWith[Option[StatOutput]] = StateT { case (state, ctx) =>
-    val input = InputExtractor.extractStatInput(ctx.block)
-    val (newState, output) = StatisticsTransition.stf(input, state, ctx.config)
-    Right(((newState, ctx), output))
+  val statistics: StfStepWith[Option[StatOutput]] = StateT {
+    case (state, ctx) =>
+      val input = InputExtractor.extractStatInput(ctx.block)
+      val (newState, output) = StatisticsTransition.stf(input, state, ctx.config)
+      Right(((newState, ctx), output))
   }

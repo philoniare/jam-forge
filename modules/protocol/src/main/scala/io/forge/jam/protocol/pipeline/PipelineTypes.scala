@@ -2,9 +2,10 @@ package io.forge.jam.protocol.pipeline
 
 import cats.data.StateT
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.state.JamState
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
 
@@ -16,8 +17,10 @@ final case class PipelineContext(
   config: ChainConfig,
   block: Block,
   preTransitionTau: Long,
+  preSafroleValidators: List[ValidatorKey] = List.empty,
   // Intermediate results passed between STFs
   safroleOutput: Option[SafroleOutputData] = None,
+  disputeOffendersMark: List[Ed25519PublicKey] = List.empty,
   availableReports: List[WorkReport] = List.empty,
   accumulateRoot: Option[Hash] = None,
   accumulationStats: Map[Long, (Long, Int)] = Map.empty,
@@ -30,7 +33,8 @@ object PipelineContext:
     PipelineContext(
       config = config,
       block = block,
-      preTransitionTau = preState.tau
+      preTransitionTau = preState.tau,
+      preSafroleValidators = preState.validators.current
     )
 
 /**

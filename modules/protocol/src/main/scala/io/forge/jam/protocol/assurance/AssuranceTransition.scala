@@ -195,6 +195,33 @@ object AssuranceTransition:
     (updatedState, output)
 
   /**
+   * Execute the Assurances STF with explicit validators for signature verification.
+   *
+   * @param input The assurance input containing assurances, slot, and parent hash.
+   * @param state The unified JamState.
+   * @param config The chain configuration.
+   * @param validators The validators to use for signature verification.
+   * @return Tuple of (updated JamState, output).
+   */
+  def stfWithValidators(
+    input: AssuranceInput,
+    state: JamState,
+    config: ChainConfig,
+    validators: List[ValidatorKey]
+  ): (JamState, AssuranceOutput) =
+    // Extract AssuranceState using lens bundle, but override currValidators
+    val preStateBase = JamState.AssuranceLenses.extract(state)
+    val preState = preStateBase.copy(currValidators = validators)
+
+    // Execute the internal STF logic
+    val (postState, output) = stfInternal(input, preState, config)
+
+    // Apply results back using lens bundle
+    val updatedState = JamState.AssuranceLenses.apply(state, postState)
+
+    (updatedState, output)
+
+  /**
    * Internal Assurances STF implementation using AssuranceState.
    *
    * @param input The assurance input containing assurances, slot, and parent hash.

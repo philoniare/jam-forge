@@ -76,14 +76,17 @@ fn initialize_ring_context(srs_data: &[u8], ring_size: jint) -> Result<(), Strin
 // "Static" ring context data
 fn ring_context(ring_size: jint) -> Arc<RingParams> {
     let ring_size = ring_size as usize;
-    let contexts = RING_CONTEXTS.get()
+    let contexts = RING_CONTEXTS
+        .get()
         .expect("Ring contexts not initialized")
         .lock()
         .unwrap();
 
-    contexts.get(&ring_size)
+    contexts
+        .get(&ring_size)
         .expect("Ring context not found for given size")
-        .clone().into()
+        .clone()
+        .into()
 }
 
 #[no_mangle]
@@ -251,7 +254,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
     let key_bytes = match env.convert_byte_array(keys) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return throw_and_return_null(&mut env, &format!("Failed to convert byte array: {:?}", e));
+            return throw_and_return_null(
+                &mut env,
+                &format!("Failed to convert byte array: {:?}", e),
+            );
         }
     };
 
@@ -280,10 +286,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
         pub_keys.push(key_slice.to_vec());
     }
 
-    // Step 5: Deserialize each public key
+    // Step 5: Deserialize each public key using unchecked deserialization
     let mut ring = Vec::with_capacity(ring_size as usize);
     for key in pub_keys.iter() {
-        match BanderPublic::deserialize_compressed(&mut &key[..]) {
+        match BanderPublic::deserialize_compressed_unchecked(&mut &key[..]) {
             Ok(public_key) => ring.push(public_key),
             Err(_e) => {
                 // Use a padding point as key
@@ -379,7 +385,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
             Ok(array) => array.into_raw(),
-            Err(_) => std::ptr::null_mut()
+            Err(_) => std::ptr::null_mut(),
         }
     };
 
@@ -402,12 +408,18 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     let attempt_value = attempt as u8;
 
     // Perform verification
-    match Verifier::ring_vrf_verify(&entropy_data, attempt_value, &signature_data, &commitment_data, ring_size) {
+    match Verifier::ring_vrf_verify(
+        &entropy_data,
+        attempt_value,
+        &signature_data,
+        &commitment_data,
+        ring_size,
+    ) {
         Ok(output_hash) => match env.byte_array_from_slice(&output_hash) {
             Ok(array) => array.into_raw(),
-            Err(_) => return_error(&mut env, "Failed to create output array")
+            Err(_) => return_error(&mut env, "Failed to create output array"),
         },
-        Err(e) => return_error(&mut env, &e.to_string())
+        Err(e) => return_error(&mut env, &e.to_string()),
     }
 }
 
@@ -449,7 +461,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed
 
     match env.byte_array_from_slice(&buf) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -484,7 +496,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecr
 
     match env.byte_array_from_slice(&buf) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -543,7 +555,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
 
     match env.byte_array_from_slice(&buf) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -563,7 +575,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
             Ok(array) => array.into_raw(),
-            Err(_) => std::ptr::null_mut()
+            Err(_) => std::ptr::null_mut(),
         }
     };
 
@@ -608,7 +620,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
 
     match env.byte_array_from_slice(&output_hash) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -624,7 +636,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
             Ok(array) => array.into_raw(),
-            Err(_) => std::ptr::null_mut()
+            Err(_) => std::ptr::null_mut(),
         }
     };
 
@@ -649,7 +661,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
 
     match env.byte_array_from_slice(&output_hash) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -665,7 +677,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
             Ok(array) => array.into_raw(),
-            Err(_) => std::ptr::null_mut()
+            Err(_) => std::ptr::null_mut(),
         }
     };
 
@@ -687,13 +699,11 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
 
     // Extract the output hash (32 bytes)
     let output_hash = signature.output.hash();
-    let output_bytes: [u8; 32] = output_hash[..32]
-        .try_into()
-        .unwrap_or([0u8; 32]);
+    let output_bytes: [u8; 32] = output_hash[..32].try_into().unwrap_or([0u8; 32]);
 
     match env.byte_array_from_slice(&output_bytes) {
         Ok(array) => array.into_raw(),
-        Err(_) => return_error_local(&mut env, "Failed to create output array")
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
 }
 
@@ -708,5 +718,55 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_rustFree(
         if ptr != 0 {
             let _ = Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+    #[test]
+    fn test_zeros_key_becomes_padding_point() {
+        // All zeros should fail to deserialize and be replaced with padding point
+        let zeros = [0u8; 32];
+
+        let result = BanderPublic::deserialize_compressed(&zeros[..]);
+
+        match &result {
+            Ok(_) => println!("WARNING: Zeros deserializes OK - may need explicit check"),
+            Err(e) => println!("GOOD: Zeros fails to deserialize: {:?}", e),
+        }
+
+        // Check what we'd actually use in ring construction
+        let point_for_ring = match BanderPublic::deserialize_compressed(&zeros[..]) {
+            Ok(pk) => pk,
+            Err(_) => BanderPublic::from(RingParams::padding_point()),
+        };
+
+        // Serialize the padding point
+        let padding = RingParams::padding_point();
+        let mut padding_buf = Vec::new();
+        padding.serialize_compressed(&mut padding_buf).unwrap();
+
+        // Serialize what we got
+        let mut actual_buf = Vec::new();
+        point_for_ring
+            .0
+            .serialize_compressed(&mut actual_buf)
+            .unwrap();
+
+        println!("Padding point:     {}", hex::encode(&padding_buf));
+        println!("Actual used point: {}", hex::encode(&actual_buf));
+
+        // Expected from spec: 92ca79e61dd90c1573a8693f199bf6e1e86835cc715cdcf93f5ef222560023aa
+        let expected = "92ca79e61dd90c1573a8693f199bf6e1e86835cc715cdcf93f5ef222560023aa";
+        println!("Expected padding:  {}", expected);
+
+        assert_eq!(
+            hex::encode(&padding_buf),
+            expected,
+            "Padding point should match spec"
+        );
     }
 }

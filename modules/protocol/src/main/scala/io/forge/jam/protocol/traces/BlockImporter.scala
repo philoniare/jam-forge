@@ -90,6 +90,12 @@ class BlockImporter(
    */
   def importBlock(block: Block, preState: RawState): ImportResult =
     try
+      if block.header.parentStateRoot != preState.stateRoot then
+        return ImportResult.Failure(
+          ImportError.InvalidStateRoot,
+          "Block's parent_state_root does not match pre-state root"
+        )
+
       // Step 1: Decode full pre-state from keyvals and convert to JamState
       val fullPreState = FullJamState.fromKeyvals(preState.keyvals, config)
       val jamState = JamState.fromFullJamState(fullPreState, config)
@@ -163,6 +169,7 @@ class BlockImporter(
     case PipelineError.InvalidEpochMark => ImportError.InvalidHeader
     case PipelineError.InvalidTicketsMark => ImportError.InvalidHeader
     case PipelineError.InvalidBlockSeal => ImportError.InvalidHeader
+    case PipelineError.InvalidOffendersMark => ImportError.InvalidHeader
 
   /**
    * Compute final core statistics by combining:

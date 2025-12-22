@@ -273,7 +273,8 @@ object StatisticsTypes:
     valsCurrStats: List[StatCount],
     valsLastStats: List[StatCount],
     slot: Long,
-    currValidators: List[ValidatorKey]
+    currValidators: List[ValidatorKey],
+    prevValidators: List[ValidatorKey] = List.empty
   )
 
   object StatState:

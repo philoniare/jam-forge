@@ -92,8 +92,8 @@ object StateKeys:
     if bytes.length != 31 then false
     else
       val firstByte = bytes(0).toInt & 0xff
-      // If first byte is 0xff, it's a service account key (not service data)
-      if firstByte == 0xff then false
+      if firstByte == 0xff then
+        bytes(2) != 0
       // If first byte is a known protocol prefix and all remaining bytes are zero, it's a protocol key
       else if KNOWN_PREFIXES.contains(firstByte) then
         // Check if any byte after the first is non-zero
@@ -156,7 +156,9 @@ object StateCodec:
     var iota: List[ValidatorKey] = List.empty
     var gammaA: List[TicketMark] = List.empty
     var gammaS: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys =
-      io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(List.fill(config.epochLength)(BandersnatchPublicKey.zero))
+      io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(
+        List.fill(config.epochLength)(BandersnatchPublicKey.zero)
+      )
     var gammaZ: JamBytes = JamBytes.zeros(RING_COMMITMENT_SIZE)
     var postOffenders: List[Ed25519PublicKey] = List.empty
 
@@ -170,7 +172,7 @@ object StateCodec:
         // Timeslot: 4 bytes little-endian
         val bits = BitVector(value)
         uint32L.decode(bits) match
-          case Attempt.Successful(DecodeResult(v, _)) => tau = v & 0xFFFFFFFFL
+          case Attempt.Successful(DecodeResult(v, _)) => tau = v & 0xffffffffL
           case Attempt.Failure(_) => () // Keep default value
       else if isSimpleKey(key, StateKeys.ENTROPY_POOL) then
         // Entropy pool: 4 x 32-byte hashes
@@ -280,7 +282,9 @@ object StateCodec:
         totalConsumed += consumed.toInt
         remainingBits = remainder
         toks
-      case Attempt.Failure(_) => io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(List.fill(epochLength)(BandersnatchPublicKey.zero))
+      case Attempt.Failure(_) => io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(
+          List.fill(epochLength)(BandersnatchPublicKey.zero)
+        )
 
     // gammaA - compact length prefix + TicketMark items
     val ticketMarkCodec = io.forge.jam.core.types.tickets.TicketMark.given_Codec_TicketMark
@@ -298,10 +302,12 @@ object StateCodec:
   /**
    * Creates a codec for TicketsOrKeys with the given epoch length.
    */
-  private def createTicketsOrKeysCodec(epochLength: Int): Codec[io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys] =
+  private def createTicketsOrKeysCodec(epochLength: Int)
+    : Codec[io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys] =
     val ticketMarkCodec = io.forge.jam.core.types.tickets.TicketMark.given_Codec_TicketMark
     val ticketsListCodec: Codec[List[TicketMark]] = JamCodecs.fixedSizeList(ticketMarkCodec, epochLength)
-    val keysListCodec: Codec[List[BandersnatchPublicKey]] = JamCodecs.fixedSizeList(summon[Codec[BandersnatchPublicKey]], epochLength)
+    val keysListCodec: Codec[List[BandersnatchPublicKey]] =
+      JamCodecs.fixedSizeList(summon[Codec[BandersnatchPublicKey]], epochLength)
 
     discriminated[io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys]
       .by(byte)

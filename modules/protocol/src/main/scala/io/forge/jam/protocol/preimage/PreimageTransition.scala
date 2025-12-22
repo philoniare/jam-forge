@@ -23,48 +23,47 @@ import io.forge.jam.protocol.state.JamState
 object PreimageTransition:
 
   /**
-   * Compare two preimages by (requester, hash).
+   * Compare two preimages by (requester, blob).
    * Returns negative if first < second, 0 if equal, positive if first > second.
    */
   private def comparePreimages(
     requester1: Long,
-    hash1: Array[Byte],
+    blob1: Array[Byte],
     requester2: Long,
-    hash2: Array[Byte]
+    blob2: Array[Byte]
   ): Int =
     // First compare by requester
     val requesterComparison = requester1.compareTo(requester2)
     if requesterComparison != 0 then
       requesterComparison
     else
-      // Then compare by hash (lexicographically)
-      compareUnsigned(hash1, hash2)
+      // Then compare by blob (lexicographically)
+      compareUnsigned(blob1, blob2)
 
   /**
-   * Check that preimages are sorted by (requester, hash) and unique.
-   * Sorting is ascending by requester ID, then by blake2b hash of the blob.
+   * Check that preimages are sorted by (requester, blob) and unique.
    */
   private def arePreimagesSortedAndUnique(preimages: List[Preimage]): Boolean =
     if preimages.size <= 1 then true
     else
       var prevRequester: Option[Long] = None
-      var prevHash: Option[Array[Byte]] = None
+      var prevBlob: Option[Array[Byte]] = None
       var result = true
 
       val iter = preimages.iterator
       while iter.hasNext && result do
         val submission = iter.next()
-        val currentHash = Hashing.blake2b256(submission.blob).bytes
+        val currentBlob = submission.blob.toArray
 
-        (prevRequester, prevHash) match
-          case (Some(pr), Some(ph)) =>
-            val comparison = comparePreimages(pr, ph, submission.requester.value.toLong, currentHash)
+        (prevRequester, prevBlob) match
+          case (Some(pr), Some(pb)) =>
+            val comparison = comparePreimages(pr, pb, submission.requester.value.toLong, currentBlob)
             // Must be strictly less than (sorted and unique means no duplicates)
             if comparison >= 0 then
               result = false
           case _ => // First element, no comparison needed
         prevRequester = Some(submission.requester.value.toLong)
-        prevHash = Some(currentHash)
+        prevBlob = Some(currentBlob)
 
       result
 
@@ -186,7 +185,7 @@ object PreimageTransition:
         updatedRawServiceData = updatedRawServiceData.updated(infoStateKey, newInfoValue)
 
         // Add preimage blob to state using discriminator 0xFFFFFFFE
-        val blobStateKey = StateKey.computeServiceDataStateKey(serviceId, 0xFFFFFFFEL, JamBytes(hash))
+        val blobStateKey = StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, JamBytes(hash))
         updatedRawServiceData = updatedRawServiceData.updated(blobStateKey, submission.blob)
 
         // Track statistics update

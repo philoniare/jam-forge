@@ -52,7 +52,8 @@ object AccumulationTransition:
       rawServiceDataByStateKey = mutable.Map.from(state.rawServiceDataByStateKey)
     )
 
-    val (postState, postStagingSet, postAuthQueues, output) = stfInternal(input, preState, initStagingSet, initAuthQueues, config)
+    val (postState, postStagingSet, postAuthQueues, output) =
+      stfInternal(input, preState, initStagingSet, initAuthQueues, config)
 
     val stagingSetChanged = postStagingSet.map(_.toHex) != initStagingSet.map(_.toHex)
 
@@ -138,9 +139,10 @@ object AccumulationTransition:
     workingReadyQueue(m) = workingReadyQueue(m) ++ newRecords
 
     // 5. Extract accumulatable reports from ready queue
-    val allQueuedWithSlots = workingReadyQueue.zipWithIndex.flatMap {
-      case (records, slotIdx) =>
-        records.map(record => (slotIdx, record))
+    val epochLen = config.epochLength
+    val reorderedSlots = (m until epochLen) ++ (0 until m)
+    val allQueuedWithSlots = reorderedSlots.flatMap { slotIdx =>
+      workingReadyQueue(slotIdx).map(record => (slotIdx, record))
     }.toList
 
     val (readyToAccumulate, stillQueuedWithSlots) = extractAccumulatableWithSlots(
@@ -288,7 +290,8 @@ object AccumulationTransition:
 
     // AlwaysAccers comes from manager's post-state only (per GP §11.2)
     // Only the manager service can modify alwaysAccers
-    val finalAlwaysAccers = managerSnapshot.map(_.alwaysAccers).getOrElse(preState.privileges.alwaysAcc.map(a => a.id -> a.gas).toMap)
+    val finalAlwaysAccers =
+      managerSnapshot.map(_.alwaysAccers).getOrElse(preState.privileges.alwaysAcc.map(a => a.id -> a.gas).toMap)
 
     val finalState = AccumulationState(
       slot = input.slot,
@@ -332,14 +335,20 @@ object AccumulationTransition:
     val postStagingSet = delegatorStateSnapshot.map(_.stagingSet).getOrElse(initStagingSet)
 
     // Auth queues: each core's queue comes from that core's assigner's post-state
-    val postAuthQueues = finalAssigners.zipWithIndex.map { case (assigner, coreIdx) =>
-      val assignerStateSnapshot = privilegeSnapshots.get(assigner)
-      assignerStateSnapshot.flatMap(_.authQueues.lift(coreIdx)).getOrElse(
-        initAuthQueues.lift(coreIdx).getOrElse(List.empty)
-      )
+    val postAuthQueues = finalAssigners.zipWithIndex.map {
+      case (assigner, coreIdx) =>
+        val assignerStateSnapshot = privilegeSnapshots.get(assigner)
+        assignerStateSnapshot.flatMap(_.authQueues.lift(coreIdx)).getOrElse(
+          initAuthQueues.lift(coreIdx).getOrElse(List.empty)
+        )
     }
 
-    (finalState, postStagingSet, postAuthQueues, StfResult.success(AccumulationOutputData(outputHash, accumulationStats, transferStats, commitmentsList)))
+    (
+      finalState,
+      postStagingSet,
+      postAuthQueues,
+      StfResult.success(AccumulationOutputData(outputHash, accumulationStats, transferStats, commitmentsList))
+    )
 
   /**
    * Merging privilege updates.
@@ -930,10 +939,10 @@ class AccountChanges:
       val serviceIdBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(id.toInt).array()
       val keysToRemove = state.rawServiceDataByStateKey.keys.filter { key =>
         key.length >= 8 &&
-          key.toArray(0) == serviceIdBytes(0) &&
-          key.toArray(2) == serviceIdBytes(1) &&
-          key.toArray(4) == serviceIdBytes(2) &&
-          key.toArray(6) == serviceIdBytes(3)
+        key.toArray(0) == serviceIdBytes(0) &&
+        key.toArray(2) == serviceIdBytes(1) &&
+        key.toArray(4) == serviceIdBytes(2) &&
+        key.toArray(6) == serviceIdBytes(3)
       }.toList
       keysToRemove.foreach(state.rawServiceDataByStateKey.remove)
 

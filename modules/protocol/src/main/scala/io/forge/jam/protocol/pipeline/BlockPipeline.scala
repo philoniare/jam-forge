@@ -58,7 +58,9 @@ object BlockPipeline:
       postSafroleTau <- inspect((s, _) => s.tau)
 
       // Step 3: Disputes
-      _ <- disputes
+      disputeOut <- disputes
+      _ <- storeDisputeOutput(disputeOut)
+      _ <- validateOffendersMark
 
       // Step 4: Assurances
       assuranceOut <- assurances

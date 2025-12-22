@@ -529,7 +529,8 @@ object JamState:
       valsCurrStats = valsCurrStatsLens.get(state),
       valsLastStats = valsLastStatsLens.get(state),
       slot = tauLens.get(state),
-      currValidators = kappaLens.get(state)
+      currValidators = kappaLens.get(state),
+      prevValidators = lambdaLens.get(state)
     )
 
     /** Apply StatState changes back to JamState (only stats are modified) */

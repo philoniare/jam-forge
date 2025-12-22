@@ -9,7 +9,7 @@ import java.nio.file.{Files, Paths}
 /**
  * Conformance tests for JAM fuzz report traces.
  *
- * These tests load JSON trace files from jam-conformance/fuzz-reports/0.7.1/traces/
+ * These tests load JSON trace files from jam-conformance/fuzz-reports/0.7.2/traces/
  * and verify that our implementation produces the expected post-state after importing each block.
  *
  * Each trace file contains:
@@ -22,17 +22,14 @@ import java.nio.file.{Files, Paths}
  * 2. Verify pre_state root matches computed root (sanity check)
  * 3. Import block using BlockImporter
  * 4. Compare actual post_state root with expected
- *
- * NOTE: Disabled until v0.7.2 traces are available.
  */
-@org.scalatest.Ignore
 class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
-  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.1", "traces")
+  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
 
-  describe("v0.7.1 Fuzz Report Traces"):
+  describe("v0.7.2 Fuzz Report Traces"):
 
     describe("single trace validation"):
 
@@ -42,8 +39,8 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = true, compareKeyvals = true)
 
         // Target a specific trace for debugging
-        val targetTraceId = "1763488465"
-        val targetFileName = "00001705.json"
+        val targetTraceId = "1766255635_2557"
+        val targetFileName = "00000153.json"
 
         val targetFile = tracesDir.resolve(targetTraceId).resolve(targetFileName)
         assume(Files.exists(targetFile), s"Target trace file not found: $targetFile")
@@ -102,7 +99,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
     describe("all traces validation"):
 
-      it("should pass all v0.7.1 fuzz report traces"):
+      it("should pass all v0.7.2 fuzz report traces"):
         assume(Files.exists(tracesDir), s"Trace directory not found: $tracesDir")
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = false, compareKeyvals = true)
@@ -117,7 +114,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
         val errorsByTrace = errors.groupBy(_.traceId)
 
         // Report summary
-        println(s"\n=== v0.7.1 Fuzz Report Traces Summary ===")
+        println(s"\n=== v0.7.2 Fuzz Report Traces Summary ===")
         println(s"Total files: ${results.size}")
         println(s"Passed: ${successes.size}")
         println(s"Failed: ${failures.size} (in ${failuresByTrace.size} traces)")

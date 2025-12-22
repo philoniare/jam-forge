@@ -20,6 +20,7 @@ enum PipelineError:
   case HeaderVerificationErr(msg: String)
   case InvalidEpochMark
   case InvalidTicketsMark
+  case InvalidOffendersMark
   case InvalidBlockSeal
 
   def message: String = this match
@@ -32,4 +33,5 @@ enum PipelineError:
     case HeaderVerificationErr(msg) => s"Header: $msg"
     case InvalidEpochMark => "Invalid epoch mark"
     case InvalidTicketsMark => "Invalid tickets mark"
+    case InvalidOffendersMark => "Invalid offenders mark"
     case InvalidBlockSeal => "Invalid block seal"
