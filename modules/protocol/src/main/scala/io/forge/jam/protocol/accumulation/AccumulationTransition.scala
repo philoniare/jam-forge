@@ -129,21 +129,25 @@ object AccumulationTransition:
       editReadyQueueRecords(oldRecords, historicallyAccumulated.toSet)
     }.toList.to(mutable.ListBuffer)
 
-    // Add new queued reports to the current slot m (BEFORE extraction)
+    // Build new queued records
     val newRecords = queuedReports.map { report =>
       val prereqs = report.context.prerequisites
       val segmentDeps = report.segmentRootLookup.map(_.workPackageHash)
       val allDeps = (prereqs ++ segmentDeps).filter(h => !historicallyAccumulated.contains(JamBytes(h.bytes)))
       AccumulationReadyRecord(report, allDeps)
     }
-    workingReadyQueue(m) = workingReadyQueue(m) ++ newRecords
+
+    // Edit new records to remove already-accumulated dependencies
+    val editedNewRecords = editReadyQueueRecords(newRecords, historicallyAccumulated.toSet)
 
     // 5. Extract accumulatable reports from ready queue
     val epochLen = config.epochLength
     val reorderedSlots = (m until epochLen) ++ (0 until m)
-    val allQueuedWithSlots = reorderedSlots.flatMap { slotIdx =>
+    val existingQueuedWithSlots = reorderedSlots.flatMap { slotIdx =>
       workingReadyQueue(slotIdx).map(record => (slotIdx, record))
     }.toList
+    // Add new records at the end
+    val allQueuedWithSlots = existingQueuedWithSlots ++ editedNewRecords.map(r => (m, r))
 
     val (readyToAccumulate, stillQueuedWithSlots) = extractAccumulatableWithSlots(
       allQueuedWithSlots,
