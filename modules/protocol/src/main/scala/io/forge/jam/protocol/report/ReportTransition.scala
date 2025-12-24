@@ -323,7 +323,12 @@ object ReportTransition:
     val totalOutputSize = workReport.authOutput.length +
       workReport.results.map(_.result match
         case ExecutionResult.Ok(output) => output.length
+        case ExecutionResult.OOG => 0
         case ExecutionResult.Panic => 0
+        case ExecutionResult.BadExports => 0
+        case ExecutionResult.Oversize => 0
+        case ExecutionResult.BadCode => 0
+        case ExecutionResult.CodeTooLarge => 0
       ).sum
     require(totalOutputSize <= MaxOutputSize, ReportErrorCode.WorkReportTooBig)
 

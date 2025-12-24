@@ -45,10 +45,11 @@ object work:
 
     given Codec[PackageSpec] =
       (hashCodec :: uint32L :: hashCodec :: hashCodec :: uint16L).xmap(
-        { case (hash, length, erasureRoot, exportsRoot, exportsCount) =>
-          PackageSpec(hash, UInt(length.toInt), erasureRoot, exportsRoot, UShort(exportsCount))
+        {
+          case (hash, length, erasureRoot, exportsRoot, exportsCount) =>
+            PackageSpec(hash, UInt(length.toInt), erasureRoot, exportsRoot, UShort(exportsCount))
         },
-        ps => (ps.hash, ps.length.toLong & 0xFFFFFFFFL, ps.erasureRoot, ps.exportsRoot, ps.exportsCount.toInt)
+        ps => (ps.hash, ps.length.toLong & 0xffffffffL, ps.erasureRoot, ps.exportsRoot, ps.exportsCount.toInt)
       )
 
     given Decoder[PackageSpec] = Decoder.instance { cursor =>
@@ -81,12 +82,12 @@ object work:
    */
   enum ExecutionResult:
     case Ok(output: JamBytes)
-    case OOG           // Out of gas
-    case Panic         // Panic during execution
-    case BadExports    // Wrong number of exports
-    case Oversize      // Output too large
-    case BadCode       // Invalid code (BAD)
-    case CodeTooLarge  // Code too large (BIG)
+    case OOG // Out of gas
+    case Panic // Panic during execution
+    case BadExports // Wrong number of exports
+    case Oversize // Output too large
+    case BadCode // Invalid code (BAD)
+    case CodeTooLarge // Code too large (BIG)
 
   object ExecutionResult:
     private val OkTag: Byte = 0x00
@@ -142,17 +143,31 @@ object work:
     given Decoder[ExecutionResult] = Decoder.instance { cursor =>
       val ok = cursor.get[String]("ok").toOption
       val err = cursor.get[Int]("err").toOption
+      val hasOutOfGas = cursor.downField("out_of_gas").succeeded
+      val hasPanic = cursor.downField("panic").succeeded
+      val hasBadExports = cursor.downField("bad_exports").succeeded
+      val hasOutputOversize = cursor.downField("output_oversize").succeeded
+      val hasBadCode = cursor.downField("bad_code").succeeded
+      val hasCodeTooLarge = cursor.downField("code_too_large").succeeded
+
       Right(ok match
         case Some(data) => ExecutionResult.Ok(JamBytes(parseHex(data)))
         case None => err match
-          case Some(1) => ExecutionResult.OOG
-          case Some(2) => ExecutionResult.Panic
-          case Some(3) => ExecutionResult.BadExports
-          case Some(4) => ExecutionResult.Oversize
-          case Some(5) => ExecutionResult.BadCode
-          case Some(6) => ExecutionResult.CodeTooLarge
-          case Some(_) => ExecutionResult.Panic  // Unknown error code, default to Panic
-          case None => ExecutionResult.Ok(JamBytes.empty)
+            case Some(1) => ExecutionResult.OOG
+            case Some(2) => ExecutionResult.Panic
+            case Some(3) => ExecutionResult.BadExports
+            case Some(4) => ExecutionResult.Oversize
+            case Some(5) => ExecutionResult.BadCode
+            case Some(6) => ExecutionResult.CodeTooLarge
+            case Some(_) => ExecutionResult.Panic
+            case None =>
+              if hasOutOfGas then ExecutionResult.OOG
+              else if hasPanic then ExecutionResult.Panic
+              else if hasBadExports then ExecutionResult.BadExports
+              else if hasOutputOversize then ExecutionResult.Oversize
+              else if hasBadCode then ExecutionResult.BadCode
+              else if hasCodeTooLarge then ExecutionResult.CodeTooLarge
+              else ExecutionResult.Ok(JamBytes.empty)
       )
     }
 
@@ -171,8 +186,9 @@ object work:
 
     given Codec[Vote] =
       (byte :: uint16L :: ed25519SigCodec).xmap(
-        { case (voteByte, idx, sig) =>
-          Vote(voteByte != 0, ValidatorIndex(idx), sig)
+        {
+          case (voteByte, idx, sig) =>
+            Vote(voteByte != 0, ValidatorIndex(idx), sig)
         },
         v => ((if v.vote then 1 else 0).toByte, v.validatorIndex.value.toInt, v.signature)
       )
