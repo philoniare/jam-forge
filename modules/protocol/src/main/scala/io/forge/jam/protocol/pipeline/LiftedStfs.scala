@@ -74,7 +74,7 @@ object LiftedStfs:
   val accumulation: StfStepWith[AccumulationOutputData] = StateT {
     case (state, ctx) =>
       val input = InputExtractor.extractAccumulationInput(ctx.availableReports, ctx.block.header.slot.value.toLong)
-      val (newState, result) = AccumulationTransition.stf(input, state, ctx.config)
+      val (newState, result) = AccumulationTransition.stf(input, state, ctx.config, ctx.preTransitionTau)
       // Accumulation never returns Left, so we just extract Right
       result match
         case Right(output) => Right(((newState, ctx), output))

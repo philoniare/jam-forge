@@ -25,12 +25,14 @@ object AccumulationTransition:
    * @param input The accumulation input containing slot and reports
    * @param state The unified JamState
    * @param config The chain configuration
+   * @param prevSlot The previous block's slot (τ) - used for ready queue clearing per Gray Paper
    * @return Tuple of (updated JamState, AccumulationOutput)
    */
   def stf(
     input: AccumulationInput,
     state: JamState,
-    config: ChainConfig
+    config: ChainConfig,
+    prevSlot: Long
   ): (JamState, AccumulationOutput) =
     val entropyBytes = state.entropy.firstAsBytes
 
@@ -53,7 +55,7 @@ object AccumulationTransition:
     )
 
     val (postState, postStagingSet, postAuthQueues, output) =
-      stfInternal(input, preState, initStagingSet, initAuthQueues, config)
+      stfInternal(input, preState, initStagingSet, initAuthQueues, config, prevSlot)
 
     val stagingSetChanged = postStagingSet.map(_.toHex) != initStagingSet.map(_.toHex)
 
@@ -93,6 +95,7 @@ object AccumulationTransition:
    * @param initStagingSet Initial staging set (validator queue) as list of 336-byte JamBytes
    * @param initAuthQueues Initial authorization queues per core as list of lists of 32-byte hashes
    * @param config The accumulation configuration
+   * @param prevSlot The previous block's slot
    * @return Tuple of (post-transition state, post staging set, post auth queues, output)
    */
   def stfInternal(
@@ -100,10 +103,11 @@ object AccumulationTransition:
     preState: AccumulationState,
     initStagingSet: List[JamBytes],
     initAuthQueues: List[List[JamBytes]],
-    config: ChainConfig
+    config: ChainConfig,
+    prevSlot: Long
   ): (AccumulationState, List[JamBytes], List[List[JamBytes]], AccumulationOutput) =
     val m = (input.slot % config.epochLength).toInt
-    val deltaT = Math.max((input.slot - preState.slot).toInt, 1)
+    val deltaT = Math.max((input.slot - prevSlot).toInt, 1)
 
     // 1. Collect all historically accumulated hashes (for dependency checking)
     val historicallyAccumulated = mutable.Set.from(preState.accumulated.flatten)
