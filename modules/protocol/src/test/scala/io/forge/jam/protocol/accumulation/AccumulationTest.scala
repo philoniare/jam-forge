@@ -74,7 +74,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           testCase.preState,
           List.empty, // initStagingSet - not part of accumulation test vectors
           List.empty, // initAuthQueues - not part of accumulation test vectors
-          TinyConfig
+          TinyConfig,
+          testCase.preState.slot
         )
 
         assertAccumulationOutputEquals(testCase.output, output, testCaseName)
@@ -108,7 +109,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
               testCase.preState,
               List.empty, // initStagingSet - not part of accumulation test vectors
               List.empty, // initAuthQueues - not part of accumulation test vectors
-              TinyConfig
+              TinyConfig,
+              testCase.preState.slot
             )
 
             // Compare output
@@ -150,7 +152,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           testCase.preState,
           List.empty,
           List.empty,
-          TinyConfig
+          TinyConfig,
+          testCase.preState.slot
         )
 
         // Verify slot is updated
@@ -174,7 +177,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           testCase.preState,
           List.empty,
           List.empty,
-          TinyConfig
+          TinyConfig,
+          testCase.preState.slot
         )
 
         // Verify privileges are preserved (or updated correctly)
@@ -374,7 +378,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           testCase.preState,
           List.empty,
           List.empty,
-          TinyConfig
+          TinyConfig,
+          testCase.preState.slot
         )
 
         // Compare output
@@ -409,7 +414,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
               testCase.preState,
               List.empty,
               List.empty,
-              FullConfig
+              FullConfig,
+              testCase.preState.slot
             )
 
             assertAccumulationOutputEquals(testCase.output, output, testCaseName)
