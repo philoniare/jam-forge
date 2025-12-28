@@ -254,7 +254,9 @@ lazy val protocol = (project in file("modules/protocol"))
       "io.circe" %% "circe-parser" % "0.14.6",
       "dev.optics" %% "monocle-core" % "3.2.0",
       "dev.optics" %% "monocle-macro" % "3.2.0",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      "org.scalatest" %% "scalatest" % "3.2.17" % Test,
+      "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
+      "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test
     ),
     scalacOptions ++= Seq(
       "-deprecation",

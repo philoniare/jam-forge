@@ -8,11 +8,6 @@ import io.circe.parser.*
 import scala.io.Source
 
 class AlgorithmsSpec extends AnyFlatSpec with Matchers:
-
-  // ════════════════════════════════════════════════════════════════════════════
-  // Test Vector Loading
-  // ════════════════════════════════════════════════════════════════════════════
-
   private val shuffleTestVectorsPath = "jamtestvectors/shuffle/shuffle_tests.json"
   private val trieTestVectorsPath = "jamtestvectors/trie/trie.json"
 
@@ -54,10 +49,6 @@ class AlgorithmsSpec extends AnyFlatSpec with Matchers:
     finally
       source.close()
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // Shuffle Tests - All vectors from JSON
-  // ════════════════════════════════════════════════════════════════════════════
-
   private lazy val shuffleTestCases = loadShuffleTestCases()
 
   "Shuffle.jamComputeShuffle" should "pass all test vectors from shuffle_tests.json" in {
@@ -70,21 +61,19 @@ class AlgorithmsSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // Merkle Trie Tests - All vectors from JSON
-  // ════════════════════════════════════════════════════════════════════════════
-
   private lazy val trieTestCases = loadTrieTestCases()
 
   "MerkleTrie.merkle" should "pass all test vectors from trie.json" in {
-    trieTestCases.zipWithIndex.foreach { case (testCase, index) =>
-      withClue(s"case $index (${testCase.input.size} entries): ") {
-        val entries = testCase.input.map { case (k, v) =>
-          JamBytes.fromHexUnsafe(k) -> JamBytes.fromHexUnsafe(v)
+    trieTestCases.zipWithIndex.foreach {
+      case (testCase, index) =>
+        withClue(s"case $index (${testCase.input.size} entries): ") {
+          val entries = testCase.input.map {
+            case (k, v) =>
+              JamBytes.fromHexUnsafe(k) -> JamBytes.fromHexUnsafe(v)
+          }
+          val result = MerkleTrie.merkle(entries)
+          val expected = Hash.fromHex(testCase.output).toOption.get
+          result.bytes shouldBe expected.bytes
         }
-        val result = MerkleTrie.merkle(entries)
-        val expected = Hash.fromHex(testCase.output).toOption.get
-        result.bytes shouldBe expected.bytes
-      }
     }
   }
