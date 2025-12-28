@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.state
 
 import monocle.Lens
-import monocle.syntax.all.*
 import monocle.Focus
 
 import io.forge.jam.core.{ChainConfig, JamBytes}
@@ -34,7 +33,7 @@ final case class ValidatorState(
 )
 
 object ValidatorState:
-  def empty(validatorCount: Int): ValidatorState =
+  def empty: ValidatorState =
     ValidatorState(
       current = List.empty,
       previous = List.empty,
@@ -324,7 +323,7 @@ object JamState:
     authQueueSize: Int = 80
   ): JamState = JamState(
     tau = 0L,
-    validators = ValidatorState.empty(validatorCount),
+    validators = ValidatorState.empty,
     entropy = EntropyBuffer.empty,
     gamma = SafroleGamma(
       z = JamBytes.zeros(SafroleGamma.RingCommitmentSize),

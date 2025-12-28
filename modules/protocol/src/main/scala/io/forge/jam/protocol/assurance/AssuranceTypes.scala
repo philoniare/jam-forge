@@ -1,17 +1,16 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{JamBytes, StfResult}
+import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
 import io.circe.Decoder
-import spire.math.{UByte, UInt}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.{BitVector, ByteVector}
+import spire.math.UByte
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec, given}
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec}
 
 /**
  * Types for the Assurances State Transition Function.

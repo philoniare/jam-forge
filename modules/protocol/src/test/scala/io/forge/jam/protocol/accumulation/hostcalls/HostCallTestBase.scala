@@ -7,7 +7,6 @@ import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.protocol.accumulation._
-import spire.math.ULong
 
 import scala.collection.mutable
 

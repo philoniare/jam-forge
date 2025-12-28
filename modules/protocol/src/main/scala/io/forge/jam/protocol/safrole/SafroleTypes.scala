@@ -1,16 +1,15 @@
 package io.forge.jam.protocol.safrole
 
-import io.forge.jam.core.{ChainConfig, JamBytes, StfResult}
+import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
-import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
+import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.{Decoder, DecodingFailure}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.{given Codec[Hash], given Codec[BandersnatchPublicKey], given Codec[Ed25519PublicKey]}
+import io.forge.jam.core.scodec.JamCodecs.{given Codec[BandersnatchPublicKey]}
 
 /**
  * Types for the Safrole State Transition Function.
@@ -59,7 +58,7 @@ object SafroleTypes:
             case Right(keyHexes) =>
               val keys = keyHexes.map(hex => BandersnatchPublicKey(parseHex(hex)))
               Right(Keys(keys))
-            case Left(err) =>
+            case Left(_) =>
               Left(DecodingFailure("TicketsOrKeys must have either 'tickets' or 'keys' field", cursor.history))
     }
 

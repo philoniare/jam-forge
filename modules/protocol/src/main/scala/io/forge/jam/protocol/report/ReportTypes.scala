@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{JamBytes, StfResult}
-import io.forge.jam.core.primitives.{Hash, Gas}
+import io.forge.jam.core.StfResult
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.{SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.epoch.ValidatorKey
@@ -10,10 +10,8 @@ import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
-import spire.math.{UInt, ULong}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.codecs.{*, given}
-import _root_.scodec.bits.BitVector
+import _root_.scodec.Codec
+import _root_.scodec.codecs.*
 
 /**
  * Types for the Reports State Transition Function.

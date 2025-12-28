@@ -2,6 +2,7 @@ package io.forge.jam.pvm.memory
 
 import spire.math.{UByte, UShort, UInt, ULong}
 import io.forge.jam.pvm.MemoryResult
+import io.forge.jam.pvm.types.Width
 import io.forge.jam.pvm.WordOps
 
 /**

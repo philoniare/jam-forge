@@ -7,8 +7,7 @@ import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.{UInt, ULong}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
+import _root_.scodec.{Codec, Attempt}
 import _root_.scodec.bits.BitVector
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs

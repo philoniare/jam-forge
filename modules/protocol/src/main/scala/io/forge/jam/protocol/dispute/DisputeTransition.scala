@@ -1,18 +1,14 @@
 package io.forge.jam.protocol.dispute
 
-import cats.syntax.all.*
 import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.JamBytes.compareUnsigned
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature, Timeslot}
+import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
-import io.forge.jam.core.types.dispute.{Culprit, Fault}
-import io.forge.jam.core.types.work.Vote
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.dispute.DisputeTypes.*
-import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
+import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.Ed25519
 import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
 import _root_.scodec.Codec
 
 /**

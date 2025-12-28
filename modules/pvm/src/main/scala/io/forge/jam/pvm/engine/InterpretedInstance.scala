@@ -383,7 +383,6 @@ final class InterpretedInstance private (
     var offset = compiledOffset
     var continue = true
     while continue do
-      cycleCounter += 1
       _instructionCounter += 1
 
       if offset.signed >= compiledInstructions.size then
@@ -509,7 +508,6 @@ object InterpretedInstance:
       _programCounterValid = false,
       _nextProgramCounter = None,
       _nextProgramCounterChanged = true,
-      cycleCounter = 0L,
       _gas = 0L,
       compiledOffsetForBlock = FlatMap.create[PackedTarget](module.codeLen + UInt(1)),
       compiledInstructions = ArrayBuffer.empty,

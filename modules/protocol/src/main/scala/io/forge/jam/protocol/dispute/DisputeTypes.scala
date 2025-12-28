@@ -1,15 +1,13 @@
 package io.forge.jam.protocol.dispute
 
-import io.forge.jam.core.{ChainConfig, JamBytes, StfResult}
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
+import io.forge.jam.core.StfResult
+import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.UInt
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.BitVector
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
 

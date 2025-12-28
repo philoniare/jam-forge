@@ -97,7 +97,7 @@ class AuthorizationsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPro
 
       // Property: queues should remain unchanged (they are read-only in this STF)
       postState.authQueues.zip(preState.authQueues).zipWithIndex.foreach {
-        case ((postQueue, preQueue), coreIndex) =>
+        case ((postQueue, preQueue), _) =>
           postQueue.size shouldBe preQueue.size
           postQueue.zip(preQueue).foreach {
             case (postHash, preHash) =>

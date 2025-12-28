@@ -5,8 +5,7 @@ import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.core.json.JsonHelpers.{parseHash, parseHashListList}
 import io.circe.Decoder
 import spire.math.UShort
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.{BitVector, ByteVector}
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
 

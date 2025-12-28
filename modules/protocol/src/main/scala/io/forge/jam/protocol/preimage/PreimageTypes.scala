@@ -1,17 +1,15 @@
 package io.forge.jam.protocol.preimage
 
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.*
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
-import io.forge.jam.core.{JamBytes, StfResult}
+import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactInt, compactPrefixedList}
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactPrefixedList}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import spire.math.UInt
 
 /**
  * Types for the Preimages State Transition Function.

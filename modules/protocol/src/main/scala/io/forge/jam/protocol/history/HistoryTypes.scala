@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.history
 
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.codecs.*
+import _root_.scodec.Codec
 import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.history.{ReportedWorkPackage, HistoricalBeta, HistoricalMmr, HistoricalBetaContainer}

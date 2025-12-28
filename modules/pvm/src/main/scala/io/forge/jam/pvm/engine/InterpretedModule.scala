@@ -13,7 +13,6 @@ import io.forge.jam.pvm.program.ProgramBlob
  * - Read-write data section template (rwData)
  * - Number of empty heap pages to allocate
  * - Program blob for instruction decoding
- * - Argument data for input region
  *
  * @param roData Read-only data section, sized to match memory map
  * @param rwData Read-write data section template (copied per instance)
@@ -22,7 +21,6 @@ import io.forge.jam.pvm.program.ProgramBlob
  * @param memoryMap The memory layout configuration
  * @param codeLen Length of the code section
  * @param is64Bit Whether this is a 64-bit program
- * @param argumentData Optional argument/input data to be placed at InputStartAddress
  */
 final class InterpretedModule private (
   val roData: Array[Byte],
@@ -74,14 +72,12 @@ object InterpretedModule:
    * @param blob The parsed program blob
    * @param heapPages Number of heap pages to pre-allocate (default 0)
    * @param auxDataSize Size of auxiliary data region (default 16MB for GP stack and arguments)
-   * @param argumentData Optional argument/input data to place at InputStartAddress
    * @return Either an error message or the created module
    */
   def create(
     blob: ProgramBlob,
     heapPages: UInt = UInt(0),
-    auxDataSize: UInt = UInt(16908288),
-    argumentData: Array[Byte] = Array.empty
+    auxDataSize: UInt = UInt(16908288)
   ): Either[String, InterpretedModule] =
     // Build memory map from program blob
     MemoryMap.builder(Abi.VmMinPageSize)

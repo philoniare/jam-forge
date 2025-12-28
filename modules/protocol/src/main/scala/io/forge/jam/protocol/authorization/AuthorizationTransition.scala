@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.authorization
 
-import io.forge.jam.core.{ChainConfig, constants}
+import io.forge.jam.core.constants
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 import io.forge.jam.protocol.state.JamState
 
@@ -23,7 +23,7 @@ object AuthorizationTransition:
    * @param config The chain configuration.
    * @return The updated JamState.
    */
-  def stf(input: AuthInput, state: JamState, config: ChainConfig): JamState =
+  def stf(input: AuthInput, state: JamState, @annotation.nowarn("msg=unused") config: io.forge.jam.core.ChainConfig): JamState =
     // Extract AuthState using lens bundle
     val preState = JamState.AuthorizationLenses.extract(state)
 

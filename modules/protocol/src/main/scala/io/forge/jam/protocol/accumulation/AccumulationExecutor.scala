@@ -34,7 +34,7 @@ class AccumulationExecutor(val config: ChainConfig):
   ): AccumulationOneResult =
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
-      return createEmptyResult(partialState, Some(serviceId), Some(timeslot), operands)
+      return createEmptyResult(partialState, Some(serviceId), operands)
 
     val acc = account.get
     val codeHash = acc.info.codeHash
@@ -45,11 +45,11 @@ class AccumulationExecutor(val config: ChainConfig):
       .orElse(partialState.rawServiceDataByStateKey.get(blobStateKey))
 
     if preimage.isEmpty then
-      return createEmptyResult(partialState, Some(serviceId), Some(timeslot), operands)
+      return createEmptyResult(partialState, Some(serviceId), operands)
 
     val code = extractCodeBlob(preimage.get.toArray)
     if code.isEmpty || code.get.isEmpty || code.get.length > MAX_SERVICE_CODE_SIZE then
-      return createEmptyResult(partialState, Some(serviceId), Some(timeslot), operands)
+      return createEmptyResult(partialState, Some(serviceId), operands)
 
     // Apply incoming transfer balances before execution
     val transferBalance = operands.collect {
@@ -200,7 +200,7 @@ class AccumulationExecutor(val config: ChainConfig):
             try
               hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
-              case e: RuntimeException =>
+              case _: RuntimeException =>
                 exitReason = ExitReason.PANIC
                 continueExecution = false
 
@@ -211,7 +211,7 @@ class AccumulationExecutor(val config: ChainConfig):
         case Right(InterruptKind.Step) =>
           // Continue for step tracing
 
-        case Left(err) =>
+        case Left(_) =>
           exitReason = ExitReason.PANIC
           continueExecution = false
 
@@ -326,11 +326,6 @@ class AccumulationExecutor(val config: ChainConfig):
     (data(offset) & 0xff) | ((data(offset + 1) & 0xff) << 8) |
       ((data(offset + 2) & 0xff) << 16) | ((data(offset + 3) & 0xff) << 24)
 
-  private def writeMemoryBulk(instance: InterpretedInstance, address: Int, data: Array[Byte]): Boolean =
-    instance.basicMemory.setMemorySlice(UInt(address), data) match
-      case MemoryResult.Success(_) => true
-      case _ => false
-
   private def readMemoryBulk(instance: InterpretedInstance, address: Int, length: Int): Option[Array[Byte]] =
     instance.basicMemory.getMemorySlice(UInt(address), length) match
       case MemoryResult.Success(data) => Some(data)
@@ -398,7 +393,6 @@ class AccumulationExecutor(val config: ChainConfig):
   private def createEmptyResult(
     state: PartialState,
     serviceId: Option[Long],
-    timeslot: Option[Long],
     operands: List[AccumulationOperand]
   ): AccumulationOneResult =
     val finalState = serviceId match
@@ -482,8 +476,7 @@ def accumulateSequential(
     freeGas,
     executor,
     timeslot,
-    entropy,
-    config
+    entropy
   )
 
   val remainingGas = gasLimit - result.gasUsed.map(_._2).sum + deferredTransfers.map(_.gasLimit).sum
@@ -516,8 +509,7 @@ def accumulateParallel(
   freeGas: Map[Long, Long],
   executor: AccumulationExecutor,
   timeslot: Long,
-  entropy: JamBytes,
-  config: ChainConfig
+  entropy: JamBytes
 ): AccumulationParResult =
   val services = mutable.Set.empty[Long]
   reports.foreach(_.results.foreach(r => services += r.serviceId.value.toLong))

@@ -2,7 +2,7 @@ package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{JamBytes, Hashing}
 import io.forge.jam.core.scodec.JamCodecs
-import spire.math.{UInt, ULong}
+import spire.math.UInt
 
 /**
  * State key computation functions for accumulation.

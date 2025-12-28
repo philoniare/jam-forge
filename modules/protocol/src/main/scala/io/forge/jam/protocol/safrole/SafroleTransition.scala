@@ -1,19 +1,13 @@
 package io.forge.jam.protocol.safrole
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
-import io.forge.jam.core.JamBytes.compareUnsigned
-import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
-import _root_.scodec.Codec
 import _root_.scodec.bits.BitVector
 import _root_.scodec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.protocol.safrole.SafroleTypes.*
-import io.forge.jam.protocol.state.{JamState, ValidatorState, EntropyBuffer, SafroleGamma}
-import monocle.syntax.all.*
-import spire.math.UByte
-import scodec.bits.ByteVector
+import io.forge.jam.protocol.state.JamState
 import scala.math.Ordering.Implicits.infixOrderingOps
 
 /**

@@ -2,7 +2,7 @@ package io.forge.jam.protocol.pipeline
 
 import cats.data.StateT
 import io.forge.jam.core.JamBytes
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
 import io.forge.jam.protocol.state.JamState

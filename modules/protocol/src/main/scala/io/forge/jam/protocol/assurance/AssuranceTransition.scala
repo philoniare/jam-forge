@@ -1,14 +1,12 @@
 package io.forge.jam.protocol.assurance
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants, StfResult, ValidationHelpers}
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
+import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
 import io.forge.jam.crypto.Ed25519
 import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
 
 /**
  * Assurances State Transition Function.

@@ -4,7 +4,6 @@ import io.forge.jam.core.{JamBytes, Hashing, ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.history.HistoryTypes.*
 import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
 
 /**
  * History State Transition Function.
