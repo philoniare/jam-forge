@@ -106,7 +106,6 @@ final class InterpretedInstance private (
   private var _programCounterValid: Boolean,
   private var _nextProgramCounter: Option[ProgramCounter],
   private var _nextProgramCounterChanged: Boolean,
-  private var cycleCounter: Long,
   private var _gas: Long,
   private val compiledOffsetForBlock: FlatMap[PackedTarget],
   private val compiledInstructions: ArrayBuffer[CompiledInstruction],
@@ -208,7 +207,6 @@ final class InterpretedInstance private (
       resolveFallthrough(nextPc)
 
   override def panic(pc: ProgramCounter): Option[UInt] =
-    val stackTrace = Thread.currentThread().getStackTrace.take(10).map(_.toString).mkString("\n  ")
     _programCounter = pc
     _programCounterValid = true
     _nextProgramCounter = None

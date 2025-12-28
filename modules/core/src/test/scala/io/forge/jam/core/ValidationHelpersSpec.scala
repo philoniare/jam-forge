@@ -69,8 +69,7 @@ class ValidationHelpersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "work with empty list" in {
-    case class Item(id: Int)
-    ValidationHelpers.isSortedUniqueByInt(List.empty[Item])(_.id) shouldBe true
+    ValidationHelpers.isSortedUniqueByInt(List.empty[(Int, String)])(x => x._1) shouldBe true
   }
 
   "isSortedUniqueByLong" should "return true for sorted unique long keys" in {
@@ -161,8 +160,7 @@ class ValidationHelpersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return true for empty list" in {
-    case class Item(value: Int)
-    ValidationHelpers.isSortedBy(List.empty[Item])(_.value) shouldBe true
+    ValidationHelpers.isSortedBy(List.empty[(Int, String)])(x => x._1) shouldBe true
   }
 
   it should "return true for single-element list" in {

@@ -1,7 +1,5 @@
 package io.forge.jam.pvm.program
 
-import spire.math.{UByte, UInt, ULong}
-
 /**
  * Varint encoding/decoding utilities for PVM program parsing.
  *

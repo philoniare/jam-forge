@@ -1,7 +1,6 @@
 package io.forge.jam.pvm.memory
 
 import spire.math.UInt
-import scala.collection.mutable.ArrayBuffer
 
 /**
  * Page access permissions.

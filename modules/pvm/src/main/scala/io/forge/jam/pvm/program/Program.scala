@@ -1,6 +1,6 @@
 package io.forge.jam.pvm.program
 
-import io.forge.jam.pvm.{Opcode, Instruction}
+import io.forge.jam.pvm.Opcode
 
 /**
  * Program parsing utilities and static operations.
@@ -404,7 +404,7 @@ object Program:
    * @param skip Skip value (unused for 64-bit imm)
    * @return (register, immediate64)
    */
-  def readArgsRegImm64(chunk: U128, skip: Int): (RawReg, Long) =
+  def readArgsRegImm64(chunk: U128): (RawReg, Long) =
     val reg = RawReg(chunk.toUInt)
     val imm = (chunk >> 8).low
     (reg, imm)

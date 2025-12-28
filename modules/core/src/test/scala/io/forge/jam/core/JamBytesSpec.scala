@@ -2,7 +2,6 @@ package io.forge.jam.core
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import spire.math.UByte
 
 class JamBytesSpec extends AnyFlatSpec with Matchers:
 

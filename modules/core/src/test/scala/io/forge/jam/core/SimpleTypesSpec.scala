@@ -234,8 +234,8 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     decoded match
       case ExecutionResult.Ok(decodedOutput) =>
         decodedOutput shouldBe output
-      case ExecutionResult.Panic =>
-        fail("Expected Ok, got Panic")
+      case _ =>
+        fail("Expected Ok, got something else")
     consumed shouldBe encoded.length
   }
 

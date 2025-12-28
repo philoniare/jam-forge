@@ -129,6 +129,10 @@ class JamBytesListSpec extends AnyFlatSpec with Matchers:
     list.clear()
     list.size shouldBe 0
     list.isEmpty shouldBe true
+  }
+
+  "contains" should "check if item exists in list" in {
+    val list = JamBytesList(JamBytes(Array[Byte](1, 2, 3)))
     list.contains(JamBytes(Array[Byte](1, 2, 3))) shouldBe true
     list.contains(JamBytes(Array[Byte](4, 5, 6))) shouldBe false
   }

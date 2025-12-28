@@ -1,7 +1,7 @@
 package io.forge.jam.pvm
 
 import scala.annotation.targetName
-import spire.math.{UByte, UShort, UInt, ULong}
+import spire.math.UInt
 
 /**
  * Core type definitions for the JAM PVM using Spire unsigned types.

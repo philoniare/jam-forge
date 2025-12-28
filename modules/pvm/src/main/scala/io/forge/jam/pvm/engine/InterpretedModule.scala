@@ -31,8 +31,7 @@ final class InterpretedModule private (
   val blob: ProgramBlob,
   val memoryMap: MemoryMap,
   val codeLen: UInt,
-  val is64Bit: Boolean,
-  val argumentData: Array[Byte] = Array.empty
+  val is64Bit: Boolean
 ):
 
   /**
@@ -106,8 +105,7 @@ object InterpretedModule:
             blob = blob,
             memoryMap = memoryMap,
             codeLen = UInt(blob.code.length),
-            is64Bit = blob.is64Bit,
-            argumentData = argumentData.clone()
+            is64Bit = blob.is64Bit
           ))
 
   /**

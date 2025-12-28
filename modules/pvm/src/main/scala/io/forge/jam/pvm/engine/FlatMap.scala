@@ -13,7 +13,7 @@ import spire.math.UInt
  * @tparam T The type of values stored in the map
  */
 final class FlatMap[T >: Null <: AnyRef] private (
-  private var inner: Array[T]
+  private val inner: Array[T]
 ):
 
   /**

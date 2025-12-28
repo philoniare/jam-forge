@@ -1,6 +1,5 @@
 package io.forge.jam.pvm.program
 
-import spire.math.{UInt, ULong}
 import io.forge.jam.pvm.{Instruction, Opcode, PvmConstants}
 import PvmConstants.{NumGeneralRegisters, MaxInstructionSize}
 

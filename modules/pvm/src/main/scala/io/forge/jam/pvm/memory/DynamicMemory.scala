@@ -2,8 +2,7 @@ package io.forge.jam.pvm.memory
 
 import spire.math.{UByte, UShort, UInt, ULong}
 import scala.collection.mutable
-import io.forge.jam.pvm.{MemoryResult, MemoryMap, Abi, AlignmentOps}
-import io.forge.jam.pvm.types.*
+import io.forge.jam.pvm.{MemoryResult, MemoryMap, AlignmentOps}
 
 /**
  * Dynamic memory implementation with page-on-demand allocation.
@@ -12,7 +11,7 @@ import io.forge.jam.pvm.types.*
  * tracking allocated pages in a Map.
  */
 final class DynamicMemory private (
-  private var _pageMap: PageMap,
+  private val _pageMap: PageMap,
   private val memoryMap: MemoryMap,
   private val pages: mutable.Map[UInt, Array[Byte]],
   private var _heapSize: UInt

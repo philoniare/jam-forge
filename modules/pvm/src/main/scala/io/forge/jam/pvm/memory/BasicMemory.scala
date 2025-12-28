@@ -2,7 +2,6 @@ package io.forge.jam.pvm.memory
 
 import spire.math.{UByte, UShort, UInt, ULong}
 import io.forge.jam.pvm.{MemoryResult, MemoryMap, PvmConstants, AlignmentOps}
-import io.forge.jam.pvm.types.*
 
 /**
  * Basic memory implementation for non-dynamic paging mode.
@@ -11,7 +10,7 @@ import io.forge.jam.pvm.types.*
  * Manages separate memory regions: roData, rwData, stack, heap, and aux.
  */
 final class BasicMemory private (
-  private var _pageMap: PageMap,
+  private val _pageMap: PageMap,
   private val memoryMap: MemoryMap,
   private var roData: Array[Byte],
   private var rwData: Array[Byte],  // var to allow resizing during sbrk
@@ -215,7 +214,6 @@ final class BasicMemory private (
    */
   private def readByte(address: UInt): Option[Byte] =
     val addr = address.signed
-    val addrLong = address.toLong
 
     // Check RO data region
     val roStart = memoryMap.roDataAddress.signed
