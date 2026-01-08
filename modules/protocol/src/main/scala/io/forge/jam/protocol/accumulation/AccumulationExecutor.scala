@@ -88,13 +88,6 @@ class AccumulationExecutor(val config: ChainConfig):
     // Collapse state based on exit reason
     val finalState = context.collapse(execResult.exitReason)
 
-    // Update last_accumulation_slot for this service
-    finalState.accounts.get(serviceId).foreach { serviceAccount =>
-      finalState.accounts(serviceId) = serviceAccount.copy(
-        info = serviceAccount.info.copy(lastAccumulationSlot = timeslot)
-      )
-    }
-
     // Determine yield based on exit reason
     val yieldHash: Option[JamBytes] = execResult.exitReason match
       case ExitReason.PANIC | ExitReason.OUT_OF_GAS => context.yieldCheckpoint

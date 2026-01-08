@@ -681,24 +681,19 @@ object InstructionExecutor:
 
       // ========================================================================
       // Three-Register Multiply Upper
+      // Uses optimized primitive-based 128-bit multiplication (no BigInt allocations)
       // ========================================================================
       case Instruction.MulUpperSignedSigned(d, s1, s2) =>
-        val v1 = BigInt(ctx.getReg(s1))
-        val v2 = BigInt(ctx.getReg(s2))
-        val result = ((v1 * v2) >> 64).toLong
+        val result = UInt128.mulUpperSignedSigned(ctx.getReg(s1), ctx.getReg(s2))
         ctx.setReg64(d, result)
         ctx.advance()
 
       case Instruction.MulUpperUnsignedUnsigned(d, s1, s2) =>
-        val v1 = BigInt(ctx.getReg(s1)) & BigInt("FFFFFFFFFFFFFFFF", 16)
-        val v2 = BigInt(ctx.getReg(s2)) & BigInt("FFFFFFFFFFFFFFFF", 16)
-        val result = ((v1 * v2) >> 64).toLong
+        val result = UInt128.mulUpperUnsigned(ctx.getReg(s1), ctx.getReg(s2))
         ctx.setReg64(d, result)
         ctx.advance()
 
       case Instruction.MulUpperSignedUnsigned(d, s1, s2) =>
-        val v1 = BigInt(ctx.getReg(s1))
-        val v2 = BigInt(ctx.getReg(s2)) & BigInt("FFFFFFFFFFFFFFFF", 16)
-        val result = ((v1 * v2) >> 64).toLong
+        val result = UInt128.mulUpperSignedUnsigned(ctx.getReg(s1), ctx.getReg(s2))
         ctx.setReg64(d, result)
         ctx.advance()
