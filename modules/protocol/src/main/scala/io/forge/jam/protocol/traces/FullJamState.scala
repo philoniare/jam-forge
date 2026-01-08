@@ -526,10 +526,16 @@ object FullJamState:
       case None => List.fill(coresCount)(List.fill(authQueueSize)(Hash.zero))
       case Some(kv) => FullJamStateCodecs.decodeAuthQueues(kv.value.toArray, coresCount, authQueueSize)
 
-  /** Decode service accounts from keyvals. Key format: prefix 255, service ID interleaved. */
+  /** Decode service accounts from keyvals. Key format: prefix 255, service ID interleaved.
+   *  Only keys with bytes(2) == 0 are actual service account info; others are storage/preimage data.
+   */
   private def decodeServiceAccounts(keyvals: List[KeyValue]): List[AccumulationServiceItem] =
     keyvals
-      .filter(kv => (kv.key.toArray(0).toInt & 0xff) == (StateKeys.SERVICE_ACCOUNT.toInt & 0xff))
+      .filter { kv =>
+        val bytes = kv.key.toArray
+        (bytes(0).toInt & 0xff) == (StateKeys.SERVICE_ACCOUNT.toInt & 0xff) &&
+          bytes.length >= 3 && bytes(2) == 0
+      }
       .map { kv =>
         val keyBytes = kv.key.toArray
         val serviceId = ((keyBytes(1).toLong & 0xff)) |
