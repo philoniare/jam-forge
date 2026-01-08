@@ -351,7 +351,7 @@ object BasicMemory:
    * Creates a new BasicMemory instance from a MemoryMap.
    */
   def create(memoryMap: MemoryMap): BasicMemory =
-    val pageMap = initializePageMap(memoryMap, None)
+    val pageMap = initializePageMap(memoryMap, None, None)
 
     new BasicMemory(
       _pageMap = pageMap,
@@ -374,7 +374,7 @@ object BasicMemory:
    * @param argumentData Optional argument/input data to place at InputStartAddress
    */
   def create(memoryMap: MemoryMap, roData: Array[Byte], rwData: Array[Byte], initialHeapSize: UInt = UInt(0), argumentData: Array[Byte] = Array.empty): BasicMemory =
-    val pageMap = initializePageMap(memoryMap, Some(roData.length))
+    val pageMap = initializePageMap(memoryMap, Some(roData.length), Some(argumentData.length))
 
     // Copy rwData into buffer
     val rwBuffer = new Array[Byte](memoryMap.rwDataSize.signed)
@@ -402,8 +402,15 @@ object BasicMemory:
 
   /**
    * Initializes the PageMap with correct page access permissions.
+   *
+   * IMPORTANT: Only explicitly mapped regions are accessible. All other addresses
+   * (including gaps between regions) are inaccessible and will cause a segfault.
+   *
+   * @param memoryMap The memory map defining region boundaries
+   * @param roDataActualSize Optional actual size of RO data (may be smaller than roDataSize)
+   * @param argumentDataSize Optional size of argument/input data in the aux region
    */
-  private def initializePageMap(memoryMap: MemoryMap, roDataActualSize: Option[Int]): PageMap =
+  private def initializePageMap(memoryMap: MemoryMap, roDataActualSize: Option[Int], argumentDataSize: Option[Int] = None): PageMap =
     val mappings = scala.collection.mutable.ListBuffer[(UInt, UInt, PageAccess)]()
 
     // RO data region - READ_ONLY
@@ -419,29 +426,29 @@ object BasicMemory:
     if memoryMap.stackSize.signed > 0 then
       mappings += ((memoryMap.stackAddressLow, memoryMap.stackSize, PageAccess.ReadWrite))
 
-    // Aux data region handling with GP stack
+    // Aux data region handling - only map GP stack and actual input data
+    // DO NOT map the entire aux region - gaps must remain inaccessible
     if memoryMap.auxDataSize.signed > 0 then
       val gpStackLow = PvmConstants.GpStackLow
       val gpStackBase = PvmConstants.GpStackBase
       val gpStackSize = PvmConstants.GpStackSize
+      val inputStartAddress = PvmConstants.InputStartAddress
 
       val auxStart = memoryMap.auxDataAddress
       val auxEnd = auxStart + memoryMap.auxDataSize
 
-      // Check if GP stack region overlaps with aux data
+      // GP stack region - READ_WRITE (if within aux bounds)
       if gpStackLow.toLong >= auxStart.toLong && gpStackBase.toLong <= auxEnd.toLong then
-        // Mark before GP stack as READ_ONLY
-        if gpStackLow.toLong > auxStart.toLong then
-          mappings += ((auxStart, UInt((gpStackLow.toLong - auxStart.toLong).toInt), PageAccess.ReadOnly))
-
-        // GP stack region - READ_WRITE
         mappings += ((gpStackLow, gpStackSize, PageAccess.ReadWrite))
 
-        // Mark after GP stack as READ_ONLY
-        if gpStackBase.toLong < auxEnd.toLong then
-          mappings += ((gpStackBase, UInt((auxEnd.toLong - gpStackBase.toLong).toInt), PageAccess.ReadOnly))
-      else
-        // No GP stack overlap - mark entire aux as READ_ONLY
-        mappings += ((auxStart, memoryMap.auxDataSize, PageAccess.ReadOnly))
+      // Input/argument data region - READ_ONLY (only the actual data, not the entire region)
+      argumentDataSize match
+        case Some(argSize) if argSize > 0 =>
+          // Only map the actual argument data size, page-aligned
+          val alignedArgSize = AlignmentOps.alignUp(UInt(argSize), memoryMap.pageSize)
+          if inputStartAddress.toLong >= auxStart.toLong && inputStartAddress.toLong < auxEnd.toLong then
+            mappings += ((inputStartAddress, alignedArgSize, PageAccess.ReadOnly))
+        case _ =>
+          // No argument data - don't map anything in the input region
 
     PageMap.create(mappings.toList, memoryMap.pageSize)
