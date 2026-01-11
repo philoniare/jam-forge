@@ -28,7 +28,7 @@ object TestResult:
 class ConformanceTestRunner(
   config: ChainConfig = ChainConfig.TINY,
   verbose: Boolean = false,
-  debugBlockIndex: Int = -1, // Set to specific index to debug that block only
+  debugBlockIndex: Int = Int.MaxValue, // Set to specific index to debug that block only (-1 to debug all)
   faultyMode: Boolean = false // When true, step 29 state root mismatch is expected
 ):
   private val stateStore = new StateStore()
@@ -107,8 +107,6 @@ class ConformanceTestRunner(
         case other => other.getClass.getSimpleName
 
       if compareMessages(actualMsg, expectedMsg) then
-        if verbose then
-          println(s"[$index] $messageType: PASS")
         TestResult.Success(index, messageType)
       else
         val expectedStr = formatMessage(expectedMsg)
@@ -161,109 +159,14 @@ class ConformanceTestRunner(
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
     val block = importBlock.block
     val parentHash = block.header.parent
-    val isDebugBlock = debugBlockIndex < 0 || currentTestIndex == debugBlockIndex
-
-    if isDebugBlock then
-      println(s"\n=== SCALA BLOCK $currentTestIndex (timeslot ${block.header.slot}) ===")
-      println(s"  guarantees: ${block.extrinsic.guarantees.size}")
-      println(s"  assurances: ${block.extrinsic.assurances.size}")
-      println(s"  tickets: ${block.extrinsic.tickets.size}")
-      println(s"  preimages: ${block.extrinsic.preimages.size}")
-      for (g, i) <- block.extrinsic.guarantees.zipWithIndex do
-        println(s"  guarantee[$i] core=${g.report.coreIndex} packageLength=${g.report.packageSpec.length}")
-        for (r, j) <- g.report.results.zipWithIndex do
-          println(
-            s"    result[$j] gasUsed=${r.refineLoad.gasUsed} imports=${r.refineLoad.imports} exports=${r.refineLoad.exports}"
-          )
-      for (a, i) <- block.extrinsic.assurances.zipWithIndex do
-        println(s"  assurance[$i] validator=${a.validatorIndex} bitfield=${a.bitfield.toHex}")
 
     stateStore.get(parentHash) match
       case None =>
         ProtocolMessage.ErrorMsg(Error(s"Parent state not found: ${parentHash.toHex.take(16)}..."))
 
       case Some(parentState) =>
-        if verbose then
-          println(s"  Parent state: ${parentState.keyvals.size} keyvals")
-          val preByPrefix = parentState.keyvals.groupBy(kv => kv.key.toArray(0).toInt & 0xff)
-          println(s"  Pre-state prefixes: ${preByPrefix.keys.toList.sorted.map(p => f"0x$p%02x").mkString(", ")}")
-          // Show sizes for all keyvals
-          println(s"  Pre-state sizes by prefix:")
-          for prefix <- preByPrefix.keys.toList.sorted do
-            val kvs = preByPrefix(prefix)
-            println(f"    0x$prefix%02x: ${kvs.map(_.value.length).mkString(", ")} bytes")
-
         blockImporter.importBlock(block, parentState) match
           case ImportResult.Success(postState, _, _) =>
-            // Always print statistics for debug block
-            if isDebugBlock then
-              val statsKv = postState.keyvals.find(kv => (kv.key.toArray(0).toInt & 0xff) == 0x0d)
-              statsKv.foreach { kv =>
-                println(s"  STATISTICS len=${kv.value.length} bytes")
-                println(s"  STATISTICS FULL: ${kv.value.toHex}")
-                // Parse and print field-by-field
-                parseAndPrintStatistics(kv.value.toArray)
-              }
-
-            if verbose then
-              println(s"  Post state: ${postState.keyvals.size} keyvals")
-              val postByPrefix = postState.keyvals.groupBy(kv => kv.key.toArray(0).toInt & 0xff)
-              println(s"  Post-state prefixes: ${postByPrefix.keys.toList.sorted.map(p => f"0x$p%02x").mkString(", ")}")
-              // Show sizes for all keyvals
-              println(s"  Post-state sizes by prefix:")
-              for prefix <- postByPrefix.keys.toList.sorted do
-                val kvs = postByPrefix(prefix)
-                println(f"    0x$prefix%02x: ${kvs.map(_.value.length).mkString(", ")} bytes")
-
-              // Dump all keyval hashes for comparison
-              println(s"  === Full keyval dump ===")
-              for kv <- postState.keyvals.sortBy(_.key.toHex) do
-                val keyHash = Hashing.blake2b256(kv.key.toArray).toHex.take(16)
-                val valueHash = Hashing.blake2b256(kv.value.toArray).toHex.take(16)
-                println(
-                  f"    key=${kv.key.toHex.take(16)}... len=${kv.value.length}%5d keyHash=$keyHash valueHash=$valueHash"
-                )
-                // For small values, show the full hex
-                if kv.value.length <= 32 then
-                  println(f"      value=${kv.value.toHex}")
-                // For key 0x03 (history), dump full hex
-                if (kv.key.toArray(0).toInt & 0xff) == 0x03 then
-                  println(f"      HISTORY FULL: ${kv.value.toHex}")
-                // For key 0x0d (statistics), dump full hex
-                if (kv.key.toArray(0).toInt & 0xff) == 0x0d then
-                  println(f"      STATISTICS FULL: ${kv.value.toHex}")
-
-              // Compare keyvals
-              val preMap = parentState.keyvals.map(kv => kv.key.toHex -> kv.value.toHex).toMap
-              val postMap = postState.keyvals.map(kv => kv.key.toHex -> kv.value.toHex).toMap
-
-              // Keys only in pre
-              val removedKeys = preMap.keySet -- postMap.keySet
-              if removedKeys.nonEmpty then
-                println(s"  Removed keys: ${removedKeys.size}")
-                removedKeys.take(3).foreach(k => println(s"    ${k.take(20)}..."))
-
-              // Keys only in post
-              val addedKeys = postMap.keySet -- preMap.keySet
-              if addedKeys.nonEmpty then
-                println(s"  Added keys: ${addedKeys.size}")
-                addedKeys.take(3).foreach(k => println(s"    ${k.take(20)}..."))
-
-              // Changed values
-              val changedKeys = preMap.keySet.intersect(postMap.keySet).filter(k => preMap(k) != postMap(k))
-              if changedKeys.nonEmpty then
-                println(s"  Changed keys: ${changedKeys.size}")
-                changedKeys.take(5).foreach { k =>
-                  println(s"    ${k.take(20)}...")
-                  println(s"      pre len:  ${preMap(k).length / 2}")
-                  println(s"      post len: ${postMap(k).length / 2}")
-                  // Show full hex for small values, truncated for large
-                  val preHex = preMap(k)
-                  val postHex = postMap(k)
-                  println(s"      pre bytes:  ${preHex.take(400)}${if preHex.length > 400 then "..." else ""}")
-                  println(s"      post bytes: ${postHex.take(600)}${if postHex.length > 600 then "..." else ""}")
-                }
-
             val headerBytes = block.header.encode
             val headerHash = Hashing.blake2b256(headerBytes)
             val isOriginal = stateStore.isOriginalBlock(parentHash)
@@ -304,8 +207,6 @@ class ConformanceTestRunner(
         // In faulty mode at step 29, the expected state root is intentionally wrong
         // Our implementation computes the correct root, so mismatch is expected
         if faultyMode && currentTestIndex == FAULTY_STEP then
-          println(s"[FAULTY MODE] Step 29: expected wrong root ${e.hash.toHex.take(32)}...")
-          println(s"[FAULTY MODE] Step 29: actual correct root ${a.hash.toHex.take(32)}...")
           true // Accept mismatch as expected behavior
         else
           a.hash.bytes.sameElements(e.hash.bytes)
@@ -315,7 +216,6 @@ class ConformanceTestRunner(
         // because our state is correct but the "faulty target" state is different
         if faultyMode then
           // Just check we returned a valid state (any state is acceptable in faulty mode)
-          println(s"[FAULTY MODE] GetState: returned ${a.keyvals.size} keyvals")
           true
         else
           a.keyvals.size == e.keyvals.size &&
@@ -360,65 +260,3 @@ class ConformanceTestRunner(
       val (v, len) = JamCodecs.decodeCompactInteger(bytes, pos)
       pos += len
       v
-
-    println("  --- Validator Accumulator (6 validators) ---")
-    for i <- 0 until 6 do
-      val blocks = readU32LE()
-      val tickets = readU32LE()
-      val preimages = readU32LE()
-      val preimagesBytes = readU32LE()
-      val guarantees = readU32LE()
-      val assurances = readU32LE()
-      if blocks > 0 || tickets > 0 || guarantees > 0 || assurances > 0 then
-        println(
-          s"    validator[$i]: blocks=$blocks tickets=$tickets preimages=$preimages preimagesBytes=$preimagesBytes guarantees=$guarantees assurances=$assurances"
-        )
-
-    println("  --- Validator Previous (6 validators) ---")
-    for i <- 0 until 6 do
-      val blocks = readU32LE()
-      val tickets = readU32LE()
-      val preimages = readU32LE()
-      val preimagesBytes = readU32LE()
-      val guarantees = readU32LE()
-      val assurances = readU32LE()
-      if blocks > 0 || tickets > 0 || guarantees > 0 || assurances > 0 then
-        println(
-          s"    validator[$i]: blocks=$blocks tickets=$tickets preimages=$preimages preimagesBytes=$preimagesBytes guarantees=$guarantees assurances=$assurances"
-        )
-
-    println(s"  --- Core Stats (2 cores, starting at byte $pos) ---")
-    for i <- 0 until 2 do
-      val startPos = pos
-      val dataSize = readCompact()
-      val assuranceCount = readCompact()
-      val imports = readCompact()
-      val extrinsicCount = readCompact()
-      val extrinsicSize = readCompact()
-      val exports = readCompact()
-      val packageSize = readCompact()
-      val gasUsed = readCompact()
-      println(
-        s"    core[$i] (bytes $startPos-$pos): dataSize=$dataSize assuranceCount=$assuranceCount imports=$imports extrinsicCount=$extrinsicCount extrinsicSize=$extrinsicSize exports=$exports packageSize=$packageSize gasUsed=$gasUsed"
-      )
-
-    println(s"  --- Service Stats (starting at byte $pos) ---")
-    val serviceCount = readCompact()
-    println(s"    service count: $serviceCount")
-    for _ <- 0 until serviceCount.toInt do
-      val serviceId = readU32LE()
-      val preimagesCount = readCompact()
-      val preimagesSize = readCompact()
-      val refinesCount = readCompact()
-      val refinesGas = readCompact()
-      val importsCount = readCompact()
-      val extrinsicCount = readCompact()
-      val extrinsicSize = readCompact()
-      val exportsCount = readCompact()
-      val accumulatesCount = readCompact()
-      val accumulatesGas = readCompact()
-      println(
-        s"    service[$serviceId]: preimages=($preimagesCount,$preimagesSize) refines=($refinesCount,$refinesGas) imports=$importsCount extrinsicCount=$extrinsicCount extrinsicSize=$extrinsicSize exports=$exportsCount accumulates=($accumulatesCount,$accumulatesGas)"
-      )
-
-    println(s"  --- End of statistics (consumed $pos of ${bytes.length} bytes) ---")

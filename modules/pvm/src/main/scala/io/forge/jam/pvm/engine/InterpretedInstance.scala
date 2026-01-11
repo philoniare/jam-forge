@@ -117,21 +117,43 @@ final class InterpretedInstance private (
 
   val pageSize: UInt = module.memoryMap.pageSize
   private val TargetOutOfRange: UInt = UInt(0)
+  private val _is64Bit: Boolean = module.is64Bit
+  private var _compiledOffsetInt: Int = 0
 
   // ============================================================================
-  // Public API
+  // Public API - Register Operations
   // ============================================================================
 
-  def reg(regIdx: Int): Long =
+  /**
+   * Get register value, applying 32-bit mask if in 32-bit mode.
+   * For 64-bit mode (common case), use getReg64Raw() for better performance.
+   */
+  inline def reg(regIdx: Int): Long =
     var value = regs(regIdx)
-    if !module.is64Bit then value = value & 0xffffffffL
+    if !_is64Bit then value = value & 0xffffffffL
     value
 
+  /**
+   * Get raw 64-bit register value without mode check.
+   * Use when module.is64Bit is known to be true (majority of cases).
+   */
+  inline def getReg64Raw(regIdx: Int): Long = regs(regIdx)
+
+  /**
+   * Set register value, applying appropriate masking based on mode.
+   */
   def setReg(regIdx: Int, value: Long): Unit =
-    regs(regIdx) = if !module.is64Bit then
+    regs(regIdx) = if !_is64Bit then
       (value & 0xffffffffL).toInt.toLong
     else
       value
+
+  /**
+   * Set raw 64-bit register value without mode check.
+   * Use when module.is64Bit is known to be true (majority of cases).
+   */
+  inline def setReg64Raw(regIdx: Int, value: Long): Unit =
+    regs(regIdx) = value
 
   def gas: Long = _gas
   def setGas(value: Long): Unit = _gas = value
@@ -157,17 +179,31 @@ final class InterpretedInstance private (
   // ExecutionContext Implementation
   // ============================================================================
 
-  override def getReg(idx: Int): Long = reg(idx)
+  override inline def getReg(idx: Int): Long = reg(idx)
 
+  /**
+   * Set 32-bit register value with sign extension.
+   */
   override def setReg32(idx: Int, value: UInt): Unit =
+    // Extract signed Int and sign-extend to Long directly
     val signExtended = value.signed.toLong
     setReg(idx, signExtended)
 
-  override def setReg64(idx: Int, value: Long): Unit =
+  /**
+   * set 32-bit register from primitive Int without UInt wrapping.
+   * Int.toLong automatically sign-extends negative values.
+   */
+  override inline def setReg32Int(idx: Int, value: Int): Unit =
+    setReg(idx, value.toLong)
+
+  override inline def setReg64(idx: Int, value: Long): Unit =
     setReg(idx, value)
 
-  override def advance(): Option[UInt] =
-    Some(compiledOffset + UInt(1))
+  /**
+   * advance using primitive Int offset.
+   */
+  override inline def advance(): Option[UInt] =
+    Some(UInt(_compiledOffsetInt + 1))
 
   override def resolveJump(pc: ProgramCounter): Option[UInt] =
     if pc.value.signed == Abi.VmAddrReturnToHost.signed then
@@ -190,12 +226,15 @@ final class InterpretedInstance private (
         compileBlock(pc)
 
   override def jumpIndirect(pc: ProgramCounter, address: UInt): Option[UInt] =
-    if address == Abi.VmAddrReturnToHost then
+    jumpIndirectInt(pc, address.signed)
+
+  override def jumpIndirectInt(pc: ProgramCounter, address: Int): Option[UInt] =
+    if address == Abi.VmAddrReturnToHost.signed then
       _programCounter = pc
       _programCounterValid = true
       finished()
     else
-      module.blob.jumpTable.getByAddress(address.signed) match
+      module.blob.jumpTable.getByAddress(address) match
         case Some(targetInt) => resolveJump(ProgramCounter(targetInt))
         case None => panic(pc)
 
@@ -242,110 +281,158 @@ final class InterpretedInstance private (
     None
 
   // ============================================================================
-  // Memory Operations
+  // Memory Operations (UInt address versions for API compatibility)
   // ============================================================================
 
   override def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadU8(address) match
+    loadU8Int(pc, dst, address.signed)
+
+  override def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadI8Int(pc, dst, address.signed)
+
+  override def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadU16Int(pc, dst, address.signed)
+
+  override def loadI16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadI16Int(pc, dst, address.signed)
+
+  override def loadU32(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadU32Int(pc, dst, address.signed)
+
+  override def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadI32Int(pc, dst, address.signed)
+
+  override def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
+    loadU64Int(pc, dst, address.signed)
+
+  override def storeU8(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
+    storeU8Int(pc, src, address.signed)
+
+  override def storeU16(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
+    storeU16Int(pc, src, address.signed)
+
+  override def storeU32(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
+    storeU32Int(pc, src, address.signed)
+
+  override def storeU64(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
+    storeU64Int(pc, src, address.signed)
+
+  override def storeImmU8(pc: ProgramCounter, address: UInt, value: Byte): Option[UInt] =
+    storeImmU8Int(pc, address.signed, value)
+
+  override def storeImmU16(pc: ProgramCounter, address: UInt, value: Short): Option[UInt] =
+    storeImmU16Int(pc, address.signed, value)
+
+  override def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Option[UInt] =
+    storeImmU32Int(pc, address.signed, value)
+
+  override def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Option[UInt] =
+    storeImmU64Int(pc, address.signed, value)
+
+  // ============================================================================
+  // Memory Operations
+  // ============================================================================
+
+  override def loadU8Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadU8(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong & 0xffL)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadI8(address) match
+  override def loadI8Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadI8(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadU16(address) match
+  override def loadU16Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadU16(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong & 0xffffL)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadI16(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadI16(address) match
+  override def loadI16Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadI16(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadU32(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadU32(address) match
+  override def loadU32Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadU32(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadI32(address) match
+  override def loadI32Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadI32(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.toLong)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Option[UInt] =
-    basicMemory.loadU64(address) match
+  override def loadU64Int(pc: ProgramCounter, dst: Int, address: Int): Option[UInt] =
+    basicMemory.loadU64(UInt(address)) match
       case MemoryResult.Success(v) =>
         setReg64(dst, v.signed)
         advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeU8(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
-    basicMemory.storeU8(address, UByte(getReg(src).toByte)) match
+  override def storeU8Int(pc: ProgramCounter, src: Int, address: Int): Option[UInt] =
+    basicMemory.storeU8(UInt(address), UByte(getReg(src).toByte)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeU16(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
-    basicMemory.storeU16(address, UShort(getReg(src).toShort)) match
+  override def storeU16Int(pc: ProgramCounter, src: Int, address: Int): Option[UInt] =
+    basicMemory.storeU16(UInt(address), UShort(getReg(src).toShort)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeU32(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
-    basicMemory.storeU32(address, UInt(getReg(src).toInt)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) =>
-        panic(pc)
-
-  override def storeU64(pc: ProgramCounter, src: Int, address: UInt): Option[UInt] =
-    basicMemory.storeU64(address, ULong(getReg(src))) match
+  override def storeU32Int(pc: ProgramCounter, src: Int, address: Int): Option[UInt] =
+    basicMemory.storeU32(UInt(address), UInt(getReg(src).toInt)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeImmU8(pc: ProgramCounter, address: UInt, value: Byte): Option[UInt] =
-    basicMemory.storeU8(address, UByte(value)) match
+  override def storeU64Int(pc: ProgramCounter, src: Int, address: Int): Option[UInt] =
+    basicMemory.storeU64(UInt(address), ULong(getReg(src))) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeImmU16(pc: ProgramCounter, address: UInt, value: Short): Option[UInt] =
-    basicMemory.storeU16(address, UShort(value)) match
+  override def storeImmU8Int(pc: ProgramCounter, address: Int, value: Byte): Option[UInt] =
+    basicMemory.storeU8(UInt(address), UByte(value)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Option[UInt] =
-    basicMemory.storeU32(address, UInt(value)) match
+  override def storeImmU16Int(pc: ProgramCounter, address: Int, value: Short): Option[UInt] =
+    basicMemory.storeU16(UInt(address), UShort(value)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
 
-  override def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Option[UInt] =
-    basicMemory.storeU64(address, ULong(value)) match
+  override def storeImmU32Int(pc: ProgramCounter, address: Int, value: Int): Option[UInt] =
+    basicMemory.storeU32(UInt(address), UInt(value)) match
+      case MemoryResult.Success(_) => advance()
+      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
+      case MemoryResult.OutOfBounds(_) => panic(pc)
+
+  override def storeImmU64Int(pc: ProgramCounter, address: Int, value: Long): Option[UInt] =
+    basicMemory.storeU64(UInt(address), ULong(value)) match
       case MemoryResult.Success(_) => advance()
       case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
       case MemoryResult.OutOfBounds(_) => panic(pc)
@@ -376,44 +463,65 @@ final class InterpretedInstance private (
         case Some(pc) =>
           _programCounter = pc
           _nextProgramCounter = None
-          compiledOffset = resolveArbitraryJump(pc).getOrElse(TargetOutOfRange)
+          val resolved = resolveArbitraryJump(pc)
+          compiledOffset = resolved.getOrElse(TargetOutOfRange)
+          _compiledOffsetInt = compiledOffset.signed
           _nextProgramCounterChanged = false
 
-    // Main execution loop using pattern matching
-    var offset = compiledOffset
-    var continue = true
-    while continue do
+    // Cache values locally for faster access in hot loop
+    var offset = _compiledOffsetInt
+    val instructions = compiledInstructions
+    var instructionsSize = instructions.size
+    val isGasMetered = gasMetering
+    val isStepTracing = stepTracing
+
+    // Main execution loop - optimized for JIT
+    while true do
       _instructionCounter += 1
 
-      if offset.signed >= compiledInstructions.size then
-        // Out of range - panic
+      // Bounds check - use primitive comparison
+      if offset >= instructionsSize then
         _interrupt = InterruptKind.Panic
-        continue = false
-      else
-        val compiled = compiledInstructions(offset.signed)
-        // Charge gas if enabled
-        if gasMetering then
-          _gas -= 1
-          if _gas < 0 then
-            outOfGas(compiled.pc)
-            continue = false
+        _compiledOffsetInt = offset
+        compiledOffset = UInt(offset)
+        return _interrupt
 
-        if continue then
-          // Execute the instruction using pattern matching
-          compiledOffset = offset
-          _programCounter = compiled.pc
-          _programCounterValid = true
+      // Get compiled instruction - ArrayBuffer.apply is O(1)
+      val compiled = instructions(offset)
 
-          InstructionExecutor.execute(compiled.instruction, this, compiled.pc, compiled.nextPc) match
-            case None =>
-              continue = false
-            case Some(nextOffset) =>
-              offset = nextOffset
-              if stepTracing then
-                compiledOffset = nextOffset
-                _interrupt = InterruptKind.Step
-                continue = false
+      // Gas metering check
+      if isGasMetered then
+        _gas -= 1
+        if _gas < 0 then
+          outOfGas(compiled.pc)
+          _compiledOffsetInt = offset
+          compiledOffset = UInt(offset)
+          return _interrupt
 
+      // Update state for instruction execution
+      _compiledOffsetInt = offset
+      compiledOffset = UInt(offset)
+      _programCounter = compiled.pc
+      _programCounterValid = true
+
+      // Execute instruction
+      val result = InstructionExecutor.execute(compiled.instruction, this, compiled.pc, compiled.nextPc)
+
+      result match
+        case None =>
+          // Interrupt occurred - exit loop
+          return _interrupt
+        case Some(nextOffset) =>
+          offset = nextOffset.signed
+          // Update instructionsSize in case compilation added new instructions
+          instructionsSize = instructions.size
+          if isStepTracing then
+            _compiledOffsetInt = offset
+            compiledOffset = nextOffset
+            _interrupt = InterruptKind.Step
+            return _interrupt
+
+    // This should never be reached, but required for type checking
     _interrupt
 
   def resolveArbitraryJump(pc: ProgramCounter): Option[UInt] =
