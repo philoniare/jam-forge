@@ -290,6 +290,8 @@ lazy val conformance = (project in file("modules/conformance"))
       // Monocle for lens-based state access (needed by protocol module at runtime)
       "dev.optics" %% "monocle-core" % "3.2.0",
       "dev.optics" %% "monocle-macro" % "3.2.0",
+      // CRaC for checkpoint/restore (instant JVM warmup)
+      "org.crac" % "crac" % "1.4.0",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
     scalacOptions ++= Seq(

@@ -18,7 +18,13 @@ project/project/
 # Test vectors (large)
 jamtestvectors/
 graypaper/
-jam-conformance/
+# Keep jam-conformance/fuzz-reports for CRaC warmup traces
+jam-conformance/crypto/
+jam-conformance/fuzz-perf/
+jam-conformance/fuzz-proto/
+jam-conformance/pvm-traces/
+jam-conformance/scripts/
+jam-conformance/test-vectors/
 
 # Logs
 *.log

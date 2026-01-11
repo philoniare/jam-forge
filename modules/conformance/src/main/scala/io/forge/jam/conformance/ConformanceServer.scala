@@ -53,17 +53,37 @@ object ServerConfig:
 
 /**
  * Main entry point for the JAM Forge Conformance Testing Server.
+ *
+ * Commands:
+ *   warmup [--iterations=N]  - Run JVM warmup and trigger CRaC checkpoint
+ *   fuzz <socket-path>       - Start conformance server on Unix socket
+ *   (default)                - Start server with --socket-path/--log-path options
  */
 object ConformanceServerApp extends IOApp:
 
   override def run(args: List[String]): IO[ExitCode] =
-    ServerConfig.fromArgs(args.toList) match
-      case Left(msg) =>
-        IO.println(msg).as(
-          if msg.contains("Usage:") then ExitCode.Success else ExitCode.Error
-        )
-      case Right(config) =>
+    args.toList match
+      // CRaC warmup command
+      case "warmup" :: warmupArgs =>
+        IO.blocking {
+          WarmupRunner.run(warmupArgs)
+          ExitCode.Success
+        }
+
+      // Fuzz command (used by conformance harness)
+      case "fuzz" :: socketPath :: _ =>
+        val config = ServerConfig(socketPath = Paths.get(socketPath))
         runServer(config)
+
+      // Legacy/default: parse --socket-path, --log-path options
+      case _ =>
+        ServerConfig.fromArgs(args.toList) match
+          case Left(msg) =>
+            IO.println(msg).as(
+              if msg.contains("Usage:") then ExitCode.Success else ExitCode.Error
+            )
+          case Right(config) =>
+            runServer(config)
 
   private def runServer(config: ServerConfig): IO[ExitCode] =
     for
