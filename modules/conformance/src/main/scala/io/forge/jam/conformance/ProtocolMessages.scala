@@ -69,7 +69,7 @@ object PeerInfo:
       fuzzFeatures = UInt(features),
       jamVersion = Version.JAM_VERSION,
       appVersion = Version.APP_VERSION,
-      appName = "jam-scala"
+      appName = "jam-forge"
     )
 
   given Codec[PeerInfo] =
