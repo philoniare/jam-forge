@@ -533,7 +533,7 @@ final class BasicMemory private (
       else
         return Some(0.toByte)
 
-    None
+    Some(0.toByte)
 
   /**
    * Reads multiple bytes from memory using primitive Int address.

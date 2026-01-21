@@ -80,9 +80,16 @@ object InterpretedModule:
     auxDataSize: UInt = UInt(16908288)
   ): Either[String, InterpretedModule] =
     // Build memory map from program blob
+    val pageSize = Abi.VmMinPageSize.toLong
+    val actualRwDataLen = if blob.originalRwDataLen >= 0 then blob.originalRwDataLen else blob.rwData.length
+    val pageAlignedRwDataLen = ((actualRwDataLen + pageSize - 1) / pageSize * pageSize).toInt
+    val effectiveHeapPages = if blob.heapPages > 0 then blob.heapPages else heapPages.signed
+    val heapEmptyPagesSize = effectiveHeapPages * pageSize.toInt
+    val rwDataSize = pageAlignedRwDataLen + heapEmptyPagesSize
+
     MemoryMap.builder(Abi.VmMinPageSize)
       .withRoDataSize(UInt(blob.roData.length))
-      .withRwDataSize(UInt(blob.rwData.length))
+      .withRwDataSize(UInt(rwDataSize))
       .withStackSize(UInt(blob.stackSize))
       .withAuxDataSize(auxDataSize)
       .build() match
@@ -93,11 +100,11 @@ object InterpretedModule:
           System.arraycopy(blob.roData, 0, roData, 0, math.min(blob.roData.length, roData.length))
 
           // Use heapPages from blob if available, otherwise use parameter
-          val effectiveHeapPages = if blob.heapPages > 0 then UInt(blob.heapPages) else heapPages
+          val effectiveHeapPagesUInt = if blob.heapPages > 0 then UInt(blob.heapPages) else heapPages
           Right(new InterpretedModule(
             roData = roData,
             rwData = blob.rwData.clone(),
-            heapEmptyPages = effectiveHeapPages,
+            heapEmptyPages = effectiveHeapPagesUInt,
             blob = blob,
             memoryMap = memoryMap,
             codeLen = UInt(blob.code.length),
