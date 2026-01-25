@@ -98,9 +98,6 @@ class JsonTraceRunner(
 
     val filesToProcess = if maxFiles > 0 then jsonFiles.take(maxFiles) else jsonFiles
 
-    if verbose then
-      println(s"Processing trace $traceId: ${filesToProcess.size} files")
-
     filesToProcess.map(jsonFile => runSingleTrace(jsonFile.toPath, traceId))
 
   /**
@@ -124,11 +121,6 @@ class JsonTraceRunner(
 
       val slot = traceStep.block.header.slot.value.toLong
 
-      if verbose then
-        println(
-          s"  [$fileName] slot=$slot, preKeyvals=${traceStep.preState.keyvals.size}, postKeyvals=${traceStep.postState.keyvals.size}"
-        )
-
       // Step 2: Verify pre-state root (sanity check)
       val computedPreRoot = StateMerklization.stateMerklize(traceStep.preState.keyvals)
       if computedPreRoot != traceStep.preState.stateRoot then
@@ -146,8 +138,6 @@ class JsonTraceRunner(
       result match
         case ImportResult.Success(actualPostState, _, _) =>
           if actualPostState.stateRoot == traceStep.postState.stateRoot then
-            if verbose then
-              println(s"  [$fileName] PASS - state root matches")
             JsonTraceResult.Success(effectiveTraceId, fileName, slot)
           else
             val keyvalDiffs = if compareKeyvals then
@@ -174,8 +164,6 @@ class JsonTraceRunner(
           // If post_state == pre_state, the test expects block rejection (no state change)
           // In this case, a "failure" with unchanged state is actually correct
           if traceStep.postState.stateRoot == traceStep.preState.stateRoot then
-            if verbose then
-              println(s"  [$fileName] PASS - block rejected as expected ($error)")
             JsonTraceResult.Success(effectiveTraceId, fileName, slot)
           else
             if verbose then
@@ -229,8 +217,12 @@ class JsonTraceRunner(
           // Also show bytes around the diff location
           val contextStart = Math.max(0, firstDiffPos - 32)
           val contextEnd = Math.min(expBytes.length, firstDiffPos + 32)
-          sb.append(s"\n      expected[${contextStart/2}..${contextEnd/2}]: ${expBytes.slice(contextStart, contextEnd)}")
-          sb.append(s"\n      actual[${contextStart/2}..${contextEnd/2}]:   ${actBytes.slice(contextStart, contextEnd)}")
+          sb.append(
+            s"\n      expected[${contextStart / 2}..${contextEnd / 2}]: ${expBytes.slice(contextStart, contextEnd)}"
+          )
+          sb.append(
+            s"\n      actual[${contextStart / 2}..${contextEnd / 2}]:   ${actBytes.slice(contextStart, contextEnd)}"
+          )
       }
 
     if sb.isEmpty then "no differences detected (root mismatch may be encoding issue)"

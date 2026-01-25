@@ -9,7 +9,7 @@ import java.nio.file.{Files, Paths}
 /**
  * Conformance tests for JAM fuzz report traces.
  *
- * These tests load JSON trace files from jam-conformance/fuzz-reports/0.7.2/traces/
+ * These tests load JSON trace files from jamtestvectors/traces/
  * and verify that our implementation produces the expected post-state after importing each block.
  *
  * Each trace file contains:
@@ -27,7 +27,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
-  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
+  private val tracesDir = Paths.get(baseDir, "jamtestvectors", "traces")
 
   describe("v0.7.2 Fuzz Report Traces"):
 
