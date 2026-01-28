@@ -309,19 +309,21 @@ final class AccumulationContext(
    */
   def getProvisions(exitReason: ExitReason): Set[(Long, JamBytes)] =
     exitReason match
-      case ExitReason.PANIC | ExitReason.OUT_OF_GAS => provisionsCheckpoint.toSet
+      case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT | ExitReason.INVALID_CODE =>
+        provisionsCheckpoint.toSet
       case _ => provisions.toSet
 
   /**
    * Get deferred transfers based on exit reason.
-   * On panic or out of gas, use checkpoint transfers.
+   * On exceptional termination (panic, out of gas, page fault, invalid code), use checkpoint transfers.
    *
    * @param exitReason The reason for execution termination
    * @return The appropriate list of deferred transfers
    */
   def getDeferredTransfers(exitReason: ExitReason): List[DeferredTransfer] =
     exitReason match
-      case ExitReason.PANIC | ExitReason.OUT_OF_GAS => deferredTransfersCheckpoint.toList
+      case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT | ExitReason.INVALID_CODE =>
+        deferredTransfersCheckpoint.toList
       case _ => deferredTransfers.toList
 
 object AccumulationContext:

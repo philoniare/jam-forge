@@ -90,7 +90,8 @@ class AccumulationExecutor(val config: ChainConfig):
 
     // Determine yield based on exit reason
     val yieldHash: Option[JamBytes] = execResult.exitReason match
-      case ExitReason.PANIC | ExitReason.OUT_OF_GAS => context.yieldCheckpoint
+      case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT | ExitReason.INVALID_CODE =>
+        context.yieldCheckpoint
       case ExitReason.HALT =>
         execResult.output match
           case Some(out) if out.length == 32 => Some(JamBytes(out))

@@ -166,6 +166,8 @@ object AccumulationTransition:
     }
 
     // 7. Rebuild ready queue with remaining records
+    val accumulatedThisBlock = newAccumulated.toSet
+
     val newQueuedReportsNotAccumulated = stillQueuedWithSlots
       .filter {
         case (slot, record) =>
@@ -176,17 +178,21 @@ object AccumulationTransition:
       }
       .map(_._2)
 
+    // Edit dependencies to remove accumulated hashes
+    val editedNewQueuedReports = editReadyQueueRecords(newQueuedReportsNotAccumulated, accumulatedThisBlock)
+
     val finalReadyQueue = (0 until config.epochLength).map { idx =>
       val i = ((m - idx) % config.epochLength + config.epochLength) % config.epochLength
       if i == 0 then
-        // Current slot: ONLY new queued reports from this block
-        newQueuedReportsNotAccumulated.toList
+        // Current slot: ONLY new queued reports from this block, with dependencies edited
+        editedNewQueuedReports
       else if i >= 1 && i < deltaT then
         // Slots that wrapped around - clear them
         List.empty[AccumulationReadyRecord]
       else
-        // Other slots: keep remaining items that weren't accumulated
-        stillQueuedWithSlots.filter(_._1 == idx).map(_._2).toList
+        // Other slots: keep remaining items that weren't accumulated, with dependencies edited
+        val records = stillQueuedWithSlots.filter(_._1 == idx).map(_._2).toList
+        editReadyQueueRecords(records, accumulatedThisBlock)
     }.toList
 
     // 8. Execute PVM for accumulated reports (respecting gas budget)
@@ -262,44 +268,13 @@ object AccumulationTransition:
         )
       }
 
-    // 13. Build final state with R function for privilege merging
-    val origManager = preState.privileges.bless
-    val origDelegator = preState.privileges.designate
-    val origRegistrar = preState.privileges.register
-    val origAssigners = preState.privileges.assign
+    // 13. Use privileges from the posterior state after all batches
+    val finalManager = outerResult.postState.manager
+    val finalDelegator = outerResult.postState.delegator
+    val finalRegistrar = outerResult.postState.registrar
+    val finalAssigners = outerResult.postState.assigners.toList
+    val finalAlwaysAccers = outerResult.postState.alwaysAccers.toMap
 
-    // Get privilege snapshots for R function
-    val privilegeSnapshots = outerResult.privilegeSnapshots
-    val managerSnapshot = privilegeSnapshots.get(origManager)
-
-    // Manager and alwaysAccers come from manager's post-state (per GP §11.2)
-    val finalManager = managerSnapshot.map(_.manager).getOrElse(origManager)
-
-    // Apply R function for delegator
-    val managerPostDelegator = managerSnapshot.map(_.delegator).getOrElse(origDelegator)
-    val delegatorSnapshot = privilegeSnapshots.get(origDelegator)
-    val delegatorPostDelegator = delegatorSnapshot.map(_.delegator).getOrElse(origDelegator)
-    val finalDelegator = privilegeR(origDelegator, managerPostDelegator, delegatorPostDelegator)
-
-    // Apply R function for registrar
-    val managerPostRegistrar = managerSnapshot.map(_.registrar).getOrElse(origRegistrar)
-    val registrarSnapshot = privilegeSnapshots.get(origRegistrar)
-    val registrarPostRegistrar = registrarSnapshot.map(_.registrar).getOrElse(origRegistrar)
-    val finalRegistrar = privilegeR(origRegistrar, managerPostRegistrar, registrarPostRegistrar)
-
-    // Apply R function for each assigner
-    val finalAssigners = origAssigners.zipWithIndex.map {
-      case (origAssigner, c) =>
-        val managerPostAssigner = managerSnapshot.flatMap(_.assigners.lift(c)).getOrElse(origAssigner)
-        val assignerSnapshot = privilegeSnapshots.get(origAssigner)
-        val assignerPostAssigner = assignerSnapshot.flatMap(_.assigners.lift(c)).getOrElse(origAssigner)
-        privilegeR(origAssigner, managerPostAssigner, assignerPostAssigner)
-    }
-
-    // AlwaysAccers comes from manager's post-state only (per GP §11.2)
-    // Only the manager service can modify alwaysAccers
-    val finalAlwaysAccers =
-      managerSnapshot.map(_.alwaysAccers).getOrElse(preState.privileges.alwaysAcc.map(a => a.id -> a.gas).toMap)
 
     val finalState = AccumulationState(
       slot = input.slot,
@@ -333,23 +308,11 @@ object AccumulationTransition:
       (c.serviceIndex, c.hash)
     }
 
-    // 17. Extract post staging set and auth queues per Gray Paper:
-    // ps_stagingset' = (local_acc(ps_delegator)_ao_poststate)_ps_stagingset
-    // ps_authqueue'[c] = ((local_acc(ps_assigners[c])_ao_poststate)_ps_authqueue)[c]
-    //
-    // Staging set comes from DELEGATOR's post-state (if delegator was accumulated)
-    // Otherwise use initial staging set
-    val delegatorStateSnapshot = privilegeSnapshots.get(origDelegator)
-    val postStagingSet = delegatorStateSnapshot.map(_.stagingSet).getOrElse(initStagingSet)
+    // 17. Extract post staging set and auth queues from posterior state
+    val postStagingSet = outerResult.postState.stagingSet.toList
 
-    // Auth queues: each core's queue comes from that core's assigner's post-state
-    val postAuthQueues = finalAssigners.zipWithIndex.map {
-      case (assigner, coreIdx) =>
-        val assignerStateSnapshot = privilegeSnapshots.get(assigner)
-        assignerStateSnapshot.flatMap(_.authQueues.lift(coreIdx)).getOrElse(
-          initAuthQueues.lift(coreIdx).getOrElse(List.empty)
-        )
-    }
+    // Auth queues: use the posterior state's auth queues
+    val postAuthQueues = outerResult.postState.authQueue.map(_.toList).toList
 
     (
       finalState,
@@ -357,12 +320,6 @@ object AccumulationTransition:
       postAuthQueues,
       StfResult.success(AccumulationOutputData(outputHash, accumulationStats, transferStats, commitmentsList))
     )
-
-  /**
-   * Merging privilege updates.
-   */
-  private def privilegeR(original: Long, managerPost: Long, holderPost: Long): Long =
-    if managerPost == original then holderPost else managerPost
 
   /**
    * Edit ready queue records by removing accumulated reports and pruning dependencies.
@@ -500,16 +457,7 @@ object AccumulationTransition:
     // Recursively process remaining reports with new deferred transfers
     val remainingReports = workReports.drop(i)
     val newTransfers = parallelResult.deferredTransfers
-
-    // Preserve account changes but reset privileges to original
     val stateForRecursion = parallelResult.postState
-    stateForRecursion.manager = partialState.manager
-    stateForRecursion.delegator = partialState.delegator
-    stateForRecursion.registrar = partialState.registrar
-    stateForRecursion.assigners.clear()
-    stateForRecursion.assigners ++= partialState.assigners
-    stateForRecursion.alwaysAccers.clear()
-    stateForRecursion.alwaysAccers ++= partialState.alwaysAccers
 
     // Recursive call if there are new transfers or remaining reports
     val outerResult = outerAccumulate(
@@ -701,6 +649,57 @@ object AccumulationTransition:
     // Apply all merged account changes to the initial state
     val finalState = initialState.deepCopy()
     allAccountChanges.applyTo(finalState)
+    
+    val origManager = partialState.manager
+    val origDelegator = partialState.delegator
+    val origRegistrar = partialState.registrar
+    val origAssigners = partialState.assigners.toList
+
+    val managerSnapshot = privilegeSnapshots.get(origManager)
+    val managerPostManager = managerSnapshot.map(_.manager).getOrElse(origManager)
+    val managerPostDelegator = managerSnapshot.map(_.delegator).getOrElse(origDelegator)
+    val managerPostRegistrar = managerSnapshot.map(_.registrar).getOrElse(origRegistrar)
+    val managerPostAssigners = managerSnapshot.map(_.assigners).getOrElse(origAssigners)
+    val managerPostAlwaysAccers = managerSnapshot.map(_.alwaysAccers).getOrElse(partialState.alwaysAccers.toMap)
+
+    val delegatorSnapshot = privilegeSnapshots.get(origDelegator)
+    val delegatorPostDelegator = delegatorSnapshot.map(_.delegator).getOrElse(origDelegator)
+
+    val registrarSnapshot = privilegeSnapshots.get(origRegistrar)
+    val registrarPostRegistrar = registrarSnapshot.map(_.registrar).getOrElse(origRegistrar)
+
+    // Apply R function: R(o, a, b) = b if a == o else a
+    finalState.manager = managerPostManager
+    finalState.delegator = if managerPostDelegator == origDelegator then delegatorPostDelegator else managerPostDelegator
+    finalState.registrar = if managerPostRegistrar == origRegistrar then registrarPostRegistrar else managerPostRegistrar
+    finalState.assigners.clear()
+    finalState.assigners ++= origAssigners.zipWithIndex.map { case (origAssigner, c) =>
+      val managerPostAssigner = managerPostAssigners.lift(c).getOrElse(origAssigner)
+      val assignerSnapshot = privilegeSnapshots.get(origAssigner)
+      val assignerPostAssigner = assignerSnapshot.flatMap(_.assigners.lift(c)).getOrElse(origAssigner)
+      if managerPostAssigner == origAssigner then assignerPostAssigner else managerPostAssigner
+    }
+    finalState.alwaysAccers.clear()
+    finalState.alwaysAccers ++= managerPostAlwaysAccers
+
+    // Also update stagingSet from delegator's post-state
+    val delegatorStagingSet = delegatorSnapshot.map(_.stagingSet).filter(_.nonEmpty)
+    delegatorStagingSet.foreach { ss =>
+      finalState.stagingSet.clear()
+      finalState.stagingSet ++= ss
+    }
+
+    // Update auth queues: for each core c, the new auth queue comes from the original assigner's post-state
+    val newAuthQueues = origAssigners.zipWithIndex.map { case (origAssigner, coreIndex) =>
+      val assignerSnapshot = privilegeSnapshots.get(origAssigner)
+      // Get the auth queue for this specific core from the assigner's post-state
+      assignerSnapshot.flatMap(_.authQueues.lift(coreIndex)).getOrElse {
+        // If no change, use the original auth queue for this core
+        partialState.authQueue.lift(coreIndex).map(_.toList).getOrElse(List.empty)
+      }
+    }
+    finalState.authQueue.clear()
+    finalState.authQueue ++= newAuthQueues.map(q => mutable.ListBuffer.from(q))
 
     // Process preimage integrations on the final merged state
     val stateAfterPreimages = if allProvisions.nonEmpty then

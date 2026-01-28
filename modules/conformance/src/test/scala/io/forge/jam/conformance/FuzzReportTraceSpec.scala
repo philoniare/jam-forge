@@ -27,7 +27,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
-  private val tracesDir = Paths.get(baseDir, "jamtestvectors", "traces")
+  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
 
   describe("v0.7.2 Fuzz Report Traces"):
 
@@ -39,8 +39,8 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = true, compareKeyvals = true)
 
         // Target a specific trace for debugging
-        val targetTraceId = "1766255635_3689"
-        val targetFileName = "00000076.json"
+        val targetTraceId = "1767891325_4549"
+        val targetFileName = "00005961.json"
 
         val targetFile = tracesDir.resolve(targetTraceId).resolve(targetFileName)
         assume(Files.exists(targetFile), s"Target trace file not found: $targetFile")
