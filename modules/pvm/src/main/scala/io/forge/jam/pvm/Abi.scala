@@ -150,43 +150,41 @@ object MemoryMap:
       if !isPowerOfTwo(pageSize) then
         return Left("Page size must be power of two")
 
-      // Align all sizes to page boundaries
-      val alignedRoData = alignToPage(VmMaxPageSize, roDataSize)
-      val alignedRwData = alignToPage(VmMaxPageSize, rwDataSize)
-      val alignedStack = alignToPage(VmMaxPageSize, stackSize)
-      val alignedAux = alignToPage(VmMaxPageSize, auxDataSize)
+      val alignedRoData = alignToPage(pageSize, roDataSize)
+      val alignedRwData = alignToPage(pageSize, rwDataSize)
+      val alignedStack = alignToPage(pageSize, stackSize)
+      val alignedAux = alignToPage(pageSize, auxDataSize)
 
-      // Calculate memory layout
-      var addressLow: ULong = ULong(VmAddressSpaceBottom.toLong)
-      addressLow = addressLow + ULong(alignedRoData.toLong)
-      addressLow = addressLow + ULong(VmMaxPageSize.toLong)
+      // RO data starts at ZZ (0x10000)
+      val roDataAddr = PvmConstants.ZZ
 
-      val rwDataAddr = UInt(addressLow.toInt)
-      val heapBase = addressLow
-      addressLow = addressLow + ULong(alignedRwData.toLong)
-      addressLow = addressLow + ULong(VmMaxPageSize.toLong)
+      // RW data starts at 2*ZZ + aligned RO data size (zone-aligned)
+      val rwDataAddr = UInt(2L * PvmConstants.ZZ.toLong + alignToPage(PvmConstants.ZZ, roDataSize).toLong)
+      val heapBase = ULong(rwDataAddr.toLong)
 
-      var addressHigh: Long = VmAddressSpaceTop.toLong
-      addressHigh -= alignedAux.toLong
-      val auxDataAddr = UInt(addressHigh.toInt)
-      addressHigh -= VmMaxPageSize.toLong
-      val stackHigh = UInt(addressHigh.toInt)
-      addressHigh -= alignedStack.toLong
+      // Stack base is fixed at 0xfefe0000, stack grows down
+      val stackHigh = PvmConstants.StackBaseAddress  // 0xfefe0000
+      val stackLow = UInt((stackHigh.toLong - alignedStack.toLong).toInt)
 
-      if addressLow.toLong > addressHigh then
-        return Left("Memory size exceeded")
+      // Aux/input region starts at 0xfeff0000
+      val auxDataAddr = PvmConstants.InputStartAddress  // 0xfeff0000
 
-      val maxHeap = UInt((addressHigh.toInt - heapBase.toInt))
+      // Validate that heap doesn't overlap with stack
+      val heapEndMax = rwDataAddr.toLong + alignedRwData.toLong
+      if heapEndMax > stackLow.toLong then
+        return Left("Memory size exceeded: heap would overlap stack")
+
+      val maxHeap = UInt((stackLow.toLong - heapBase.toLong).toInt)
 
       Right(MemoryMap(
         pageSize = pageSize,
-        roDataSize = alignToPage(pageSize, roDataSize),
+        roDataSize = alignedRoData,
         rwDataAddress = rwDataAddr,
-        rwDataSize = alignToPage(pageSize, rwDataSize),
+        rwDataSize = alignedRwData,
         stackAddressHigh = stackHigh,
-        stackSize = alignToPage(pageSize, stackSize),
+        stackSize = alignedStack,
         auxDataAddress = auxDataAddr,
-        auxDataSize = alignToPage(pageSize, auxDataSize),
+        auxDataSize = alignedAux,
         heapBase = UInt(heapBase.toInt),
         maxHeapSize = maxHeap
       ))

@@ -217,7 +217,8 @@ class AccumulationExecutor(val config: ChainConfig):
     val output = if exitReason == ExitReason.HALT then
       val addr = instance.reg(7).toInt  // A0
       val len = instance.reg(8).toInt   // A1
-      if len > 0 && len <= 1024 then
+      val isReadable = instance.basicMemory.isReadable(spire.math.UInt(addr), len)
+      if len > 0 && len <= 1024 && isReadable then
         readMemoryBulk(instance, addr, len)
       else if len == 0 then
         Some(Array.empty[Byte])
@@ -304,7 +305,7 @@ class AccumulationExecutor(val config: ChainConfig):
       data = codeAndJumpTable,
       roData = roData,
       rwData = paddedRwData,
-      stackSize = Math.max(stackSize, 65536),
+      stackSize = stackSize,
       is64Bit = true,
       heapPages = heapPages,
       originalRwDataLen = rwDataLen

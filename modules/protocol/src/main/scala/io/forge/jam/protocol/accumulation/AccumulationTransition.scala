@@ -682,7 +682,7 @@ object AccumulationTransition:
     finalState.alwaysAccers.clear()
     finalState.alwaysAccers ++= managerPostAlwaysAccers
 
-    // Also update stagingSet from delegator's post-state
+    // Update stagingSet from delegator's post-state
     val delegatorStagingSet = delegatorSnapshot.map(_.stagingSet).filter(_.nonEmpty)
     delegatorStagingSet.foreach { ss =>
       finalState.stagingSet.clear()
@@ -755,12 +755,6 @@ object AccumulationTransition:
       changes.assignersChange = Some(postState.assigners.toList)
     if postState.alwaysAccers.toMap != initialState.alwaysAccers.toMap then
       changes.alwaysAccersChange = Some(postState.alwaysAccers.toMap)
-
-    // Check for staging set and auth queue changes
-    if postState.stagingSet.toList != initialState.stagingSet.toList then
-      changes.stagingSetChange = Some(postState.stagingSet.toList)
-    if postState.authQueue.map(_.toList).toList != initialState.authQueue.map(_.toList).toList then
-      changes.authQueueChange = Some(postState.authQueue.toList)
 
     // Check for rawServiceData changes (added or updated keys)
     for (key, value) <- postState.rawServiceDataByStateKey do
@@ -937,9 +931,6 @@ class AccountChanges:
   // Storage data changes (for WRITE host call updates)
   val rawServiceDataUpdates: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty
   val rawServiceDataRemovals: mutable.Set[JamBytes] = mutable.Set.empty
-  // Staging set and auth queue changes (from designate and assign host calls)
-  var stagingSetChange: Option[List[JamBytes]] = None
-  var authQueueChange: Option[List[mutable.ListBuffer[JamBytes]]] = None
 
   def checkAndMerge(other: AccountChanges): Unit =
     // Merge account updates
@@ -961,12 +952,6 @@ class AccountChanges:
       assignersChange = other.assignersChange
     if other.alwaysAccersChange.isDefined && alwaysAccersChange.isEmpty then
       alwaysAccersChange = other.alwaysAccersChange
-
-    // Merge staging set and auth queue changes (first write wins)
-    if other.stagingSetChange.isDefined && stagingSetChange.isEmpty then
-      stagingSetChange = other.stagingSetChange
-    if other.authQueueChange.isDefined && authQueueChange.isEmpty then
-      authQueueChange = other.authQueueChange
 
     // Merge rawServiceData updates (first write wins for conflicts)
     for (key, value) <- other.rawServiceDataUpdates do
@@ -1007,16 +992,6 @@ class AccountChanges:
     alwaysAccersChange.foreach { alwaysAccers =>
       state.alwaysAccers.clear()
       state.alwaysAccers ++= alwaysAccers
-    }
-
-    // Apply staging set and auth queue changes
-    stagingSetChange.foreach { stagingSet =>
-      state.stagingSet.clear()
-      state.stagingSet ++= stagingSet
-    }
-    authQueueChange.foreach { authQueue =>
-      state.authQueue.clear()
-      state.authQueue ++= authQueue
     }
 
     // Apply rawServiceData changes

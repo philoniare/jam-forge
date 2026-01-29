@@ -756,28 +756,15 @@ object BasicMemory:
     if memoryMap.stackSize.signed > 0 then
       mappings += ((memoryMap.stackAddressLow, memoryMap.stackSize, PageAccess.ReadWrite))
 
-    // Aux data region handling - only map GP stack and actual input data
-    // DO NOT map the entire aux region - gaps must remain inaccessible
     if memoryMap.auxDataSize.signed > 0 then
-      val gpStackLow = PvmConstants.GpStackLow
-      val gpStackBase = PvmConstants.GpStackBase
-      val gpStackSize = PvmConstants.GpStackSize
       val inputStartAddress = PvmConstants.InputStartAddress
-
-      val auxStart = memoryMap.auxDataAddress
-      val auxEnd = auxStart + memoryMap.auxDataSize
-
-      // GP stack region - READ_WRITE (if within aux bounds)
-      if gpStackLow.toLong >= auxStart.toLong && gpStackBase.toLong <= auxEnd.toLong then
-        mappings += ((gpStackLow, gpStackSize, PageAccess.ReadWrite))
 
       // Input/argument data region - READ_ONLY (only the actual data, not the entire region)
       argumentDataSize match
         case Some(argSize) if argSize > 0 =>
           // Only map the actual argument data size, page-aligned
           val alignedArgSize = AlignmentOps.alignUp(UInt(argSize), memoryMap.pageSize)
-          if inputStartAddress.toLong >= auxStart.toLong && inputStartAddress.toLong < auxEnd.toLong then
-            mappings += ((inputStartAddress, alignedArgSize, PageAccess.ReadOnly))
+          mappings += ((inputStartAddress, alignedArgSize, PageAccess.ReadOnly))
         case _ =>
         // No argument data - don't map anything in the input region
 
