@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
+    <!-- Read LOG_LEVEL from environment, default to ERROR -->
+    <variable name="LOG_LEVEL" value="${LOG_LEVEL:-ERROR}" />
+
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
-    <!-- Suppress all debug/info logging for performance -->
-    <root level="ERROR">
+    <root level="${LOG_LEVEL}">
         <appender-ref ref="STDOUT" />
     </root>
 
-    <!-- Only log errors from our code -->
-    <logger name="io.forge.jam" level="ERROR" />
+    <!-- Our application logging respects LOG_LEVEL -->
+    <logger name="io.forge.jam" level="${LOG_LEVEL}" />
 </configuration>

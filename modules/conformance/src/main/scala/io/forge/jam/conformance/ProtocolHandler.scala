@@ -36,13 +36,15 @@ class ProtocolHandler(
     yield ()
 
   private def connectionLoop(socket: Socket[IO]): IO[Unit] =
+    logger.logInfo("Waiting for next message...") *>
     readMessage(socket).flatMap {
       case Some((msg, size)) =>
+        logger.logInfo(s"Received message of size $size bytes, processing...") *>
         handleMessage(msg, size, socket) *> connectionLoop(socket)
       case None =>
-        logger.logInfo("Connection closed by peer")
+        logger.logInfo("Connection closed by peer (read returned None)")
     }.handleErrorWith { error =>
-      logger.logError("Protocol error", error) *>
+      logger.logError(s"Protocol error in connectionLoop: ${error.getClass.getSimpleName}", error) *>
         IO.raiseError(error)
     }
 
@@ -53,19 +55,29 @@ class ProtocolHandler(
     // Read 4-byte length prefix
     socket.read(4).flatMap {
       case None =>
+        logger.logInfo("readMessage: socket.read(4) returned None - connection closed") *>
         IO.pure(None)
       case Some(lengthChunk) if lengthChunk.size < 4 =>
+        logger.logWarning(s"readMessage: got partial length header (${lengthChunk.size} bytes instead of 4)") *>
         IO.pure(None)
       case Some(lengthChunk) =>
         val length = JamCodecs.decodeU32LE(lengthChunk.toArray, 0).signed
-        if length <= 0 then
+        logger.logInfo(s"readMessage: length prefix indicates $length bytes") *>
+        (if length <= 0 then
           IO.raiseError(new IllegalArgumentException(s"Invalid message length: $length"))
+        else if length > 100_000_000 then
+          IO.raiseError(new IllegalArgumentException(s"Message length too large: $length (max 100MB)"))
         else
           readExactly(socket, length).flatMap { bodyBytes =>
-            val jamBytes = JamBytes(bodyBytes)
-            val (msg, _) = ProtocolMessage.decodeMessage(jamBytes, 0, config)
-            IO.pure(Some((msg, length)))
-          }
+            IO.blocking {
+              val jamBytes = JamBytes(bodyBytes)
+              val (msg, _) = ProtocolMessage.decodeMessage(jamBytes, 0, config)
+              Some((msg, length))
+            }
+          })
+    }.handleErrorWith { error =>
+      logger.logError(s"readMessage failed: ${error.getClass.getSimpleName}", error) *>
+        IO.raiseError(error)
     }
 
   /**
@@ -77,7 +89,9 @@ class ProtocolHandler(
       else
         socket.read(remaining).flatMap {
           case None =>
-            IO.raiseError(new java.io.EOFException(s"Expected $remaining more bytes"))
+            logger.logError(s"readExactly: early EOF - expected $remaining more bytes, got ${acc.length} so far",
+              new java.io.EOFException(s"Expected $remaining more bytes")) *>
+            IO.raiseError(new java.io.EOFException(s"Expected $remaining more bytes (read ${acc.length} of $n total)"))
           case Some(chunk) =>
             val chunkArr = chunk.toArray
             loop(remaining - chunkArr.length, acc ++ chunkArr)
@@ -96,10 +110,15 @@ class ProtocolHandler(
       case _: ProtocolMessage.ErrorMsg => "Error"
       case other => other.getClass.getSimpleName
 
-    for
+    (for
       _ <- logger.logSent(msgType, framedBytes.length - 4)
+      _ <- logger.logInfo(s"sendMessage: writing ${framedBytes.length} bytes to socket...")
       _ <- socket.write(fs2.Chunk.array(framedBytes.toArray))
-    yield ()
+      _ <- logger.logInfo(s"sendMessage: write completed successfully")
+    yield ()).handleErrorWith { error =>
+      logger.logError(s"sendMessage failed (broken pipe?): ${error.getClass.getSimpleName}", error) *>
+        IO.raiseError(error)
+    }
 
   /**
    * Handle a received protocol message.

@@ -9,13 +9,21 @@ import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 /**
  * Simple append-only file logger for conformance testing sessions.
+ *
+ * @param echoToStderr If true, also print log messages to stderr for Docker visibility
  */
 class FileLogger(
   private[conformance] val writer: BufferedWriter,
   sessionStart: AtomicReference[Instant],
-  errorCount: AtomicLong
+  errorCount: AtomicLong,
+  echoToStderr: Boolean = false
 ):
   private val timestampFormat = DateTimeFormatter.ISO_INSTANT
+
+  private def writeAndEcho(msg: String): Unit =
+    writer.write(msg)
+    writer.flush()
+    if echoToStderr then System.err.println(msg.stripSuffix("\n"))
 
   /**
    * Log a message with timestamp, direction, type, size, and key fields.
@@ -24,8 +32,7 @@ class FileLogger(
     IO.blocking {
       val timestamp = timestampFormat.format(Instant.now())
       val fields = if keyFields.nonEmpty then s" [$keyFields]" else ""
-      writer.write(s"[$timestamp] [$direction] $msgType (${size}b)$fields\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [$direction] $msgType (${size}b)$fields\n")
     }
 
   /**
@@ -49,8 +56,7 @@ class FileLogger(
       sessionStart.set(now)
       errorCount.set(0)
       val timestamp = timestampFormat.format(now)
-      writer.write(s"[$timestamp] [SESSION] Connected\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [SESSION] Connected\n")
     }
 
   /**
@@ -63,8 +69,7 @@ class FileLogger(
       val duration = if start != null then Duration.between(start, now) else Duration.ZERO
       val errors = errorCount.get()
       val timestamp = timestampFormat.format(now)
-      writer.write(s"[$timestamp] [SESSION] Disconnected (duration=${duration.toMillis}ms, errors=$errors)\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [SESSION] Disconnected (duration=${duration.toMillis}ms, errors=$errors)\n")
     }
 
   /**
@@ -76,8 +81,7 @@ class FileLogger(
       val timestamp = timestampFormat.format(Instant.now())
       val sw = new StringWriter()
       error.printStackTrace(new PrintWriter(sw))
-      writer.write(s"[$timestamp] [ERROR] $message\n$sw\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [ERROR] $message\n$sw\n")
     }
 
   /**
@@ -86,8 +90,7 @@ class FileLogger(
   def logWarning(message: String): IO[Unit] =
     IO.blocking {
       val timestamp = timestampFormat.format(Instant.now())
-      writer.write(s"[$timestamp] [WARN] $message\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [WARN] $message\n")
     }
 
   /**
@@ -96,8 +99,7 @@ class FileLogger(
   def logInfo(message: String): IO[Unit] =
     IO.blocking {
       val timestamp = timestampFormat.format(Instant.now())
-      writer.write(s"[$timestamp] [INFO] $message\n")
-      writer.flush()
+      writeAndEcho(s"[$timestamp] [INFO] $message\n")
     }
 
   /**
@@ -107,7 +109,16 @@ class FileLogger(
 
 object FileLogger:
   /**
+   * Check if verbose logging is enabled via environment variable.
+   */
+  private def isVerbose: Boolean =
+    sys.env.get("LOG_LEVEL").exists(level =>
+      level.equalsIgnoreCase("DEBUG") || level.equalsIgnoreCase("INFO") || level.equalsIgnoreCase("TRACE")
+    )
+
+  /**
    * Create a FileLogger resource that manages the file lifecycle.
+   * If LOG_LEVEL is DEBUG/INFO/TRACE, also echoes to stderr.
    */
   def resource(logPath: Path): Resource[IO, FileLogger] =
     Resource.make(
@@ -116,7 +127,8 @@ object FileLogger:
         new FileLogger(
           writer,
           new AtomicReference[Instant](),
-          new AtomicLong(0)
+          new AtomicLong(0),
+          echoToStderr = isVerbose
         )
       }
     ) { logger =>
@@ -132,5 +144,6 @@ object FileLogger:
     new FileLogger(
       new BufferedWriter(new StringWriter()),
       new AtomicReference[Instant](),
-      new AtomicLong(0)
+      new AtomicLong(0),
+      echoToStderr = false
     )
