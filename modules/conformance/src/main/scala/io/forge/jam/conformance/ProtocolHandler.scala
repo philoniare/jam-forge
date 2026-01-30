@@ -227,6 +227,9 @@ class ProtocolHandler(
 
             case ImportResult.Failure(error, message) =>
               Left(s"Import failed: $error - $message")
+    }.handleErrorWith { error =>
+      logger.logError(s"ImportBlock: exception during processing", error) *>
+        IO.pure(Left(s"Import exception: ${error.getClass.getSimpleName} - ${error.getMessage}"))
     }.flatMap {
       case Right(stateRoot) =>
         val response = ProtocolMessage.StateRootMsg(StateRoot(stateRoot))
