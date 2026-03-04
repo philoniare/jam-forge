@@ -7,6 +7,11 @@ import scala.collection.mutable
 
 /**
  * In-memory state store indexed by header hash.
+ *
+ * Implements a bounded storage strategy to prevent OOM during long fuzzing sessions:
+ * - Always retains states referenced by the current ancestry (up to 24 entries)
+ * - Keeps a sliding window of recently stored states for fork support
+ * - Prunes oldest non-ancestry states when the window is exceeded
  */
 class StateStore:
   // State indexed by header hash
@@ -15,11 +20,18 @@ class StateStore:
   // Track which header hashes are "original" blocks (not mutations/forks)
   private val originalBlocks: mutable.Set[Hash] = mutable.Set.empty
 
+  // Insertion-ordered list of stored hashes for LRU-style pruning
+  private val insertionOrder: mutable.ArrayBuffer[Hash] = mutable.ArrayBuffer.empty
+
   // Current ancestry list (from Initialize message)
   private var ancestry: List[AncestryItem] = List.empty
 
   // Maximum ancestry length (L=24 for tiny spec)
   val maxAncestryLength: Int = 24
+
+  // Maximum number of non-ancestry states to retain for fork support
+  // This bounds memory while allowing the fuzzer to build fork chains
+  private val maxExtraStates: Int = 64
 
   /**
    * Initialize the state store with genesis state and ancestry.
@@ -33,6 +45,7 @@ class StateStore:
       clear()
       states.put(headerHash, state)
       originalBlocks.add(headerHash)
+      insertionOrder += headerHash
       ancestry = initialAncestry.take(maxAncestryLength)
     }
 
@@ -48,7 +61,41 @@ class StateStore:
       states.put(headerHash, state)
       if isOriginal then
         originalBlocks.add(headerHash)
+      insertionOrder += headerHash
+      pruneIfNeeded()
     }
+
+  /**
+   * Prune oldest non-ancestry states when storage exceeds the limit.
+   * Must be called within synchronized block.
+   */
+  private def pruneIfNeeded(): Unit =
+    val ancestryHashes = ancestry.map(_.headerHash).toSet
+    // Count how many stored states are NOT in ancestry
+    val extraCount = states.size - states.keys.count(ancestryHashes.contains)
+
+    if extraCount > maxExtraStates then
+      // Walk insertion order from oldest, removing non-ancestry entries
+      var removed = 0
+      val toRemoveCount = extraCount - maxExtraStates
+      val toRemoveHashes = mutable.ListBuffer[Hash]()
+
+      val it = insertionOrder.iterator
+      while it.hasNext && removed < toRemoveCount do
+        val hash = it.next()
+        if !ancestryHashes.contains(hash) && states.contains(hash) then
+          toRemoveHashes += hash
+          removed += 1
+
+      for hash <- toRemoveHashes do
+        states.remove(hash)
+        originalBlocks.remove(hash)
+
+      // Compact insertion order: remove entries no longer in states
+      val stateKeys = states.keySet
+      val newOrder = insertionOrder.filter(stateKeys.contains)
+      insertionOrder.clear()
+      insertionOrder ++= newOrder
 
   /**
    * Retrieve state by header hash.
@@ -117,19 +164,6 @@ class StateStore:
     synchronized {
       states.clear()
       originalBlocks.clear()
+      insertionOrder.clear()
       ancestry = List.empty
-    }
-
-  /**
-   * Remove old fork states that are no longer needed.
-   * Called after advancing past a fork point.
-   *
-   * @param keepHashes Set of header hashes to keep
-   */
-  def pruneForks(keepHashes: Set[Hash]): Unit =
-    synchronized {
-      val toRemove = states.keys.filterNot(keepHashes.contains).toList
-      for hash <- toRemove do
-        states.remove(hash)
-        originalBlocks.remove(hash)
     }
