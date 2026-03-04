@@ -15,19 +15,19 @@ import io.forge.jam.core.scodec.JamCodecs.jamBytesCodec
 
 import scala.collection.mutable
 
-/**
- * Accumulation state serialization types.
- */
+/** Accumulation state serialization types.
+  */
 
-/**
- * Always-accumulate service item with service ID and gas allocation.
- *
- * @param id Service ID (4 bytes)
- * @param gas Gas allocation (8 bytes)
- */
+/** Always-accumulate service item with service ID and gas allocation.
+  *
+  * @param id
+  *   Service ID (4 bytes)
+  * @param gas
+  *   Gas allocation (8 bytes)
+  */
 final case class AlwaysAccItem(
-  id: Long,
-  gas: Long
+    id: Long,
+    gas: Long
 )
 
 object AlwaysAccItem:
@@ -46,21 +46,25 @@ object AlwaysAccItem:
     yield AlwaysAccItem(id, gas)
   }
 
-/**
- * Privileged service configuration.
- *
- * @param bless Manager service ID
- * @param assign Per-core assigner service IDs
- * @param designate Delegator service ID
- * @param register Registrar service ID (v0.7.1+, defaults to 0 for v0.7.0 compatibility)
- * @param alwaysAcc Always-accumulate services with gas allocations
- */
+/** Privileged service configuration.
+  *
+  * @param bless
+  *   Manager service ID
+  * @param assign
+  *   Per-core assigner service IDs
+  * @param designate
+  *   Delegator service ID
+  * @param register
+  *   Registrar service ID (v0.7.1+, defaults to 0 for v0.7.0 compatibility)
+  * @param alwaysAcc
+  *   Always-accumulate services with gas allocations
+  */
 final case class Privileges(
-  bless: Long,
-  assign: List[Long],
-  designate: Long,
-  register: Long,
-  alwaysAcc: List[AlwaysAccItem]
+    bless: Long,
+    assign: List[Long],
+    designate: Long,
+    register: Long,
+    alwaysAcc: List[AlwaysAccItem]
 )
 
 object Privileges:
@@ -70,15 +74,14 @@ object Privileges:
       uint32L ::
       uint32L ::
       JamCodecs.compactPrefixedList(summon[Codec[AlwaysAccItem]])).xmap(
-      {
-        case (bless, assign, designate, register, alwaysAcc) =>
-          Privileges(
-            bless & 0xffffffffL,
-            assign.map(_ & 0xffffffffL),
-            designate & 0xffffffffL,
-            register & 0xffffffffL,
-            alwaysAcc
-          )
+      { case (bless, assign, designate, register, alwaysAcc) =>
+        Privileges(
+          bless & 0xffffffffL,
+          assign.map(_ & 0xffffffffL),
+          designate & 0xffffffffL,
+          register & 0xffffffffL,
+          alwaysAcc
+        )
       },
       p =>
         (
@@ -100,20 +103,19 @@ object Privileges:
     yield Privileges(bless, assign, designate, register, alwaysAcc)
   }
 
-/**
- * Service activity record for statistics tracking.
- */
+/** Service activity record for statistics tracking.
+  */
 final case class ServiceActivityRecord(
-  providedCount: Int = 0,
-  providedSize: Long = 0,
-  refinementCount: Long = 0,
-  refinementGasUsed: Long = 0,
-  imports: Long = 0,
-  extrinsicCount: Long = 0,
-  extrinsicSize: Long = 0,
-  exports: Long = 0,
-  accumulateCount: Long = 0,
-  accumulateGasUsed: Long = 0
+    providedCount: Int = 0,
+    providedSize: Long = 0,
+    refinementCount: Long = 0,
+    refinementGasUsed: Long = 0,
+    imports: Long = 0,
+    extrinsicCount: Long = 0,
+    extrinsicSize: Long = 0,
+    exports: Long = 0,
+    accumulateCount: Long = 0,
+    accumulateGasUsed: Long = 0
 )
 
 object ServiceActivityRecord:
@@ -122,9 +124,8 @@ object ServiceActivityRecord:
       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger).xmap(
-      {
-        case (pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
-          ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, ag)
+      { case (pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
+        ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, ag)
       },
       r =>
         (
@@ -167,12 +168,11 @@ object ServiceActivityRecord:
     )
   }
 
-/**
- * Service statistics entry pairing service ID with activity record.
- */
+/** Service statistics entry pairing service ID with activity record.
+  */
 final case class ServiceStatisticsEntry(
-  id: Long,
-  record: ServiceActivityRecord
+    id: Long,
+    record: ServiceActivityRecord
 )
 
 object ServiceStatisticsEntry:
@@ -189,21 +189,21 @@ object ServiceStatisticsEntry:
     yield ServiceStatisticsEntry(id, record)
   }
 
-/**
- * Storage map entry with key and value.
- */
+/** Storage map entry with key and value.
+  */
 final case class StorageMapEntry(
-  key: JamBytes,
-  value: JamBytes
+    key: JamBytes,
+    value: JamBytes
 )
 
 object StorageMapEntry:
   given Codec[StorageMapEntry] =
     (variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]) ::
-      variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]])).xmap(
-      { case (key, value) => StorageMapEntry(key, value) },
-      e => (e.key, e.value)
-    )
+      variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]))
+      .xmap(
+        { case (key, value) => StorageMapEntry(key, value) },
+        e => (e.key, e.value)
+      )
 
   given Decoder[StorageMapEntry] = Decoder.instance { cursor =>
     for
@@ -212,18 +212,19 @@ object StorageMapEntry:
     yield StorageMapEntry(JamBytes(parseHex(key)), JamBytes(parseHex(value)))
   }
 
-/**
- * Preimage requests map key with hash and value list.
- */
+/** Preimage requests map key with hash and value list.
+  */
 final case class PreimageRequestsMapKey(
-  hash: Hash,
-  value: List[Long]
+    hash: Hash,
+    value: List[Long]
 )
 
 object PreimageRequestsMapKey:
   given Codec[PreimageRequestsMapKey] =
     (JamCodecs.hashCodec :: JamCodecs.compactPrefixedList(uint32L)).xmap(
-      { case (hash, value) => PreimageRequestsMapKey(hash, value.map(_ & 0xffffffffL)) },
+      { case (hash, value) =>
+        PreimageRequestsMapKey(hash, value.map(_ & 0xffffffffL))
+      },
       e => (e.hash, e.value.map(_ & 0xffffffffL))
     )
 
@@ -234,14 +235,13 @@ object PreimageRequestsMapKey:
     yield PreimageRequestsMapKey(Hash(parseHex(hash)), value)
   }
 
-/**
- * Full account data for accumulation state.
- */
+/** Full account data for accumulation state.
+  */
 final case class AccumulationServiceData(
-  service: ServiceInfo,
-  storage: List[StorageMapEntry] = List.empty,
-  preimages: List[PreimageHash] = List.empty,
-  preimageRequests: List[PreimageRequestsMapKey] = List.empty
+    service: ServiceInfo,
+    storage: List[StorageMapEntry] = List.empty,
+    preimages: List[PreimageHash] = List.empty,
+    preimageRequests: List[PreimageRequestsMapKey] = List.empty
 )
 
 object AccumulationServiceData:
@@ -249,29 +249,32 @@ object AccumulationServiceData:
     (summon[Codec[ServiceInfo]] ::
       JamCodecs.compactPrefixedList(summon[Codec[StorageMapEntry]]) ::
       JamCodecs.compactPrefixedList(summon[Codec[PreimageHash]]) ::
-      JamCodecs.compactPrefixedList(summon[Codec[PreimageRequestsMapKey]])).xmap(
-      {
-        case (service, storage, preimages, preimageRequests) =>
+      JamCodecs.compactPrefixedList(summon[Codec[PreimageRequestsMapKey]]))
+      .xmap(
+        { case (service, storage, preimages, preimageRequests) =>
           AccumulationServiceData(service, storage, preimages, preimageRequests)
-      },
-      a => (a.service, a.storage, a.preimages, a.preimageRequests)
-    )
+        },
+        a => (a.service, a.storage, a.preimages, a.preimageRequests)
+      )
 
   given Decoder[AccumulationServiceData] = Decoder.instance { cursor =>
     for
       service <- cursor.get[ServiceInfo]("service")
       storage <- cursor.getOrElse[List[StorageMapEntry]]("storage")(List.empty)
-      preimages <- cursor.getOrElse[List[PreimageHash]]("preimage_blobs")(List.empty)
-      preimageRequests <- cursor.getOrElse[List[PreimageRequestsMapKey]]("preimage_requests")(List.empty)
+      preimages <- cursor.getOrElse[List[PreimageHash]]("preimage_blobs")(
+        List.empty
+      )
+      preimageRequests <- cursor.getOrElse[List[PreimageRequestsMapKey]](
+        "preimage_requests"
+      )(List.empty)
     yield AccumulationServiceData(service, storage, preimages, preimageRequests)
   }
 
-/**
- * Service item for accumulation state.
- */
+/** Service item for accumulation state.
+  */
 final case class AccumulationServiceItem(
-  id: Long,
-  data: AccumulationServiceData
+    id: Long,
+    data: AccumulationServiceData
 )
 
 object AccumulationServiceItem:
@@ -289,20 +292,23 @@ object AccumulationServiceItem:
     yield AccumulationServiceItem(id & 0xffffffffL, data)
   }
 
-/**
- * Ready record containing a work report and its dependencies.
- * Used in test vector state serialization.
- * Dependencies are work-package hashes (32 bytes each).
- */
+/** Ready record containing a work report and its dependencies. Used in test
+  * vector state serialization. Dependencies are work-package hashes (32 bytes
+  * each).
+  */
 final case class AccumulationReadyRecord(
-  report: WorkReport,
-  dependencies: List[Hash]
+    report: WorkReport,
+    dependencies: List[Hash]
 )
 
 object AccumulationReadyRecord:
   given Codec[AccumulationReadyRecord] =
-    (summon[Codec[WorkReport]] :: JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
-      { case (report, dependencies) => AccumulationReadyRecord(report, dependencies) },
+    (summon[Codec[WorkReport]] :: JamCodecs.compactPrefixedList(
+      JamCodecs.hashCodec
+    )).xmap(
+      { case (report, dependencies) =>
+        AccumulationReadyRecord(report, dependencies)
+      },
       r => (r.report, r.dependencies)
     )
 
@@ -310,94 +316,138 @@ object AccumulationReadyRecord:
     for
       report <- cursor.get[WorkReport]("report")
       dependencies <- cursor.get[List[String]]("dependencies")
-    yield AccumulationReadyRecord(report, dependencies.map(h => Hash(parseHex(h))))
+    yield AccumulationReadyRecord(
+      report,
+      dependencies.map(h => Hash(parseHex(h)))
+    )
   }
 
-/**
- * Accumulation state for test vector serialization.
- *
- * @param slot Current timeslot
- * @param entropy Entropy for the epoch (32 bytes)
- * @param readyQueue Ready queue (epochLength lists of ReadyRecords)
- * @param accumulated Accumulated hashes (epochLength lists of 32-byte hashes)
- * @param privileges Privileged service configuration
- * @param statistics Service statistics entries
- * @param accounts Service accounts with full data
- * @param rawServiceDataByStateKey Raw state data for lookups (transient)
- * @param rawServiceAccountsByStateKey Raw account data for lookups (transient)
- */
+/** Accumulation state for test vector serialization.
+  *
+  * @param slot
+  *   Current timeslot
+  * @param entropy
+  *   Entropy for the epoch (32 bytes)
+  * @param readyQueue
+  *   Ready queue (epochLength lists of ReadyRecords)
+  * @param accumulated
+  *   Accumulated hashes (epochLength lists of 32-byte hashes)
+  * @param privileges
+  *   Privileged service configuration
+  * @param statistics
+  *   Service statistics entries
+  * @param accounts
+  *   Service accounts with full data
+  * @param rawServiceDataByStateKey
+  *   Raw state data for lookups (transient)
+  * @param rawServiceAccountsByStateKey
+  *   Raw account data for lookups (transient)
+  */
 final case class AccumulationState(
-  slot: Long,
-  entropy: JamBytes,
-  readyQueue: List[List[AccumulationReadyRecord]],
-  accumulated: List[List[JamBytes]],
-  privileges: Privileges,
-  statistics: List[ServiceStatisticsEntry] = List.empty,
-  accounts: List[AccumulationServiceItem],
-  rawServiceDataByStateKey: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty,
-  rawServiceAccountsByStateKey: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty
+    slot: Long,
+    entropy: JamBytes,
+    readyQueue: List[List[AccumulationReadyRecord]],
+    accumulated: List[List[JamBytes]],
+    privileges: Privileges,
+    statistics: List[ServiceStatisticsEntry] = List.empty,
+    accounts: List[AccumulationServiceItem],
+    rawServiceDataByStateKey: mutable.Map[JamBytes, JamBytes] =
+      mutable.Map.empty,
+    rawServiceAccountsByStateKey: mutable.Map[JamBytes, JamBytes] =
+      mutable.Map.empty
 ):
-  /**
-   * Deep copy of this state.
-   */
+  /** Deep copy of this state.
+    */
   def deepCopy(): AccumulationState =
     AccumulationState(
       slot = slot,
       entropy = JamBytes(entropy.toArray),
-      readyQueue =
-        readyQueue.map(_.map(r => AccumulationReadyRecord(r.report, r.dependencies.map(d => Hash(d.bytes))))),
+      readyQueue = readyQueue.map(
+        _.map(r =>
+          AccumulationReadyRecord(
+            r.report,
+            r.dependencies.map(d => Hash(d.bytes))
+          )
+        )
+      ),
       accumulated = accumulated.map(_.map(h => JamBytes(h.toArray))),
       privileges = privileges.copy(),
       statistics = statistics.map(_.copy()),
       accounts = accounts.map(_.copy()),
       rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey),
-      rawServiceAccountsByStateKey = mutable.Map.from(rawServiceAccountsByStateKey)
+      rawServiceAccountsByStateKey =
+        mutable.Map.from(rawServiceAccountsByStateKey)
     )
 
-  /**
-   * Convert to PartialState for PVM execution.
-   *
-   * @param initStagingSet Initial staging set (validator queue) as list of 336-byte JamBytes
-   * @param initAuthQueues Initial authorization queues per core as list of lists of 32-byte hashes
-   */
+  /** Convert to PartialState for PVM execution.
+    *
+    * @param initStagingSet
+    *   Initial staging set (validator queue) as list of 336-byte JamBytes
+    * @param initAuthQueues
+    *   Initial authorization queues per core as list of lists of 32-byte hashes
+    */
   def toPartialState(
-    initStagingSet: List[JamBytes] = List.empty,
-    initAuthQueues: List[List[JamBytes]] = List.empty
+      initStagingSet: List[JamBytes] = List.empty,
+      initAuthQueues: List[List[JamBytes]] = List.empty
   ): PartialState =
     PartialState(
       accounts = mutable.Map.from(accounts.map { item =>
-        val preimagesMap = mutable.Map.from(item.data.preimages.map(p => p.hash -> p.blob))
+        val preimagesMap =
+          mutable.Map.from(item.data.preimages.map(p => p.hash -> p.blob))
+        // Load code preimage from raw state if not already in the preimages map
+        val codeHash = item.data.service.codeHash
+        if !preimagesMap.contains(codeHash) then
+          val blobStateKey = StateKey.computeServiceDataStateKey(
+            item.id,
+            0xfffffffeL,
+            JamBytes(codeHash.bytes.toArray)
+          )
+          rawServiceDataByStateKey.get(blobStateKey).foreach { blob =>
+            preimagesMap.put(codeHash, blob)
+          }
         item.id -> ServiceAccount(
           info = item.data.service,
-          storage = mutable.Map.from(item.data.storage.map(e => e.key -> e.value)),
+          storage =
+            mutable.Map.from(item.data.storage.map(e => e.key -> e.value)),
           preimages = preimagesMap,
-          preimageRequests = mutable.Map.from(item.data.preimageRequests.flatMap { req =>
-            // Look up the preimage blob to get its length
-            preimagesMap.get(req.hash).map { blob =>
-              PreimageKey(req.hash, blob.length) -> PreimageRequest(req.value)
-            }
-          }),
+          preimageRequests =
+            mutable.Map.from(item.data.preimageRequests.flatMap { req =>
+              // Look up the preimage blob to get its length
+              preimagesMap.get(req.hash).map { blob =>
+                PreimageKey(req.hash, blob.length) -> PreimageRequest(req.value)
+              }
+            }),
           lastAccumulated = item.data.service.lastAccumulationSlot
         )
       }),
       stagingSet = mutable.ListBuffer.from(initStagingSet),
-      authQueue = mutable.ListBuffer.from(initAuthQueues.map(q => mutable.ListBuffer.from(q))),
+      authQueue = mutable.ListBuffer.from(
+        initAuthQueues.map(q => mutable.ListBuffer.from(q))
+      ),
       manager = privileges.bless,
       assigners = mutable.ListBuffer.from(privileges.assign),
       delegator = privileges.designate,
       registrar = privileges.register,
-      alwaysAccers = mutable.Map.from(privileges.alwaysAcc.map(a => a.id -> a.gas)),
+      alwaysAccers =
+        mutable.Map.from(privileges.alwaysAcc.map(a => a.id -> a.gas)),
       rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey),
-      rawServiceAccountsByStateKey = mutable.Map.from(rawServiceAccountsByStateKey)
+      rawServiceAccountsByStateKey =
+        mutable.Map.from(rawServiceAccountsByStateKey)
     )
 
 object AccumulationState:
   def codec(coresCount: Int, epochLength: Int): Codec[AccumulationState] =
     val readyQueueCodec: Codec[List[List[AccumulationReadyRecord]]] =
-      JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]), epochLength)
+      JamCodecs.fixedSizeList(
+        JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]),
+        epochLength
+      )
 
     val accumulatedCodec: Codec[List[List[JamBytes]]] =
-      JamCodecs.fixedSizeList(JamCodecs.compactPrefixedList(summon[Codec[JamBytes]]), epochLength)
+      JamCodecs.fixedSizeList(
+        JamCodecs.compactPrefixedList(summon[Codec[JamBytes]]),
+        epochLength
+      )
 
     (uint32L ::
       JamCodecs.hashCodec ::
@@ -405,39 +455,52 @@ object AccumulationState:
       accumulatedCodec ::
       Privileges.codec(coresCount) ::
       JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]]) ::
-      JamCodecs.compactPrefixedList(summon[Codec[AccumulationServiceItem]])).xmap(
-      {
-        case (slot, entropy, readyQueue, accumulated, privileges, statistics, accounts) =>
-          AccumulationState(
-            slot & 0xffffffffL,
-            JamBytes.fromByteVector(entropy.toByteVector),
-            readyQueue,
-            accumulated,
-            privileges,
-            statistics,
-            accounts
+      JamCodecs.compactPrefixedList(summon[Codec[AccumulationServiceItem]]))
+      .xmap(
+        {
+          case (
+                slot,
+                entropy,
+                readyQueue,
+                accumulated,
+                privileges,
+                statistics,
+                accounts
+              ) =>
+            AccumulationState(
+              slot & 0xffffffffL,
+              JamBytes.fromByteVector(entropy.toByteVector),
+              readyQueue,
+              accumulated,
+              privileges,
+              statistics,
+              accounts
+            )
+        },
+        a =>
+          (
+            a.slot & 0xffffffffL,
+            Hash(a.entropy.toArray),
+            a.readyQueue,
+            a.accumulated,
+            a.privileges,
+            a.statistics,
+            a.accounts
           )
-      },
-      a =>
-        (
-          a.slot & 0xffffffffL,
-          Hash(a.entropy.toArray),
-          a.readyQueue,
-          a.accumulated,
-          a.privileges,
-          a.statistics,
-          a.accounts
-        )
-    )
+      )
 
   given Decoder[AccumulationState] = Decoder.instance { cursor =>
     for
       slot <- cursor.get[Long]("slot")
       entropy <- cursor.get[String]("entropy")
-      readyQueue <- cursor.get[List[List[AccumulationReadyRecord]]]("ready_queue")
+      readyQueue <- cursor.get[List[List[AccumulationReadyRecord]]](
+        "ready_queue"
+      )
       accumulated <- cursor.get[List[List[String]]]("accumulated")
       privileges <- cursor.get[Privileges]("privileges")
-      statistics <- cursor.getOrElse[List[ServiceStatisticsEntry]]("statistics")(List.empty)
+      statistics <- cursor.getOrElse[List[ServiceStatisticsEntry]](
+        "statistics"
+      )(List.empty)
       accounts <- cursor.get[List[AccumulationServiceItem]]("accounts")
     yield AccumulationState(
       slot,
@@ -450,16 +513,15 @@ object AccumulationState:
     )
   }
 
-/**
- * Extension methods for PartialState to convert back to AccumulationServiceItems.
- */
+/** Extension methods for PartialState to convert back to
+  * AccumulationServiceItems.
+  */
 extension (state: PartialState)
-  /**
-   * Convert PartialState back to sorted list of AccumulationServiceItems.
-   */
+  /** Convert PartialState back to sorted list of AccumulationServiceItems.
+    */
   def toAccumulationServiceItems(): List[AccumulationServiceItem] =
-    state.accounts.toList.map {
-      case (id, account) =>
+    state.accounts.toList
+      .map { case (id, account) =>
         AccumulationServiceItem(
           id = id,
           data = AccumulationServiceData(
@@ -472,26 +534,27 @@ extension (state: PartialState)
               .map { case (hash, blob) => PreimageHash(hash, blob) },
             preimageRequests = account.preimageRequests.toList
               .sortBy(_._1.hash.toHex)
-              .map {
-                case (key, request) =>
-                  PreimageRequestsMapKey(key.hash, request.requestedAt)
+              .map { case (key, request) =>
+                PreimageRequestsMapKey(key.hash, request.requestedAt)
               }
           )
         )
-    }.sortBy(_.id)
+      }
+      .sortBy(_.id)
 
-/**
- * Input to the accumulation STF.
- */
+/** Input to the accumulation STF.
+  */
 final case class AccumulationInput(
-  slot: Long,
-  reports: List[WorkReport]
+    slot: Long,
+    reports: List[WorkReport]
 )
 
 object AccumulationInput:
   given Codec[AccumulationInput] =
     (uint32L :: JamCodecs.compactPrefixedList(summon[Codec[WorkReport]])).xmap(
-      { case (slot, reports) => AccumulationInput(slot & 0xffffffffL, reports) },
+      { case (slot, reports) =>
+        AccumulationInput(slot & 0xffffffffL, reports)
+      },
       i => (i.slot & 0xffffffffL, i.reports)
     )
 
@@ -502,83 +565,94 @@ object AccumulationInput:
     yield AccumulationInput(slot, reports)
   }
 
-/**
- * Output data from the accumulation STF.
- *
- * @param ok The accumulation root hash
- * @param accumulationStats Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
- * @param transferStats Per-service transfer statistics: serviceId -> (count, gasUsed)
- * @param commitments Individual service commitments (service_id, hash) - stored in state for key 0x10
- */
+/** Output data from the accumulation STF.
+  *
+  * @param ok
+  *   The accumulation root hash
+  * @param accumulationStats
+  *   Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
+  * @param transferStats
+  *   Per-service transfer statistics: serviceId -> (count, gasUsed)
+  * @param commitments
+  *   Individual service commitments (service_id, hash) - stored in state for
+  *   key 0x10
+  */
 final case class AccumulationOutputData(
-  ok: JamBytes,
-  accumulationStats: Map[Long, (Long, Int)] = Map.empty,
-  transferStats: Map[Long, (Long, Long)] = Map.empty,
-  commitments: List[(Long, JamBytes)] = List.empty
+    ok: JamBytes,
+    accumulationStats: Map[Long, (Long, Int)] = Map.empty,
+    transferStats: Map[Long, (Long, Long)] = Map.empty,
+    commitments: List[(Long, JamBytes)] = List.empty
 )
 
 object AccumulationOutputData:
   // AccumulationOutputData codec - only used for decoding in tests
   // Encoding is handled via custom logic in AccumulationOutput
   given Codec[AccumulationOutputData] =
-    variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]).xmap(
-      ok => AccumulationOutputData(ok),
-      a => a.ok
-    )
+    variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]])
+      .xmap(
+        ok => AccumulationOutputData(ok),
+        a => a.ok
+      )
 
   given Decoder[AccumulationOutputData] = Decoder.instance { cursor =>
-    for
-      ok <- cursor.get[String]("ok")
+    for ok <- cursor.get[String]("ok")
     yield AccumulationOutputData(JamBytes(parseHex(ok)))
   }
 
-/**
- * Output from the accumulation STF.
- * Uses generic StfResult type with AccumulationOutputData as success type.
- * Note: Nothing as error type since no error case currently exists.
- */
+/** Output from the accumulation STF. Uses generic StfResult type with
+  * AccumulationOutputData as success type. Note: Nothing as error type since no
+  * error case currently exists.
+  */
 type AccumulationOutput = StfResult[AccumulationOutputData, Nothing]
 
 object AccumulationOutput:
   given Decoder[AccumulationOutput] = Decoder.instance { cursor =>
-    for
-      ok <- cursor.get[String]("ok")
+    for ok <- cursor.get[String]("ok")
     yield StfResult.success(AccumulationOutputData(JamBytes(parseHex(ok))))
   }
 
 // Custom codec for AccumulationOutput (StfResult[AccumulationOutputData, Nothing])
 // Since error type is Nothing, we only encode/decode success case with discriminator 0
-given accumulationOutputCodec: Codec[AccumulationOutput] = new Codec[AccumulationOutput]:
-  def sizeBound = _root_.scodec.SizeBound.unknown
+given accumulationOutputCodec: Codec[AccumulationOutput] =
+  new Codec[AccumulationOutput]:
+    def sizeBound = _root_.scodec.SizeBound.unknown
 
-  def encode(value: AccumulationOutput) =
-    val dataCodec = summon[Codec[AccumulationOutputData]]
-    value match
-      case Right(data) =>
-        for
-          discriminator <- uint8.encode(0)
-          encoded <- dataCodec.encode(data)
-        yield discriminator ++ encoded
-      case Left(_) =>
-        // This should never happen since error type is Nothing
-        Attempt.failure(_root_.scodec.Err("Cannot encode error in AccumulationOutput"))
+    def encode(value: AccumulationOutput) =
+      val dataCodec = summon[Codec[AccumulationOutputData]]
+      value match
+        case Right(data) =>
+          for
+            discriminator <- uint8.encode(0)
+            encoded <- dataCodec.encode(data)
+          yield discriminator ++ encoded
+        case Left(_) =>
+          // This should never happen since error type is Nothing
+          Attempt.failure(
+            _root_.scodec.Err("Cannot encode error in AccumulationOutput")
+          )
 
-  def decode(bits: BitVector) =
-    for
-      discriminator <- uint8.decode(bits)
-      _ <- if discriminator.value == 0 then Attempt.successful(())
-      else Attempt.failure(_root_.scodec.Err(s"Invalid discriminator: ${discriminator.value}"))
-      result <- summon[Codec[AccumulationOutputData]].decode(discriminator.remainder)
-    yield result.map(data => Right(data))
+    def decode(bits: BitVector) =
+      for
+        discriminator <- uint8.decode(bits)
+        _ <-
+          if discriminator.value == 0 then Attempt.successful(())
+          else
+            Attempt.failure(
+              _root_.scodec
+                .Err(s"Invalid discriminator: ${discriminator.value}")
+            )
+        result <- summon[Codec[AccumulationOutputData]].decode(
+          discriminator.remainder
+        )
+      yield result.map(data => Right(data))
 
-/**
- * Test case for accumulation STF.
- */
+/** Test case for accumulation STF.
+  */
 final case class AccumulationCase(
-  input: AccumulationInput,
-  preState: AccumulationState,
-  output: AccumulationOutput,
-  postState: AccumulationState
+    input: AccumulationInput,
+    preState: AccumulationState,
+    output: AccumulationOutput,
+    postState: AccumulationState
 )
 
 object AccumulationCase:
@@ -591,9 +665,8 @@ object AccumulationCase:
       stateCodec ::
       accumulationOutputCodec ::
       stateCodec).xmap(
-      {
-        case (input, preState, output, postState) =>
-          AccumulationCase(input, preState, output, postState)
+      { case (input, preState, output, postState) =>
+        AccumulationCase(input, preState, output, postState)
       },
       c => (c.input, c.preState, c.output, c.postState)
     )

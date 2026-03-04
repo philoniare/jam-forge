@@ -8,115 +8,114 @@ import spire.math.ULong
 
 import scala.collection.mutable
 
-/**
- * Handles host calls during accumulation PVM execution.
- */
+/** Handles host calls during accumulation PVM execution.
+  */
 class AccumulationHostCalls(
-  val context: AccumulationContext,
-  val operands: List[AccumulationOperand],
-  val config: ChainConfig
+    val context: AccumulationContext,
+    val operands: List[AccumulationOperand],
+    val config: ChainConfig
 ):
-  /**
-   * Get register value from PVM instance as ULong.
-   * Gray Paper register mapping: r7=A0 (first arg/return), r8=A1, r9=A2, r10=A3, r11=A4, r12=A5
-   */
+  /** Get register value from PVM instance as ULong. Gray Paper register
+    * mapping: r7=A0 (first arg/return), r8=A1, r9=A2, r10=A3, r11=A4, r12=A5
+    */
   private def getReg(instance: PvmInstance, reg: Int): ULong =
     ULong(instance.reg(reg))
 
-  /**
-   * Set register value in PVM instance.
-   */
+  /** Set register value in PVM instance.
+    */
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
-  /**
-   * Calculate threshold balance for a service account.
-   * Formula: max(0, base + items*itemCost + bytes*byteCost - gratisStorage)
-   */
-  private def calculateThreshold(items: Int, bytesUsed: Long, depositOffset: Long): Long =
+  /** Calculate threshold balance for a service account. Formula: max(0, base +
+    * items*itemCost + bytes*byteCost - gratisStorage)
+    */
+  private def calculateThreshold(
+      items: Int,
+      bytesUsed: Long,
+      depositOffset: Long
+  ): Long =
     val base = config.serviceMinBalance
     val itemsCost = config.additionalMinBalancePerStateItem * items
     val bytesCost = config.additionalMinBalancePerStateByte * bytesUsed
     val costUnsigned = ULong(base + itemsCost + bytesCost)
     val gratisUnsigned = ULong(depositOffset)
-    if costUnsigned > gratisUnsigned then (costUnsigned - gratisUnsigned).toLong else 0L
+    if costUnsigned > gratisUnsigned then (costUnsigned - gratisUnsigned).toLong
+    else 0L
 
-  /**
-   * Calculate threshold balance from ServiceInfo.
-   */
+  /** Calculate threshold balance from ServiceInfo.
+    */
   private def calculateThreshold(info: ServiceInfo): Long =
     calculateThreshold(info.items, info.bytesUsed, info.depositOffset)
 
-  /**
-   * Check if balance meets threshold requirement.
-   */
+  /** Check if balance meets threshold requirement.
+    */
   private def meetsThreshold(balance: Long, threshold: Long): Boolean =
     ULong(balance) >= ULong(threshold)
 
-  /**
-   * Get gas cost for a host call without executing it.
-   * Gas is charged BEFORE the host call implementation runs.
-   *
-   * @param hostCallId The host call identifier
-   * @param instance The PVM instance (used for reading gas limit for TRANSFER)
-   * @return The gas cost for this host call
-   */
+  /** Get gas cost for a host call without executing it. Gas is charged BEFORE
+    * the host call implementation runs.
+    *
+    * @param hostCallId
+    *   The host call identifier
+    * @param instance
+    *   The PVM instance (used for reading gas limit for TRANSFER)
+    * @return
+    *   The gas cost for this host call
+    */
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
       case _ => 10L
 
-  /**
-   * Dispatch a host call based on its identifier.
-   * Gas should be charged BEFORE calling this method.
-   *
-   * @param hostCallId The host call identifier
-   * @param instance The PVM instance
-   */
+  /** Dispatch a host call based on its identifier. Gas should be charged BEFORE
+    * calling this method.
+    *
+    * @param hostCallId
+    *   The host call identifier
+    * @param instance
+    *   The PVM instance
+    */
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
-      case HostCall.GAS => handleGas(instance)
-      case HostCall.FETCH => handleFetch(instance)
-      case HostCall.LOOKUP => handleLookup(instance)
-      case HostCall.READ => handleRead(instance)
-      case HostCall.WRITE => handleWrite(instance)
-      case HostCall.INFO => handleInfo(instance)
-      case HostCall.BLESS => handleBless(instance)
-      case HostCall.ASSIGN => handleAssign(instance)
-      case HostCall.DESIGNATE => handleDesignate(instance)
+      case HostCall.GAS        => handleGas(instance)
+      case HostCall.FETCH      => handleFetch(instance)
+      case HostCall.LOOKUP     => handleLookup(instance)
+      case HostCall.READ       => handleRead(instance)
+      case HostCall.WRITE      => handleWrite(instance)
+      case HostCall.INFO       => handleInfo(instance)
+      case HostCall.BLESS      => handleBless(instance)
+      case HostCall.ASSIGN     => handleAssign(instance)
+      case HostCall.DESIGNATE  => handleDesignate(instance)
       case HostCall.CHECKPOINT => handleCheckpoint(instance)
-      case HostCall.NEW => handleNew(instance)
-      case HostCall.UPGRADE => handleUpgrade(instance)
-      case HostCall.TRANSFER => handleTransfer(instance)
-      case HostCall.EJECT => handleEject(instance)
-      case HostCall.QUERY => handleQuery(instance)
-      case HostCall.SOLICIT => handleSolicit(instance)
-      case HostCall.FORGET => handleForget(instance)
-      case HostCall.YIELD => handleYield(instance)
-      case HostCall.PROVIDE => handleProvide(instance)
-      case HostCall.LOG => handleLog(instance)
-      case _ =>
+      case HostCall.NEW        => handleNew(instance)
+      case HostCall.UPGRADE    => handleUpgrade(instance)
+      case HostCall.TRANSFER   => handleTransfer(instance)
+      case HostCall.EJECT      => handleEject(instance)
+      case HostCall.QUERY      => handleQuery(instance)
+      case HostCall.SOLICIT    => handleSolicit(instance)
+      case HostCall.FORGET     => handleForget(instance)
+      case HostCall.YIELD      => handleYield(instance)
+      case HostCall.PROVIDE    => handleProvide(instance)
+      case HostCall.LOG        => handleLog(instance)
+      case _                   =>
         // Unknown host call - return WHAT
         setReg(instance, 7, HostCallResult.WHAT)
 
-  /**
-   * gas (0): Returns remaining gas in register r7.
-   */
+  /** gas (0): Returns remaining gas in register r7.
+    */
   private def handleGas(instance: PvmInstance): Unit =
     setReg(instance, 7, ULong(instance.gas))
 
-  /**
-   * Fetch host call sub-selectors
-   */
+  /** Fetch host call sub-selectors
+    */
   private object FetchSelector:
     val CONSTANTS = 0 // Protocol configuration constants
     val ENTROPY = 1 // Entropy/randomness data
     val ALL_OPERANDS = 14 // List of all work package operands
     val SINGLE_OPERAND = 15 // Individual operand at index
 
-  /**
-   * fetch (1): Fetch various data based on register r10 selector.
-   * For accumulation, supports fetching operands and constants.
-   */
+  /** fetch (1): Fetch various data based on register r10 selector. For
+    * accumulation, supports fetching operands and constants.
+    */
   private def handleFetch(instance: PvmInstance): Unit =
     val selector = getReg(instance, 10).toInt
     val outputAddr = getReg(instance, 7).toInt
@@ -125,9 +124,9 @@ class AccumulationHostCalls(
     val index = getReg(instance, 11).toInt
 
     val data: Option[Array[Byte]] = selector match
-      case FetchSelector.CONSTANTS => Some(getConstantsBlob())
-      case FetchSelector.ENTROPY => Some(context.entropy.toArray)
-      case FetchSelector.ALL_OPERANDS => Some(encodeOperandsList())
+      case FetchSelector.CONSTANTS      => Some(getConstantsBlob())
+      case FetchSelector.ENTROPY        => Some(context.entropy.toArray)
+      case FetchSelector.ALL_OPERANDS   => Some(encodeOperandsList())
       case FetchSelector.SINGLE_OPERAND =>
         if index < operands.size then Some(encodeOperand(operands(index)))
         else None
@@ -148,14 +147,11 @@ class AccumulationHostCalls(
           )
 
         val writeResult = writeMemory(instance, outputAddr, slice)
-        if !writeResult then
-          setReg(instance, 7, HostCallResult.OOB)
-        else
-          setReg(instance, 7, ULong(bytes.length))
+        if !writeResult then setReg(instance, 7, HostCallResult.OOB)
+        else setReg(instance, 7, ULong(bytes.length))
 
-  /**
-   * lookup (2): Look up preimage by hash.
-   */
+  /** lookup (2): Look up preimage by hash.
+    */
   private def handleLookup(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val hashAddr = getReg(instance, 8).toInt
@@ -166,16 +162,18 @@ class AccumulationHostCalls(
     // Read hash from memory - panic on OOB
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(s"Lookup PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}")
+      throw new RuntimeException(
+        s"Lookup PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
+      )
 
     val hashBytes = JamBytes(hashBuffer)
     val hash = Hash(hashBuffer)
 
     // Determine which account to look up from
-    val targetServiceId = if serviceId == -1L || serviceId == context.serviceIndex then
-      context.serviceIndex
-    else
-      serviceId
+    val targetServiceId =
+      if serviceId == -1L || serviceId == context.serviceIndex then
+        context.serviceIndex
+      else serviceId
 
     val account = context.x.accounts.get(targetServiceId)
 
@@ -184,7 +182,11 @@ class AccumulationHostCalls(
 
     // If not in memory, check raw state data with discriminator 0xFFFFFFFE (preimage blob)
     if preimage.isEmpty then
-      val blobStateKey = StateKey.computeServiceDataStateKey(targetServiceId, 0xfffffffeL, hashBytes)
+      val blobStateKey = StateKey.computeServiceDataStateKey(
+        targetServiceId,
+        0xfffffffeL,
+        hashBytes
+      )
       preimage = context.x.rawServiceDataByStateKey.get(blobStateKey)
 
     // Calculate actual offset and length based on preimage data (or 0 if not found)
@@ -216,9 +218,8 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, ULong(data.length))
 
-  /**
-   * read (3): Read from service storage.
-   */
+  /** read (3): Read from service storage.
+    */
   private def handleRead(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val keyAddr = getReg(instance, 8).toInt
@@ -230,15 +231,17 @@ class AccumulationHostCalls(
     // Read key from memory - PANIC on memory failure
     val keyBuffer = new Array[Byte](keyLen)
     if !readMemory(instance, keyAddr, keyBuffer) then
-      throw new RuntimeException(s"Read PANIC: Failed to read key from memory at 0x${keyAddr.toHexString} len $keyLen")
+      throw new RuntimeException(
+        s"Read PANIC: Failed to read key from memory at 0x${keyAddr.toHexString} len $keyLen"
+      )
 
     val key = JamBytes(keyBuffer)
 
     // Determine which account to read from
-    val targetServiceId = if serviceId == -1L || serviceId == context.serviceIndex then
-      context.serviceIndex
-    else
-      serviceId
+    val targetServiceId =
+      if serviceId == -1L || serviceId == context.serviceIndex then
+        context.serviceIndex
+      else serviceId
 
     val account = context.x.accounts.get(targetServiceId)
 
@@ -260,15 +263,16 @@ class AccumulationHostCalls(
     val slice = data.slice(actualOffset, actualOffset + actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
-      throw new RuntimeException(s"Read PANIC: Failed to write to output memory at 0x${outputAddr.toHexString}")
+      throw new RuntimeException(
+        s"Read PANIC: Failed to write to output memory at 0x${outputAddr.toHexString}"
+      )
 
     setReg(instance, 7, ULong(data.length))
 
-  /**
-   * write (4): Write to service storage.
-   * Updates storage map and adjusts bytes/items counters in ServiceInfo.
-   * Returns: old value length on success, NONE if key didn't exist, FULL if threshold exceeded.
-   */
+  /** write (4): Write to service storage. Updates storage map and adjusts
+    * bytes/items counters in ServiceInfo. Returns: old value length on success,
+    * NONE if key didn't exist, FULL if threshold exceeded.
+    */
   private def handleWrite(instance: PvmInstance): Unit =
     val keyAddr = getReg(instance, 7).toInt
     val keyLen = getReg(instance, 8).toInt
@@ -277,21 +281,26 @@ class AccumulationHostCalls(
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
-      throw new RuntimeException("Write PANIC: Current service account not found")
+      throw new RuntimeException(
+        "Write PANIC: Current service account not found"
+      )
 
     val acc = account.get
 
     // Read key from memory
     val keyBuffer = new Array[Byte](keyLen)
     if !readMemory(instance, keyAddr, keyBuffer) then
-      throw new RuntimeException(s"Write PANIC: Failed to read key from memory at $keyAddr len $keyLen")
+      throw new RuntimeException(
+        s"Write PANIC: Failed to read key from memory at $keyAddr len $keyLen"
+      )
 
     val key = JamBytes(keyBuffer)
 
     // Track old value for return value and bytes calculation
     // Check both in-memory storage and raw service data
     var oldValue = acc.storage.get(key)
-    val stateKeyForLookup = StateKey.computeStorageStateKey(context.serviceIndex, key)
+    val stateKeyForLookup =
+      StateKey.computeStorageStateKey(context.serviceIndex, key)
     if oldValue.isEmpty then
       oldValue = context.x.rawServiceDataByStateKey.get(stateKeyForLookup)
 
@@ -299,12 +308,15 @@ class AccumulationHostCalls(
     val keyWasPresent = oldValue.isDefined
 
     // Calculate new footprint to check threshold
-    val newValue = if valueLen == 0 then None
-    else
-      val valueBuffer = new Array[Byte](valueLen)
-      if !readMemory(instance, valueAddr, valueBuffer) then
-        throw new RuntimeException(s"Write PANIC: Failed to read value from memory at $valueAddr len $valueLen")
-      Some(JamBytes(valueBuffer))
+    val newValue =
+      if valueLen == 0 then None
+      else
+        val valueBuffer = new Array[Byte](valueLen)
+        if !readMemory(instance, valueAddr, valueBuffer) then
+          throw new RuntimeException(
+            s"Write PANIC: Failed to read value from memory at $valueAddr len $valueLen"
+          )
+        Some(JamBytes(valueBuffer))
 
     // Calculate bytes/items delta for threshold check
     val (bytesDelta, itemsDelta): (Long, Int) = (valueLen, keyWasPresent) match
@@ -325,7 +337,8 @@ class AccumulationHostCalls(
     val info = acc.info
     val newBytes = info.bytesUsed + bytesDelta
     val newItems = info.items + itemsDelta
-    val newThreshold = calculateThreshold(newItems, newBytes, info.depositOffset)
+    val newThreshold =
+      calculateThreshold(newItems, newBytes, info.depositOffset)
 
     if !meetsThreshold(info.balance, newThreshold) then
       setReg(instance, 7, HostCallResult.FULL)
@@ -352,22 +365,23 @@ class AccumulationHostCalls(
     context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
 
     // Return old value length (or NONE if key didn't exist)
-    val returnValue = if keyWasPresent then ULong(oldValueSize) else HostCallResult.NONE
+    val returnValue =
+      if keyWasPresent then ULong(oldValueSize) else HostCallResult.NONE
     setReg(instance, 7, returnValue)
 
-  /**
-   * info (5): Get service account info.
-   * Returns 96 bytes: codeHash(32) + balance(8) + thresholdBalance(8) + minAccumulateGas(8) +
-   *                   minMemoGas(8) + totalByteLength(8) + itemsCount(4) + gratisStorage(8) +
-   *                   createdAt(4) + lastAccAt(4) + parentService(4)
-   */
+  /** info (5): Get service account info. Returns 96 bytes: codeHash(32) +
+    * balance(8) + thresholdBalance(8) + minAccumulateGas(8) + minMemoGas(8) +
+    * totalByteLength(8) + itemsCount(4) + gratisStorage(8) + createdAt(4) +
+    * lastAccAt(4) + parentService(4)
+    */
   private def handleInfo(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val outputAddr = getReg(instance, 8).toInt
     val offset = getReg(instance, 9).toInt
     val length = getReg(instance, 10).toInt
 
-    val targetServiceId = if serviceId == -1L then context.serviceIndex else serviceId
+    val targetServiceId =
+      if serviceId == -1L then context.serviceIndex else serviceId
     val account = context.x.accounts.get(targetServiceId)
 
     if account.isEmpty then
@@ -396,16 +410,17 @@ class AccumulationHostCalls(
     val slicedData = data.slice(first, first + len)
 
     if !writeMemory(instance, outputAddr, slicedData) then
-      throw new RuntimeException(s"Info PANIC: Failed to write to memory at $outputAddr")
+      throw new RuntimeException(
+        s"Info PANIC: Failed to write to memory at $outputAddr"
+      )
 
     // Return the full data length (not sliced length)
     setReg(instance, 7, ULong(data.length))
 
-  /**
-   * bless (14): Set privileged services.
-   * reg7 = manager, reg8 = assigners ptr, reg9 = delegator, reg10 = registrar,
-   * reg11 = always-acc pairs ptr, reg12 = always-acc pairs count
-   */
+  /** bless (14): Set privileged services. reg7 = manager, reg8 = assigners ptr,
+    * reg9 = delegator, reg10 = registrar, reg11 = always-acc pairs ptr, reg12 =
+    * always-acc pairs count
+    */
   private def handleBless(instance: PvmInstance): Unit =
     val newManager = getReg(instance, 7).toLong
     val assignersPtr = getReg(instance, 8).toInt
@@ -418,7 +433,9 @@ class AccumulationHostCalls(
     val coresCount = config.coresCount
     val assignersBytes = new Array[Byte](4 * coresCount)
     if !readMemory(instance, assignersPtr, assignersBytes) then
-      throw new RuntimeException("Bless PANIC: Failed to read assigners from memory")
+      throw new RuntimeException(
+        "Bless PANIC: Failed to read assigners from memory"
+      )
 
     // Parse assigners
     val newAssigners = mutable.ListBuffer.empty[Long]
@@ -433,7 +450,9 @@ class AccumulationHostCalls(
     if alwaysAccCount > 0 then
       val alwaysAccBytes = new Array[Byte](12 * alwaysAccCount)
       if !readMemory(instance, alwaysAccPtr, alwaysAccBytes) then
-        throw new RuntimeException("Bless PANIC: Failed to read always-acc from memory")
+        throw new RuntimeException(
+          "Bless PANIC: Failed to read always-acc from memory"
+        )
 
       var j = 0
       while j < alwaysAccCount do
@@ -463,10 +482,9 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * assign (15): Set core assigner and authorization queue (privileged).
-   * reg7 = targetCoreIndex, reg8 = authorizationQueue address, reg9 = new assigner
-   */
+  /** assign (15): Set core assigner and authorization queue (privileged). reg7 =
+    * targetCoreIndex, reg8 = authorizationQueue address, reg9 = new assigner
+    */
   private def handleAssign(instance: PvmInstance): Unit =
     val targetCoreIndex = getReg(instance, 7).toInt
     val startAddr = getReg(instance, 8).toInt
@@ -477,7 +495,9 @@ class AccumulationHostCalls(
     val queueBuffer = new Array[Byte](queueLength)
     if !readMemory(instance, startAddr, queueBuffer) then
       // PANIC if memory is not readable
-      throw new RuntimeException(s"Assign PANIC: Failed to read authorization queue from memory at $startAddr")
+      throw new RuntimeException(
+        s"Assign PANIC: Failed to read authorization queue from memory at $startAddr"
+      )
 
     // Check core index bounds
     if targetCoreIndex >= config.coresCount then
@@ -517,12 +537,10 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * designate (16): Set validator queue (privileged).
-   * Panics if memory is not readable.
-   * Returns HUH if caller is not the delegator.
-   * Returns OK on success and updates stagingSet with the new validator keys.
-   */
+  /** designate (16): Set validator queue (privileged). Panics if memory is not
+    * readable. Returns HUH if caller is not the delegator. Returns OK on
+    * success and updates stagingSet with the new validator keys.
+    */
   private def handleDesignate(instance: PvmInstance): Unit =
     val startAddr = getReg(instance, 7).toInt
     val validatorKeySize = 336
@@ -530,7 +548,9 @@ class AccumulationHostCalls(
 
     // Check if memory is readable - PANIC if not
     if !isMemoryWritable(instance, startAddr, totalLength) then
-      throw new RuntimeException(s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength")
+      throw new RuntimeException(
+        s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength"
+      )
 
     // Check if caller is the delegator
     if context.serviceIndex != context.x.delegator then
@@ -543,7 +563,9 @@ class AccumulationHostCalls(
       val offset = i * validatorKeySize
       val keyBuffer = new Array[Byte](validatorKeySize)
       if !readMemory(instance, startAddr + offset, keyBuffer) then
-        throw new RuntimeException(s"Designate PANIC: Failed to read validator key $i from memory")
+        throw new RuntimeException(
+          s"Designate PANIC: Failed to read validator key $i from memory"
+        )
       newStagingSet += JamBytes(keyBuffer)
 
     // Update the staging set in context
@@ -552,16 +574,14 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * checkpoint (17): Save current state x to checkpoint y.
-   */
+  /** checkpoint (17): Save current state x to checkpoint y.
+    */
   private def handleCheckpoint(instance: PvmInstance): Unit =
     context.checkpoint()
     setReg(instance, 7, ULong(instance.gas))
 
-  /**
-   * upgrade (19): Upgrade service code hash.
-   */
+  /** upgrade (19): Upgrade service code hash.
+    */
   private def handleUpgrade(instance: PvmInstance): Unit =
     val codeHashAddr = getReg(instance, 7).toInt
     val newMinAccumulateGas = getReg(instance, 8).toLong
@@ -584,19 +604,20 @@ class AccumulationHostCalls(
       minItemGas = newMinAccumulateGas,
       minMemoGas = newMinMemoGas
     )
-    context.x.accounts(context.serviceIndex) = account.get.copy(info = updatedInfo)
+    context.x.accounts(context.serviceIndex) =
+      account.get.copy(info = updatedInfo)
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * new (18): Create new service account.
-   * reg7 = codeHashAddr, reg8 = codeHashLength (for preimage info),
-   * reg9 = minAccumulateGas, reg10 = minMemoGas, reg11 = gratisStorage,
-   * reg12 = requested service index (if caller is registrar)
-   */
+  /** new (18): Create new service account. reg7 = codeHashAddr, reg8 =
+    * codeHashLength (for preimage info), reg9 = minAccumulateGas, reg10 =
+    * minMemoGas, reg11 = gratisStorage, reg12 = requested service index (if
+    * caller is registrar)
+    */
   private def handleNew(instance: PvmInstance): Unit =
     val codeHashAddr = getReg(instance, 7).toInt
-    val codeHashLength = getReg(instance, 8).toInt // Length for preimage info key
+    val codeHashLength =
+      getReg(instance, 8).toInt // Length for preimage info key
     val minAccumulateGas = getReg(instance, 9).toLong
     val minMemoGas = getReg(instance, 10).toLong
     val gratisStorage = getReg(instance, 11).toLong
@@ -605,7 +626,9 @@ class AccumulationHostCalls(
     // Read code hash from memory - PANIC if not readable
     val codeHashBuffer = new Array[Byte](32)
     if !readMemory(instance, codeHashAddr, codeHashBuffer) then
-      throw new RuntimeException(s"New PANIC: Failed to read code hash from memory at $codeHashAddr")
+      throw new RuntimeException(
+        s"New PANIC: Failed to read code hash from memory at $codeHashAddr"
+      )
 
     val codeHash = Hash(codeHashBuffer)
 
@@ -624,7 +647,8 @@ class AccumulationHostCalls(
     // New account starts with: items = 2, bytes = 81 + codeHashLength
     val newAccountItems = 2
     val newAccountBytes = 81L + codeHashLength
-    val thresholdBalance = calculateThreshold(newAccountItems, newAccountBytes, gratisStorage)
+    val thresholdBalance =
+      calculateThreshold(newAccountItems, newAccountBytes, gratisStorage)
 
     // Check if caller can afford: balance >= newThreshold + callerThreshold
     val callerThreshold = calculateThreshold(acc.info)
@@ -635,14 +659,16 @@ class AccumulationHostCalls(
 
     // Determine new service ID
     val minPublicServiceIndex = context.minPublicServiceIndex
+    val unsignedRequestedServiceId = requestedServiceId & 0xffffffffL
+    val usedRegistrarPrivilege =
+      context.serviceIndex == context.x.registrar && unsignedRequestedServiceId < minPublicServiceIndex
     val newServiceId: Long =
-      if context.serviceIndex == context.x.registrar && requestedServiceId >= 0 && requestedServiceId < minPublicServiceIndex
-      then
+      if usedRegistrarPrivilege then
         // Registrar can request specific service ID below minPublicServiceIndex
-        if context.x.accounts.contains(requestedServiceId) then
+        if context.x.accounts.contains(unsignedRequestedServiceId) then
           setReg(instance, 7, HostCallResult.FULL)
           return
-        requestedServiceId
+        unsignedRequestedServiceId
       else
         // Use pre-calculated nextAccountIndex
         context.nextAccountIndex
@@ -666,15 +692,22 @@ class AccumulationHostCalls(
       preimages = mutable.Map.empty,
       preimageRequests = mutable.Map(
         // Initialize preimage info for code hash with empty requestedAt list
-        PreimageKey(Hash(codeHashBuffer), codeHashLength) -> PreimageRequest(List.empty)
+        PreimageKey(Hash(codeHashBuffer), codeHashLength) -> PreimageRequest(
+          List.empty
+        )
       )
     )
 
     context.x.accounts(newServiceId) = newAccount
 
     val preimageInfoStateKey =
-      StateKey.computePreimageInfoStateKey(newServiceId, codeHashLength, JamBytes(codeHashBuffer))
-    context.x.rawServiceDataByStateKey(preimageInfoStateKey) = StateKey.encodePreimageInfoValue(List.empty)
+      StateKey.computePreimageInfoStateKey(
+        newServiceId,
+        codeHashLength,
+        JamBytes(codeHashBuffer)
+      )
+    context.x.rawServiceDataByStateKey(preimageInfoStateKey) =
+      StateKey.encodePreimageInfoValue(List.empty)
 
     // Deduct balance from creator
     val updatedCreatorInfo = acc.info.copy(
@@ -685,7 +718,7 @@ class AccumulationHostCalls(
     )
 
     // Update nextAccountIndex for next NEW call (ONLY if not using registrar privilege)
-    if context.serviceIndex != context.x.registrar || requestedServiceId >= minPublicServiceIndex then
+    if !usedRegistrarPrivilege then
       val s = minPublicServiceIndex
       // Calculate next candidate index per Gray Paper:
       // i^* = check(Cminpublicindex + (nextfreeid - Cminpublicindex + 42) mod (2^32 - Cminpublicindex - 2^8))
@@ -698,16 +731,17 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, ULong(newServiceId))
 
-  /**
-   * eject (21): Remove another service account.
-   */
+  /** eject (21): Remove another service account.
+    */
   private def handleEject(instance: PvmInstance): Unit =
     val ejectServiceId = getReg(instance, 7).toLong
     val preimageHashAddr = getReg(instance, 8).toInt
 
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, preimageHashAddr, hashBuffer) then
-      throw new RuntimeException("Eject PANIC: Failed to read preimage hash from memory")
+      throw new RuntimeException(
+        "Eject PANIC: Failed to read preimage hash from memory"
+      )
 
     val preimageHash = JamBytes(hashBuffer)
 
@@ -724,7 +758,8 @@ class AccumulationHostCalls(
       return
 
     val acc = ejectAccount.get
-    if !acc.info.codeHash.bytes.toArray.sameElements(expectedCodeHash.toArray) then
+    if !acc.info.codeHash.bytes.toArray.sameElements(expectedCodeHash.toArray)
+    then
       setReg(instance, 7, HostCallResult.WHO)
       return
 
@@ -738,14 +773,19 @@ class AccumulationHostCalls(
 
     val octets = acc.info.bytesUsed
     val derivedLength = math.max(81L, octets) - 81L
-    val preimageKey = PreimageKey(Hash(preimageHash.toArray), derivedLength.toInt)
+    val preimageKey =
+      PreimageKey(Hash(preimageHash.toArray), derivedLength.toInt)
     val preimageRequest = acc.preimageRequests.get(preimageKey)
 
     val timeslots: List[Long] = preimageRequest match
       case Some(req) =>
         req.requestedAt
       case None =>
-        val expectedKey = StateKey.computePreimageInfoStateKey(ejectServiceId, derivedLength.toInt, preimageHash)
+        val expectedKey = StateKey.computePreimageInfoStateKey(
+          ejectServiceId,
+          derivedLength.toInt,
+          preimageHash
+        )
         val matchingInfoEntry = context.x.rawServiceDataByStateKey.find {
           case (key, _) =>
             java.util.Arrays.equals(key.toArray, expectedKey.toArray)
@@ -772,11 +812,16 @@ class AccumulationHostCalls(
     val updatedCallerInfo = callerAccount.info.copy(
       balance = callerAccount.info.balance + acc.info.balance
     )
-    context.x.accounts(context.serviceIndex) = callerAccount.copy(info = updatedCallerInfo)
+    context.x.accounts(context.serviceIndex) =
+      callerAccount.copy(info = updatedCallerInfo)
     context.x.accounts.remove(ejectServiceId)
 
     val serviceIdBytes =
-      java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(ejectServiceId.toInt).array()
+      java.nio.ByteBuffer
+        .allocate(4)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .putInt(ejectServiceId.toInt)
+        .array()
     val keysToRemove = context.x.rawServiceDataByStateKey.keys.filter { key =>
       key.length >= 8 &&
       key.toArray(0) == serviceIdBytes(0) &&
@@ -792,9 +837,8 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * transfer (20): Queue a deferred transfer.
-   */
+  /** transfer (20): Queue a deferred transfer.
+    */
   private def handleTransfer(instance: PvmInstance): Unit =
     val destination = (getReg(instance, 7) & ULong(0xffffffffL)).toLong
     val amount = getReg(instance, 8).toLong
@@ -807,14 +851,17 @@ class AccumulationHostCalls(
     // 1. Read memo from memory (128 bytes) - PANIC if fails
     val memoBuffer = new Array[Byte](DeferredTransfer.MEMO_SIZE)
     if !readMemory(instance, memoAddr, memoBuffer) then
-      throw new RuntimeException(s"Transfer PANIC: Failed to read memo from memory at $memoAddr")
+      throw new RuntimeException(
+        s"Transfer PANIC: Failed to read memo from memory at $memoAddr"
+      )
 
     // 2. Check if destination exists (WHO)
     var destExists = accounts.contains(destination)
     if !destExists then
       val destStateKey = StateKey.computeServiceAccountKey(destination)
       val rawMap = context.x.rawServiceAccountsByStateKey
-      val rawDestData = rawMap.find { case (k, _) => k.toHex == destStateKey.toHex }.map(_._2)
+      val rawDestData =
+        rawMap.find { case (k, _) => k.toHex == destStateKey.toHex }.map(_._2)
       if rawDestData.isDefined then
         // Try to decode destination account from raw state
         val bytes = rawDestData.get.toArray
@@ -895,9 +942,8 @@ class AccumulationHostCalls(
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * query (22): Return preimage request status packed in r7/r8.
-   */
+  /** query (22): Return preimage request status packed in r7/r8.
+    */
   private def handleQuery(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
     val length = getReg(instance, 8).toInt
@@ -910,14 +956,20 @@ class AccumulationHostCalls(
     // Read hash from memory
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(s"Query PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}")
+      throw new RuntimeException(
+        s"Query PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
+      )
 
     val key = PreimageKey(Hash(hashBuffer), length)
     var request = account.flatMap(_.preimageRequests.get(key))
 
     // If not in memory, check raw state data for preimage info
     if request.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(context.serviceIndex, length, JamBytes(hashBuffer))
+      val infoStateKey = StateKey.computePreimageInfoStateKey(
+        context.serviceIndex,
+        length,
+        JamBytes(hashBuffer)
+      )
       val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
       if rawInfoData.isDefined then
         // Decode preimage info from raw state
@@ -942,15 +994,14 @@ class AccumulationHostCalls(
       setReg(instance, 7, r7Value)
       setReg(instance, 8, r8Value)
 
-  /**
-   * solicit (23): Request a preimage.
-   * Request that a preimage be made available.
-   *
-   * Cases:
-   * - notRequestedYet (null): Create new entry with empty list []
-   * - isPreviouslyAvailable (count == 2): Append timeslot
-   * - Otherwise: Return HUH
-   */
+  /** solicit (23): Request a preimage. Request that a preimage be made
+    * available.
+    *
+    * Cases:
+    *   - notRequestedYet (null): Create new entry with empty list []
+    *   - isPreviouslyAvailable (count == 2): Append timeslot
+    *   - Otherwise: Return HUH
+    */
   private def handleSolicit(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
     val length = (getReg(instance, 8) & ULong(0xffffffffL)).toInt
@@ -965,14 +1016,20 @@ class AccumulationHostCalls(
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException("Solicit PANIC: Failed to read hash from memory")
+      throw new RuntimeException(
+        "Solicit PANIC: Failed to read hash from memory"
+      )
 
     val key = PreimageKey(Hash(hashBuffer), length)
     var existingRequest = acc.preimageRequests.get(key)
 
     // Also check raw state for preimage info if not found in memory
     if existingRequest.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(context.serviceIndex, length, JamBytes(hashBuffer))
+      val infoStateKey = StateKey.computePreimageInfoStateKey(
+        context.serviceIndex,
+        length,
+        JamBytes(hashBuffer)
+      )
       val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
       if rawInfoData.isDefined then
         val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
@@ -989,18 +1046,23 @@ class AccumulationHostCalls(
     // Calculate new footprint for threshold balance check
     val lengthUnsigned = (length.toLong & 0xffffffffL)
     val info = acc.info
-    val (newItems, newBytes): (Int, Long) = if notRequestedYet then
-      (info.items + 2, info.bytesUsed + 81 + lengthUnsigned)
-    else
-      (info.items, info.bytesUsed)
+    val (newItems, newBytes): (Int, Long) =
+      if notRequestedYet then
+        (info.items + 2, info.bytesUsed + 81 + lengthUnsigned)
+      else (info.items, info.bytesUsed)
 
-    val thresholdBalance = calculateThreshold(newItems, newBytes, info.depositOffset)
+    val thresholdBalance =
+      calculateThreshold(newItems, newBytes, info.depositOffset)
     if !meetsThreshold(info.balance, thresholdBalance) then
       setReg(instance, 7, HostCallResult.FULL)
       return
 
     // Compute preimage info state key
-    val stateKey = StateKey.computePreimageInfoStateKey(context.serviceIndex, length, JamBytes(hashBuffer))
+    val stateKey = StateKey.computePreimageInfoStateKey(
+      context.serviceIndex,
+      length,
+      JamBytes(hashBuffer)
+    )
 
     // Apply the change
     if notRequestedYet then
@@ -1008,7 +1070,8 @@ class AccumulationHostCalls(
       val newTimeslots = List.empty[Long]
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) = StateKey.encodePreimageInfoValue(newTimeslots)
+      context.x.rawServiceDataByStateKey(stateKey) =
+        StateKey.encodePreimageInfoValue(newTimeslots)
       // Update footprint
       val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
       context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
@@ -1017,20 +1080,22 @@ class AccumulationHostCalls(
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) = StateKey.encodePreimageInfoValue(newTimeslots)
+      context.x.rawServiceDataByStateKey(stateKey) =
+        StateKey.encodePreimageInfoValue(newTimeslots)
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * forget (24): Forget a preimage request.
-   * Mark a preimage as no longer needed or remove it.
-   *
-   * Cases:
-   * - canExpunge (count == 0 || (count == 2 && requestedAt[1] < minHoldSlot)): Remove entry
-   * - isAvailable1 (count == 1): Append timeslot
-   * - isAvailable3 (count == 3 && requestedAt[1] < minHoldSlot): Update to [requestedAt[2], timeslot]
-   * - Otherwise: Return HUH
-   */
+  /** forget (24): Forget a preimage request. Mark a preimage as no longer
+    * needed or remove it.
+    *
+    * Cases:
+    *   - canExpunge (count == 0 || (count == 2 && requestedAt[1] <
+    *     minHoldSlot)): Remove entry
+    *   - isAvailable1 (count == 1): Append timeslot
+    *   - isAvailable3 (count == 3 && requestedAt[1] < minHoldSlot): Update to
+    *     [requestedAt[2], timeslot]
+    *   - Otherwise: Return HUH
+    */
   private def handleForget(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
     val length = getReg(instance, 8).toInt
@@ -1045,14 +1110,20 @@ class AccumulationHostCalls(
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException("Forget PANIC: Failed to read hash from memory")
+      throw new RuntimeException(
+        "Forget PANIC: Failed to read hash from memory"
+      )
 
     val key = PreimageKey(Hash(hashBuffer), length)
     var existingRequest = acc.preimageRequests.get(key)
 
     // Also check raw state for preimage info if not found in memory
     if existingRequest.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(context.serviceIndex, length, JamBytes(hashBuffer))
+      val infoStateKey = StateKey.computePreimageInfoStateKey(
+        context.serviceIndex,
+        length,
+        JamBytes(hashBuffer)
+      )
       val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
       if rawInfoData.isDefined then
         val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
@@ -1063,11 +1134,15 @@ class AccumulationHostCalls(
       return
 
     val historyCount = existingRequest.get.requestedAt.size
-    val minHoldSlot = math.max(0L, context.timeslot - config.preimageExpungePeriod)
+    val minHoldSlot =
+      math.max(0L, context.timeslot - config.preimageExpungePeriod)
 
-    val canExpunge = historyCount == 0 || (historyCount == 2 && existingRequest.get.requestedAt(1) < minHoldSlot)
+    val canExpunge =
+      historyCount == 0 || (historyCount == 2 && existingRequest.get
+        .requestedAt(1) < minHoldSlot)
     val isAvailable1 = historyCount == 1
-    val isAvailable3 = historyCount == 3 && existingRequest.get.requestedAt(1) < minHoldSlot
+    val isAvailable3 =
+      historyCount == 3 && existingRequest.get.requestedAt(1) < minHoldSlot
 
     val canForget = canExpunge || isAvailable1 || isAvailable3
 
@@ -1076,7 +1151,11 @@ class AccumulationHostCalls(
       return
 
     // Compute preimage info state key
-    val stateKey = StateKey.computePreimageInfoStateKey(context.serviceIndex, length, JamBytes(hashBuffer))
+    val stateKey = StateKey.computePreimageInfoStateKey(
+      context.serviceIndex,
+      length,
+      JamBytes(hashBuffer)
+    )
 
     // Apply the change
     val info = acc.info
@@ -1089,7 +1168,11 @@ class AccumulationHostCalls(
       val preimageHash = Hash(hashBuffer)
       acc.preimages.remove(preimageHash)
       val preimageStateKey =
-        StateKey.computeServiceDataStateKey(context.serviceIndex, 0xfffffffeL, JamBytes(preimageHash.bytes))
+        StateKey.computeServiceDataStateKey(
+          context.serviceIndex,
+          0xfffffffeL,
+          JamBytes(preimageHash.bytes)
+        )
       context.x.rawServiceDataByStateKey.remove(preimageStateKey)
       // Update footprint: decrease items by 2 and bytes by 81 + length
       val newItems = math.max(0, info.items - 2)
@@ -1101,19 +1184,21 @@ class AccumulationHostCalls(
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) = StateKey.encodePreimageInfoValue(newTimeslots)
+      context.x.rawServiceDataByStateKey(stateKey) =
+        StateKey.encodePreimageInfoValue(newTimeslots)
     else if isAvailable3 then
       // Update to [requestedAt[2], timeslot]
-      val newTimeslots = List(existingRequest.get.requestedAt(2), context.timeslot)
+      val newTimeslots =
+        List(existingRequest.get.requestedAt(2), context.timeslot)
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) = StateKey.encodePreimageInfoValue(newTimeslots)
+      context.x.rawServiceDataByStateKey(stateKey) =
+        StateKey.encodePreimageInfoValue(newTimeslots)
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * provide (26): Provide a preimage for another service.
-   */
+  /** provide (26): Provide a preimage for another service.
+    */
   private def handleProvide(instance: PvmInstance): Unit =
     val targetServiceId = getReg(instance, 7).toLong
     val blobAddr = getReg(instance, 8).toInt
@@ -1140,7 +1225,8 @@ class AccumulationHostCalls(
     // Check if preimage has been solicited
     val preimageKey = PreimageKey(Hash(preimageHash.bytes.toArray), blobLen)
     val preimageRequest = targetAccount.get.preimageRequests.get(preimageKey)
-    val existingPreimage = targetAccount.get.preimages.get(Hash(preimageHash.bytes.toArray))
+    val existingPreimage =
+      targetAccount.get.preimages.get(Hash(preimageHash.bytes.toArray))
 
     // If no request exists OR preimage already provided -> HUH
     if preimageRequest.isEmpty || existingPreimage.isDefined then
@@ -1157,107 +1243,153 @@ class AccumulationHostCalls(
     context.provisions += provisionEntry
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * yield (25): Set accumulation output hash.
-   */
+  /** yield (25): Set accumulation output hash.
+    */
   private def handleYield(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
 
     // Read hash from memory
     val hashBuffer = new Array[Byte](32)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(s"Yield PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}")
+      throw new RuntimeException(
+        s"Yield PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
+      )
 
     // Store the yield in the context
     context.yieldHash = Some(JamBytes(hashBuffer))
     setReg(instance, 7, HostCallResult.OK)
 
-  /**
-   * log (100): Debug logging host call (JIP-1)
-   * Gas cost: 10, always returns WHAT
-   */
+  /** log (100): Debug logging host call (JIP-1) Gas cost: 10, always returns
+    * WHAT
+    */
   private def handleLog(instance: PvmInstance): Unit =
     setReg(instance, 7, HostCallResult.WHAT)
 
   private var cachedConstantsBlob: Array[Byte] = null
 
-  /**
-   * Encode protocol configuration as expected by the guest.
-   * Uses actual config values for correct behavior in both tiny and full configs.
-   * Caches the result since it's constant for the lifetime of this handler.
-   */
+  /** Encode protocol configuration as expected by the guest. Uses actual config
+    * values for correct behavior in both tiny and full configs. Caches the
+    * result since it's constant for the lifetime of this handler.
+    */
   private def getConstantsBlob(): Array[Byte] =
     if cachedConstantsBlob == null then
       cachedConstantsBlob = buildConstantsBlob()
     cachedConstantsBlob
 
-  /**
-   * Build the constants blob (called once and cached).
-   */
+  /** Build the constants blob (called once and cached).
+    */
   private def buildConstantsBlob(): Array[Byte] =
     val buffer = new java.io.ByteArrayOutputStream(256)
 
     // Config-dependent values
     val isTiny = config.validatorCount == 6
 
-    buffer.write(encodeLong(config.additionalMinBalancePerStateItem)) // additionalMinBalancePerStateItem (UInt64)
-    buffer.write(encodeLong(config.additionalMinBalancePerStateByte)) // additionalMinBalancePerStateByte (UInt64)
-    buffer.write(encodeLong(config.serviceMinBalance)) // serviceMinBalance (UInt64)
+    buffer.write(
+      encodeLong(config.additionalMinBalancePerStateItem)
+    ) // additionalMinBalancePerStateItem (UInt64)
+    buffer.write(
+      encodeLong(config.additionalMinBalancePerStateByte)
+    ) // additionalMinBalancePerStateByte (UInt64)
+    buffer.write(
+      encodeLong(config.serviceMinBalance)
+    ) // serviceMinBalance (UInt64)
     buffer.write(encodeShort(config.coresCount)) // totalNumberOfCores (UInt16)
-    buffer.write(encodeIntLE(config.preimageExpungePeriod)) // preimagePurgePeriod (UInt32)
+    buffer.write(
+      encodeIntLE(config.preimageExpungePeriod)
+    ) // preimagePurgePeriod (UInt32)
     buffer.write(encodeIntLE(config.epochLength)) // epochLength (UInt32)
-    buffer.write(encodeLong(config.reportAccGas)) // workReportAccumulationGas (UInt64)
-    buffer.write(encodeLong(50_000_000L)) // workPackageIsAuthorizedGas (UInt64) - same for both configs
-    buffer.write(encodeLong(config.maxRefineGas)) // workPackageRefineGas (UInt64)
-    buffer.write(encodeLong(if isTiny then config.maxBlockGas else 3_500_000_000L)) // totalAccumulationGas (UInt64)
-    buffer.write(encodeShort(config.maxBlockHistory)) // recentHistorySize (UInt16)
-    buffer.write(encodeShort(16)) // maxWorkItems (UInt16) - same for both configs
-    buffer.write(encodeShort(config.maxDependencies)) // maxDepsInWorkReport (UInt16)
-    buffer.write(encodeShort(config.maxTicketsPerExtrinsic)) // maxTicketsPerExtrinsic (UInt16)
-    buffer.write(encodeIntLE(if isTiny then 24 else 14400)) // maxLookupAnchorAge (UInt32)
-    buffer.write(encodeShort(config.ticketsPerValidator)) // ticketEntriesPerValidator (UInt16)
-    buffer.write(encodeShort(8)) // maxAuthorizationsPoolItems (UInt16) - same for both configs
+    buffer.write(
+      encodeLong(config.reportAccGas)
+    ) // workReportAccumulationGas (UInt64)
+    buffer.write(
+      encodeLong(50_000_000L)
+    ) // workPackageIsAuthorizedGas (UInt64) - same for both configs
+    buffer.write(
+      encodeLong(config.maxRefineGas)
+    ) // workPackageRefineGas (UInt64)
+    buffer.write(
+      encodeLong(if isTiny then config.maxBlockGas else 3_500_000_000L)
+    ) // totalAccumulationGas (UInt64)
+    buffer.write(
+      encodeShort(config.maxBlockHistory)
+    ) // recentHistorySize (UInt16)
+    buffer.write(
+      encodeShort(16)
+    ) // maxWorkItems (UInt16) - same for both configs
+    buffer.write(
+      encodeShort(config.maxDependencies)
+    ) // maxDepsInWorkReport (UInt16)
+    buffer.write(
+      encodeShort(config.maxTicketsPerExtrinsic)
+    ) // maxTicketsPerExtrinsic (UInt16)
+    buffer.write(
+      encodeIntLE(if isTiny then 24 else 14400)
+    ) // maxLookupAnchorAge (UInt32)
+    buffer.write(
+      encodeShort(config.ticketsPerValidator)
+    ) // ticketEntriesPerValidator (UInt16)
+    buffer.write(
+      encodeShort(8)
+    ) // maxAuthorizationsPoolItems (UInt16) - same for both configs
     buffer.write(encodeShort(config.slotDuration)) // slotPeriodSeconds (UInt16)
-    buffer.write(encodeShort(config.authQueueSize)) // maxAuthorizationsQueueItems (UInt16)
-    buffer.write(encodeShort(config.rotationPeriod)) // coreAssignmentRotationPeriod (UInt16)
-    buffer.write(encodeShort(128)) // maxWorkPackageExtrinsics (UInt16) - same for both configs
-    buffer.write(encodeShort(5)) // preimageReplacementPeriod (UInt16) - same for both configs
-    buffer.write(encodeShort(config.validatorCount)) // totalNumberOfValidators (UInt16)
-    buffer.write(encodeIntLE(if isTiny then 64000 else 64_000_000)) // maxIsAuthorizedCodeSize (UInt32)
-    buffer.write(encodeIntLE(if isTiny then 13_791_360 else 12_000_000)) // maxEncodedWorkPackageSize (UInt32)
-    buffer.write(encodeIntLE(if isTiny then 4_000_000 else 5_000_000)) // maxServiceCodeSize (UInt32)
-    buffer.write(encodeIntLE(if isTiny then 4 else 12)) // erasureCodedPieceSize (UInt32)
+    buffer.write(
+      encodeShort(config.authQueueSize)
+    ) // maxAuthorizationsQueueItems (UInt16)
+    buffer.write(
+      encodeShort(config.rotationPeriod)
+    ) // coreAssignmentRotationPeriod (UInt16)
+    buffer.write(
+      encodeShort(128)
+    ) // maxWorkPackageExtrinsics (UInt16) - same for both configs
+    buffer.write(
+      encodeShort(5)
+    ) // preimageReplacementPeriod (UInt16) - same for both configs
+    buffer.write(
+      encodeShort(config.validatorCount)
+    ) // totalNumberOfValidators (UInt16)
+    buffer.write(
+      encodeIntLE(if isTiny then 64000 else 64_000_000)
+    ) // maxIsAuthorizedCodeSize (UInt32)
+    buffer.write(
+      encodeIntLE(if isTiny then 13_791_360 else 12_000_000)
+    ) // maxEncodedWorkPackageSize (UInt32)
+    buffer.write(
+      encodeIntLE(if isTiny then 4_000_000 else 5_000_000)
+    ) // maxServiceCodeSize (UInt32)
+    buffer.write(
+      encodeIntLE(if isTiny then 4 else 12)
+    ) // erasureCodedPieceSize (UInt32)
     buffer.write(encodeIntLE(3072)) // maxWorkPackageImports (UInt32)
-    buffer.write(encodeIntLE(config.numEcPiecesPerSegment)) // erasureCodedSegmentSize (UInt32)
+    buffer.write(
+      encodeIntLE(config.numEcPiecesPerSegment)
+    ) // erasureCodedSegmentSize (UInt32)
     buffer.write(encodeIntLE(48 * 1024)) // maxWorkReportBlobSize (UInt32) 48KB
     buffer.write(encodeIntLE(128)) // transferMemoSize (UInt32)
     buffer.write(encodeIntLE(3072)) // maxWorkPackageExports (UInt32)
-    buffer.write(encodeIntLE(config.ticketCutoff)) // ticketSubmissionEndSlot (UInt32)
+    buffer.write(
+      encodeIntLE(config.ticketCutoff)
+    ) // ticketSubmissionEndSlot (UInt32)
 
     buffer.toByteArray
 
-  /**
-   * Encode the full array of inputs.
-   */
+  /** Encode the full array of inputs.
+    */
   private def encodeOperandsList(): Array[Byte] =
     val buffer = mutable.ListBuffer.empty[Byte]
     // Gray Paper natural number encode the array length
     buffer ++= JamCodecs.encodeCompactInteger(operands.size.toLong)
     // Encode each operand using its existing encode() method (includes variant)
-    for operand <- operands do
-      buffer ++= operand.encode()
+    for operand <- operands do buffer ++= operand.encode()
     buffer.toArray
 
-  /**
-   * Encode a single operand.
-   */
+  /** Encode a single operand.
+    */
   private def encodeOperand(operand: AccumulationOperand): Array[Byte] =
     operand.encode()
 
-  /**
-   * Encode service ID as a 32-byte code hash (fixed-width little-endian encoding).
-   * Used for parent-child relationship verification in eject.
-   */
+  /** Encode service ID as a 32-byte code hash (fixed-width little-endian
+    * encoding). Used for parent-child relationship verification in eject.
+    */
   private def encodeServiceIdAsCodeHash(serviceId: Long): JamBytes =
     val bytes = new Array[Byte](32)
     // Little-endian encoding of service ID in first 4 bytes
@@ -1267,10 +1399,12 @@ class AccumulationHostCalls(
     bytes(3) = ((serviceId >> 24) & 0xff).toByte
     JamBytes(bytes)
 
-  /**
-   * Find the first available service index starting from a candidate.
-   */
-  private def findAvailableServiceIndex(candidate: Long, minPublicServiceIndex: Long): Long =
+  /** Find the first available service index starting from a candidate.
+    */
+  private def findAvailableServiceIndex(
+      candidate: Long,
+      minPublicServiceIndex: Long
+  ): Long =
     var i = candidate
     val s = minPublicServiceIndex
     val right = (0xffffffffL - s - 255).toLong
@@ -1300,24 +1434,35 @@ class AccumulationHostCalls(
     result
 
   /** Check if memory is writable at the given address and length */
-  private def isMemoryWritable(instance: PvmInstance, address: Int, length: Int): Boolean =
+  private def isMemoryWritable(
+      instance: PvmInstance,
+      address: Int,
+      length: Int
+  ): Boolean =
     instance.isMemoryAccessible(address, length)
 
   /** Read memory from PVM instance, returns true on success */
-  private def readMemory(instance: PvmInstance, address: Int, buffer: Array[Byte]): Boolean =
+  private def readMemory(
+      instance: PvmInstance,
+      address: Int,
+      buffer: Array[Byte]
+  ): Boolean =
     var i = 0
     while i < buffer.length do
       instance.readByte(address + i) match
         case Some(v) => buffer(i) = v
-        case None => return false
+        case None    => return false
       i += 1
     true
 
   /** Write memory to PVM instance, returns true on success */
-  private def writeMemory(instance: PvmInstance, address: Int, data: Array[Byte]): Boolean =
+  private def writeMemory(
+      instance: PvmInstance,
+      address: Int,
+      data: Array[Byte]
+  ): Boolean =
     var i = 0
     while i < data.length do
-      if !instance.writeByte(address + i, data(i)) then
-        return false
+      if !instance.writeByte(address + i, data(i)) then return false
       i += 1
     true

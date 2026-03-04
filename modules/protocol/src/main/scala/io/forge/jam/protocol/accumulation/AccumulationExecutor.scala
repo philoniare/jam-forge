@@ -12,25 +12,24 @@ import spire.math.{UInt, UByte}
 
 import scala.collection.mutable
 
-/**
- * Orchestrates PVM execution for accumulation.
- */
+/** Orchestrates PVM execution for accumulation.
+  */
 class AccumulationExecutor(val config: ChainConfig):
-  private val moduleCache: mutable.Map[JamBytes, InterpretedModule] = mutable.Map.empty
+  private val moduleCache: mutable.Map[JamBytes, InterpretedModule] =
+    mutable.Map.empty
   private val MAX_SERVICE_CODE_SIZE: Int = 4 * 1024 * 1024
   private val JAM_PAGE_SIZE = 4096
 
-  /**
-   * Execute accumulation for a single service.
-   * Implements the Psi_A function from Gray Paper.
-   */
+  /** Execute accumulation for a single service. Implements the Psi_A function
+    * from Gray Paper.
+    */
   def executeService(
-    partialState: PartialState,
-    timeslot: Long,
-    serviceId: Long,
-    gasLimit: Long,
-    entropy: JamBytes,
-    operands: List[AccumulationOperand]
+      partialState: PartialState,
+      timeslot: Long,
+      serviceId: Long,
+      gasLimit: Long,
+      entropy: JamBytes,
+      operands: List[AccumulationOperand]
   ): AccumulationOneResult =
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
@@ -39,17 +38,15 @@ class AccumulationExecutor(val config: ChainConfig):
     val acc = account.get
     val codeHash = acc.info.codeHash
 
-    // Look up service code from preimages or raw state data
-    val blobStateKey = StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, JamBytes(codeHash.bytes.toArray))
+    // Look up service code from service's own preimages
     val preimage = acc.preimages.get(Hash(codeHash.bytes.toArray))
-      .orElse(partialState.rawServiceDataByStateKey.get(blobStateKey))
 
     if preimage.isEmpty then
       return createEmptyResult(partialState, Some(serviceId), operands)
 
     val code = extractCodeBlob(preimage.get.toArray)
-    if code.isEmpty || code.get.isEmpty || code.get.length > MAX_SERVICE_CODE_SIZE then
-      return createEmptyResult(partialState, Some(serviceId), operands)
+    if code.isEmpty || code.get.isEmpty || code.get.length > MAX_SERVICE_CODE_SIZE
+    then return createEmptyResult(partialState, Some(serviceId), operands)
 
     // Apply incoming transfer balances before execution
     val transferBalance = operands.collect {
@@ -69,7 +66,11 @@ class AccumulationExecutor(val config: ChainConfig):
     val modValue = 0xffffffffL - s - 255 // 2^32 - Cminpublicindex - 2^8
     val candidateIndex = s + (initialIndex % modValue)
     val nextAccountIndex =
-      findAvailableServiceIndex(candidateIndex, minPublicServiceIndex, postTransferState.accounts.toMap)
+      findAvailableServiceIndex(
+        candidateIndex,
+        minPublicServiceIndex,
+        postTransferState.accounts.toMap
+      )
 
     // Create accumulation context with dual state
     val context = new AccumulationContext(
@@ -90,12 +91,13 @@ class AccumulationExecutor(val config: ChainConfig):
 
     // Determine yield based on exit reason
     val yieldHash: Option[JamBytes] = execResult.exitReason match
-      case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT | ExitReason.INVALID_CODE =>
+      case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT |
+          ExitReason.INVALID_CODE =>
         context.yieldCheckpoint
       case ExitReason.HALT =>
         execResult.output match
           case Some(out) if out.length == 32 => Some(JamBytes(out))
-          case _ => context.yieldHash
+          case _                             => context.yieldHash
       case _ => context.yieldHash
 
     val newDeferred = context.getDeferredTransfers(execResult.exitReason)
@@ -108,14 +110,13 @@ class AccumulationExecutor(val config: ChainConfig):
       provisions = context.getProvisions(execResult.exitReason)
     )
 
-  /**
-   * Execute PVM code with host call handling.
-   */
+  /** Execute PVM code with host call handling.
+    */
   private def executePvm(
-    context: AccumulationContext,
-    code: Array[Byte],
-    gasLimit: Long,
-    operands: List[AccumulationOperand]
+      context: AccumulationContext,
+      code: Array[Byte],
+      gasLimit: Long,
+      operands: List[AccumulationOperand]
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
@@ -129,7 +130,11 @@ class AccumulationExecutor(val config: ChainConfig):
 
     val module = moduleOpt.get
 
-    val instance = InterpretedInstance.fromModule(module, inputData, forceStepTracing = false)
+    val instance = InterpretedInstance.fromModule(
+      module,
+      inputData,
+      forceStepTracing = false
+    )
 
     // Create PvmInstance wrapper for host calls
     val pvmWrapper = new InterpretedInstanceWrapper(instance)
@@ -191,8 +196,7 @@ class AccumulationExecutor(val config: ChainConfig):
             exitReason = ExitReason.OUT_OF_GAS
             continueExecution = false
           else
-            try
-              hostCalls.dispatch(hostId.signed, pvmWrapper)
+            try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
               case _: RuntimeException =>
                 exitReason = ExitReason.PANIC
@@ -203,7 +207,7 @@ class AccumulationExecutor(val config: ChainConfig):
           continueExecution = false
 
         case Right(InterruptKind.Step) =>
-          // Continue for step tracing
+        // Continue for step tracing
 
         case Left(_) =>
           exitReason = ExitReason.PANIC
@@ -215,29 +219,26 @@ class AccumulationExecutor(val config: ChainConfig):
     // Extract output on halt
     // Per PVM ABI: A0=r7, A1=r8 (not r10/r11 which are A3/A4)
     val output = if exitReason == ExitReason.HALT then
-      val addr = instance.reg(7).toInt  // A0
-      val len = instance.reg(8).toInt   // A1
-      val isReadable = instance.basicMemory.isReadable(spire.math.UInt(addr), len)
+      val addr = instance.reg(7).toInt // A0
+      val len = instance.reg(8).toInt // A1
+      val isReadable =
+        instance.basicMemory.isReadable(spire.math.UInt(addr), len)
       if len > 0 && len <= 1024 && isReadable then
         readMemoryBulk(instance, addr, len)
-      else if len == 0 then
-        Some(Array.empty[Byte])
-      else
-        None
-    else
-      None
+      else if len == 0 then Some(Array.empty[Byte])
+      else None
+    else None
 
     PvmExecResult(exitReason, gasUsed, output)
 
-  /**
-   * Get or compile a module from code bytes.
-   */
+  /** Get or compile a module from code bytes.
+    */
   private def getOrCompileModule(code: Array[Byte]): Option[InterpretedModule] =
     val codeHash = JamBytes(Hashing.blake2b256(code).bytes.toArray)
 
     moduleCache.get(codeHash) match
       case Some(module) => Some(module)
-      case None =>
+      case None         =>
         // Try JAM format first
         var blobOpt = parseJamFormat(code)
 
@@ -252,8 +253,7 @@ class AccumulationExecutor(val config: ChainConfig):
           )
 
         // If that fails too, try generic PVM format
-        if blobOpt.isEmpty then
-          blobOpt = ProgramBlob.parse(code)
+        if blobOpt.isEmpty then blobOpt = ProgramBlob.parse(code)
 
         blobOpt.flatMap { blob =>
           InterpretedModule.create(blob) match
@@ -263,9 +263,8 @@ class AccumulationExecutor(val config: ChainConfig):
             case Left(_) => None
         }
 
-  /**
-   * Parse JAM blob format.
-   */
+  /** Parse JAM blob format.
+    */
   private def parseJamFormat(data: Array[Byte]): Option[ProgramBlob] =
     if data.length < 15 then return None
 
@@ -275,8 +274,8 @@ class AccumulationExecutor(val config: ChainConfig):
     val heapPages = readLE2(data, offset); offset += 2
     val stackSize = readLE3(data, offset); offset += 3
 
-    if roDataLen > data.length || rwDataLen > data.length || stackSize > 1000000 then
-      return None
+    if roDataLen > data.length || rwDataLen > data.length || stackSize > 1000000
+    then return None
 
     if offset + roDataLen > data.length then return None
     val roData = new Array[Byte](roDataLen)
@@ -315,21 +314,26 @@ class AccumulationExecutor(val config: ChainConfig):
     (data(offset) & 0xff) | ((data(offset + 1) & 0xff) << 8)
 
   private def readLE3(data: Array[Byte], offset: Int): Int =
-    (data(offset) & 0xff) | ((data(offset + 1) & 0xff) << 8) | ((data(offset + 2) & 0xff) << 16)
+    (data(offset) & 0xff) | ((data(offset + 1) & 0xff) << 8) | ((data(
+      offset + 2
+    ) & 0xff) << 16)
 
   private def readLE4(data: Array[Byte], offset: Int): Int =
     (data(offset) & 0xff) | ((data(offset + 1) & 0xff) << 8) |
       ((data(offset + 2) & 0xff) << 16) | ((data(offset + 3) & 0xff) << 24)
 
-  private def readMemoryBulk(instance: InterpretedInstance, address: Int, length: Int): Option[Array[Byte]] =
+  private def readMemoryBulk(
+      instance: InterpretedInstance,
+      address: Int,
+      length: Int
+  ): Option[Array[Byte]] =
     instance.basicMemory.getMemorySlice(UInt(address), length) match
       case MemoryResult.Success(data) => Some(data)
-      case _ => None
+      case _                          => None
 
-  /**
-   * Extract code blob from preimage data.
-   * Format: metaLength (Gray Paper natural) + metadata + codeBlob
-   */
+  /** Extract code blob from preimage data. Format: metaLength (Gray Paper
+    * natural) + metadata + codeBlob
+    */
   private def extractCodeBlob(preimage: Array[Byte]): Option[Array[Byte]] =
     if preimage.isEmpty then return None
 
@@ -360,7 +364,11 @@ class AccumulationExecutor(val config: ChainConfig):
     if codeStart > preimage.length then return None
     Some(preimage.drop(codeStart))
 
-  private def calculateInitialIndex(serviceId: Long, entropy: JamBytes, timeslot: Long): Long =
+  private def calculateInitialIndex(
+      serviceId: Long,
+      entropy: JamBytes,
+      timeslot: Long
+  ): Long =
     val encodedServiceId = JamCodecs.encodeCompactInteger(serviceId)
     val encodedTimeslot = JamCodecs.encodeCompactInteger(timeslot)
     val data = encodedServiceId ++ entropy.toArray ++ encodedTimeslot
@@ -373,9 +381,9 @@ class AccumulationExecutor(val config: ChainConfig):
     result
 
   private def findAvailableServiceIndex(
-    candidate: Long,
-    minPublicServiceIndex: Long,
-    accounts: Map[Long, ServiceAccount]
+      candidate: Long,
+      minPublicServiceIndex: Long,
+      accounts: Map[Long, ServiceAccount]
   ): Long =
     var i = candidate
     val s = minPublicServiceIndex
@@ -386,9 +394,9 @@ class AccumulationExecutor(val config: ChainConfig):
     i
 
   private def createEmptyResult(
-    state: PartialState,
-    serviceId: Option[Long],
-    operands: List[AccumulationOperand]
+      state: PartialState,
+      serviceId: Option[Long],
+      operands: List[AccumulationOperand]
   ): AccumulationOneResult =
     val finalState = serviceId match
       case Some(sid) =>
@@ -398,7 +406,8 @@ class AccumulationExecutor(val config: ChainConfig):
             case AccumulationOperand.Transfer(t) => t.amount
           }.sum
           stateCopy.accounts(sid) = account.copy(
-            info = account.info.copy(balance = account.info.balance + transferBalance)
+            info = account.info
+              .copy(balance = account.info.balance + transferBalance)
           )
         }
         stateCopy
@@ -406,49 +415,49 @@ class AccumulationExecutor(val config: ChainConfig):
 
     AccumulationOneResult(finalState, List.empty, None, 0L, Set.empty)
 
-/**
- * Result of PVM execution.
- */
+/** Result of PVM execution.
+  */
 final case class PvmExecResult(
-  exitReason: ExitReason,
-  gasUsed: Long,
-  output: Option[Array[Byte]]
+    exitReason: ExitReason,
+    gasUsed: Long,
+    output: Option[Array[Byte]]
 )
 
-/**
- * Wrapper around InterpretedInstance to implement PvmInstance trait.
- */
-class InterpretedInstanceWrapper(instance: InterpretedInstance) extends PvmInstance:
+/** Wrapper around InterpretedInstance to implement PvmInstance trait.
+  */
+class InterpretedInstanceWrapper(instance: InterpretedInstance)
+    extends PvmInstance:
   override def reg(regIdx: Int): Long = instance.reg(regIdx)
-  override def setReg(regIdx: Int, value: Long): Unit = instance.setReg(regIdx, value)
+  override def setReg(regIdx: Int, value: Long): Unit =
+    instance.setReg(regIdx, value)
   override def gas: Long = instance.gas
   override def setGas(value: Long): Unit = instance.setGas(value)
 
   override def readByte(address: Int): Option[Byte] =
     instance.basicMemory.loadU8(UInt(address)) match
       case MemoryResult.Success(v) => Some(v.toByte)
-      case _ => None
+      case _                       => None
 
   override def writeByte(address: Int, value: Byte): Boolean =
     instance.basicMemory.storeU8(UInt(address), UByte(value)) match
       case MemoryResult.Success(_) => true
-      case _ => false
+      case _                       => false
 
   override def isMemoryAccessible(address: Int, length: Int): Boolean =
     instance.basicMemory.getMemorySlice(UInt(address), length) match
       case MemoryResult.Success(_) => true
-      case _ => false
+      case _                       => false
 
 def accumulateSequential(
-  gasLimit: Long,
-  deferredTransfers: List[DeferredTransfer],
-  reports: List[WorkReport],
-  partialState: PartialState,
-  freeGas: Map[Long, Long],
-  executor: AccumulationExecutor,
-  timeslot: Long,
-  entropy: JamBytes,
-  config: ChainConfig
+    gasLimit: Long,
+    deferredTransfers: List[DeferredTransfer],
+    reports: List[WorkReport],
+    partialState: PartialState,
+    freeGas: Map[Long, Long],
+    executor: AccumulationExecutor,
+    timeslot: Long,
+    entropy: JamBytes,
+    config: ChainConfig
 ): AccumulationSeqResult =
   if reports.isEmpty && deferredTransfers.isEmpty && freeGas.isEmpty then
     return AccumulationSeqResult(0, partialState, Set.empty, List.empty)
@@ -461,8 +470,7 @@ def accumulateSequential(
     if totalGas + reportGas <= gasLimit then
       totalGas += reportGas
       reportsToProcess += 1
-    else
-      breakLoop = true
+    else breakLoop = true
 
   val result = accumulateParallel(
     partialState,
@@ -474,7 +482,9 @@ def accumulateSequential(
     entropy
   )
 
-  val remainingGas = gasLimit - result.gasUsed.map(_._2).sum + deferredTransfers.map(_.gasLimit).sum
+  val remainingGas = gasLimit - result.gasUsed.map(_._2).sum + deferredTransfers
+    .map(_.gasLimit)
+    .sum
 
   if reportsToProcess < reports.size && remainingGas > 0 then
     val recursiveResult = accumulateSequential(
@@ -495,16 +505,21 @@ def accumulateSequential(
       result.gasUsed ++ recursiveResult.gasUsed
     )
   else
-    AccumulationSeqResult(reportsToProcess, result.postState, result.outputs, result.gasUsed)
+    AccumulationSeqResult(
+      reportsToProcess,
+      result.postState,
+      result.outputs,
+      result.gasUsed
+    )
 
 def accumulateParallel(
-  partialState: PartialState,
-  deferredTransfers: List[DeferredTransfer],
-  reports: List[WorkReport],
-  freeGas: Map[Long, Long],
-  executor: AccumulationExecutor,
-  timeslot: Long,
-  entropy: JamBytes
+    partialState: PartialState,
+    deferredTransfers: List[DeferredTransfer],
+    reports: List[WorkReport],
+    freeGas: Map[Long, Long],
+    executor: AccumulationExecutor,
+    timeslot: Long,
+    entropy: JamBytes
 ): AccumulationParResult =
   val services = mutable.Set.empty[Long]
   reports.foreach(_.results.foreach(r => services += r.serviceId.value.toLong))
@@ -518,20 +533,40 @@ def accumulateParallel(
 
   for serviceId <- services.toList.sorted do
     val operands = mutable.ListBuffer.empty[AccumulationOperand]
-    deferredTransfers.filter(_.destination == serviceId).foreach(t => operands += AccumulationOperand.Transfer(t))
-    extractOperandTuples(reports, serviceId).foreach(t => operands += AccumulationOperand.WorkItem(t))
+    deferredTransfers
+      .filter(_.destination == serviceId)
+      .foreach(t => operands += AccumulationOperand.Transfer(t))
+    extractOperandTuples(reports, serviceId).foreach(t =>
+      operands += AccumulationOperand.WorkItem(t)
+    )
 
-    val serviceGasLimit = calculateServiceGasLimit(reports, deferredTransfers, freeGas, serviceId)
-    val result = executor.executeService(currentState, timeslot, serviceId, serviceGasLimit, entropy, operands.toList)
+    val serviceGasLimit =
+      calculateServiceGasLimit(reports, deferredTransfers, freeGas, serviceId)
+    val result = executor.executeService(
+      currentState,
+      timeslot,
+      serviceId,
+      serviceGasLimit,
+      entropy,
+      operands.toList
+    )
 
     currentState = result.postState
     allGasUsed += ((serviceId, result.gasUsed))
     allTransfers ++= result.deferredTransfers
     result.yieldHash.foreach(h => allOutputs += Commitment(serviceId, h))
 
-  AccumulationParResult(currentState, allTransfers.toList, allOutputs.toSet, allGasUsed.toList)
+  AccumulationParResult(
+    currentState,
+    allTransfers.toList,
+    allOutputs.toSet,
+    allGasUsed.toList
+  )
 
-def extractOperandTuples(reports: List[WorkReport], serviceId: Long): List[OperandTuple] =
+def extractOperandTuples(
+    reports: List[WorkReport],
+    serviceId: Long
+): List[OperandTuple] =
   reports.flatMap { report =>
     report.results.filter(_.serviceId.value.toLong == serviceId).map { result =>
       OperandTuple(
@@ -547,25 +582,40 @@ def extractOperandTuples(reports: List[WorkReport], serviceId: Long): List[Opera
   }
 
 def calculateServiceGasLimit(
-  reports: List[WorkReport],
-  transfers: List[DeferredTransfer],
-  freeGas: Map[Long, Long],
-  serviceId: Long
+    reports: List[WorkReport],
+    transfers: List[DeferredTransfer],
+    freeGas: Map[Long, Long],
+    serviceId: Long
 ): Long =
   freeGas.getOrElse(serviceId, 0L) +
     transfers.filter(_.destination == serviceId).map(_.gasLimit).sum +
-    reports.flatMap(_.results.filter(_.serviceId.value.toLong == serviceId)).map(_.accumulateGas.toLong).sum
+    reports
+      .flatMap(_.results.filter(_.serviceId.value.toLong == serviceId))
+      .map(_.accumulateGas.toLong)
+      .sum
 
 final case class ReadyRecord(report: WorkReport, dependencies: List[JamBytes])
 
-def editReadyQueue(queue: List[ReadyRecord], accumulatedHashes: Set[JamBytes]): List[ReadyRecord] =
+def editReadyQueue(
+    queue: List[ReadyRecord],
+    accumulatedHashes: Set[JamBytes]
+): List[ReadyRecord] =
   queue
-    .filter(r => !accumulatedHashes.contains(JamBytes(r.report.packageSpec.hash.bytes.toArray)))
-    .map(r => ReadyRecord(r.report, r.dependencies.filter(!accumulatedHashes.contains(_))))
+    .filter(r =>
+      !accumulatedHashes.contains(
+        JamBytes(r.report.packageSpec.hash.bytes.toArray)
+      )
+    )
+    .map(r =>
+      ReadyRecord(
+        r.report,
+        r.dependencies.filter(!accumulatedHashes.contains(_))
+      )
+    )
 
 def extractAccumulatableReports(
-  queue: List[ReadyRecord],
-  initiallyAccumulated: Set[JamBytes]
+    queue: List[ReadyRecord],
+    initiallyAccumulated: Set[JamBytes]
 ): (List[WorkReport], List[ReadyRecord]) =
   val accumulated = mutable.Set.from(initiallyAccumulated)
   val result = mutable.ListBuffer.empty[WorkReport]
@@ -573,9 +623,9 @@ def extractAccumulatableReports(
   var continue = true
 
   while continue do
-    val (ready, notReady) = remaining.partition(_.dependencies.forall(accumulated.contains))
-    if ready.isEmpty then
-      continue = false
+    val (ready, notReady) =
+      remaining.partition(_.dependencies.forall(accumulated.contains))
+    if ready.isEmpty then continue = false
     else
       ready.foreach { record =>
         result += record.report
