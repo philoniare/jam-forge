@@ -154,9 +154,9 @@ class BlockImporter(
 
           ImportResult.Success(rawPostState, mergedState, Some(safrolePostState))
     catch
-      case e: Exception =>
+      case e: Throwable =>
         e.printStackTrace()
-        ImportResult.Failure(ImportError.UnknownError, e.getMessage)
+        ImportResult.Failure(ImportError.UnknownError, Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
 
   /**
    * Maps pipeline errors to import errors.

@@ -40,7 +40,19 @@ class ProtocolHandler(
     readMessage(socket).flatMap {
       case Some((msg, size)) =>
         logger.logInfo(s"Received message of size $size bytes, processing...") *>
-        handleMessage(msg, size, socket) *> connectionLoop(socket)
+        handleMessage(msg, size, socket).handleErrorWith { error =>
+          // Log error but try to send error response and continue processing
+          logger.logError(s"Error handling message: ${error.getClass.getSimpleName}", error) *>
+          (for
+            _ <- sendMessage(socket, ProtocolMessage.ErrorMsg(Error(
+              s"Internal error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
+            )))
+          yield ()).handleErrorWith { sendError =>
+            // If we can't even send the error response, the socket is dead
+            logger.logError(s"Failed to send error response, connection lost", sendError) *>
+              IO.raiseError(sendError)
+          }
+        } *> connectionLoop(socket)
       case None =>
         logger.logInfo("Connection closed by peer (read returned None)")
     }.handleErrorWith { error =>
@@ -199,37 +211,38 @@ class ProtocolHandler(
    * Handle ImportBlock message.
    */
   private def handleImportBlock(importBlock: ImportBlock, socket: Socket[IO]): IO[Unit] =
-    IO {
-      val block = importBlock.block
-      val parentHash = block.header.parent
+    IO.blocking {
+      try
+        val block = importBlock.block
+        val parentHash = block.header.parent
 
-      // Look up parent state
-      stateStore.get(parentHash) match
-        case None =>
-          Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
-        case Some(parentState) =>
-          // Import block using existing BlockImporter
-          blockImporter.importBlock(block, parentState) match
-            case ImportResult.Success(postState, _, _) =>
-              // Compute header hash for this block
-              val headerBytes = block.header.encode
-              val headerHash = Hashing.blake2b256(headerBytes)
+        // Look up parent state
+        stateStore.get(parentHash) match
+          case None =>
+            Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
+          case Some(parentState) =>
+            // Import block using existing BlockImporter
+            blockImporter.importBlock(block, parentState) match
+              case ImportResult.Success(postState, _, _) =>
+                // Compute header hash for this block
+                val headerBytes = block.header.encode
+                val headerHash = Hashing.blake2b256(headerBytes)
 
-              // Store the new state
-              val isOriginal = stateStore.isOriginalBlock(parentHash)
-              stateStore.store(headerHash, postState, isOriginal)
+                // Store the new state
+                val isOriginal = stateStore.isOriginalBlock(parentHash)
+                stateStore.store(headerHash, postState, isOriginal)
 
-              // Update ancestry if this is an original block
-              if isOriginal then
-                stateStore.addToAncestry(AncestryItem(block.header.slot, headerHash))
+                // Update ancestry if this is an original block
+                if isOriginal then
+                  stateStore.addToAncestry(AncestryItem(block.header.slot, headerHash))
 
-              Right(postState.stateRoot)
+                Right(postState.stateRoot)
 
-            case ImportResult.Failure(error, message) =>
-              Left(s"Import failed: $error - $message")
-    }.handleErrorWith { error =>
-      logger.logError(s"ImportBlock: exception during processing", error) *>
-        IO.pure(Left(s"Import exception: ${error.getClass.getSimpleName} - ${error.getMessage}"))
+              case ImportResult.Failure(error, message) =>
+                Left(s"Import failed: $error - $message")
+      catch
+        case e: Throwable =>
+          Left(s"Import exception: ${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}")
     }.flatMap {
       case Right(stateRoot) =>
         val response = ProtocolMessage.StateRootMsg(StateRoot(stateRoot))
