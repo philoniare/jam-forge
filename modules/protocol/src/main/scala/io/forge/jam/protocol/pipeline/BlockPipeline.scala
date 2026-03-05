@@ -6,6 +6,7 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.JamState
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
+import io.forge.jam.protocol.accumulation.AccumulationExecutor
 import io.forge.jam.protocol.pipeline.PipelineTypes.*
 import io.forge.jam.protocol.pipeline.LiftedStfs.*
 import io.forge.jam.protocol.pipeline.IntermediateSteps.*
@@ -40,7 +41,8 @@ object BlockPipeline:
     block: Block,
     initialState: JamState,
     config: ChainConfig,
-    skipAncestryValidation: Boolean = false
+    skipAncestryValidation: Boolean = false,
+    sharedExecutor: Option[AccumulationExecutor] = None
   ): Either[PipelineError, BlockPipelineResult] =
     val initialContext = PipelineContext.from(block, config, initialState)
 
@@ -76,7 +78,7 @@ object BlockPipeline:
       _ <- capturePreAccumulationState
 
       // Step 7: Accumulation
-      accOut <- accumulation
+      accOut <- accumulation(sharedExecutor)
       accRoot = Hash(accOut.ok.toArray)
       _ <- storeAccumulateRoot(accRoot)
       _ <- storeAccumulationStats(accOut.accumulationStats)

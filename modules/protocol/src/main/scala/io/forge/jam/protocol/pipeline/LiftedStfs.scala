@@ -10,7 +10,7 @@ import io.forge.jam.protocol.assurance.AssuranceTransition
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
 import io.forge.jam.protocol.report.ReportTransition
 import io.forge.jam.protocol.report.ReportTypes.*
-import io.forge.jam.protocol.accumulation.{AccumulationTransition, AccumulationOutputData}
+import io.forge.jam.protocol.accumulation.{AccumulationTransition, AccumulationOutputData, AccumulationExecutor}
 import io.forge.jam.protocol.history.HistoryTransition
 import io.forge.jam.protocol.history.HistoryTypes.*
 import io.forge.jam.protocol.authorization.AuthorizationTransition
@@ -71,10 +71,10 @@ object LiftedStfs:
   )
 
   // 5. Accumulation STF (never fails - returns Either[Nothing, AccumulationOutputData])
-  val accumulation: StfStepWith[AccumulationOutputData] = StateT {
+  def accumulation(sharedExecutor: Option[AccumulationExecutor] = None): StfStepWith[AccumulationOutputData] = StateT {
     case (state, ctx) =>
       val input = InputExtractor.extractAccumulationInput(ctx.availableReports, ctx.block.header.slot.value.toLong)
-      val (newState, result) = AccumulationTransition.stf(input, state, ctx.config, ctx.preTransitionTau)
+      val (newState, result) = AccumulationTransition.stf(input, state, ctx.config, ctx.preTransitionTau, sharedExecutor)
       // Accumulation never returns Left, so we just extract Right
       result match
         case Right(output) => Right(((newState, ctx), output))

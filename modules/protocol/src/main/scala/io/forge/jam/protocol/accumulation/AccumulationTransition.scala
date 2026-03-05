@@ -32,7 +32,8 @@ object AccumulationTransition:
     input: AccumulationInput,
     state: JamState,
     config: ChainConfig,
-    prevSlot: Long
+    prevSlot: Long,
+    sharedExecutor: Option[AccumulationExecutor] = None
   ): (JamState, AccumulationOutput) =
     val entropyBytes = state.entropy.firstAsBytes
 
@@ -55,7 +56,7 @@ object AccumulationTransition:
     )
 
     val (postState, postStagingSet, postAuthQueues, output) =
-      stfInternal(input, preState, initStagingSet, initAuthQueues, config, prevSlot)
+      stfInternal(input, preState, initStagingSet, initAuthQueues, config, prevSlot, sharedExecutor)
 
     val stagingSetChanged = postStagingSet.map(_.toHex) != initStagingSet.map(_.toHex)
 
@@ -104,7 +105,8 @@ object AccumulationTransition:
     initStagingSet: List[JamBytes],
     initAuthQueues: List[List[JamBytes]],
     config: ChainConfig,
-    prevSlot: Long
+    prevSlot: Long,
+    sharedExecutor: Option[AccumulationExecutor] = None
   ): (AccumulationState, List[JamBytes], List[List[JamBytes]], AccumulationOutput) =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max((input.slot - prevSlot).toInt, 1)
@@ -204,8 +206,8 @@ object AccumulationTransition:
     val minTotalGas = config.reportAccGas * config.coresCount + sumPrivilegedGas
     val totalGasLimit = Math.max(config.maxBlockGas, minTotalGas)
 
-    // Create executor (now directly uses PVM, no strategy pattern needed)
-    val executor = new AccumulationExecutor(config)
+    // Use shared executor if provided (for module cache reuse), otherwise create new
+    val executor = sharedExecutor.getOrElse(new AccumulationExecutor(config))
 
     // Execute outer accumulation with recursive deferred transfer processing
     val outerResult = outerAccumulate(

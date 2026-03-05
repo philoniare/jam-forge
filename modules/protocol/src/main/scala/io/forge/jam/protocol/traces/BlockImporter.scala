@@ -80,6 +80,9 @@ class BlockImporter(
 ):
   private val logger = LoggerFactory.getLogger(getClass)
 
+  // Shared PVM module cache across block imports to avoid recompiling same service code
+  private val sharedExecutor = new io.forge.jam.protocol.accumulation.AccumulationExecutor(config)
+
   /**
    * Imports a block and applies all state transitions using the unified JamState pipeline.
    * Returns the computed post-state with updated state root.
@@ -101,7 +104,7 @@ class BlockImporter(
       val jamState = JamState.fromFullJamState(fullPreState, config)
 
       // Step 2: Execute the STF pipeline using Kleisli composition
-      BlockPipeline.execute(block, jamState, config, skipAncestryValidation) match
+      BlockPipeline.execute(block, jamState, config, skipAncestryValidation, Some(sharedExecutor)) match
         case Left(error) =>
           ImportResult.Failure(mapPipelineError(error), error.message)
 
