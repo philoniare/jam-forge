@@ -15,8 +15,20 @@ import scala.collection.mutable
 /** Orchestrates PVM execution for accumulation.
   */
 class AccumulationExecutor(val config: ChainConfig):
-  private val moduleCache: mutable.Map[JamBytes, InterpretedModule] =
-    mutable.Map.empty
+  // LRU-bounded module cache to prevent unbounded memory growth
+  private val MAX_MODULE_CACHE_SIZE = 256
+  private val moduleCache
+      : java.util.LinkedHashMap[JamBytes, InterpretedModule] =
+    new java.util.LinkedHashMap[JamBytes, InterpretedModule](
+      MAX_MODULE_CACHE_SIZE,
+      0.75f,
+      true
+    ) {
+      override def removeEldestEntry(
+          eldest: java.util.Map.Entry[JamBytes, InterpretedModule]
+      ): Boolean =
+        size() > MAX_MODULE_CACHE_SIZE
+    }
   private val MAX_SERVICE_CODE_SIZE: Int = 4 * 1024 * 1024
   private val JAM_PAGE_SIZE = 4096
 
@@ -69,12 +81,12 @@ class AccumulationExecutor(val config: ChainConfig):
       findAvailableServiceIndex(
         candidateIndex,
         minPublicServiceIndex,
-        postTransferState.accounts.toMap
+        postTransferState.accounts
       )
 
     // Create accumulation context with dual state
     val context = new AccumulationContext(
-      x = postTransferState.deepCopy(),
+      x = postTransferState,
       y = postTransferState.deepCopy(),
       serviceIndex = serviceId,
       timeslot = timeslot,
@@ -236,32 +248,32 @@ class AccumulationExecutor(val config: ChainConfig):
   private def getOrCompileModule(code: Array[Byte]): Option[InterpretedModule] =
     val codeHash = JamBytes(Hashing.blake2b256(code).bytes.toArray)
 
-    moduleCache.get(codeHash) match
-      case Some(module) => Some(module)
-      case None         =>
-        // Try JAM format first
-        var blobOpt = parseJamFormat(code)
+    val cached = moduleCache.get(codeHash)
+    if cached != null then Some(cached)
+    else
+      // Try JAM format first
+      var blobOpt = parseJamFormat(code)
 
-        // If that fails, try raw code+jumptable format
-        if blobOpt.isEmpty then
-          blobOpt = ProgramBlob.fromCodeAndJumpTable(
-            data = code,
-            roData = Array.empty,
-            rwData = new Array[Byte](262144),
-            stackSize = 65536,
-            is64Bit = true
-          )
+      // If that fails, try raw code+jumptable format
+      if blobOpt.isEmpty then
+        blobOpt = ProgramBlob.fromCodeAndJumpTable(
+          data = code,
+          roData = Array.empty,
+          rwData = new Array[Byte](262144),
+          stackSize = 65536,
+          is64Bit = true
+        )
 
-        // If that fails too, try generic PVM format
-        if blobOpt.isEmpty then blobOpt = ProgramBlob.parse(code)
+      // If that fails too, try generic PVM format
+      if blobOpt.isEmpty then blobOpt = ProgramBlob.parse(code)
 
-        blobOpt.flatMap { blob =>
-          InterpretedModule.create(blob) match
-            case Right(module) =>
-              moduleCache(codeHash) = module
-              Some(module)
-            case Left(_) => None
-        }
+      blobOpt.flatMap { blob =>
+        InterpretedModule.create(blob) match
+          case Right(module) =>
+            moduleCache.put(codeHash, module)
+            Some(module)
+          case Left(_) => None
+      }
 
   /** Parse JAM blob format.
     */
@@ -383,7 +395,7 @@ class AccumulationExecutor(val config: ChainConfig):
   private def findAvailableServiceIndex(
       candidate: Long,
       minPublicServiceIndex: Long,
-      accounts: Map[Long, ServiceAccount]
+      accounts: scala.collection.Map[Long, ServiceAccount]
   ): Long =
     var i = candidate
     val s = minPublicServiceIndex
@@ -400,17 +412,23 @@ class AccumulationExecutor(val config: ChainConfig):
   ): AccumulationOneResult =
     val finalState = serviceId match
       case Some(sid) =>
-        val stateCopy = state.deepCopy()
-        stateCopy.accounts.get(sid).foreach { account =>
-          val transferBalance = operands.collect {
-            case AccumulationOperand.Transfer(t) => t.amount
-          }.sum
-          stateCopy.accounts(sid) = account.copy(
-            info = account.info
-              .copy(balance = account.info.balance + transferBalance)
-          )
-        }
-        stateCopy
+        val transferBalance = operands.collect {
+          case AccumulationOperand.Transfer(t) => t.amount
+        }.sum
+        if transferBalance > 0 then
+          state.accounts.get(sid) match
+            case Some(account) =>
+              val shallowCopy = state.shallowCopyWithAccountUpdate(
+                sid,
+                account.copy(info =
+                  account.info.copy(balance =
+                    account.info.balance + transferBalance
+                  )
+                )
+              )
+              shallowCopy
+            case None => state
+        else state
       case None => state
 
     AccumulationOneResult(finalState, List.empty, None, 0L, Set.empty)

@@ -31,7 +31,7 @@ class StateStore:
 
   // Maximum number of non-ancestry states to retain for fork support
   // This bounds memory while allowing the fuzzer to build fork chains
-  private val maxExtraStates: Int = 64
+  private val maxExtraStates: Int = 32
 
   /**
    * Initialize the state store with genesis state and ancestry.

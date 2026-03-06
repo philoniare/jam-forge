@@ -43,10 +43,41 @@ object StateMerklization:
 
   /**
    * Convenience method that takes a List[KeyValue] instead of Map.
+   * Uses array-based splitting to avoid intermediate Map allocations.
    */
   def stateMerklize(keyvals: List[KeyValue]): Hash =
-    val map = keyvals.map(kv => (kv.key, kv.value)).toMap
-    stateMerklize(map)
+    val arr = keyvals.toArray
+    merklizeArray(arr, 0, arr.length, 0)
+
+  /**
+   * Array-based Merkle computation that avoids Map allocations.
+   * Works on a slice [from, until) of the array, partitioning in-place by bit.
+   */
+  private def merklizeArray(arr: Array[KeyValue], from: Int, until: Int, bitIndex: Int): Hash =
+    val size = until - from
+    if size == 0 then return ZERO_HASH
+    if size == 1 then
+      val kv = arr(from)
+      return Hashing.blake2b256(leaf(kv.key, kv.value))
+
+    // Partition in-place: move items with bit=0 to left, bit=1 to right
+    var lo = from
+    var hi = until - 1
+    while lo <= hi do
+      if !getBitDirect(arr(lo).key, bitIndex) then
+        lo += 1
+      else
+        // Swap with hi
+        val tmp = arr(lo)
+        arr(lo) = arr(hi)
+        arr(hi) = tmp
+        hi -= 1
+
+    val mid = lo // [from, mid) = left (bit=0), [mid, until) = right (bit=1)
+
+    val leftHash = merklizeArray(arr, from, mid, bitIndex + 1)
+    val rightHash = merklizeArray(arr, mid, until, bitIndex + 1)
+    Hashing.blake2b256(branch(leftHash, rightHash))
 
   /**
    * Create branch node (64 bytes).
@@ -114,6 +145,16 @@ object StateMerklization:
    * Bit 0 is the MSB of byte 0, bit 7 is the LSB of byte 0, etc.
    */
   def getBit(data: Array[Byte], i: Int): Boolean =
+    val byteIndex = i / 8
+    if byteIndex >= data.length then
+      return false
+    val bitIndex = 7 - (i % 8) // MSB first
+    (data(byteIndex) & (1 << bitIndex)) != 0
+
+  /**
+   * Get bit at position i directly from JamBytes without array copy.
+   */
+  private def getBitDirect(data: JamBytes, i: Int): Boolean =
     val byteIndex = i / 8
     if byteIndex >= data.length then
       return false

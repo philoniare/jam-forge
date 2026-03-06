@@ -687,10 +687,8 @@ object AccumulationTransition:
       }.sum
       val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
-      val serviceInitialState = initialState.deepCopy()
-
       val execResult = executor.executeService(
-        partialState = serviceInitialState,
+        partialState = initialState,
         timeslot = timeslot,
         serviceId = serviceId,
         gasLimit = totalGasLimit,
@@ -732,8 +730,8 @@ object AccumulationTransition:
       allProvisions ++= execResult.provisions
 
     // Apply all merged account changes to the initial state
-    val finalState = initialState.deepCopy()
-    allAccountChanges.applyTo(finalState)
+    allAccountChanges.applyTo(initialState)
+    val finalState = initialState
 
     val origManager = partialState.manager
     val origDelegator = partialState.delegator
@@ -855,9 +853,9 @@ object AccumulationTransition:
       changes.delegatorChange = Some(postState.delegator)
     if postState.registrar != initialState.registrar then
       changes.registrarChange = Some(postState.registrar)
-    if postState.assigners.toList != initialState.assigners.toList then
+    if postState.assigners != initialState.assigners then
       changes.assignersChange = Some(postState.assigners.toList)
-    if postState.alwaysAccers.toMap != initialState.alwaysAccers.toMap then
+    if postState.alwaysAccers != initialState.alwaysAccers then
       changes.alwaysAccersChange = Some(postState.alwaysAccers.toMap)
 
     // Check for rawServiceData changes (added or updated keys)
