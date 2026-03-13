@@ -64,11 +64,16 @@ class AccumulationExecutor(val config: ChainConfig):
     val transferBalance = operands.collect {
       case AccumulationOperand.Transfer(t) => t.amount
     }.sum
-    val updatedAccount = acc.copy(
-      info = acc.info.copy(balance = acc.info.balance + transferBalance)
-    )
     val postTransferState = partialState.deepCopy()
-    postTransferState.accounts(serviceId) = updatedAccount
+    val deepCopiedAccount = postTransferState.accounts(serviceId)
+    postTransferState.accounts(serviceId) = ServiceAccount(
+      info = deepCopiedAccount.info
+        .copy(balance = deepCopiedAccount.info.balance + transferBalance),
+      storage = deepCopiedAccount.storage,
+      preimages = deepCopiedAccount.preimages,
+      preimageRequests = deepCopiedAccount.preimageRequests,
+      lastAccumulated = deepCopiedAccount.lastAccumulated
+    )
 
     // Calculate initial nextAccountIndex per Gray Paper:
     // nextfreeid = check((decode[4]{blake(encode(serviceId, entropyaccumulator', timeslot))} mod (2^32-Cminpublicindex-2^8)) + Cminpublicindex)
@@ -210,7 +215,7 @@ class AccumulationExecutor(val config: ChainConfig):
           else
             try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
-              case _: RuntimeException =>
+              case e: RuntimeException =>
                 exitReason = ExitReason.PANIC
                 continueExecution = false
 
