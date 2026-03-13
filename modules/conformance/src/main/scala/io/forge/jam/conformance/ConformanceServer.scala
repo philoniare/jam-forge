@@ -62,6 +62,12 @@ object ServerConfig:
 object ConformanceServerApp extends IOApp:
 
   override def run(args: List[String]): IO[ExitCode] =
+    // Install JVM-level uncaught exception handler so crashes are always visible
+    Thread.setDefaultUncaughtExceptionHandler { (thread, throwable) =>
+      System.err.println(s"[JAM-FORGE FATAL] Uncaught exception in thread ${thread.getName}: ${throwable.getClass.getSimpleName} - ${throwable.getMessage}")
+      throwable.printStackTrace(System.err)
+    }
+
     args.toList match
       // CRaC warmup command
       case "warmup" :: warmupArgs =>
@@ -114,7 +120,8 @@ object SocketServer:
       IO.println("Server started, waiting for connections...") *>
         IO.never[ExitCode]
     }.handleErrorWith { error =>
-      IO.println(s"Server error: ${error.getMessage}") *>
+      IO.println(s"[JAM-FORGE ERROR] Server error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}") *>
+      IO.blocking { error.printStackTrace(System.err) } *>
         IO.pure(ExitCode.Error)
     }
 

@@ -42,6 +42,7 @@ class ProtocolHandler(
         logger.logInfo(s"Received message of size $size bytes, processing...") *>
         handleMessage(msg, size, socket).handleErrorWith { error =>
           // Log error but try to send error response and continue processing
+          IO.println(s"[JAM-FORGE ERROR] Error handling message: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}") *>
           logger.logError(s"Error handling message: ${error.getClass.getSimpleName}", error) *>
           (for
             _ <- sendMessage(socket, ProtocolMessage.ErrorMsg(Error(
@@ -56,8 +57,9 @@ class ProtocolHandler(
       case None =>
         logger.logInfo("Connection closed by peer (read returned None)")
     }.handleErrorWith { error =>
-      logger.logError(s"Protocol error in connectionLoop: ${error.getClass.getSimpleName}", error) *>
-        IO.raiseError(error)
+      IO.println(s"[JAM-FORGE ERROR] Protocol error in connectionLoop: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}") *>
+      IO.blocking { error.printStackTrace(System.err) } *>
+      logger.logError(s"Protocol error in connectionLoop, connection terminated: ${error.getClass.getSimpleName}", error)
     }
 
   /**
@@ -82,9 +84,16 @@ class ProtocolHandler(
         else
           readExactly(socket, length).flatMap { bodyBytes =>
             IO.blocking {
-              val jamBytes = JamBytes(bodyBytes)
-              val (msg, _) = ProtocolMessage.decodeMessage(jamBytes, 0, config)
-              Some((msg, length))
+              try
+                val jamBytes = JamBytes(bodyBytes)
+                val (msg, _) = ProtocolMessage.decodeMessage(jamBytes, 0, config)
+                Some((msg, length))
+              catch
+                case e: Throwable =>
+                  throw new RuntimeException(
+                    s"Failed to decode message of $length bytes: ${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}",
+                    e
+                  )
             }
           })
     }.handleErrorWith { error =>
@@ -211,7 +220,7 @@ class ProtocolHandler(
    * Handle ImportBlock message.
    */
   private def handleImportBlock(importBlock: ImportBlock, socket: Socket[IO]): IO[Unit] =
-    IO.blocking {
+    (IO.blocking {
       try
         val block = importBlock.block
         val parentHash = block.header.parent
@@ -253,6 +262,13 @@ class ProtocolHandler(
         val response = ProtocolMessage.ErrorMsg(Error(errorMsg))
         logger.logInfo(s"ImportBlock: failed - $errorMsg") *>
           sendMessage(socket, response)
+    }).handleErrorWith { error =>
+      // Catch-all: if anything escaped above (e.g. OOM, StackOverflow), still try to respond
+      val msg = s"Fatal import error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
+      IO.println(s"[JAM-FORGE ERROR] $msg") *>
+      IO.blocking { error.printStackTrace(System.err) } *>
+      logger.logError(msg, error) *>
+        sendMessage(socket, ProtocolMessage.ErrorMsg(Error(msg))).handleErrorWith(_ => IO.unit)
     }
 
   /**
