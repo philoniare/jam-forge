@@ -111,9 +111,6 @@ object SafroleTransition:
         preState.gammaA.size == config.epochLength
     )(transformTicketsSequence(preState.gammaA))
 
-    // Save pre-epoch gammaZ for ticket verification
-    val ticketVerificationGammaZ = preState.gammaZ
-
     // Handle epoch transition if needed
     val (stateAfterEpoch, epochMark) =
       if ctx.crossingEpochBoundary then
@@ -121,6 +118,9 @@ object SafroleTransition:
         (newState, Some(mark))
       else
         (preState, None)
+
+    // Use post-epoch gammaZ for ticket verification
+    val ticketVerificationGammaZ = stateAfterEpoch.gammaZ
 
     // Process ticket submissions
     val ticketResult =
@@ -267,7 +267,7 @@ object SafroleTransition:
         if ticket.attempt.toInt >= config.ticketsPerValidator then
           Left(SafroleErrorCode.BadTicketAttempt)
         else
-          // Verify ring VRF proof using pre-epoch ring root
+          // Verify ring VRF proof using post-epoch ring root
           BandersnatchWrapper.verifyRingProof(
             ticket.signature,
             verificationGammaZ,
@@ -310,10 +310,10 @@ object SafroleTransition:
   ): List[BandersnatchPublicKey] =
     val keys = validators.map(_.bandersnatch)
     (0 until epochLength).map { i =>
-      val iEncoded = uint32L.encode(i.toLong & 0xFFFFFFFFL).require.toByteArray
+      val iEncoded = uint32L.encode(i.toLong & 0xffffffffL).require.toByteArray
       val slotEntropy = Hashing.blake2b256(entropy.bytes ++ iEncoded)
       val indexResult = uint32L.decode(BitVector(slotEntropy.bytes.take(4).toArray)).require
-      val index = ((indexResult.value & 0xFFFFFFFFL) % validators.size).toInt
+      val index = ((indexResult.value & 0xffffffffL) % validators.size).toInt
       keys(index)
     }.toList
 

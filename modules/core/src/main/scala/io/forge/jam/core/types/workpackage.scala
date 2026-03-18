@@ -174,7 +174,7 @@ object workpackage:
         context <- cursor.get[Context]("context")
         coreIndex <- cursor.get[Int]("core_index")
         authorizerHash <- cursor.get[Hash]("authorizer_hash")
-        authGasUsed <- cursor.get[Long]("auth_gas_used")
+        authGasUsed <- cursor.get[BigInt]("auth_gas_used")
         authOutput <- cursor.get[String]("auth_output")
         segmentRootLookup <- cursor.get[List[SegmentRootLookup]]("segment_root_lookup")
         results <- cursor.get[List[WorkResult]]("results")
@@ -183,7 +183,7 @@ object workpackage:
         context,
         CoreIndex(coreIndex),
         authorizerHash,
-        Gas(authGasUsed),
+        Gas(spire.math.ULong.fromBigInt(authGasUsed)),
         JamBytes(parseHex(authOutput)),
         segmentRootLookup,
         results

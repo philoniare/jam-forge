@@ -48,12 +48,12 @@ object workresult:
 
     given Decoder[RefineLoad] = Decoder.instance { cursor =>
       for
-        gasUsed <- cursor.get[Long]("gas_used")
+        gasUsed <- cursor.get[BigInt]("gas_used")
         imports <- cursor.get[Int]("imports")
         extrinsicCount <- cursor.get[Int]("extrinsic_count")
-        extrinsicSize <- cursor.get[Long]("extrinsic_size")
+        extrinsicSize <- cursor.get[BigInt]("extrinsic_size")
         exports <- cursor.get[Int]("exports")
-      yield RefineLoad(Gas(gasUsed), UShort(imports), UShort(extrinsicCount), UInt(extrinsicSize.toInt), UShort(exports))
+      yield RefineLoad(Gas(spire.math.ULong.fromBigInt(gasUsed)), UShort(imports), UShort(extrinsicCount), UInt(extrinsicSize.toInt), UShort(exports))
     }
 
   /**

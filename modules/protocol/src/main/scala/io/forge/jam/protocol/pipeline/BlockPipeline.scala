@@ -47,6 +47,9 @@ object BlockPipeline:
     val initialContext = PipelineContext.from(block, config, initialState)
 
     val pipeline: StfStepWith[BlockPipelineResult] = for {
+      // Step 0: Validate extrinsic hash
+      _ <- validateExtrinsicHash
+
       // Step 1: Safrole
       safroleOut <- safrole
       _ <- storeSafroleOutput(safroleOut)
@@ -55,6 +58,7 @@ object BlockPipeline:
       _ <- validateBlockSeal
       _ <- validateEpochMark
       _ <- validateTicketsMark
+      _ <- validateEntropyVrf
 
       // Capture post-Safrole tau for later restoration
       postSafroleTau <- inspect((s, _) => s.tau)

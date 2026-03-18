@@ -558,6 +558,18 @@ object JamState:
         )
       }
 
+      // Extract ready queue package hashes and accumulated hashes
+      val readyQueuePkgHashes = state.accumulation.readyQueue.flatten.map(r =>
+        io.forge.jam.core.primitives.Hash(r.report.packageSpec.hash.bytes)
+      ).toSet
+      val accumulatedPkgHashes = state.accumulation.accumulated.flatten.map(jb =>
+        io.forge.jam.core.primitives.Hash(jb.toArray)
+      ).toSet
+      // Also add package hashes from pending reports
+      val pendingReportPkgHashes = state.cores.reports.flatten.map(aa =>
+        io.forge.jam.core.primitives.Hash(aa.report.packageSpec.hash.bytes)
+      ).toSet
+
       ReportState(
         availAssignments = rhoLens.get(state),
         currValidators = kappaLens.get(state),
@@ -568,7 +580,9 @@ object JamState:
         authPools = authPoolsLens.get(state),
         accounts = accounts,
         coresStatistics = coreStatisticsLens.get(state),
-        servicesStatistics = serviceStatisticsLens.get(state)
+        servicesStatistics = serviceStatisticsLens.get(state),
+        readyQueuePackageHashes = readyQueuePkgHashes,
+        accumulatedPackageHashes = accumulatedPkgHashes ++ pendingReportPkgHashes
       )
 
     /** Apply ReportState changes back to JamState */

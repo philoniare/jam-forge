@@ -219,6 +219,24 @@ object BandersnatchVrf:
       case _: Exception =>
         None
 
+  /**
+   * Extract VRF output from an IETF VRF signature without verification.
+   *
+   * @param signature The 96-byte IETF VRF signature
+   * @return Some(vrfOutput) with 32-byte output, None on failure
+   */
+  def getVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
+    try
+      JniBandersnatchWrapper.ensureLibraryLoaded()
+      val result = JniBandersnatchWrapper.getIetfVrfOutput(signature)
+      if result == null || result.length != 32 then
+        None
+      else
+        Some(result)
+    catch
+      case _: Exception =>
+        None
+
 /**
  * Signing context constants for VRF input data construction.
  */

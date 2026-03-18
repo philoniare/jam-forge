@@ -40,13 +40,32 @@ object ReportTypes:
 
     given Codec[CoreStatisticsRecord] =
       (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-       JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-        { case (daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed) =>
-          CoreStatisticsRecord(daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed)
+        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+        JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+        {
+          case (daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed) =>
+            CoreStatisticsRecord(
+              daLoad,
+              popularity,
+              imports,
+              extrinsicCount,
+              extrinsicSize,
+              exports,
+              bundleSize,
+              gasUsed
+            )
         },
-        record => (record.daLoad, record.popularity, record.imports, record.extrinsicCount,
-                   record.extrinsicSize, record.exports, record.bundleSize, record.gasUsed)
+        record =>
+          (
+            record.daLoad,
+            record.popularity,
+            record.imports,
+            record.extrinsicCount,
+            record.extrinsicSize,
+            record.exports,
+            record.bundleSize,
+            record.gasUsed
+          )
       )
 
     given Decoder[CoreStatisticsRecord] =
@@ -91,15 +110,48 @@ object ReportTypes:
   object ServiceActivityRecord:
     given Codec[ServiceActivityRecord] =
       (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-       JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-       JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-        { case (providedCount, providedSize, refinementCount, refinementGasUsed, extrinsicCount, extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed) =>
-          ServiceActivityRecord(providedCount.toInt, providedSize, refinementCount, refinementGasUsed, extrinsicCount, extrinsicSize, imports, exports, accumulateCount, accumulateGasUsed)
+        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+        JamCodecs.compactInteger :: JamCodecs.compactInteger ::
+        JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+        {
+          case (
+                providedCount,
+                providedSize,
+                refinementCount,
+                refinementGasUsed,
+                extrinsicCount,
+                extrinsicSize,
+                imports,
+                exports,
+                accumulateCount,
+                accumulateGasUsed
+              ) =>
+            ServiceActivityRecord(
+              providedCount.toInt,
+              providedSize,
+              refinementCount,
+              refinementGasUsed,
+              extrinsicCount,
+              extrinsicSize,
+              imports,
+              exports,
+              accumulateCount,
+              accumulateGasUsed
+            )
         },
-        record => (record.providedCount.toLong, record.providedSize, record.refinementCount, record.refinementGasUsed,
-                   record.extrinsicCount, record.extrinsicSize, record.imports, record.exports,
-                   record.accumulateCount, record.accumulateGasUsed)
+        record =>
+          (
+            record.providedCount.toLong,
+            record.providedSize,
+            record.refinementCount,
+            record.refinementGasUsed,
+            record.extrinsicCount,
+            record.extrinsicSize,
+            record.imports,
+            record.exports,
+            record.accumulateCount,
+            record.accumulateGasUsed
+          )
       )
 
     given Decoder[ServiceActivityRecord] =
@@ -140,10 +192,11 @@ object ReportTypes:
   object ServiceStatisticsEntry:
     given Codec[ServiceStatisticsEntry] =
       (uint32L :: summon[Codec[ServiceActivityRecord]]).xmap(
-        { case (id, record) =>
-          ServiceStatisticsEntry((id & 0xFFFFFFFFL), record)
+        {
+          case (id, record) =>
+            ServiceStatisticsEntry((id & 0xffffffffL), record)
         },
-        entry => (entry.id & 0xFFFFFFFFL, entry.record)
+        entry => (entry.id & 0xffffffffL, entry.record)
       )
 
     given Decoder[ServiceStatisticsEntry] =
@@ -167,12 +220,15 @@ object ReportTypes:
     authPools: List[List[Hash]],
     accounts: List[ServiceAccount],
     coresStatistics: List[CoreStatisticsRecord],
-    servicesStatistics: List[ServiceStatisticsEntry]
+    servicesStatistics: List[ServiceStatisticsEntry],
+    readyQueuePackageHashes: Set[Hash] = Set.empty,
+    accumulatedPackageHashes: Set[Hash] = Set.empty
   )
 
   object ReportState:
     def codec(coresCount: Int, validatorsCount: Int): Codec[ReportState] =
-      val availAssignmentsCodec = JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coresCount)
+      val availAssignmentsCodec =
+        JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coresCount)
       val currValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
       val prevValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
       val entropyCodec = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
@@ -184,14 +240,47 @@ object ReportTypes:
       val servicesStatisticsCodec = JamCodecs.compactPrefixedList(summon[Codec[ServiceStatisticsEntry]])
 
       (availAssignmentsCodec :: currValidatorsCodec :: prevValidatorsCodec ::
-       entropyCodec :: offendersCodec :: recentBlocksCodec :: authPoolsCodec ::
-       accountsCodec :: coresStatisticsCodec :: servicesStatisticsCodec).xmap(
-        { case (availAssignments, currValidators, prevValidators, entropy, offenders, recentBlocks, authPools, accounts, coresStatistics, servicesStatistics) =>
-          ReportState(availAssignments, currValidators, prevValidators, entropy, offenders, recentBlocks, authPools, accounts, coresStatistics, servicesStatistics)
+        entropyCodec :: offendersCodec :: recentBlocksCodec :: authPoolsCodec ::
+        accountsCodec :: coresStatisticsCodec :: servicesStatisticsCodec).xmap(
+        {
+          case (
+                availAssignments,
+                currValidators,
+                prevValidators,
+                entropy,
+                offenders,
+                recentBlocks,
+                authPools,
+                accounts,
+                coresStatistics,
+                servicesStatistics
+              ) =>
+            ReportState(
+              availAssignments,
+              currValidators,
+              prevValidators,
+              entropy,
+              offenders,
+              recentBlocks,
+              authPools,
+              accounts,
+              coresStatistics,
+              servicesStatistics
+            )
         },
-        state => (state.availAssignments, state.currValidators, state.prevValidators, state.entropy,
-                  state.offenders, state.recentBlocks, state.authPools, state.accounts,
-                  state.coresStatistics, state.servicesStatistics)
+        state =>
+          (
+            state.availAssignments,
+            state.currValidators,
+            state.prevValidators,
+            state.entropy,
+            state.offenders,
+            state.recentBlocks,
+            state.authPools,
+            state.accounts,
+            state.coresStatistics,
+            state.servicesStatistics
+          )
       )
 
     given Decoder[ReportState] =
@@ -233,12 +322,13 @@ object ReportTypes:
   object ReportInput:
     given Codec[ReportInput] =
       (JamCodecs.compactPrefixedList(summon[Codec[GuaranteeExtrinsic]]) ::
-       uint32L ::
-       JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
-        { case (guarantees, slot, knownPackages) =>
-          ReportInput(guarantees, slot & 0xFFFFFFFFL, knownPackages)
+        uint32L ::
+        JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
+        {
+          case (guarantees, slot, knownPackages) =>
+            ReportInput(guarantees, slot & 0xffffffffL, knownPackages)
         },
-        input => (input.guarantees, input.slot & 0xFFFFFFFFL, input.knownPackages)
+        input => (input.guarantees, input.slot & 0xffffffffL, input.knownPackages)
       )
 
     given Decoder[ReportInput] =
@@ -285,7 +375,7 @@ object ReportTypes:
 
   object ReportErrorCode:
     given Codec[ReportErrorCode] = byte.xmap(
-      b => ReportErrorCode.fromOrdinal(b.toInt & 0xFF),
+      b => ReportErrorCode.fromOrdinal(b.toInt & 0xff),
       e => e.ordinal.toByte
     )
 
@@ -334,9 +424,10 @@ object ReportTypes:
   object ReportOutputMarks:
     given Codec[ReportOutputMarks] =
       (JamCodecs.compactPrefixedList(summon[Codec[SegmentRootLookup]]) ::
-       JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
-        { case (reported, reporters) =>
-          ReportOutputMarks(reported, reporters)
+        JamCodecs.compactPrefixedList(JamCodecs.hashCodec)).xmap(
+        {
+          case (reported, reporters) =>
+            ReportOutputMarks(reported, reporters)
         },
         marks => (marks.reported, marks.reporters)
       )
@@ -384,9 +475,10 @@ object ReportTypes:
     def codec(coresCount: Int, validatorsCount: Int): Codec[ReportCase] =
       val stateCodec = ReportState.codec(coresCount, validatorsCount)
       (summon[Codec[ReportInput]] :: stateCodec ::
-       summon[Codec[ReportOutput]] :: stateCodec).xmap(
-        { case (input, preState, output, postState) =>
-          ReportCase(input, preState, output, postState)
+        summon[Codec[ReportOutput]] :: stateCodec).xmap(
+        {
+          case (input, preState, output, postState) =>
+            ReportCase(input, preState, output, postState)
         },
         testCase => (testCase.input, testCase.preState, testCase.output, testCase.postState)
       )

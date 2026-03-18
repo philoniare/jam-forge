@@ -107,14 +107,15 @@ object ReportTransition:
     val result =
       for
         _ <- validateGuaranteesOrder(input.guarantees)
-        _ <- validateNoDuplicatePackages(input.guarantees, preState.recentBlocks)
+        _ <- validateNoDuplicatePackages(input.guarantees, preState)
         _ <- if skipAncestryValidation then Right(())
         else validateAnchor(input.guarantees, preState.recentBlocks, input.slot, config)
         processedGuarantees <- processGuarantees(input, preState, config)
       yield processedGuarantees
 
     result match
-      case Left(err) => (preState, StfResult.error(err))
+      case Left(err) =>
+        (preState, StfResult.error(err))
       case Right((reports, packages, guarantors)) =>
         val postState = preState.copy(
           availAssignments = updateAvailAssignments(preState.availAssignments, reports, input.slot),
@@ -195,17 +196,20 @@ object ReportTransition:
    */
   private def validateNoDuplicatePackages(
     guarantees: List[GuaranteeExtrinsic],
-    recentBlocks: HistoricalBetaContainer
+    preState: ReportState
   ): ValidationResult =
+    val recentBlocks = preState.recentBlocks
     val packageHashes = guarantees.map(_.report.packageSpec.hash)
 
     // Check for duplicates within batch
     if packageHashes.distinct.size != packageHashes.size then
       return Left(ReportErrorCode.DuplicatePackage)
 
-    // Check against history
     val historyHashes = recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet
-    if packageHashes.exists(historyHashes.contains) then
+    val allPipelinedHashes = historyHashes ++
+      preState.readyQueuePackageHashes ++
+      preState.accumulatedPackageHashes
+    if packageHashes.exists(allPipelinedHashes.contains) then
       return Left(ReportErrorCode.DuplicatePackage)
 
     // Build lookup for current batch packages

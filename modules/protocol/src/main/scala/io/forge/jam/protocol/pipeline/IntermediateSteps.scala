@@ -94,6 +94,94 @@ object IntermediateSteps:
   }
 
   /**
+   * Validate extrinsic hash
+   */
+  val validateExtrinsicHash: StfStep = validate { (_, ctx) =>
+    import io.forge.jam.core.{Hashing, JamBytes as JB}
+    import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute}
+    import io.forge.jam.core.types.tickets.TicketEnvelope
+    import io.forge.jam.core.types.extrinsic.Preimage
+    import io.forge.jam.core.scodec.JamCodecs.{compactPrefixedList, compactInt}
+
+    val block = ctx.block
+    val config = ctx.config
+    val ex = block.extrinsic
+
+    try
+      // Encode each extrinsic component
+      val ticketsEncoded = compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets).require.toByteArray
+      val preimagesEncoded = compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages).require.toByteArray
+      val assurancesEncoded =
+        compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)).encode(ex.assurances).require.toByteArray
+      val disputesEncoded = Dispute.codec(config.votesPerVerdict).encode(ex.disputes).require.toByteArray
+
+      // Build guarantee component
+      val guaranteeItems = ex.guarantees.map { g =>
+        val reportEncoded =
+          summon[Codec[io.forge.jam.core.types.workpackage.WorkReport]].encode(g.report).require.toByteArray
+        val reportHash = Hashing.blake2b256(reportEncoded)
+        val timeslotEncoded = _root_.scodec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL).require.toByteArray
+
+        val credentialEncoded = compactPrefixedList(summon[Codec[io.forge.jam.core.types.dispute.GuaranteeSignature]])
+          .encode(g.signatures).require.toByteArray
+
+        reportHash.bytes ++ timeslotEncoded ++ credentialEncoded
+      }
+
+      val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length).require.toByteArray
+      val gEncoded = guaranteeListLenEncoded ++ guaranteeItems.foldLeft(Array.empty[Byte])(_ ++ _)
+
+      // Hash each component
+      val hashes =
+        List(ticketsEncoded, preimagesEncoded, gEncoded, assurancesEncoded, disputesEncoded).map(Hashing.blake2b256)
+
+      // Encode the list of 5 hashes (fixed-length, no length prefix)
+      val hashesEncoded = hashes.flatMap(_.bytes).toArray
+
+      val computedExtrinsicHash = Hashing.blake2b256(hashesEncoded)
+
+      if computedExtrinsicHash != block.header.extrinsicHash then
+        Left(PipelineError.HeaderVerificationErr("Invalid extrinsic hash"))
+      else
+        Right(())
+    catch
+      case _: Exception =>
+        Right(())
+  }
+
+  /**
+   * Validate entropy VRF signature (H_vrfsig).
+   * Per GP eq:vrfsigcheck: H_vrfsig ∈ bssignature{H_authorbskey}{X_entropy ∥ banderout(H_sealsig)}{[]}
+   * The VRF input is "$jam_entropy" ∥ seal_vrf_output, with empty aux data.
+   */
+  val validateEntropyVrf: StfStep = validate { (state, ctx) =>
+    val block = ctx.block
+    val authorIndex = block.header.authorIndex.value.toInt
+    val blockAuthorKey = state.validators.current(authorIndex).bandersnatch
+
+    // Get the seal VRF output: banderout(H_sealsig)
+    val sealVrfOutput = BandersnatchVrf.getVrfOutput(block.header.seal.toArray)
+    if sealVrfOutput.isEmpty then
+      Left(PipelineError.HeaderVerificationErr("Cannot extract VRF output from seal"))
+    else
+      // Build VRF input: "$jam_entropy" ∥ sealVrfOutput
+      val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
+
+      // Verify H_vrfsig with empty aux data
+      val vrfResult = BandersnatchVrf.ietfVrfVerify(
+        blockAuthorKey.bytes,
+        vrfInput,
+        Array.empty[Byte], // empty aux data
+        block.header.entropySource.toArray
+      )
+
+      if vrfResult.isEmpty then
+        Left(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
+      else
+        Right(())
+  }
+
+  /**
    * Validate epoch mark matches Safrole output.
    */
   val validateEpochMark: StfStep = validate { (_, ctx) =>

@@ -141,7 +141,7 @@ object AccumulationTransition:
       AccumulationOutput
   ) =
     val m = (input.slot % config.epochLength).toInt
-    val deltaT = Math.max((input.slot - prevSlot).toInt, 1)
+    val deltaT = Math.max(input.slot - prevSlot, 1L)
 
     // 1. Collect all historically accumulated hashes (for dependency checking)
     val historicallyAccumulated = mutable.Set.from(preState.accumulated.flatten)

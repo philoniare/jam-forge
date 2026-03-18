@@ -83,7 +83,8 @@ object ChainConfig:
     authQueueSize = 80,
     serviceMinBalance = 100L,
     additionalMinBalancePerStateItem = 10L,
-    additionalMinBalancePerStateByte = 1L
+    additionalMinBalancePerStateByte = 1L,
+    maxLookupAnchorAge = 24L
   )
 
   /**

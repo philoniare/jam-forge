@@ -131,7 +131,7 @@ class JsonTraceRunner(
         )
 
       // Step 3: Import block using BlockImporter
-      val importer = new BlockImporter(config, skipAncestryValidation = true)
+      val importer = new BlockImporter(config, skipAncestryValidation = false)
       val result = importer.importBlock(traceStep.block, traceStep.preState)
 
       // Step 4: Compare post-state
