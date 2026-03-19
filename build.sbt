@@ -36,13 +36,15 @@ lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
 lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
 lazy val benchmark = taskKey[Unit]("Run benchmark tests")
+lazy val stressTest = taskKey[Unit]("Run long-running stress test (100K blocks)")
 
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance)
   .settings(
     name := "jam",
     publish / skip := true,
-    benchmark := (protocol / Test / runMain).toTask(" io.forge.jam.protocol.benchmark.TracesBenchmark").value
+    benchmark := (protocol / Test / runMain).toTask(" io.forge.jam.protocol.benchmark.TracesBenchmark").value,
+    stressTest := (protocol / Test / runMain).toTask(" io.forge.jam.protocol.benchmark.StressTestApp --blocks=100000 --window=1000 --force-gc=10").value
   )
 
 lazy val core = (project in file("modules/core"))
@@ -210,7 +212,9 @@ lazy val crypto = (project in file("modules/crypto"))
     Test / javaOptions ++= Seq(
       s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
       s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
-      "--enable-native-access=ALL-UNNAMED"
+      "--enable-native-access=ALL-UNNAMED",
+      "-Xmx4g",
+      "-XX:+HeapDumpOnOutOfMemoryError"
     )
   )
 
