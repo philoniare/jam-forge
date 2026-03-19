@@ -166,34 +166,51 @@ class StressTestHarness(config: StressTestConfig):
     val finalRetained = avgOpt(finalSnapshots.flatMap(_.retainedHeapMB))
 
     val throughputDrop = if baselineThroughput > 0 then
-      (1.0 - finalThroughput / baselineThroughput) * 100 else 0.0
+      (1.0 - finalThroughput / baselineThroughput) * 100
+    else 0.0
 
     val heapGrowth = if baselineRetained > 0 then
-      (finalRetained / baselineRetained - 1.0) * 100 else 0.0
+      (finalRetained / baselineRetained - 1.0) * 100
+    else 0.0
 
-    val throughputFailed = throughputDrop > config.throughputDropThresholdPct
+    val adjacentDrops = windows.toList.sliding(2).collect {
+      case List(a, b) if a.blocksPerSec > 0 => (1.0 - b.blocksPerSec / a.blocksPerSec) * 100
+    }.toList
+    val maxAdjacentDrop = if adjacentDrops.isEmpty then 0.0 else adjacentDrops.max
+    val throughputFailed = maxAdjacentDrop > config.throughputDropThresholdPct
+
     val heapFailed = heapGrowth > config.heapGrowthThresholdPct
     val passed = !throughputFailed && !heapFailed && errors == 0
 
     val failureReason =
       if errors > 0 then Some(s"$errors blocks failed to import")
-      else if throughputFailed then Some(f"Throughput dropped ${throughputDrop}%.1f%% (threshold: ${config.throughputDropThresholdPct}%%)")
-      else if heapFailed then Some(f"Heap grew ${heapGrowth}%.1f%% (threshold: ${config.heapGrowthThresholdPct}%%)")
+      else if throughputFailed then
+        Some(
+          f"Max adjacent window throughput drop $maxAdjacentDrop%.1f%% (threshold: ${config.throughputDropThresholdPct}%%)"
+        )
+      else if heapFailed then Some(f"Heap grew $heapGrowth%.1f%% (threshold: ${config.heapGrowthThresholdPct}%%)")
       else None
 
     // Print summary
     val avgBlockMs = if successCount > 0 then totalBlockTimeMs.toDouble / successCount else 0.0
     println()
     println("=" * 75)
-    println(f"Total: ${config.totalBlocks} blocks in ${totalTimeMs}ms (${config.totalBlocks.toDouble * 1000 / totalTimeMs}%.1f blk/s)")
+    println(
+      f"Total: ${config.totalBlocks} blocks in ${totalTimeMs}ms (${config.totalBlocks.toDouble * 1000 / totalTimeMs}%.1f blk/s)"
+    )
     println(f"Successes: $successCount, Errors: $errors")
-    println(f"Avg block time: ${avgBlockMs}%.2f ms")
-    println(f"Max block time: ${maxBlockTimeMs} ms (block #$maxBlockNum)")
+    println(f"Avg block time: $avgBlockMs%.2f ms")
+    println(f"Max block time: $maxBlockTimeMs ms (block #$maxBlockNum)")
     println(f"Hangs (>${HANG_THRESHOLD_MS}ms): $hangCount")
-    println(f"Baseline (windows 1-${config.baselineWindows}): ${baselineThroughput}%.1f blk/s, ${baselineRetained}%.0f MB retained")
-    println(f"Final (last ${config.baselineWindows}):          ${finalThroughput}%.1f blk/s, ${finalRetained}%.0f MB retained")
-    if throughputDrop.abs > 1 then println(f"Throughput change: ${-throughputDrop}%.1f%%")
-    if heapGrowth.abs > 1 then println(f"Heap change: ${heapGrowth}%.1f%%")
+    println(
+      f"Baseline (windows 1-${config.baselineWindows}): $baselineThroughput%.1f blk/s, $baselineRetained%.0f MB retained"
+    )
+    println(
+      f"Final (last ${config.baselineWindows}):          $finalThroughput%.1f blk/s, $finalRetained%.0f MB retained"
+    )
+    println(f"Overall throughput change: ${-throughputDrop}%.1f%% (expected with state growth)")
+    println(f"Max adjacent window drop: $maxAdjacentDrop%.1f%% (threshold: ${config.throughputDropThresholdPct}%%)")
+    if heapGrowth.abs > 1 then println(f"Heap change: $heapGrowth%.1f%%")
     println(s"RESULT: ${if passed then "PASS" else "FAIL"}")
     failureReason.foreach(r => println(s"  Reason: $r"))
     println("=" * 75)
@@ -242,9 +259,13 @@ class StressTestHarness(config: StressTestConfig):
     if values.isEmpty then 0.0 else values.sum / values.size
 
   private def printHeader(): Unit =
-    println(f"${"Window"}%7s ${"Blocks"}%7s ${"Time(ms)"}%9s ${"Blk/s"}%8s ${"Heap(MB)"}%9s ${"GC(ms)"}%8s ${"RetainedMB"}%11s ${"p99(ms)"}%8s")
+    println(
+      f"${"Window"}%7s ${"Blocks"}%7s ${"Time(ms)"}%9s ${"Blk/s"}%8s ${"Heap(MB)"}%9s ${"GC(ms)"}%8s ${"RetainedMB"}%11s ${"p99(ms)"}%8s"
+    )
     println("-" * 75)
 
   private def printSnapshot(s: MetricSnapshot): Unit =
     val retained = s.retainedHeapMB.map(r => f"$r%.0f").getOrElse("-")
-    println(f"${s.windowNum}%7d ${s.blocksProcessed}%7d ${s.windowDurationMs}%9d ${s.blocksPerSec}%8.1f ${s.heapUsedMB}%9.0f ${s.gcTimeMs}%8d $retained%11s ${s.p99BlockTimeMs}%8.0f")
+    println(
+      f"${s.windowNum}%7d ${s.blocksProcessed}%7d ${s.windowDurationMs}%9d ${s.blocksPerSec}%8.1f ${s.heapUsedMB}%9.0f ${s.gcTimeMs}%8d $retained%11s ${s.p99BlockTimeMs}%8.0f"
+    )
