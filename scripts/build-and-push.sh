@@ -95,9 +95,17 @@ if [ -z "$SKIP_VERIFY" ]; then
     JAR_SIZE="$(stat -f%z "$TMP_DIR/jam-conformance.jar" 2>/dev/null || stat -c%s "$TMP_DIR/jam-conformance.jar")"
     echo "  jar size: ${JAR_SIZE} bytes"
 
-    if ! unzip -l "$TMP_DIR/jam-conformance.jar" \
-        | grep -q 'io/forge/jam/protocol/report/ReportTransition\$\.class'; then
-        echo "ERROR: jam-conformance.jar is missing ReportTransition — aborting push." >&2
+    JAR_ENTRIES="$(unzip -l "$TMP_DIR/jam-conformance.jar")"
+    if ! echo "$JAR_ENTRIES" | grep -F 'io/forge/jam/protocol/report/ReportTransition' >/dev/null; then
+        echo "ERROR: jam-conformance.jar has no ReportTransition entries at all — aborting push." >&2
+        echo "--- jar head ---" >&2
+        echo "$JAR_ENTRIES" | head -20 >&2
+        exit 1
+    fi
+    if ! echo "$JAR_ENTRIES" | grep -F 'io/forge/jam/protocol/report/ReportTransition$.class' >/dev/null; then
+        echo "ERROR: jam-conformance.jar is missing ReportTransition\$.class — aborting push." >&2
+        echo "--- found ReportTransition entries ---" >&2
+        echo "$JAR_ENTRIES" | grep -F 'ReportTransition' >&2 || true
         exit 1
     fi
 
