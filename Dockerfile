@@ -50,8 +50,14 @@ COPY modules/pvm ./modules/pvm
 COPY modules/protocol ./modules/protocol
 COPY modules/conformance ./modules/conformance
 
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV JAM_BUILD_GIT_SHA=${GIT_SHA}
+ENV JAM_BUILD_TIME=${BUILD_TIME}
+
 # Build the assembly JAR (skip native lib build since we already have them)
-RUN sbt "conformance/assembly"
+RUN echo "Building for git=${GIT_SHA} at ${BUILD_TIME}" && \
+    sbt clean "conformance/assembly"
 
 # Stage 3: Runtime image
 FROM eclipse-temurin:21-jre-jammy
@@ -74,6 +80,13 @@ COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-
 
 # Set library path for native libraries
 ENV LD_LIBRARY_PATH=/app/lib
+
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV JAM_BUILD_GIT_SHA=${GIT_SHA}
+ENV JAM_BUILD_TIME=${BUILD_TIME}
+LABEL org.opencontainers.image.revision=${GIT_SHA}
+LABEL org.opencontainers.image.created=${BUILD_TIME}
 
 # Set default log level to ERROR for production
 ENV LOG_LEVEL=ERROR
