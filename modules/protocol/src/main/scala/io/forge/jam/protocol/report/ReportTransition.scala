@@ -108,6 +108,7 @@ object ReportTransition:
       for
         _ <- validateGuaranteesOrder(input.guarantees)
         _ <- validateNoDuplicatePackages(input.guarantees, preState)
+        _ <- validateAnchorAge(input.guarantees, input.slot, config)
         _ <- if skipAncestryValidation then Right(())
         else validateAnchor(input.guarantees, preState.recentBlocks, input.slot, config)
         processedGuarantees <- processGuarantees(input, preState, config)
@@ -242,6 +243,20 @@ object ReportTransition:
     Right(())
 
   /**
+   * Validate lookup anchor slot age.
+   */
+  private def validateAnchorAge(
+    guarantees: List[GuaranteeExtrinsic],
+    currentSlot: Long,
+    config: ChainConfig
+  ): ValidationResult =
+    for guarantee <- guarantees do
+      val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.toInt.toLong
+      if currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
+        return Left(ReportErrorCode.AnchorNotRecent)
+    Right(())
+
+  /**
    * Validate anchor recency and context.
    */
   private def validateAnchor(
@@ -254,10 +269,6 @@ object ReportTransition:
 
     for guarantee <- guarantees do
       val context = guarantee.report.context
-
-      // Validate lookup anchor age
-      if currentSlot - context.lookupAnchorSlot.toInt > config.maxLookupAnchorAge then
-        return Left(ReportErrorCode.AnchorNotRecent)
 
       // Find and validate lookup anchor block
       val lookupAnchorBlock = recentBlocks.history.find(_.headerHash == context.lookupAnchor)
