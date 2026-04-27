@@ -153,7 +153,7 @@ object ReportTransition:
           _ <- validateGuarantorSignatureOrder(guarantee)
           _ <- validateWorkReport(
             guarantee.report,
-            guarantee.slot.toInt.toLong,
+            guarantee.slot.value.toLong,
             input.slot,
             preState.accounts,
             preState.authPools,
@@ -171,7 +171,7 @@ object ReportTransition:
           )
           _ <- require(!state.seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
         yield
-          val ctx = computeRotationContext(guarantee.slot.toInt.toLong, input.slot, config)
+          val ctx = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
           val validators = selectValidatorSet(ctx, preState.currValidators, preState.prevValidators)
           val newGuarantors = guarantee.signatures.map(sig => Hash(validators(sig.validatorIndex.toInt).ed25519.bytes))
 
@@ -251,8 +251,8 @@ object ReportTransition:
     config: ChainConfig
   ): ValidationResult =
     for guarantee <- guarantees do
-      val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.toInt.toLong
-      if currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
+      val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.value.toLong
+      if lookupAnchorSlot > currentSlot || currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
         return Left(ReportErrorCode.AnchorNotRecent)
     Right(())
 
@@ -384,7 +384,7 @@ object ReportTransition:
     if sigCount < 2 || sigCount > 3 then
       return Left(ReportErrorCode.InsufficientGuarantees)
 
-    val ctx = computeRotationContext(guarantee.slot.toInt.toLong, currentSlot, config)
+    val ctx = computeRotationContext(guarantee.slot.value.toLong, currentSlot, config)
 
     if ctx.reportRotation < ctx.currentRotation - 1 then
       return Left(ReportErrorCode.ReportEpochBeforeLast)

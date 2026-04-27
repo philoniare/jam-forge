@@ -34,7 +34,7 @@ object DisputeTransition:
     currentEpoch: Long,
     epochLength: Int
   ): Boolean =
-    val age = verdict.age.toInt.toLong
+    val age = verdict.age.value.toLong
     val validAges = Set(currentEpoch, currentEpoch - 1)
     validAges.contains(age)
 
@@ -51,7 +51,7 @@ object DisputeTransition:
    */
   private def getValidatorSet(verdict: Verdict, state: DisputeState, epochLength: Int): List[ValidatorKey] =
     val currentEpoch = state.tau / epochLength
-    val age = verdict.age.toInt.toLong
+    val age = verdict.age.value.toLong
     if age == currentEpoch then state.kappa else state.lambda
 
   /**
@@ -277,7 +277,8 @@ object DisputeTransition:
     }
 
     // Sort new offenders by key for adding to state
-    val sortedNewOffenders = afterFaults.newOffendersSet.toList.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
+    val sortedNewOffenders =
+      afterFaults.newOffendersSet.toList.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
     val finalOffenders = preState.psi.offenders ++ sortedNewOffenders
 
     // Clear invalid reports from rho
