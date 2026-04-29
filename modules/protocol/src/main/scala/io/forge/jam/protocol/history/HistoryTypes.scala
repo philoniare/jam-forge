@@ -54,7 +54,7 @@ object HistoryTypes:
      * @param config The chain configuration (for max cores validation).
      * @throws IllegalArgumentException if validation fails.
      */
-    def validate(config: ChainConfig = ChainConfig.FULL): Unit =
+    def validate(config: ChainConfig = ChainConfig.TINY): Unit =
       require(headerHash.size == constants.HashSize, "Header hash must be 32 bytes")
       require(parentStateRoot.size == constants.HashSize, "Parent state root must be 32 bytes")
       require(accumulateRoot.size == constants.HashSize, "Accumulate root must be 32 bytes")

@@ -3,17 +3,22 @@ package io.forge.jam.conformance
 import cats.effect.{IO, IOApp, ExitCode, Resource}
 import cats.syntax.all.*
 import fs2.io.net.unixsocket.{UnixSocketAddress, UnixSockets}
+import io.forge.jam.core.ChainConfig
 import java.nio.file.{Files, Path, Paths}
 
 /**
  * Configuration for the conformance testing server.
  *
- * @param socketPath Path to the Unix domain socket
- * @param logPath Path to the log file
+ * @param socketPath  Path to the Unix domain socket
+ * @param logPath     Path to the log file
+ * @param dataPath    Optional persistence directory
+ * @param chainConfig Chain spec (tiny/full)
  */
 final case class ServerConfig(
   socketPath: Path = Paths.get("/tmp/jam_target.sock"),
-  logPath: Path = Paths.get("/tmp/jam_conformance.log")
+  logPath: Path = Paths.get("/tmp/jam_conformance.log"),
+  dataPath: Option[Path] = None,
+  chainConfig: ChainConfig = ChainConfig.TINY
 )
 
 object ServerConfig:
@@ -64,10 +69,22 @@ object ConformanceServerApp extends IOApp:
   override def run(args: List[String]): IO[ExitCode] =
     // Install JVM-level uncaught exception handler so crashes are always visible
     Thread.setDefaultUncaughtExceptionHandler { (thread, throwable) =>
-      System.err.println(s"[JAM-FORGE FATAL] Uncaught exception in thread ${thread.getName}: ${throwable.getClass.getSimpleName} - ${throwable.getMessage}")
+      System.err.println(
+        s"[JAM-FORGE FATAL] Uncaught exception in thread ${thread.getName}: ${throwable.getClass.getSimpleName} - ${throwable.getMessage}"
+      )
       throwable.printStackTrace(System.err)
     }
 
+    FuzzEnv.fromSystemEnv() match
+      case Left(err) =>
+        IO.println(s"[JAM-FORGE FATAL] $err").as(ExitCode.Error)
+      case Right(Some(cfg)) =>
+        cfg.dataPath.foreach(FuzzEnv.ensureDataPath)
+        runServer(cfg)
+      case Right(None) =>
+        runFromArgs(args)
+
+  private def runFromArgs(args: List[String]): IO[ExitCode] =
     args.toList match
       // CRaC warmup command
       case "warmup" :: warmupArgs =>
@@ -92,10 +109,16 @@ object ConformanceServerApp extends IOApp:
             runServer(config)
 
   private def runServer(config: ServerConfig): IO[ExitCode] =
+    val specName = config.chainConfig match
+      case ChainConfig.TINY => "tiny"
+      case ChainConfig.FULL => "full"
+      case _ => "custom"
     for
       _ <- IO.println(s"JAM Forge Conformance Testing Server v0.7.2")
       _ <- IO.println(s"Socket path: ${config.socketPath}")
       _ <- IO.println(s"Log path: ${config.logPath}")
+      _ <- IO.println(s"Chain spec: $specName")
+      _ <- config.dataPath.fold(IO.unit)(p => IO.println(s"Data path: $p"))
       _ <- IO.println("Starting server...")
 
       // Clean up existing socket file if present
@@ -120,8 +143,10 @@ object SocketServer:
       IO.println("Server started, waiting for connections...") *>
         IO.never[ExitCode]
     }.handleErrorWith { error =>
-      IO.println(s"[JAM-FORGE ERROR] Server error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}") *>
-      IO.blocking { error.printStackTrace(System.err) } *>
+      IO.println(
+        s"[JAM-FORGE ERROR] Server error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
+      ) *>
+        IO.blocking(error.printStackTrace(System.err)) *>
         IO.pure(ExitCode.Error)
     }
 
@@ -132,7 +157,7 @@ object SocketServer:
     for
       logger <- FileLogger.resource(config.logPath)
       stateStore = new StateStore()
-      handler = new ProtocolHandler(stateStore, logger)
+      handler = new ProtocolHandler(stateStore, logger, config.chainConfig)
       _ <- acceptConnections(config.socketPath, handler, logger)
     yield ()
 

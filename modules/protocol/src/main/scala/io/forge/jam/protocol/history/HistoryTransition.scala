@@ -31,7 +31,7 @@ object HistoryTransition:
    * @param config The chain configuration (for max cores validation).
    * @return The updated JamState.
    */
-  def stf(input: HistoricalInput, state: JamState, config: ChainConfig = ChainConfig.FULL): JamState =
+  def stf(input: HistoricalInput, state: JamState, config: ChainConfig = ChainConfig.TINY): JamState =
     // Extract HistoricalState using lens bundle
     val preState = JamState.HistoryLenses.extract(state)
 
@@ -52,7 +52,7 @@ object HistoryTransition:
   def stfInternal(
     input: HistoricalInput,
     preState: HistoricalState,
-    config: ChainConfig = ChainConfig.FULL
+    config: ChainConfig = ChainConfig.TINY
   ): HistoricalState =
     input.validate(config)
 
