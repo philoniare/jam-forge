@@ -105,19 +105,21 @@ class ProtocolHandler(
    * Read exactly n bytes from the socket.
    */
   private def readExactly(socket: Socket[IO], n: Int): IO[Array[Byte]] =
-    def loop(remaining: Int, acc: Array[Byte]): IO[Array[Byte]] =
-      if remaining <= 0 then IO.pure(acc)
+    val buf = new Array[Byte](n)
+    def loop(offset: Int): IO[Array[Byte]] =
+      val remaining = n - offset
+      if remaining <= 0 then IO.pure(buf)
       else
         socket.read(remaining).flatMap {
           case None =>
-            logger.logError(s"readExactly: early EOF - expected $remaining more bytes, got ${acc.length} so far",
+            logger.logError(s"readExactly: early EOF - expected $remaining more bytes, got $offset so far",
               new java.io.EOFException(s"Expected $remaining more bytes")) *>
-            IO.raiseError(new java.io.EOFException(s"Expected $remaining more bytes (read ${acc.length} of $n total)"))
+            IO.raiseError(new java.io.EOFException(s"Expected $remaining more bytes (read $offset of $n total)"))
           case Some(chunk) =>
-            val chunkArr = chunk.toArray
-            loop(remaining - chunkArr.length, acc ++ chunkArr)
+            chunk.copyToArray(buf, offset)
+            loop(offset + chunk.size)
         }
-    loop(n, Array.empty)
+    loop(0)
 
   /**
    * Send a protocol message to the socket.
