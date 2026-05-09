@@ -39,14 +39,14 @@ object Ed25519:
    * @return true if the signature is valid, false otherwise
    */
   def verify(publicKey: Array[Byte], message: Array[Byte], signature: Array[Byte]): Boolean =
+    if publicKey.length != PublicKeySize then return false
+    if signature.length != SignatureSize then return false
+    ensureLibraryLoaded()
     try
-      if publicKey.length != PublicKeySize then return false
-      if signature.length != SignatureSize then return false
-      ensureLibraryLoaded()
       val result = Ed25519ZebraWrapper.verify(publicKey, message, signature)
       result != null && result.length == 1 && result(0) == 1
     catch
-      case _: Exception => false
+      case _: RuntimeException => false
 
   /**
    * Verify an Ed25519 signature using typed primitives.

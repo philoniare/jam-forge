@@ -111,8 +111,7 @@ object BandersnatchVrf:
       else
         Some(JamBytes(commitment))
     catch
-      case _: Exception =>
-        None
+      case _: RuntimeException => None
 
   /**
    * Verify a ring VRF proof and extract the ticket ID if valid.
@@ -150,8 +149,7 @@ object BandersnatchVrf:
         // The result is the 32-byte ticket ID
         Some(VerificationResult(JamBytes(result), attempt))
     catch
-      case _: Exception =>
-        None
+      case _: RuntimeException => None
 
   /**
    * Alternative verification method that takes raw byte arrays.
@@ -180,8 +178,7 @@ object BandersnatchVrf:
       else
         Some(result)
     catch
-      case _: Exception =>
-        None
+      case _: RuntimeException => None
 
   /**
    * Check if the native library is loaded and operational.
@@ -191,7 +188,7 @@ object BandersnatchVrf:
       JniBandersnatchWrapper.ensureLibraryLoaded()
       JniBandersnatchWrapper.isLibraryLoaded()
     catch
-      case _: Exception => false
+      case _: RuntimeException | _: LinkageError => false
 
   /**
    * Verify an IETF VRF signature and return the VRF output.
@@ -216,8 +213,7 @@ object BandersnatchVrf:
       else
         Some(result)
     catch
-      case _: Exception =>
-        None
+      case _: RuntimeException => None
 
   /**
    * Extract VRF output from an IETF VRF signature without verification.
@@ -234,8 +230,7 @@ object BandersnatchVrf:
       else
         Some(result)
     catch
-      case _: Exception =>
-        None
+      case _: RuntimeException => None
 
 /**
  * Signing context constants for VRF input data construction.

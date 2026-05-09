@@ -12,6 +12,7 @@ import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.state.JamState
 import io.forge.jam.crypto.Ed25519
+import spire.math.ULong
 
 /**
  * Reports State Transition Function.
@@ -321,10 +322,13 @@ object ReportTransition:
       _ <- require(workReport.results.nonEmpty, ReportErrorCode.MissingWorkResults)
       _ <- require(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
-      _ <- require(
-        workReport.results.map(_.accumulateGas.toLong).sum <= config.reportAccGas,
-        ReportErrorCode.WorkReportGasTooHigh
-      )
+      _ <- {
+        // ULong sum: signed-Long sum can wrap and falsely satisfy the bound.
+        val totalAccGas = workReport.results.foldLeft(ULong(0L)) { (acc, r) =>
+          acc + ULong(r.accumulateGas.toLong)
+        }
+        require(totalAccGas <= ULong(config.reportAccGas), ReportErrorCode.WorkReportGasTooHigh)
+      }
       _ <- require(workReport.coreIndex.toInt < config.coresCount, ReportErrorCode.BadCoreIndex)
       _ <- validateAuthorizer(workReport, authPools)
       _ <- validateWorkResults(workReport, accounts)

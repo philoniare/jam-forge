@@ -22,7 +22,7 @@ object ErasureCoding:
       ensureInitialized()
       ErasureCodingWrapper.isLibraryLoaded
     catch
-      case _: Throwable => false
+      case _: RuntimeException | _: LinkageError => false
 
   /** Shard with data and index */
   case class Shard(data: Array[Byte], index: Int)

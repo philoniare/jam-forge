@@ -34,13 +34,15 @@ class AccumulationHostCalls(
       bytesUsed: Long,
       depositOffset: Long
   ): Long =
-    val base = config.serviceMinBalance
-    val itemsCost = config.additionalMinBalancePerStateItem * items
-    val bytesCost = config.additionalMinBalancePerStateByte * bytesUsed
-    val costUnsigned = ULong(base + itemsCost + bytesCost)
-    val gratisUnsigned = ULong(depositOffset)
-    if costUnsigned > gratisUnsigned then (costUnsigned - gratisUnsigned).toLong
-    else 0L
+    // ULong throughout: signed-Long add can overflow before the wrap.
+    val base = ULong(config.serviceMinBalance)
+    val itemsU = ULong(items.toLong & 0xffffffffL)
+    val bytesU = ULong(bytesUsed)
+    val perItem = ULong(config.additionalMinBalancePerStateItem)
+    val perByte = ULong(config.additionalMinBalancePerStateByte)
+    val cost = base + perItem * itemsU + perByte * bytesU
+    val gratis = ULong(depositOffset)
+    if cost > gratis then (cost - gratis).toLong else 0L
 
   /** Calculate threshold balance from ServiceInfo.
     */
