@@ -5,6 +5,7 @@ import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.pvm.{InterruptKind, MemoryResult}
+import io.forge.jam.pvm.memory.Memory.isReadable
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
@@ -470,6 +471,9 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
     instance.basicMemory.getMemorySlice(UInt(address), length) match
       case MemoryResult.Success(_) => true
       case _                       => false
+
+  override def isMemoryReadable(address: Int, length: Int): Boolean =
+    length >= 0 && instance.basicMemory.isReadable(UInt(address), length)
 
 def accumulateSequential(
     gasLimit: Long,

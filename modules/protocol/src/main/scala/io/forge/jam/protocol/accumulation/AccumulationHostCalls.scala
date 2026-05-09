@@ -26,6 +26,23 @@ class AccumulationHostCalls(
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
+  private def readGuestBytes(
+      instance: PvmInstance,
+      address: Int,
+      length: Int,
+      label: String
+  ): Array[Byte] =
+    if !instance.isMemoryReadable(address, length) then
+      throw new RuntimeException(
+        s"$label PANIC: Failed to read from memory at 0x${address.toHexString} len $length"
+      )
+    val buf = new Array[Byte](length)
+    if !readMemory(instance, address, buf) then
+      throw new RuntimeException(
+        s"$label PANIC: Failed to read from memory at 0x${address.toHexString} len $length"
+      )
+    buf
+
   /** Calculate threshold balance for a service account. Formula: max(0, base +
     * items*itemCost + bytes*byteCost - gratisStorage)
     */
@@ -231,11 +248,7 @@ class AccumulationHostCalls(
     val length = getReg(instance, 12).toInt
 
     // Read key from memory - PANIC on memory failure
-    val keyBuffer = new Array[Byte](keyLen)
-    if !readMemory(instance, keyAddr, keyBuffer) then
-      throw new RuntimeException(
-        s"Read PANIC: Failed to read key from memory at 0x${keyAddr.toHexString} len $keyLen"
-      )
+    val keyBuffer = readGuestBytes(instance, keyAddr, keyLen, "Read")
 
     val key = JamBytes(keyBuffer)
 
@@ -290,11 +303,7 @@ class AccumulationHostCalls(
     val acc = account.get
 
     // Read key from memory
-    val keyBuffer = new Array[Byte](keyLen)
-    if !readMemory(instance, keyAddr, keyBuffer) then
-      throw new RuntimeException(
-        s"Write PANIC: Failed to read key from memory at $keyAddr len $keyLen"
-      )
+    val keyBuffer = readGuestBytes(instance, keyAddr, keyLen, "Write")
 
     val key = JamBytes(keyBuffer)
 
@@ -312,13 +321,7 @@ class AccumulationHostCalls(
     // Calculate new footprint to check threshold
     val newValue =
       if valueLen == 0 then None
-      else
-        val valueBuffer = new Array[Byte](valueLen)
-        if !readMemory(instance, valueAddr, valueBuffer) then
-          throw new RuntimeException(
-            s"Write PANIC: Failed to read value from memory at $valueAddr len $valueLen"
-          )
-        Some(JamBytes(valueBuffer))
+      else Some(JamBytes(readGuestBytes(instance, valueAddr, valueLen, "Write")))
 
     // Calculate bytes/items delta for threshold check
     val (bytesDelta, itemsDelta): (Long, Int) = (valueLen, keyWasPresent) match
@@ -1207,11 +1210,7 @@ class AccumulationHostCalls(
     val blobLen = getReg(instance, 9).toInt
 
     // Read blob from memory - PANIC on failure
-    val blobBuffer = new Array[Byte](blobLen)
-    if !readMemory(instance, blobAddr, blobBuffer) then
-      throw new RuntimeException(
-        s"Provide PANIC: Failed to read blob from memory at 0x${blobAddr.toHexString} len $blobLen"
-      )
+    val blobBuffer = readGuestBytes(instance, blobAddr, blobLen, "Provide")
 
     val blob = JamBytes(blobBuffer)
 

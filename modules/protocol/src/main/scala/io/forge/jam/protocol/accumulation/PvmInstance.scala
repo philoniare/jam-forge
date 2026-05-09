@@ -56,3 +56,5 @@ trait PvmInstance:
    * @return true if memory is accessible
    */
   def isMemoryAccessible(address: Int, length: Int): Boolean
+
+  def isMemoryReadable(address: Int, length: Int): Boolean
