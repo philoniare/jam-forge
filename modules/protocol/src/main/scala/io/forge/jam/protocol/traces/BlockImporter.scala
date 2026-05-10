@@ -4,7 +4,11 @@ import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.vrfs.BandersnatchWrapper
 import io.forge.jam.core.types.block.Block
-import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
+import io.forge.jam.core.types.extrinsic.{
+  AssuranceExtrinsic,
+  GuaranteeExtrinsic,
+  Preimage
+}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.history.ReportedWorkPackage
 import io.forge.jam.protocol.safrole.SafroleTypes.*
@@ -21,26 +25,24 @@ import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
 import io.forge.jam.protocol.state.JamState
 import org.slf4j.LoggerFactory
 
-/**
- * Result of a block import operation.
- */
+/** Result of a block import operation.
+  */
 sealed trait ImportResult
 
 object ImportResult:
   final case class Success(
-    postState: RawState,
-    computedFullState: FullJamState,
-    safroleState: Option[SafroleState] = None
+      postState: RawState,
+      computedFullState: FullJamState,
+      safroleState: Option[SafroleState] = None
   ) extends ImportResult
 
   final case class Failure(
-    error: ImportError,
-    message: String = ""
+      error: ImportError,
+      message: String = ""
   ) extends ImportResult
 
-/**
- * Errors that can occur during block import.
- */
+/** Errors that can occur during block import.
+  */
 enum ImportError:
   case InvalidHeader
   case InvalidParent
@@ -57,40 +59,46 @@ enum ImportError:
   case AccumulationError
   case UnknownError
 
-/**
- * BlockImporter handles importing blocks and applying all state transitions.
- *
- * Uses a unified JamState pipeline where state flows sequentially through all 9 STFs:
- * 1. Safrole - Block production and VRF validation
- * 2. Disputes - Process dispute verdicts
- * 3. Assurances - Process availability assurances
- * 4. Reports - Process work reports (guarantees)
- * 5. Accumulation - Execute PVM accumulation
- * 6. History - Update recent blocks history
- * 7. Authorizations - Update authorization pools
- * 8. Preimages - Handle preimage provisioning
- * 9. Statistics - Update chain statistics
- *
- * @param config The chain configuration
- * @param skipAncestryValidation When true, skip anchor recency validation in Reports STF.
- */
+/** BlockImporter handles importing blocks and applying all state transitions.
+  *
+  * Uses a unified JamState pipeline where state flows sequentially through all
+  * 9 STFs:
+  *   1. Safrole - Block production and VRF validation
+  *   2. Disputes - Process dispute verdicts
+  *   3. Assurances - Process availability assurances
+  *   4. Reports - Process work reports (guarantees)
+  *   5. Accumulation - Execute PVM accumulation
+  *   6. History - Update recent blocks history
+  *   7. Authorizations - Update authorization pools
+  *   8. Preimages - Handle preimage provisioning
+  *   9. Statistics - Update chain statistics
+  *
+  * @param config
+  *   The chain configuration
+  * @param skipAncestryValidation
+  *   When true, skip anchor recency validation in Reports STF.
+  */
 class BlockImporter(
-  config: ChainConfig = ChainConfig.TINY,
-  skipAncestryValidation: Boolean = false
+    config: ChainConfig = ChainConfig.TINY,
+    skipAncestryValidation: Boolean = false
 ):
   private val logger = LoggerFactory.getLogger(getClass)
 
   // Shared PVM module cache across block imports to avoid recompiling same service code
-  private val sharedExecutor = new io.forge.jam.protocol.accumulation.AccumulationExecutor(config)
+  private val sharedExecutor =
+    new io.forge.jam.protocol.accumulation.AccumulationExecutor(config)
 
-  /**
-   * Imports a block and applies all state transitions using the unified JamState pipeline.
-   * Returns the computed post-state with updated state root.
-   *
-   * @param block The block to import
-   * @param preState The state before the block (raw keyvals)
-   * @return ImportResult indicating success with new state or failure with error
-   */
+  /** Imports a block and applies all state transitions using the unified
+    * JamState pipeline. Returns the computed post-state with updated state
+    * root.
+    *
+    * @param block
+    *   The block to import
+    * @param preState
+    *   The state before the block (raw keyvals)
+    * @return
+    *   ImportResult indicating success with new state or failure with error
+    */
   def importBlock(block: Block, preState: RawState): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
@@ -104,7 +112,13 @@ class BlockImporter(
       val jamState = JamState.fromFullJamState(fullPreState, config)
 
       // Step 2: Execute the STF pipeline using Kleisli composition
-      BlockPipeline.execute(block, jamState, config, skipAncestryValidation, Some(sharedExecutor)) match
+      BlockPipeline.execute(
+        block,
+        jamState,
+        config,
+        skipAncestryValidation,
+        Some(sharedExecutor)
+      ) match
         case Left(error) =>
           ImportResult.Failure(mapPipelineError(error), error.message)
 
@@ -132,7 +146,7 @@ class BlockImporter(
           val mergedState = JamState.toFullJamState(finalJamState)
 
           // Step 6: Encode merged state back to keyvals
-          val postKeyvals = StateEncoder.encodeFullState(mergedState, config)
+          val postKeyvals = mergedState.toKeyvals(config, Some(fullPreState))
 
           // Step 7: Compute state root via Merkle trie
           val stateRoot = StateMerklization.stateMerklize(postKeyvals)
@@ -152,206 +166,219 @@ class BlockImporter(
             postOffenders = finalJamState.postOffenders
           )
 
-          ImportResult.Success(rawPostState, mergedState, Some(safrolePostState))
+          ImportResult.Success(
+            rawPostState,
+            mergedState,
+            Some(safrolePostState)
+          )
     catch
       case e: Throwable =>
         e.printStackTrace()
-        ImportResult.Failure(ImportError.UnknownError, Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+        ImportResult.Failure(
+          ImportError.UnknownError,
+          Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+        )
 
-  /**
-   * Maps pipeline errors to import errors.
-   */
+  /** Maps pipeline errors to import errors.
+    */
   private def mapPipelineError(error: PipelineError): ImportError = error match
-    case PipelineError.SafroleErr(_) => ImportError.SafroleError
-    case PipelineError.DisputeErr(_) => ImportError.DisputeError
-    case PipelineError.AssuranceErr(_) => ImportError.AssuranceError
-    case PipelineError.ReportErr(_) => ImportError.ReportError
-    case PipelineError.PreimageErr(_) => ImportError.PreimageError
-    case PipelineError.AccumulationErr(_) => ImportError.AccumulationError
+    case PipelineError.SafroleErr(_)            => ImportError.SafroleError
+    case PipelineError.DisputeErr(_)            => ImportError.DisputeError
+    case PipelineError.AssuranceErr(_)          => ImportError.AssuranceError
+    case PipelineError.ReportErr(_)             => ImportError.ReportError
+    case PipelineError.PreimageErr(_)           => ImportError.PreimageError
+    case PipelineError.AccumulationErr(_)       => ImportError.AccumulationError
     case PipelineError.HeaderVerificationErr(_) => ImportError.InvalidHeader
-    case PipelineError.InvalidEpochMark => ImportError.InvalidHeader
-    case PipelineError.InvalidTicketsMark => ImportError.InvalidHeader
-    case PipelineError.InvalidBlockSeal => ImportError.InvalidHeader
-    case PipelineError.InvalidOffendersMark => ImportError.InvalidHeader
+    case PipelineError.InvalidEpochMark         => ImportError.InvalidHeader
+    case PipelineError.InvalidTicketsMark       => ImportError.InvalidHeader
+    case PipelineError.InvalidBlockSeal         => ImportError.InvalidHeader
+    case PipelineError.InvalidOffendersMark     => ImportError.InvalidHeader
 
-  /**
-   * Compute final core statistics by combining:
-   * 1. Guarantee-based stats (bundleSize, gasUsed, extrinsicCount, etc.) from block's guarantees
-   * 2. dataSize from available reports
-   * 3. assuranceCount/popularity from assurance extrinsics
-   */
+  /** Compute final core statistics by combining:
+    *   1. Guarantee-based stats (bundleSize, gasUsed, extrinsicCount, etc.)
+    *      from block's guarantees
+    *   2. dataSize from available reports
+    *   3. assuranceCount/popularity from assurance extrinsics
+    */
   private def computeFinalCoreStatistics(
-    guarantees: List[GuaranteeExtrinsic],
-    availableReports: List[WorkReport],
-    assurances: List[AssuranceExtrinsic],
-    maxCores: Int
+      guarantees: List[GuaranteeExtrinsic],
+      availableReports: List[WorkReport],
+      assurances: List[AssuranceExtrinsic],
+      maxCores: Int
   ): List[CoreStatisticsRecord] =
-    // Helper to update stat at specific core index
-    def updateAt(
-      stats: List[CoreStatisticsRecord],
-      idx: Int,
-      f: CoreStatisticsRecord => CoreStatisticsRecord
-    ): List[CoreStatisticsRecord] =
-      if idx >= 0 && idx < stats.length then
-        stats.zipWithIndex.map { case (s, i) => if i == idx then f(s) else s }
-      else
-        stats
+    val stats = Array.fill(maxCores)(CoreStatisticsRecord())
 
-    val initialStats = List.fill(maxCores)(CoreStatisticsRecord())
-
-    // Process guarantees using foldLeft
-    val afterGuarantees = guarantees.foldLeft(initialStats) { (stats, guarantee) =>
+    var gi = guarantees
+    while gi.nonEmpty do
+      val guarantee = gi.head
+      gi = gi.tail
       val report = guarantee.report
       val coreIdx = report.coreIndex.toInt
       if coreIdx >= 0 && coreIdx < maxCores then
-        val totals = report.results.foldLeft((0L, 0L, 0L, 0L, 0L)) {
-          case ((imports, extCount, extSize, exports, gas), result) =>
-            val load = result.refineLoad
-            (
-              imports + load.imports.toLong,
-              extCount + load.extrinsicCount.toLong,
-              extSize + load.extrinsicSize.toLong,
-              exports + load.exports.toLong,
-              gas + load.gasUsed.toLong
-            )
-        }
-        updateAt(
-          stats,
-          coreIdx,
-          current =>
-            current.copy(
-              imports = current.imports + totals._1,
-              extrinsicCount = current.extrinsicCount + totals._2,
-              extrinsicSize = current.extrinsicSize + totals._3,
-              exports = current.exports + totals._4,
-              bundleSize = current.bundleSize + report.packageSpec.length.toLong,
-              gasUsed = current.gasUsed + totals._5
-            )
+        var imports = 0L
+        var extCount = 0L
+        var extSize = 0L
+        var exports = 0L
+        var gas = 0L
+        var rs = report.results
+        while rs.nonEmpty do
+          val load = rs.head.refineLoad
+          imports += load.imports.toLong
+          extCount += load.extrinsicCount.toLong
+          extSize += load.extrinsicSize.toLong
+          exports += load.exports.toLong
+          gas += load.gasUsed.toLong
+          rs = rs.tail
+        val cur = stats(coreIdx)
+        stats(coreIdx) = cur.copy(
+          imports = cur.imports + imports,
+          extrinsicCount = cur.extrinsicCount + extCount,
+          extrinsicSize = cur.extrinsicSize + extSize,
+          exports = cur.exports + exports,
+          bundleSize = cur.bundleSize + report.packageSpec.length.toLong,
+          gasUsed = cur.gasUsed + gas
         )
-      else
-        stats
-    }
 
-    // Add dataSize from available reports using foldLeft
     val segmentSize = 4104L
-    val afterReports = availableReports.foldLeft(afterGuarantees) { (stats, report) =>
+    var ari = availableReports
+    while ari.nonEmpty do
+      val report = ari.head
+      ari = ari.tail
       val coreIndex = report.coreIndex.toInt
-      if coreIndex >= 0 && coreIndex < stats.length then
+      if coreIndex >= 0 && coreIndex < maxCores then
         val packageLength = report.packageSpec.length.toLong
         val segmentCount = report.packageSpec.exportsCount.toLong
         val segmentsSize = segmentSize * ((segmentCount * 65 + 63) / 64)
-        val dataSize = packageLength + segmentsSize
-        updateAt(stats, coreIndex, c => c.copy(daLoad = c.daLoad + dataSize))
-      else
-        stats
-    }
+        val cur = stats(coreIndex)
+        stats(coreIndex) =
+          cur.copy(daLoad = cur.daLoad + packageLength + segmentsSize)
 
-    // Add popularity from assurances using foldLeft
-    assurances.foldLeft(afterReports) { (stats, assurance) =>
+    var asi = assurances
+    while asi.nonEmpty do
+      val assurance = asi.head
+      asi = asi.tail
       val bitfield = assurance.bitfield.toArray
-      (0 until maxCores).foldLeft(stats) { (s, coreIndex) =>
-        val byteIndex = coreIndex / 8
-        val bitIndex = coreIndex % 8
-        if byteIndex < bitfield.length then
-          val attested = (bitfield(byteIndex).toInt & (1 << bitIndex)) != 0
-          if attested then updateAt(s, coreIndex, c => c.copy(popularity = c.popularity + 1))
-          else s
-        else
-          s
-      }
-    }
+      val bitfieldLen = bitfield.length
+      var byteIndex = 0
+      while byteIndex < bitfieldLen do
+        val b = bitfield(byteIndex).toInt & 0xff
+        if b != 0 then
+          var bit = 0
+          while bit < 8 do
+            if (b & (1 << bit)) != 0 then
+              val coreIndex = byteIndex * 8 + bit
+              if coreIndex < maxCores then
+                val cur = stats(coreIndex)
+                stats(coreIndex) = cur.copy(popularity = cur.popularity + 1)
+            bit += 1
+        byteIndex += 1
 
-  /**
-   * Compute fresh service statistics by combining:
-   * 1. Work reports from guarantees (refinementCount, gasUsed, imports, exports, extrinsicCount, extrinsicSize)
-   * 2. Preimages (providedCount, providedSize)
-   * 3. Accumulation results (accumulateCount, accumulateGasUsed)
-   */
+    stats.toList
+
+  /** Compute fresh service statistics by combining:
+    *   1. Work reports from guarantees (refinementCount, gasUsed, imports,
+    *      exports, extrinsicCount, extrinsicSize)
+    *   2. Preimages (providedCount, providedSize)
+    *   3. Accumulation results (accumulateCount, accumulateGasUsed)
+    */
   private def computeFinalServiceStatistics(
-    guarantees: List[GuaranteeExtrinsic],
-    preimages: List[Preimage],
-    accumulationStats: Map[Long, (Long, Int)] // serviceId -> (gasUsed, workItemCount)
+      guarantees: List[GuaranteeExtrinsic],
+      preimages: List[Preimage],
+      accumulationStats: Map[
+        Long,
+        (Long, Int)
+      ] // serviceId -> (gasUsed, workItemCount)
   ): List[ReportTypes.ServiceStatisticsEntry] =
     // Collect all service IDs from all sources (immutable)
-    val guaranteeServiceIds = guarantees.flatMap(_.report.results.map(_.serviceId.value.toLong))
-    val preimageServiceIds = preimages.map(_.requester.value.toLong)
-    val allServiceIds = (guaranteeServiceIds ++ preimageServiceIds ++ accumulationStats.keys).toSet
+    val stats =
+      scala.collection.mutable.LongMap.empty[ReportTypes.ServiceActivityRecord]
+    def getOrEmpty(id: Long): ReportTypes.ServiceActivityRecord =
+      stats.getOrElse(id, ReportTypes.ServiceActivityRecord())
 
-    // Build initial stats map with empty records for all services
-    val initialStats = allServiceIds.map(id => id -> ReportTypes.ServiceActivityRecord()).toMap
-
-    // Update from guarantees using foldLeft
-    val afterGuarantees = guarantees.foldLeft(initialStats) { (stats, guarantee) =>
-      guarantee.report.results.foldLeft(stats) { (s, result) =>
-        val serviceId = result.serviceId.value.toLong
-        val current = s.getOrElse(serviceId, ReportTypes.ServiceActivityRecord())
-        val refineLoad = result.refineLoad
-        s.updated(
-          serviceId,
-          current.copy(
-            refinementCount = current.refinementCount + 1L,
-            refinementGasUsed = current.refinementGasUsed + refineLoad.gasUsed.toLong,
-            imports = current.imports + refineLoad.imports.toLong,
-            exports = current.exports + refineLoad.exports.toLong,
-            extrinsicCount = current.extrinsicCount + refineLoad.extrinsicCount.toLong,
-            extrinsicSize = current.extrinsicSize + refineLoad.extrinsicSize.toLong
-          )
+    var gi = guarantees
+    while gi.nonEmpty do
+      var rs = gi.head.report.results
+      while rs.nonEmpty do
+        val r = rs.head
+        val serviceId = r.serviceId.value.toLong
+        val refineLoad = r.refineLoad
+        val cur = getOrEmpty(serviceId)
+        stats(serviceId) = cur.copy(
+          refinementCount = cur.refinementCount + 1L,
+          refinementGasUsed = cur.refinementGasUsed + refineLoad.gasUsed.toLong,
+          imports = cur.imports + refineLoad.imports.toLong,
+          exports = cur.exports + refineLoad.exports.toLong,
+          extrinsicCount =
+            cur.extrinsicCount + refineLoad.extrinsicCount.toLong,
+          extrinsicSize = cur.extrinsicSize + refineLoad.extrinsicSize.toLong
         )
-      }
-    }
+        rs = rs.tail
+      gi = gi.tail
 
-    // Update from preimages (providedCount, providedSize) using foldLeft
-    val afterPreimages = preimages.foldLeft(afterGuarantees) { (stats, preimage) =>
-      val serviceId = preimage.requester.value.toLong
-      val current = stats.getOrElse(serviceId, ReportTypes.ServiceActivityRecord())
-      stats.updated(
-        serviceId,
-        current.copy(
-          providedCount = current.providedCount + 1,
-          providedSize = current.providedSize + preimage.blob.length.toLong
-        )
+    var pi = preimages
+    while pi.nonEmpty do
+      val p = pi.head
+      val serviceId = p.requester.value.toLong
+      val cur = getOrEmpty(serviceId)
+      stats(serviceId) = cur.copy(
+        providedCount = cur.providedCount + 1,
+        providedSize = cur.providedSize + p.blob.length.toLong
+      )
+      pi = pi.tail
+
+    accumulationStats.foreach { case (serviceId, (gasUsed, count)) =>
+      val cur = getOrEmpty(serviceId)
+      stats(serviceId) = cur.copy(
+        accumulateCount = cur.accumulateCount + count.toLong,
+        accumulateGasUsed = cur.accumulateGasUsed + gasUsed
       )
     }
 
-    // Update from accumulation stats using foldLeft
-    val afterAccumulation = accumulationStats.foldLeft(afterPreimages) {
-      case (stats, (serviceId, (gasUsed, count))) =>
-        val current = stats.getOrElse(serviceId, ReportTypes.ServiceActivityRecord())
-        stats.updated(
-          serviceId,
-          current.copy(
-            accumulateCount = current.accumulateCount + count.toLong,
-            accumulateGasUsed = current.accumulateGasUsed + gasUsed
-          )
-        )
+    // Sorted-by-service-id list, materialised once at the end.
+    val entries =
+      new Array[(Long, ReportTypes.ServiceActivityRecord)](stats.size)
+    var idx = 0
+    stats.foreachEntry { (id, rec) =>
+      entries(idx) = (id, rec); idx += 1
     }
+    java.util.Arrays.sort(
+      entries,
+      (
+          a: (Long, ReportTypes.ServiceActivityRecord),
+          b: (Long, ReportTypes.ServiceActivityRecord)
+      ) => java.lang.Long.compare(a._1, b._1)
+    )
+    val out = scala.collection.mutable.ListBuffer
+      .empty[ReportTypes.ServiceStatisticsEntry]
+    var oi = 0
+    while oi < entries.length do
+      val (id, record) = entries(oi)
+      out += ReportTypes.ServiceStatisticsEntry(id = id, record = record)
+      oi += 1
+    out.toList
 
-    // Return sorted list by service ID
-    afterAccumulation.toList.sortBy(_._1).map {
-      case (id, record) => ReportTypes.ServiceStatisticsEntry(id = id, record = record)
-    }
-
-  /**
-   * Imports a block and returns just the computed SafroleState for comparison.
-   * This is useful for trace testing where we want to compare typed state.
-   */
-  def importBlockForSafrole(block: Block, preState: RawState): (Option[SafroleState], Option[String]) =
+  /** Imports a block and returns just the computed SafroleState for comparison.
+    * This is useful for trace testing where we want to compare typed state.
+    */
+  def importBlockForSafrole(
+      block: Block,
+      preState: RawState
+  ): (Option[SafroleState], Option[String]) =
     try
       importBlock(block, preState) match
         case ImportResult.Success(_, _, safroleState) => (safroleState, None)
-        case ImportResult.Failure(_, message) => (None, Some(message))
+        case ImportResult.Failure(_, message)         => (None, Some(message))
     catch
       case e: Exception =>
         (None, Some(s"Exception: ${e.getMessage}"))
 
-  /**
-   * Validates that a block import produces the expected post-state.
-   * Used for testing against trace vectors.
-   */
+  /** Validates that a block import produces the expected post-state. Used for
+    * testing against trace vectors.
+    */
   def validateBlockImport(
-    block: Block,
-    preState: RawState,
-    expectedPostState: RawState
+      block: Block,
+      preState: RawState,
+      expectedPostState: RawState
   ): Boolean =
     importBlock(block, preState) match
       case ImportResult.Success(actualPostState, _, _) =>
@@ -360,14 +387,12 @@ class BlockImporter(
       case ImportResult.Failure(_, _) =>
         false
 
-/**
- * Extracts STF inputs from block and state.
- */
+/** Extracts STF inputs from block and state.
+  */
 object InputExtractor:
-  /**
-   * Extract SafroleInput from block.
-   * The entropy source in the header is a VRF signature from which we extract the output.
-   */
+  /** Extract SafroleInput from block. The entropy source in the header is a VRF
+    * signature from which we extract the output.
+    */
 
   def extractSafroleInput(block: Block): SafroleInput =
     val header = block.header
@@ -379,8 +404,7 @@ object InputExtractor:
       try
         BandersnatchWrapper.ensureLibraryLoaded()
         val output = BandersnatchWrapper.getIetfVrfOutput(entropyBytes)
-        if output != null && output.length == 32 then
-          Hash(output)
+        if output != null && output.length == 32 then Hash(output)
         else
           // Fallback: use first 32 bytes if native extraction fails
           Hash(entropyBytes.take(32))
@@ -395,15 +419,13 @@ object InputExtractor:
       extrinsic = tickets
     )
 
-  /**
-   * Extract DisputeInput from block.
-   */
+  /** Extract DisputeInput from block.
+    */
   def extractDisputeInput(block: Block): DisputeInput =
     DisputeInput(disputes = block.extrinsic.disputes)
 
-  /**
-   * Extract AssuranceInput from block.
-   */
+  /** Extract AssuranceInput from block.
+    */
   def extractAssuranceInput(block: Block): AssuranceInput =
     AssuranceInput(
       assurances = block.extrinsic.assurances,
@@ -411,29 +433,33 @@ object InputExtractor:
       parent = block.header.parent
     )
 
-  /**
-   * Extract AccumulationInput from available reports and slot.
-   */
-  def extractAccumulationInput(availableReports: List[WorkReport], slot: Long): AccumulationInput =
+  /** Extract AccumulationInput from available reports and slot.
+    */
+  def extractAccumulationInput(
+      availableReports: List[WorkReport],
+      slot: Long
+  ): AccumulationInput =
     AccumulationInput(
       slot = slot,
       reports = availableReports
     )
 
-  /**
-   * Extract HistoricalInput from block and accumulate root.
-   */
+  /** Extract HistoricalInput from block and accumulate root.
+    */
   def extractHistoryInput(block: Block, accumulateRoot: Hash): HistoricalInput =
     import io.forge.jam.core.scodec.JamCodecs.encode
     import _root_.scodec.Codec
     val headerHash = Hashing.blake2b256(block.header.encode.toArray)
 
-    val workPackages = block.extrinsic.guarantees.map { guarantee =>
-      ReportedWorkPackage(
-        hash = guarantee.report.packageSpec.hash,
-        exportsRoot = guarantee.report.packageSpec.exportsRoot // Segment root is the exports root
-      )
-    }.sortBy(wp => JamBytes(wp.hash.bytes))
+    val workPackages = block.extrinsic.guarantees
+      .map { guarantee =>
+        ReportedWorkPackage(
+          hash = guarantee.report.packageSpec.hash,
+          exportsRoot =
+            guarantee.report.packageSpec.exportsRoot // Segment root is the exports root
+        )
+      }
+      .sortBy(wp => JamBytes(wp.hash.bytes))
 
     HistoricalInput(
       headerHash = headerHash,
@@ -442,9 +468,8 @@ object InputExtractor:
       workPackages = workPackages
     )
 
-  /**
-   * Extract AuthInput from block.
-   */
+  /** Extract AuthInput from block.
+    */
   def extractAuthInput(block: Block): AuthInput =
     // Consumed authorizations come from guarantees
     val auths = block.extrinsic.guarantees.map { guarantee =>
@@ -458,18 +483,16 @@ object InputExtractor:
       auths = auths
     )
 
-  /**
-   * Extract PreimageInput from block.
-   */
+  /** Extract PreimageInput from block.
+    */
   def extractPreimageInput(block: Block, slot: Long): PreimageInput =
     PreimageInput(
       preimages = block.extrinsic.preimages,
       slot = slot
     )
 
-  /**
-   * Extract StatInput from block.
-   */
+  /** Extract StatInput from block.
+    */
   def extractStatInput(block: Block): StatInput =
     StatInput(
       slot = block.header.slot.value.toLong,
@@ -483,13 +506,14 @@ object InputExtractor:
       )
     )
 
-/**
- * Encoder for converting typed state structures back to raw keyvals.
- */
+/** Encoder for converting typed state structures back to raw keyvals.
+  */
 object StateEncoder:
-  /**
-   * Encode the full FullJamState back to keyvals.
-   * This encodes all state components according to the Gray Paper state layout.
-   */
-  def encodeFullState(state: FullJamState, config: ChainConfig = ChainConfig.TINY): List[KeyValue] =
+  /** Encode the full FullJamState back to keyvals. This encodes all state
+    * components according to the Gray Paper state layout.
+    */
+  def encodeFullState(
+      state: FullJamState,
+      config: ChainConfig = ChainConfig.TINY
+  ): List[KeyValue] =
     state.toKeyvals(config)

@@ -1,7 +1,12 @@
 package io.forge.jam.protocol.traces
 
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
+import io.forge.jam.core.primitives.{
+  Hash,
+  BandersnatchPublicKey,
+  Ed25519PublicKey,
+  BlsPublicKey
+}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
@@ -15,221 +20,301 @@ import io.forge.jam.protocol.accumulation.{
   Privileges
 }
 import io.forge.jam.core.types.service.ServiceInfo
-import io.forge.jam.protocol.report.ReportTypes.{CoreStatisticsRecord, ServiceStatisticsEntry}
+import io.forge.jam.protocol.report.ReportTypes.{
+  CoreStatisticsRecord,
+  ServiceStatisticsEntry
+}
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import org.slf4j.LoggerFactory
 import _root_.scodec.bits.BitVector
 import _root_.scodec.Codec
 import io.forge.jam.core.scodec.FullJamStateCodecs
 
-/**
- * Unified JAM state container holding all state components.
- */
+/** Unified JAM state container holding all state components.
+  */
 final case class FullJamState(
-  // tau - Current timeslot
-  timeslot: Long,
+    // tau - Current timeslot
+    timeslot: Long,
 
-  // eta - Entropy pool (4 x 32-byte hashes)
-  entropyPool: List[Hash],
+    // eta - Entropy pool (4 x 32-byte hashes)
+    entropyPool: List[Hash],
 
-  // kappa - Current validators
-  currentValidators: List[ValidatorKey],
+    // kappa - Current validators
+    currentValidators: List[ValidatorKey],
 
-  // lambda - Previous validators
-  previousValidators: List[ValidatorKey],
+    // lambda - Previous validators
+    previousValidators: List[ValidatorKey],
 
-  // iota - Validator queue (pending validators)
-  validatorQueue: List[ValidatorKey],
+    // iota - Validator queue (pending validators)
+    validatorQueue: List[ValidatorKey],
 
-  // gamma - Safrole state
-  safroleGammaK: List[ValidatorKey], // gamma_k - next epoch validators
-  safroleGammaZ: JamBytes, // gamma_z - ring root
-  safroleGammaS: TicketsOrKeys, // gamma_s - sealing sequence
-  safroleGammaA: List[TicketMark], // gamma_a - ticket accumulator
+    // gamma - Safrole state
+    safroleGammaK: List[ValidatorKey], // gamma_k - next epoch validators
+    safroleGammaZ: JamBytes, // gamma_z - ring root
+    safroleGammaS: TicketsOrKeys, // gamma_s - sealing sequence
+    safroleGammaA: List[TicketMark], // gamma_a - ticket accumulator
 
-  // phi_c - Core authorization pools (per core, variable-size inner lists)
-  authPools: List[List[Hash]] = List.empty,
+    // phi_c - Core authorization pools (per core, variable-size inner lists)
+    authPools: List[List[Hash]] = List.empty,
 
-  // phi - Authorization queues (per core, fixed-size 80 inner lists)
-  authQueues: List[List[Hash]] = List.empty,
+    // phi - Authorization queues (per core, fixed-size 80 inner lists)
+    authQueues: List[List[Hash]] = List.empty,
 
-  // beta - Recent block history
-  recentHistory: HistoricalBetaContainer = HistoricalBetaContainer(),
+    // beta - Recent block history
+    recentHistory: HistoricalBetaContainer = HistoricalBetaContainer(),
 
-  // rho - Pending work reports (availability assignments per core)
-  reports: List[Option[AvailabilityAssignment]] = List.empty,
+    // rho - Pending work reports (availability assignments per core)
+    reports: List[Option[AvailabilityAssignment]] = List.empty,
 
-  // psi - Judgements (disputes resolution state)
-  judgements: Psi = Psi.empty,
+    // psi - Judgements (disputes resolution state)
+    judgements: Psi = Psi.empty,
 
-  // chi - Privileged services configuration
-  privilegedServices: Privileges = Privileges(0, List.empty, 0, 0, List.empty),
+    // chi - Privileged services configuration
+    privilegedServices: Privileges =
+      Privileges(0, List.empty, 0, 0, List.empty),
 
-  // Ready queue for accumulation (epoch-length ring buffer)
-  accumulationQueue: List[List[AccumulationReadyRecord]] = List.empty,
+    // Ready queue for accumulation (epoch-length ring buffer)
+    accumulationQueue: List[List[AccumulationReadyRecord]] = List.empty,
 
-  // Accumulated hashes history (epoch-length ring buffer)
-  accumulationHistory: List[List[JamBytes]] = List.empty,
+    // Accumulated hashes history (epoch-length ring buffer)
+    accumulationHistory: List[List[JamBytes]] = List.empty,
 
-  // delta - Service accounts with full data
-  serviceAccounts: List[AccumulationServiceItem] = List.empty,
+    // delta - Service accounts with full data
+    serviceAccounts: List[AccumulationServiceItem] = List.empty,
 
-  // pi - Service statistics (per block, fresh each block)
-  serviceStatistics: List[ServiceStatisticsEntry] = List.empty,
+    // pi - Service statistics (per block, fresh each block)
+    serviceStatistics: List[ServiceStatisticsEntry] = List.empty,
 
-  // alpha_c - Core statistics (per core)
-  coreStatistics: List[CoreStatisticsRecord] = List.empty,
+    // alpha_c - Core statistics (per core)
+    coreStatistics: List[CoreStatisticsRecord] = List.empty,
 
-  // alpha_v^curr - Current epoch validator statistics
-  activityStatsCurrent: List[StatCount] = List.empty,
+    // alpha_v^curr - Current epoch validator statistics
+    activityStatsCurrent: List[StatCount] = List.empty,
 
-  // alpha_v^last - Last epoch validator statistics
-  activityStatsLast: List[StatCount] = List.empty,
+    // alpha_v^last - Last epoch validator statistics
+    activityStatsLast: List[StatCount] = List.empty,
 
-  // Post-dispute offenders
-  postOffenders: List[Ed25519PublicKey] = List.empty,
+    // Post-dispute offenders
+    postOffenders: List[Ed25519PublicKey] = List.empty,
 
-  // Last accumulation outputs (service commitments)
-  lastAccumulationOutputs: List[(Long, JamBytes)] = List.empty,
+    // Last accumulation outputs (service commitments)
+    lastAccumulationOutputs: List[(Long, JamBytes)] = List.empty,
 
-  // Raw keyvals for all state components (for pass-through when unchanged)
-  otherKeyvals: List[KeyValue] = List.empty,
+    // Raw keyvals for all state components (for pass-through when unchanged)
+    otherKeyvals: List[KeyValue] = List.empty,
 
-  // Original keyvals by full key (for preserving exact bytes when unchanged)
-  originalKeyvals: Map[JamBytes, KeyValue] = Map.empty,
+    // Original keyvals by full key (for preserving exact bytes when unchanged)
+    originalKeyvals: Map[JamBytes, KeyValue] = Map.empty,
 
-  // Raw service data by state key (for preimages, storage, etc.)
-  rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty
+    // Raw service data by state key (for preimages, storage, etc.)
+    rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty
 ):
 
-  /**
-   * Convert back to raw keyvals for state root computation.
-   */
-  def toKeyvals(config: ChainConfig = ChainConfig.TINY): List[KeyValue] =
+  /** Convert back to raw keyvals for state root computation.
+    */
+  def toKeyvals(
+      config: ChainConfig = ChainConfig.TINY,
+      preState: Option[FullJamState] = None
+  ): List[KeyValue] =
     val builder = scala.collection.mutable.ListBuffer[KeyValue]()
 
     // Build a map of original keyvals from otherKeyvals by prefix for pass-through
-    val otherByPrefix = otherKeyvals.groupBy(kv => kv.key.toArray(0).toInt & 0xff)
+    val otherByPrefix = otherKeyvals.groupBy(kv => kv.key(0).toInt & 0xff)
 
-    // Core authorization pools (0x01) - always re-encode (modified by Authorization STF)
-    val encodedAuthPools = encodeAuthPools(authPools)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.CORE_AUTHORIZATION_POOL),
-      encodedAuthPools
+    inline def emitSimple[A <: AnyRef](
+        prefix: Byte,
+        current: A,
+        pre: FullJamState => A,
+        reencode: => JamBytes
+    ): Unit =
+      val key = StateKeys.simpleKey(prefix)
+      val cached: Option[JamBytes] = preState.flatMap { ps =>
+        if (current eq pre(ps)) then originalKeyvals.get(key).map(_.value)
+        else None
+      }
+      builder += KeyValue(key, cached.getOrElse(reencode))
+
+    emitSimple[List[List[Hash]]](
+      StateKeys.CORE_AUTHORIZATION_POOL,
+      authPools,
+      _.authPools,
+      encodeAuthPools(authPools)
     )
-
-    // Authorization queues (0x02) - always re-encode (modified by Authorization STF)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.AUTHORIZATION_QUEUE),
+    emitSimple[List[List[Hash]]](
+      StateKeys.AUTHORIZATION_QUEUE,
+      authQueues,
+      _.authQueues,
       encodeAuthQueues(authQueues)
     )
-
-    // Recent history (0x03) - always re-encode (modified by History STF)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.RECENT_HISTORY),
-      JamBytes.fromByteVector(summon[Codec[HistoricalBetaContainer]].encode(recentHistory).require.bytes)
+    emitSimple[HistoricalBetaContainer](
+      StateKeys.RECENT_HISTORY,
+      recentHistory,
+      _.recentHistory,
+      JamBytes.fromByteVector(
+        summon[Codec[HistoricalBetaContainer]]
+          .encode(recentHistory)
+          .require
+          .bytes
+      )
     )
 
-    // Safrole gamma state (0x04) - always re-encode (modified by Safrole STF at epoch boundaries)
+    // Safrole gamma state
     val safroleKey = StateKeys.simpleKey(StateKeys.SAFROLE_STATE)
+    val safroleClean = preState.exists { ps =>
+      // gammaZ is a JamBytes value class — use content equality (cheap, 144 bytes).
+      // The list refs use eq to stay O(1).
+      (safroleGammaK eq ps.safroleGammaK) &&
+      (safroleGammaS eq ps.safroleGammaS) &&
+      (safroleGammaA eq ps.safroleGammaA) &&
+      (safroleGammaZ == ps.safroleGammaZ)
+    }
+    val safroleCached =
+      if safroleClean then originalKeyvals.get(safroleKey).map(_.value)
+      else None
     builder += KeyValue(
       safroleKey,
-      encodeSafroleGammaState(safroleGammaK, safroleGammaZ, safroleGammaS, safroleGammaA)
+      safroleCached.getOrElse(
+        encodeSafroleGammaState(
+          safroleGammaK,
+          safroleGammaZ,
+          safroleGammaS,
+          safroleGammaA
+        )
+      )
     )
 
-    // Judgements (0x05) - pass through original if available
-    otherByPrefix.get(StateKeys.JUDGEMENTS.toInt & 0xff).foreach(kvs => builder ++= kvs)
+    otherByPrefix
+      .get(StateKeys.JUDGEMENTS.toInt & 0xff)
+      .foreach(kvs => builder ++= kvs)
 
-    // Entropy pool (0x06) - always re-encode (modified by Safrole STF)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.ENTROPY_POOL),
+    emitSimple[List[Hash]](
+      StateKeys.ENTROPY_POOL,
+      entropyPool,
+      _.entropyPool,
       encodeEntropyPool(entropyPool)
     )
-
-    // Validator queue (0x07) - always re-encode (rotated by Safrole STF at epoch boundaries)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.VALIDATOR_QUEUE),
+    emitSimple[List[ValidatorKey]](
+      StateKeys.VALIDATOR_QUEUE,
+      validatorQueue,
+      _.validatorQueue,
       encodeValidatorList(validatorQueue)
     )
-
-    // Current validators (0x08) - always re-encode (rotated by Safrole STF at epoch boundaries)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.CURRENT_VALIDATORS),
+    emitSimple[List[ValidatorKey]](
+      StateKeys.CURRENT_VALIDATORS,
+      currentValidators,
+      _.currentValidators,
       encodeValidatorList(currentValidators)
     )
-
-    // Previous validators (0x09) - always re-encode (rotated by Safrole STF at epoch boundaries)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.PREVIOUS_VALIDATORS),
+    emitSimple[List[ValidatorKey]](
+      StateKeys.PREVIOUS_VALIDATORS,
+      previousValidators,
+      _.previousValidators,
       encodeValidatorList(previousValidators)
     )
 
-    // Reports (0x0A) - always re-encode (modified by Reports STF)
-    val paddedReports = reports.padTo(config.coresCount, None)
+    // Reports — pad lazily, only when re-encoding fires.
+    val reportsKey = StateKeys.simpleKey(StateKeys.REPORTS)
+    val reportsClean = preState.exists(ps => reports eq ps.reports)
+    val reportsCached =
+      if reportsClean then originalKeyvals.get(reportsKey).map(_.value)
+      else None
     builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.REPORTS),
-      encodeReports(paddedReports)
+      reportsKey,
+      reportsCached.getOrElse {
+        val paddedReports = reports.padTo(config.coresCount, None)
+        encodeReports(paddedReports)
+      }
     )
 
-    // Timeslot (0x0B) - always re-encode (modified by Safrole STF)
+    // Timeslot — always changes; cheap to encode (4 bytes).
     builder += KeyValue(
       StateKeys.simpleKey(StateKeys.TIMESLOT),
       encodeTimeslot(timeslot)
     )
 
-    // Privileged services (0x0C) - always re-encode (modified by Accumulation STF via bless host call)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.PRIVILEGED_SERVICES),
+    emitSimple[Privileges](
+      StateKeys.PRIVILEGED_SERVICES,
+      privilegedServices,
+      _.privilegedServices,
       encodePrivilegedServices(config)
     )
 
-    // Activity statistics (0x0D) - always re-encode with new format
+    // Activity statistics depend on coreStatistics and serviceStatistics which
+    // are recomputed every block, so always re-encode.
     builder += KeyValue(
       StateKeys.simpleKey(StateKeys.ACTIVITY_STATISTICS),
       encodeActivityStatistics(config)
     )
 
-    // Accumulation queue (0x0E) - always re-encode (modified by Accumulation STF)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.ACCUMULATION_QUEUE),
+    emitSimple[List[List[AccumulationReadyRecord]]](
+      StateKeys.ACCUMULATION_QUEUE,
+      accumulationQueue,
+      _.accumulationQueue,
       encodeAccumulationQueue(accumulationQueue)
     )
-
-    // Accumulation history (0x0F) - always re-encode (modified by Accumulation STF)
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.ACCUMULATION_HISTORY),
+    emitSimple[List[List[JamBytes]]](
+      StateKeys.ACCUMULATION_HISTORY,
+      accumulationHistory,
+      _.accumulationHistory,
       encodeAccumulationHistory(accumulationHistory)
     )
-
-    // Last accumulation outputs (0x10) - always re-encode from lastAccumulationOutputs field
-    // Gray Paper C(16) ↦ encode{sq{(encode[4]{s}, encode{h}) | (s, h) ∈ lastaccout}}
-    builder += KeyValue(
-      StateKeys.simpleKey(StateKeys.LAST_ACCUMULATION_OUTPUTS),
+    emitSimple[List[(Long, JamBytes)]](
+      StateKeys.LAST_ACCUMULATION_OUTPUTS,
+      lastAccumulationOutputs,
+      _.lastAccumulationOutputs,
       encodeLastAccumulationOutputs(lastAccumulationOutputs)
     )
 
-    // Service accounts (0xFF) - always encode current state (not original)
-    // because account info (bytesUsed, items) can change during accumulation
-    for item <- serviceAccounts do
+    val preInfoById: scala.collection.Map[Long, ServiceInfo] =
+      preState match
+        case Some(ps) =>
+          val m = scala.collection.mutable.LongMap.empty[ServiceInfo]
+          var sa = ps.serviceAccounts
+          while sa.nonEmpty do
+            m(sa.head.id) = sa.head.data.service
+            sa = sa.tail
+          m
+        case None => Map.empty
+
+    val infoCodec = summon[Codec[ServiceInfo]]
+    var sa = serviceAccounts
+    while sa.nonEmpty do
+      val item = sa.head
+      sa = sa.tail
       val serviceKey = encodeServiceAccountKey(item.id)
-      builder += KeyValue(
-        serviceKey,
-        JamBytes.fromByteVector(summon[Codec[ServiceInfo]].encode(item.data.service).require.bytes)
-      )
+      val infoUnchanged =
+        preInfoById.get(item.id).exists(_ eq item.data.service)
+      val encoded =
+        if infoUnchanged then
+          originalKeyvals
+            .get(serviceKey)
+            .map(_.value)
+            .getOrElse(
+              JamBytes.fromByteVector(
+                infoCodec.encode(item.data.service).require.bytes
+              )
+            )
+        else
+          JamBytes.fromByteVector(
+            infoCodec.encode(item.data.service).require.bytes
+          )
+      builder += KeyValue(serviceKey, encoded)
 
-    // Service storage/preimage/request data - use rawServiceDataByStateKey as source of truth
-    // These keys use interleaved encoding: [n0, a0, n1, a1, n2, a2, n3, a3, a4, ...]
-    // where n = encode(serviceId), a = blake2b(val_encoded + data)
-    // The first byte is the low byte of the service ID, NOT a fixed prefix
-    // Filter to only include service data keys (not known protocol keys)
-    val storageDataByKey = rawServiceDataByStateKey.filter {
-      case (key, _) =>
-        StateKeys.isServiceDataKeyFull(key)
+    // Service storage/preimage/request data — sorted by raw byte order.
+    val storageDataByKey = rawServiceDataByStateKey.filter { case (key, _) =>
+      StateKeys.isServiceDataKeyFull(key)
     }
-
-    // Add storage keyvals from accumulation state
-    for (key, value) <- storageDataByKey.toList.sortBy(_._1.toHex) do
+    val sortedStorage = storageDataByKey.toArray
+    java.util.Arrays.sort(
+      sortedStorage,
+      (a: (JamBytes, JamBytes), b: (JamBytes, JamBytes)) =>
+        a._1.bytes.compare(b._1.bytes)
+    )
+    var i = 0
+    while i < sortedStorage.length do
+      val (key, value) = sortedStorage(i)
       builder += KeyValue(key, value)
+      i += 1
 
     builder.toList
 
@@ -245,10 +330,9 @@ final case class FullJamState(
   private def encodeAuthPools(pools: List[List[Hash]]): JamBytes =
     encode(FullJamStateCodecs.authPoolsCodec(pools.length), pools)
 
-  /**
-   * Encode service account key.
-   * Format: prefix 255, service ID interleaved at positions 1, 3, 5, 7
-   */
+  /** Encode service account key. Format: prefix 255, service ID interleaved at
+    * positions 1, 3, 5, 7
+    */
   private def encodeServiceAccountKey(serviceId: Long): JamBytes =
     val key = new Array[Byte](31)
     key(0) = StateKeys.SERVICE_ACCOUNT
@@ -272,14 +356,16 @@ final case class FullJamState(
 
   /** Encode Safrole gamma state using FullJamStateCodecs. */
   private def encodeSafroleGammaState(
-    gammaK: List[ValidatorKey],
-    gammaZ: JamBytes,
-    gammaS: TicketsOrKeys,
-    gammaA: List[TicketMark]
+      gammaK: List[ValidatorKey],
+      gammaZ: JamBytes,
+      gammaS: TicketsOrKeys,
+      gammaA: List[TicketMark]
   ): JamBytes =
     val (gammaS_data, gammaS_length) = gammaS match
-      case TicketsOrKeys.Tickets(tickets) => (FullJamStateCodecs.TicketsOrKeysData.Tickets(tickets), tickets.length)
-      case TicketsOrKeys.Keys(keys) => (FullJamStateCodecs.TicketsOrKeysData.Keys(keys), keys.length)
+      case TicketsOrKeys.Tickets(tickets) =>
+        (FullJamStateCodecs.TicketsOrKeysData.Tickets(tickets), tickets.length)
+      case TicketsOrKeys.Keys(keys) =>
+        (FullJamStateCodecs.TicketsOrKeysData.Keys(keys), keys.length)
     encode(
       FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, gammaS_length),
       (gammaK, gammaZ.toByteVector, gammaS_data, gammaA)
@@ -291,34 +377,88 @@ final case class FullJamState(
     encode(FullJamStateCodecs.authQueuesCodec(queues.length, queueSize), queues)
 
   /** Encode reports using FullJamStateCodecs. */
-  private def encodeReports(reports: List[Option[AvailabilityAssignment]]): JamBytes =
-    encode(FullJamStateCodecs.reportsCodec(reports.length)(using summon[Codec[AvailabilityAssignment]]), reports)
+  private def encodeReports(
+      reports: List[Option[AvailabilityAssignment]]
+  ): JamBytes =
+    encode(
+      FullJamStateCodecs.reportsCodec(reports.length)(using
+        summon[Codec[AvailabilityAssignment]]
+      ),
+      reports
+    )
 
   /** Encode activity statistics using FullJamStateCodecs. */
   private def encodeActivityStatistics(config: ChainConfig): JamBytes =
-    val paddedCurrent = activityStatsCurrent.padTo(config.validatorCount, StatCount.zero)
-    val paddedLast = activityStatsLast.padTo(config.validatorCount, StatCount.zero)
-    val paddedCoreStats = coreStatistics.padTo(config.coresCount, CoreStatisticsRecord.zero)
+    val paddedCurrent =
+      activityStatsCurrent.padTo(config.validatorCount, StatCount.zero)
+    val paddedLast =
+      activityStatsLast.padTo(config.validatorCount, StatCount.zero)
+    val paddedCoreStats =
+      coreStatistics.padTo(config.coresCount, CoreStatisticsRecord.zero)
 
     val statsData = FullJamStateCodecs.ActivityStatisticsData(
-      accumulator = paddedCurrent.map(s => FullJamStateCodecs.StatCountData(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances)),
-      previous = paddedLast.map(s => FullJamStateCodecs.StatCountData(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances)),
-      core = paddedCoreStats.map(c => FullJamStateCodecs.CoreStatisticsData(c.daLoad, c.popularity, c.imports, c.extrinsicCount, c.extrinsicSize, c.exports, c.bundleSize, c.gasUsed)),
-      service = serviceStatistics.map(e => FullJamStateCodecs.ServiceStatisticsData(
-        e.id, e.record.providedCount.toLong, e.record.providedSize,
-        e.record.refinementCount, e.record.refinementGasUsed,
-        e.record.imports, e.record.extrinsicCount, e.record.extrinsicSize, e.record.exports,
-        e.record.accumulateCount, e.record.accumulateGasUsed
-      ))
+      accumulator = paddedCurrent.map(s =>
+        FullJamStateCodecs.StatCountData(
+          s.blocks,
+          s.tickets,
+          s.preImages,
+          s.preImagesSize,
+          s.guarantees,
+          s.assurances
+        )
+      ),
+      previous = paddedLast.map(s =>
+        FullJamStateCodecs.StatCountData(
+          s.blocks,
+          s.tickets,
+          s.preImages,
+          s.preImagesSize,
+          s.guarantees,
+          s.assurances
+        )
+      ),
+      core = paddedCoreStats.map(c =>
+        FullJamStateCodecs.CoreStatisticsData(
+          c.daLoad,
+          c.popularity,
+          c.imports,
+          c.extrinsicCount,
+          c.extrinsicSize,
+          c.exports,
+          c.bundleSize,
+          c.gasUsed
+        )
+      ),
+      service = serviceStatistics.map(e =>
+        FullJamStateCodecs.ServiceStatisticsData(
+          e.id,
+          e.record.providedCount.toLong,
+          e.record.providedSize,
+          e.record.refinementCount,
+          e.record.refinementGasUsed,
+          e.record.imports,
+          e.record.extrinsicCount,
+          e.record.extrinsicSize,
+          e.record.exports,
+          e.record.accumulateCount,
+          e.record.accumulateGasUsed
+        )
+      )
     )
-    encode(FullJamStateCodecs.activityStatisticsCodec(config.validatorCount, config.coresCount), statsData)
+    encode(
+      FullJamStateCodecs
+        .activityStatisticsCodec(config.validatorCount, config.coresCount),
+      statsData
+    )
 
   /** Encode privileged services using Privileges codec. */
   private def encodePrivilegedServices(config: ChainConfig): JamBytes =
     encode(Privileges.codec(config.coresCount), privilegedServices)
 
   /** Encode accumulation queue (ready queue) using scodec. */
-  private def encodeAccumulationQueue(queue: List[List[AccumulationReadyRecord]]): JamBytes =
+  private def encodeAccumulationQueue(
+      queue: List[List[AccumulationReadyRecord]]
+  ): JamBytes =
     import io.forge.jam.core.scodec.JamCodecs
     val queueCodec = JamCodecs.fixedSizeList(
       JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]),
@@ -327,32 +467,52 @@ final case class FullJamState(
     encode(queueCodec, queue)
 
   /** Encode accumulation history using FullJamStateCodecs. */
-  private def encodeAccumulationHistory(history: List[List[JamBytes]]): JamBytes =
+  private def encodeAccumulationHistory(
+      history: List[List[JamBytes]]
+  ): JamBytes =
     val historyBv = history.map(_.map(_.toByteVector))
-    encode(FullJamStateCodecs.accumulationHistoryCodec(history.length), historyBv)
+    encode(
+      FullJamStateCodecs.accumulationHistoryCodec(history.length),
+      historyBv
+    )
 
   /** Encode last accumulation outputs using FullJamStateCodecs. */
-  private def encodeLastAccumulationOutputs(outputs: List[(Long, JamBytes)]): JamBytes =
+  private def encodeLastAccumulationOutputs(
+      outputs: List[(Long, JamBytes)]
+  ): JamBytes =
     val outputsBv = outputs.map { case (id, jb) => (id, jb.toByteVector) }
-    JamBytes.fromByteVector(FullJamStateCodecs.encodeLastAccumulationOutputs(outputsBv))
+    JamBytes.fromByteVector(
+      FullJamStateCodecs.encodeLastAccumulationOutputs(outputsBv)
+    )
 
 object FullJamState:
   private val logger = LoggerFactory.getLogger(getClass)
 
   // Bandersnatch ring commitment size (144 bytes)
-  private val RING_COMMITMENT_SIZE: Int = TinyConfig.BANDERSNATCH_RING_COMMITMENT_SIZE
+  private val RING_COMMITMENT_SIZE: Int =
+    TinyConfig.BANDERSNATCH_RING_COMMITMENT_SIZE
 
-  /**
-   * Create from raw state keyvals.
-   */
-  def fromKeyvals(keyvals: List[KeyValue], config: ChainConfig = ChainConfig.TINY): FullJamState =
-    val safroleState = StateCodec.decodeSafroleState(keyvals, config)
+  /** Simple protocol keys
+    */
+  private final class KeyvalIndex(
+      val simpleByPrefix: Array[KeyValue], // 256 slots; null if absent
+      val serviceAccountKeyvals: scala.collection.mutable.ArrayBuffer[KeyValue],
+      val rawServiceDataByStateKey: scala.collection.mutable.HashMap[
+        JamBytes,
+        JamBytes
+      ],
+      val originalByKey: scala.collection.mutable.HashMap[JamBytes, KeyValue],
+      val otherKeyvals: scala.collection.mutable.ListBuffer[KeyValue]
+  )
 
-    // Build a map of ALL original keyvals by full key for preserving exact bytes
-    val originalByKey = keyvals.map(kv => kv.key -> kv).toMap
+  private def buildIndex(keyvals: List[KeyValue]): KeyvalIndex =
+    val simple = new Array[KeyValue](256)
+    val serviceAccounts = scala.collection.mutable.ArrayBuffer.empty[KeyValue]
+    val rawData = scala.collection.mutable.HashMap.empty[JamBytes, JamBytes]
+    val original = scala.collection.mutable.HashMap.empty[JamBytes, KeyValue]
+    val other = scala.collection.mutable.ListBuffer.empty[KeyValue]
 
-    // Separate Safrole-related keyvals from others
-    val safroleRelatedPrefixes = Set(
+    val safroleRelated: Set[Int] = Set(
       StateKeys.TIMESLOT.toInt & 0xff,
       StateKeys.ENTROPY_POOL.toInt & 0xff,
       StateKeys.CURRENT_VALIDATORS.toInt & 0xff,
@@ -363,45 +523,60 @@ object FullJamState:
       StateKeys.SERVICE_ACCOUNT.toInt & 0xff
     )
 
-    val otherKvs = keyvals.filterNot(kv =>
-      safroleRelatedPrefixes.contains(kv.key.toArray(0).toInt & 0xff) ||
-      StateKeys.isServiceDataKeyFull(kv.key)
+    var rem = keyvals
+    while rem.nonEmpty do
+      val kv = rem.head
+      rem = rem.tail
+      val key = kv.key
+      original.update(key, kv)
+
+      val first = key(0).toInt & 0xff
+      val isServiceData = StateKeys.isServiceDataKeyFullWithFirst(key, first)
+
+      if isServiceData then
+        rawData.update(key, kv.value)
+        if first == 0xff && key(2) == 0 then serviceAccounts += kv
+      else if first == 0xff then serviceAccounts += kv
+      else simple(first) = kv
+
+      if !safroleRelated.contains(first) && !isServiceData then other += kv
+
+    new KeyvalIndex(simple, serviceAccounts, rawData, original, other)
+
+  /** Create from raw state keyvals.
+    */
+  def fromKeyvals(
+      keyvals: List[KeyValue],
+      config: ChainConfig = ChainConfig.TINY
+  ): FullJamState =
+    val idx = buildIndex(keyvals)
+
+    val safroleState = StateCodec.decodeSafroleStateFromIndex(
+      idx.simpleByPrefix,
+      config
     )
 
-    // Decode reports from keyvals (0x0A)
-    val reports = decodeReports(keyvals, config.coresCount)
-
-    // Decode auth pools from keyvals
-    val authPools = decodeAuthPools(keyvals, config.coresCount)
-
-    // Decode auth queues from keyvals (0x02)
-    val authQueues = decodeAuthQueues(keyvals, config.coresCount, config.authQueueSize)
-
-    // Decode service accounts from keyvals
-    val serviceAccounts = decodeServiceAccounts(keyvals)
-
-    // rawServiceDataByStateKey contains all service storage/preimage/request keys
-    // These use interleaved encoding where the first byte is the low byte of the service ID
-    // Filter using isServiceDataKeyFull to capture all non-protocol keys
-    // Note: Service data keys can have the same first byte as protocol keys if the service ID's
-    // low byte matches a protocol prefix (e.g., 0x07). We must check the full key.
-    val rawServiceDataByStateKey: Map[JamBytes, JamBytes] = keyvals
-      .filter(kv => StateKeys.isServiceDataKeyFull(kv.key))
-      .map(kv => kv.key -> kv.value)
-      .toMap
-
-    val recentHistory = decodeRecentHistory(keyvals)
-
+    val reports = decodeReportsAt(idx, config.coresCount)
+    val authPools = decodeAuthPoolsAt(idx, config.coresCount)
+    val authQueues =
+      decodeAuthQueuesAt(idx, config.coresCount, config.authQueueSize)
+    val serviceAccounts = decodeServiceAccountsAt(idx)
+    val recentHistory = decodeRecentHistoryAt(idx)
     val (activityStatsCurrent, activityStatsLast, _) =
-      decodeActivityStatistics(keyvals, config.validatorCount, config.coresCount)
+      decodeActivityStatisticsAt(idx, config.validatorCount, config.coresCount)
     val coreStatistics = List.fill(config.coresCount)(CoreStatisticsRecord())
+    val accumulationQueue = decodeAccumulationQueueAt(idx, config.epochLength)
+    val accumulationHistory =
+      decodeAccumulationHistoryAt(idx, config.epochLength)
+    val lastAccumulationOutputs = decodeLastAccumulationOutputsAt(idx)
+    val privilegedServices = decodePrivilegedServicesAt(idx, config.coresCount)
 
-    val accumulationQueue = decodeAccumulationQueue(keyvals, config.epochLength)
-    val accumulationHistory = decodeAccumulationHistory(keyvals, config.epochLength)
-    val lastAccumulationOutputs = decodeLastAccumulationOutputs(keyvals)
-
-    // Decode privileged services from keyvals (0x0C)
-    val privilegedServices = decodePrivilegedServices(keyvals, config.coresCount)
+    // Convert mutable index state into the immutable shapes the FullJamState
+    // case class expects. The mutable buffers are local to this function.
+    val originalByKey: Map[JamBytes, KeyValue] = idx.originalByKey.toMap
+    val rawServiceDataByStateKey: Map[JamBytes, JamBytes] =
+      idx.rawServiceDataByStateKey.toMap
+    val otherKvs: List[KeyValue] = idx.otherKeyvals.toList
 
     FullJamState(
       timeslot = safroleState.tau,
@@ -414,7 +589,8 @@ object FullJamState:
       safroleGammaS = safroleState.gammaS,
       safroleGammaA = safroleState.gammaA,
       postOffenders = safroleState.postOffenders,
-      judgements = Psi.empty, // Judgements initialized empty, updated by Disputes STF
+      judgements =
+        Psi.empty, // Judgements initialized empty, updated by Disputes STF
       reports = reports,
       authPools = authPools,
       authQueues = authQueues,
@@ -436,22 +612,17 @@ object FullJamState:
   // Decoding helpers - all use FullJamStateCodecs for consistency
   // ============================================================================
 
-  /** Helper to find a keyval by prefix - only matches simple protocol state keys. */
-  private def findKeyval(keyvals: List[KeyValue], prefix: Byte): Option[KeyValue] =
-    keyvals.find { kv =>
-      val keyBytes = kv.key.toArray
-      if keyBytes.length != 31 then false
-      else if keyBytes(0) != prefix then false
-      else keyBytes.drop(1).forall(_ == 0) // Only match simple keys (all zeros after prefix)
-    }
+  /** Look up the simple-prefix slot in the prebuilt index. */
+  private def lookupSimple(idx: KeyvalIndex, prefix: Byte): Option[KeyValue] =
+    val slot = idx.simpleByPrefix(prefix.toInt & 0xff)
+    if slot == null then None else Some(slot)
 
-  /** Decode activity statistics using FullJamStateCodecs. */
-  private def decodeActivityStatistics(
-    keyvals: List[KeyValue],
-    validatorCount: Int,
-    coresCount: Int
+  private def decodeActivityStatisticsAt(
+      idx: KeyvalIndex,
+      validatorCount: Int,
+      coresCount: Int
   ): (List[StatCount], List[StatCount], List[CoreStatisticsRecord]) =
-    findKeyval(keyvals, StateKeys.ACTIVITY_STATISTICS) match
+    lookupSimple(idx, StateKeys.ACTIVITY_STATISTICS) match
       case None =>
         (
           List.fill(validatorCount)(StatCount.zero),
@@ -459,51 +630,97 @@ object FullJamState:
           List.fill(coresCount)(CoreStatisticsRecord())
         )
       case Some(kv) =>
-        val stats = FullJamStateCodecs.decodeActivityStatistics(kv.value.toArray, validatorCount, coresCount)
-        val current = stats.accumulator.map(s => StatCount(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances))
-        val last = stats.previous.map(s => StatCount(s.blocks, s.tickets, s.preImages, s.preImagesSize, s.guarantees, s.assurances))
-        val core = stats.core.map(c => CoreStatisticsRecord(c.daLoad, c.popularity, c.imports, c.extrinsicCount, c.extrinsicSize, c.exports, c.bundleSize, c.gasUsed))
+        val stats = FullJamStateCodecs.decodeActivityStatistics(
+          kv.value.toArray,
+          validatorCount,
+          coresCount
+        )
+        val current = stats.accumulator.map(s =>
+          StatCount(
+            s.blocks,
+            s.tickets,
+            s.preImages,
+            s.preImagesSize,
+            s.guarantees,
+            s.assurances
+          )
+        )
+        val last = stats.previous.map(s =>
+          StatCount(
+            s.blocks,
+            s.tickets,
+            s.preImages,
+            s.preImagesSize,
+            s.guarantees,
+            s.assurances
+          )
+        )
+        val core = stats.core.map(c =>
+          CoreStatisticsRecord(
+            c.daLoad,
+            c.popularity,
+            c.imports,
+            c.extrinsicCount,
+            c.extrinsicSize,
+            c.exports,
+            c.bundleSize,
+            c.gasUsed
+          )
+        )
         (current, last, core)
 
-  /** Decode last accumulation outputs using FullJamStateCodecs. */
-  private def decodeLastAccumulationOutputs(keyvals: List[KeyValue]): List[(Long, JamBytes)] =
-    findKeyval(keyvals, StateKeys.LAST_ACCUMULATION_OUTPUTS) match
-      case None => List.empty
+  private def decodeLastAccumulationOutputsAt(
+      idx: KeyvalIndex
+  ): List[(Long, JamBytes)] =
+    lookupSimple(idx, StateKeys.LAST_ACCUMULATION_OUTPUTS) match
+      case None     => List.empty
       case Some(kv) =>
-        FullJamStateCodecs.decodeLastAccumulationOutputs(kv.value.toArray)
+        FullJamStateCodecs
+          .decodeLastAccumulationOutputs(kv.value.toArray)
           .map { case (id, bv) => (id, JamBytes.fromByteVector(bv)) }
 
-  /** Decode privileged services using Privileges codec. */
-  private def decodePrivilegedServices(keyvals: List[KeyValue], coresCount: Int): Privileges =
-    findKeyval(keyvals, StateKeys.PRIVILEGED_SERVICES) match
-      case None =>
-        // Default with correct coresCount
-        Privileges(0, List.fill(coresCount)(0L), 0, 0, List.empty)
+  private def decodePrivilegedServicesAt(
+      idx: KeyvalIndex,
+      coresCount: Int
+  ): Privileges =
+    lookupSimple(idx, StateKeys.PRIVILEGED_SERVICES) match
+      case None => Privileges(0, List.fill(coresCount)(0L), 0, 0, List.empty)
       case Some(kv) =>
-        Privileges.codec(coresCount).decodeValue(BitVector(kv.value.toByteVector)) match
+        Privileges
+          .codec(coresCount)
+          .decodeValue(BitVector(kv.value.toByteVector)) match
           case scodec.Attempt.Successful(p) => p
-          case scodec.Attempt.Failure(err) =>
-            logger.warn(s"[decodePrivilegedServices] decode failed: $err, using default")
+          case scodec.Attempt.Failure(err)  =>
+            logger.warn(
+              s"[decodePrivilegedServices] decode failed: $err, using default"
+            )
             Privileges(0, List.fill(coresCount)(0L), 0, 0, List.empty)
 
-  /** Decode recent history using scodec Codec. */
-  private def decodeRecentHistory(keyvals: List[KeyValue]): HistoricalBetaContainer =
-    findKeyval(keyvals, StateKeys.RECENT_HISTORY) match
-      case None => HistoricalBetaContainer()
+  private def decodeRecentHistoryAt(idx: KeyvalIndex): HistoricalBetaContainer =
+    lookupSimple(idx, StateKeys.RECENT_HISTORY) match
+      case None     => HistoricalBetaContainer()
       case Some(kv) =>
-        summon[Codec[HistoricalBetaContainer]].decode(BitVector(kv.value.toByteVector)).require.value
+        summon[Codec[HistoricalBetaContainer]]
+          .decode(BitVector(kv.value.toByteVector))
+          .require
+          .value
 
-  /** Decode authorization pools using FullJamStateCodecs. */
-  private def decodeAuthPools(keyvals: List[KeyValue], coresCount: Int): List[List[Hash]] =
-    findKeyval(keyvals, StateKeys.CORE_AUTHORIZATION_POOL) match
-      case None => List.fill(coresCount)(List.empty[Hash])
-      case Some(kv) => FullJamStateCodecs.decodeAuthPools(kv.value.toArray, coresCount)
+  private def decodeAuthPoolsAt(
+      idx: KeyvalIndex,
+      coresCount: Int
+  ): List[List[Hash]] =
+    lookupSimple(idx, StateKeys.CORE_AUTHORIZATION_POOL) match
+      case None     => List.fill(coresCount)(List.empty[Hash])
+      case Some(kv) =>
+        FullJamStateCodecs.decodeAuthPools(kv.value.toArray, coresCount)
 
-  /** Decode accumulation queue using scodec. */
-  private def decodeAccumulationQueue(keyvals: List[KeyValue], epochLength: Int): List[List[AccumulationReadyRecord]] =
+  private def decodeAccumulationQueueAt(
+      idx: KeyvalIndex,
+      epochLength: Int
+  ): List[List[AccumulationReadyRecord]] =
     import io.forge.jam.core.scodec.JamCodecs
-    findKeyval(keyvals, StateKeys.ACCUMULATION_QUEUE) match
-      case None => List.fill(epochLength)(List.empty)
+    lookupSimple(idx, StateKeys.ACCUMULATION_QUEUE) match
+      case None     => List.fill(epochLength)(List.empty)
       case Some(kv) =>
         val queueCodec = JamCodecs.fixedSizeList(
           JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]),
@@ -511,42 +728,54 @@ object FullJamState:
         )
         queueCodec.decodeValue(BitVector(kv.value.toByteVector)) match
           case scodec.Attempt.Successful(queue) => queue
-          case scodec.Attempt.Failure(err) =>
-            logger.warn(s"[decodeAccumulationQueue] decode failed: $err, using empty queue")
+          case scodec.Attempt.Failure(err)      =>
+            logger.warn(
+              s"[decodeAccumulationQueue] decode failed: $err, using empty queue"
+            )
             List.fill(epochLength)(List.empty)
 
-  /** Decode accumulation history using FullJamStateCodecs. */
-  private def decodeAccumulationHistory(keyvals: List[KeyValue], epochLength: Int): List[List[JamBytes]] =
-    findKeyval(keyvals, StateKeys.ACCUMULATION_HISTORY) match
-      case None => List.fill(epochLength)(List.empty)
+  private def decodeAccumulationHistoryAt(
+      idx: KeyvalIndex,
+      epochLength: Int
+  ): List[List[JamBytes]] =
+    lookupSimple(idx, StateKeys.ACCUMULATION_HISTORY) match
+      case None     => List.fill(epochLength)(List.empty)
       case Some(kv) =>
-        FullJamStateCodecs.decodeAccumulationHistory(kv.value.toArray, epochLength)
+        FullJamStateCodecs
+          .decodeAccumulationHistory(kv.value.toArray, epochLength)
           .map(_.map(bv => JamBytes.fromByteVector(bv)))
 
-  /** Decode authorization queues using FullJamStateCodecs. */
-  private def decodeAuthQueues(keyvals: List[KeyValue], coresCount: Int, authQueueSize: Int): List[List[Hash]] =
-    findKeyval(keyvals, StateKeys.AUTHORIZATION_QUEUE) match
+  private def decodeAuthQueuesAt(
+      idx: KeyvalIndex,
+      coresCount: Int,
+      authQueueSize: Int
+  ): List[List[Hash]] =
+    lookupSimple(idx, StateKeys.AUTHORIZATION_QUEUE) match
       case None => List.fill(coresCount)(List.fill(authQueueSize)(Hash.zero))
-      case Some(kv) => FullJamStateCodecs.decodeAuthQueues(kv.value.toArray, coresCount, authQueueSize)
+      case Some(kv) =>
+        FullJamStateCodecs.decodeAuthQueues(
+          kv.value.toArray,
+          coresCount,
+          authQueueSize
+        )
 
-  /** Decode service accounts from keyvals. Key format: prefix 255, service ID interleaved.
-   *  Only keys with bytes(2) == 0 are actual service account info; others are storage/preimage data.
-   */
-  private def decodeServiceAccounts(keyvals: List[KeyValue]): List[AccumulationServiceItem] =
-    keyvals
-      .filter { kv =>
-        val bytes = kv.key.toArray
-        (bytes(0).toInt & 0xff) == (StateKeys.SERVICE_ACCOUNT.toInt & 0xff) &&
-          bytes.length >= 3 && bytes(2) == 0
-      }
-      .map { kv =>
-        val keyBytes = kv.key.toArray
-        val serviceId = ((keyBytes(1).toLong & 0xff)) |
-          ((keyBytes(3).toLong & 0xff) << 8) |
-          ((keyBytes(5).toLong & 0xff) << 16) |
-          ((keyBytes(7).toLong & 0xff) << 24)
+  /** Service-account info keyvals already collected during the index build. */
+  private def decodeServiceAccountsAt(
+      idx: KeyvalIndex
+  ): List[AccumulationServiceItem] =
+    val out =
+      scala.collection.mutable.ArrayBuffer.empty[AccumulationServiceItem]
+    var i = 0
+    while i < idx.serviceAccountKeyvals.size do
+      val kv = idx.serviceAccountKeyvals(i)
+      val key = kv.key
+      if key.length >= 3 && key(2) == 0 then
+        val serviceId = ((key(1).toLong & 0xff)) |
+          ((key(3).toLong & 0xff) << 8) |
+          ((key(5).toLong & 0xff) << 16) |
+          ((key(7).toLong & 0xff) << 24)
         val serviceInfo = FullJamStateCodecs.decodeServiceInfo(kv.value.toArray)
-        AccumulationServiceItem(
+        out += AccumulationServiceItem(
           id = serviceId,
           data = AccumulationServiceData(
             service = serviceInfo,
@@ -555,19 +784,22 @@ object FullJamState:
             preimageRequests = List.empty
           )
         )
-      }.sortBy(_.id)
+      i += 1
+    out.sortBy(_.id).toList
 
-  /** Decode reports using FullJamStateCodecs. */
-  private def decodeReports(keyvals: List[KeyValue], coresCount: Int): List[Option[AvailabilityAssignment]] =
-    findKeyval(keyvals, StateKeys.REPORTS) match
-      case None => List.fill(coresCount)(None)
+  private def decodeReportsAt(
+      idx: KeyvalIndex,
+      coresCount: Int
+  ): List[Option[AvailabilityAssignment]] =
+    lookupSimple(idx, StateKeys.REPORTS) match
+      case None     => List.fill(coresCount)(None)
       case Some(kv) =>
-        val codec = FullJamStateCodecs.reportsCodec[AvailabilityAssignment](coresCount)
+        val codec =
+          FullJamStateCodecs.reportsCodec[AvailabilityAssignment](coresCount)
         codec.decodeValue(BitVector(kv.value.toByteVector)).require
 
-  /**
-   * Create an empty/default FullJamState.
-   */
+  /** Create an empty/default FullJamState.
+    */
   def empty(config: ChainConfig = ChainConfig.TINY): FullJamState =
     val emptyValidatorKey = ValidatorKey(
       BandersnatchPublicKey.zero,
@@ -577,7 +809,8 @@ object FullJamState:
     )
     val emptyValidators = List.fill(config.validatorCount)(emptyValidatorKey)
     val emptyEntropy = List.fill(4)(Hash.zero)
-    val emptyReports = List.fill(config.coresCount)(Option.empty[AvailabilityAssignment])
+    val emptyReports =
+      List.fill(config.coresCount)(Option.empty[AvailabilityAssignment])
     val emptyAuthPools = List.fill(config.coresCount)(List.empty[Hash])
     val emptyAuthQueues = List.fill(config.coresCount)(List.fill(80)(Hash.zero))
     val emptyStatCount = List.fill(config.validatorCount)(StatCount.zero)
@@ -591,7 +824,9 @@ object FullJamState:
       validatorQueue = emptyValidators,
       safroleGammaK = emptyValidators,
       safroleGammaZ = JamBytes.zeros(RING_COMMITMENT_SIZE),
-      safroleGammaS = TicketsOrKeys.Keys(List.fill(config.epochLength)(BandersnatchPublicKey.zero)),
+      safroleGammaS = TicketsOrKeys.Keys(
+        List.fill(config.epochLength)(BandersnatchPublicKey.zero)
+      ),
       safroleGammaA = List.empty,
       reports = emptyReports,
       authPools = emptyAuthPools,

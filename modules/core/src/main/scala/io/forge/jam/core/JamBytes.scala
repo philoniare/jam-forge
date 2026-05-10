@@ -4,10 +4,10 @@ import _root_.scodec.bits.ByteVector
 import spire.math.UByte
 import io.circe.Decoder
 
-/**
- * JamBytes wraps scodec.bits.ByteVector to provide a stable API.
- */
-final class JamBytes private (private val underlying: ByteVector) extends AnyVal:
+/** JamBytes wraps scodec.bits.ByteVector to provide a stable API.
+  */
+final class JamBytes private (private val underlying: ByteVector)
+    extends AnyVal:
   // Core ByteVector operations
   def length: Int = underlying.length.toInt
   def size: Long = underlying.size
@@ -26,20 +26,29 @@ final class JamBytes private (private val underlying: ByteVector) extends AnyVal
   def toHexWithPrefix: String = "0x" + underlying.toHex
 
   // Concatenation
-  def ++(other: JamBytes): JamBytes = new JamBytes(underlying ++ other.underlying)
+  def ++(other: JamBytes): JamBytes = new JamBytes(
+    underlying ++ other.underlying
+  )
   def :+(byte: Byte): JamBytes = new JamBytes(underlying :+ byte)
   def +:(byte: Byte): JamBytes = new JamBytes(byte +: underlying)
 
   // Slicing
   def take(n: Long): JamBytes = new JamBytes(underlying.take(n))
   def drop(n: Long): JamBytes = new JamBytes(underlying.drop(n))
-  def slice(from: Long, until: Long): JamBytes = new JamBytes(underlying.slice(from, until))
+  def slice(from: Long, until: Long): JamBytes = new JamBytes(
+    underlying.slice(from, until)
+  )
 
   // Other operations
   def reverse: JamBytes = new JamBytes(underlying.reverse)
   def bytes: ByteVector = underlying
-  def copyToArray(dest: Array[Byte], destPos: Int, srcPos: Int, len: Int): Unit =
-    underlying.toArray.slice(srcPos, srcPos + len).copyToArray(dest, destPos)
+  def copyToArray(
+      dest: Array[Byte],
+      destPos: Int,
+      srcPos: Int,
+      len: Int
+  ): Unit =
+    underlying.copyToArray(dest, destPos, srcPos.toLong, len)
 
   // Comparison
   override def toString: String = s"JamBytes(${underlying.toHex})"
@@ -47,11 +56,16 @@ final class JamBytes private (private val underlying: ByteVector) extends AnyVal
 
   // Fold operations
   def foldLeft[A](z: A)(op: (A, UByte) => A): A =
-    underlying.toArray.foldLeft(z)((acc, b) => op(acc, UByte(b)))
+    var acc = z
+    val n = underlying.size
+    var i = 0L
+    while i < n do
+      acc = op(acc, UByte(underlying(i)))
+      i += 1
+    acc
 
-/**
- * Companion object providing factory methods and utilities for JamBytes.
- */
+/** Companion object providing factory methods and utilities for JamBytes.
+  */
 object JamBytes:
   val empty: JamBytes = new JamBytes(ByteVector.empty)
 
@@ -60,13 +74,15 @@ object JamBytes:
   def fromSeq(bytes: Seq[Byte]): JamBytes = new JamBytes(ByteVector(bytes))
   def fromByteVector(bv: ByteVector): JamBytes = new JamBytes(bv)
   def zeros(size: Int): JamBytes = new JamBytes(ByteVector.fill(size.toLong)(0))
-  def fill(size: Int)(value: Byte): JamBytes = new JamBytes(ByteVector.fill(size.toLong)(value))
+  def fill(size: Int)(value: Byte): JamBytes = new JamBytes(
+    ByteVector.fill(size.toLong)(value)
+  )
 
   def fromHex(hex: String): Either[String, JamBytes] =
     val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
     ByteVector.fromHex(cleanHex) match
       case Some(bv) => Right(new JamBytes(bv))
-      case None => Left("Invalid hex character")
+      case None     => Left("Invalid hex character")
 
   def fromHexUnsafe(hex: String): JamBytes =
     fromHex(hex).fold(msg => throw new IllegalArgumentException(msg), identity)
@@ -99,7 +115,10 @@ object JamBytes:
 
   def newBuilder: Builder = new Builder
 
-  given Decoder[JamBytes] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid hex: $err"))
+  given Decoder[JamBytes] = Decoder.decodeString.emap(hex =>
+    fromHex(hex).left.map(err => s"Invalid hex: $err")
+  )
 
-  /** Ordering for JamBytes based on lexicographic byte comparison */
-  given Ordering[JamBytes] = Ordering.by(_.toHex)
+  /** Ordering for JamBytes based on lexicographic comparison.
+    */
+  given Ordering[JamBytes] = (a, b) => a.bytes.compare(b.bytes)
