@@ -37,12 +37,8 @@ jobs:
                 with:
                     submodules: recursive
 
-            -   name: Verify CRIU available on runner
-                run: |
-                    sudo apt-get update
-                    sudo apt-get install -y criu
-                    criu --version
-                    docker info | grep -i 'cgroup\|version' || true
+            -   name: Inspect runner Docker
+                run: docker info | grep -i 'cgroup\|version\|kernel' || true
 
             -   name: Build CRaC image and push to GHCR
                 env:
