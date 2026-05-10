@@ -235,16 +235,12 @@ class AccumulationExecutor(val config: ChainConfig):
     val gasUsed = if finalGas >= 0 then initialGas - finalGas else initialGas
 
     // Extract output on halt
-    // Per PVM ABI: A0=r7, A1=r8 (not r10/r11 which are A3/A4)
     val output = if exitReason == ExitReason.HALT then
-      val addr = instance.reg(7).toInt // A0
-      val len = instance.reg(8).toInt // A1
-      val isReadable =
-        instance.basicMemory.isReadable(spire.math.UInt(addr), len)
-      if len > 0 && len <= 1024 && isReadable then
-        readMemoryBulk(instance, addr, len)
-      else if len == 0 then Some(Array.empty[Byte])
-      else None
+      val addr = instance.reg(7).toInt
+      val len = instance.reg(8).toInt
+      if len >= 0 && instance.basicMemory.isReadable(spire.math.UInt(addr), len)
+      then readMemoryBulk(instance, addr, len)
+      else Some(Array.empty[Byte])
     else None
 
     PvmExecResult(exitReason, gasUsed, output)
