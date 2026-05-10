@@ -226,13 +226,15 @@ object IntermediateSteps:
    */
   val updateRecentHistoryPartial: StfStep = modifyState { (state, ctx) =>
     val recentHistory = state.beta
-    if recentHistory.history.isEmpty then
+    val history = recentHistory.history
+    if history.isEmpty then
       state
     else
-      val history = recentHistory.history.toArray
-      val lastItem = history.last
-      history(history.length - 1) = lastItem.copy(stateRoot = ctx.block.header.parentStateRoot)
-      state.focus(_.beta).replace(recentHistory.copy(history = history.toList))
+      val updatedHistory = history.updated(
+        history.length - 1,
+        history.last.copy(stateRoot = ctx.block.header.parentStateRoot)
+      )
+      state.focus(_.beta).replace(recentHistory.copy(history = updatedHistory))
   }
 
   /**
