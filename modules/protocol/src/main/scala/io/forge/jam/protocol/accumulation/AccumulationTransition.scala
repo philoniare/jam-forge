@@ -161,14 +161,14 @@ object AccumulationTransition:
       historicallyAccumulated += hash
     }
 
-    // 4. Build working copy of ready queue with edited dependencies
-    val workingReadyQueue = preState.readyQueue.indices
-      .map { slotIdx =>
-        val oldRecords = preState.readyQueue(slotIdx)
-        editReadyQueueRecords(oldRecords, historicallyAccumulated.toSet)
-      }
-      .toList
-      .to(mutable.ListBuffer)
+    // 4. Build working copy of ready queue with edited dependencies.
+    val workingReadyQueue: Vector[List[AccumulationReadyRecord]] =
+      preState.readyQueue.indices.iterator.map { slotIdx =>
+        editReadyQueueRecords(
+          preState.readyQueue(slotIdx),
+          historicallyAccumulated.toSet
+        )
+      }.toVector
 
     // Build new queued records
     val newRecords = queuedReports.map { report =>
@@ -285,10 +285,10 @@ object AccumulationTransition:
       allToAccumulate.take(outerResult.reportsAccumulated)
 
     // Rebuild actuallyAccumulated to only include reports that will actually be accumulated
-    val actuallyAccumulated = mutable.Set.empty[JamBytes]
-    reportsToAccumulate.foreach(report =>
-      actuallyAccumulated += JamBytes(report.packageSpec.hash.bytes.toArray)
-    )
+    val actuallyAccumulated: Set[JamBytes] =
+      reportsToAccumulate.iterator
+        .map(report => JamBytes(report.packageSpec.hash.bytes.toArray))
+        .toSet
 
     val newPartialState = outerResult.postState
     val gasUsedPerService = outerResult.gasUsedMap

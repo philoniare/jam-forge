@@ -86,12 +86,22 @@ object ConformanceServerApp extends IOApp:
 
   private def runFromArgs(args: List[String]): IO[ExitCode] =
     args.toList match
-      // CRaC warmup command
+      // CRaC warmup command (warm + checkpoint + exit)
       case "warmup" :: warmupArgs =>
         IO.blocking {
           WarmupRunner.run(warmupArgs)
           ExitCode.Success
         }
+
+      // CRaC warm-and-serve: warm on all traces, checkpoint, post-restore
+      // start fuzz server. Args: --socket-path <p>
+      case "warmup-and-serve" :: rest =>
+        val socketPath = rest
+          .sliding(2)
+          .collectFirst { case List("--socket-path", p) => Paths.get(p) }
+          .getOrElse(Paths.get("/tmp/jam_target.sock"))
+        IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
+          runServer(ServerConfig(socketPath = socketPath))
 
       // Fuzz command (used by conformance harness)
       case "fuzz" :: socketPath :: _ =>

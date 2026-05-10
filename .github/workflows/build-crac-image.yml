@@ -1,0 +1,75 @@
+name: Build CRaC Image
+
+# Builds the jam-forge Docker image with a pre-baked CRaC checkpoint and
+# pushes it to GHCR. CRaC checkpoint creation requires CRIU + privileged
+# Linux, so this only runs on ubuntu-latest (Docker Desktop on macOS cannot
+# produce checkpoints — the VM lacks FPU ptrace support).
+#
+# Manual trigger only.
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Additional tag (default: short SHA)'
+                required: false
+                type: string
+            push:
+                description: 'Push to GHCR'
+                required: false
+                type: boolean
+                default: true
+
+concurrency:
+    group: build-crac-image-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@v4
+                with:
+                    submodules: recursive
+
+            -   name: Verify CRIU available on runner
+                run: |
+                    sudo apt-get update
+                    sudo apt-get install -y criu
+                    criu --version
+                    docker info | grep -i 'cgroup\|version' || true
+
+            -   name: Build CRaC image and push to GHCR
+                env:
+                    GH_USER: ${{ github.repository_owner }}
+                    GH_DOCKER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                run: |
+                    chmod +x scripts/build-and-push.sh
+                    args=()
+                    if [ -n "${{ inputs.tag }}" ]; then
+                        args+=(--tag "${{ inputs.tag }}")
+                    fi
+                    if [ "${{ inputs.push }}" != "true" ]; then
+                        args+=(--skip-push)
+                    fi
+                    scripts/build-and-push.sh "${args[@]}"
+
+            -   name: Extract CRIU dump logs on failure
+                if: failure()
+                run: |
+                    mkdir -p criu-logs
+                    docker cp jam-crac-checkpoint:/app/cr criu-logs/ 2>/dev/null || true
+                    ls -la criu-logs/cr 2>/dev/null || echo "no logs available"
+
+            -   name: Upload checkpoint logs on failure
+                if: failure()
+                uses: actions/upload-artifact@v4
+                with:
+                    name: criu-dump-logs
+                    path: criu-logs/
+                    if-no-files-found: ignore
