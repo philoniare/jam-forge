@@ -240,6 +240,21 @@ object AccumulationTransition:
         editReadyQueueRecords(records, accumulatedThisBlock)
     }.toList
 
+    val accumulatedSnapshot = historicallyAccumulated.toSet
+    require(
+      finalReadyQueue.forall { slotRecords =>
+        slotRecords.forall { record =>
+          val recordHash =
+            JamBytes(record.report.packageSpec.hash.bytes.toArray)
+          !accumulatedSnapshot.contains(recordHash) &&
+          record.dependencies.forall(h =>
+            !accumulatedSnapshot.contains(JamBytes(h.bytes))
+          )
+        }
+      },
+      "Ready-queue post-condition violated: an accumulated hash leaked into the final queue"
+    )
+
     // 8. Execute PVM for accumulated reports (respecting gas budget)
     val allToAccumulate = immediateReports ++ readyToAccumulate
     val partialState = preState.toPartialState(initStagingSet, initAuthQueues)
