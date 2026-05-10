@@ -90,6 +90,8 @@ set +e
 docker run \
     --platform linux/amd64 \
     --privileged \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
     --name "$CHECKPOINT_CONTAINER" \
     "${COLD_IMAGE}:latest"
 set -e
@@ -98,10 +100,10 @@ set -e
 if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr/." - 2>/dev/null \
         | tar -t 2>/dev/null | grep -q '\.img$'; then
     echo "ERROR: no checkpoint .img files were produced in /app/cr" >&2
-    echo "Inspect logs with: docker cp $CHECKPOINT_CONTAINER:/app/cr - | tar -xv" >&2
-    echo "Note: Docker Desktop on macOS cannot create CRaC checkpoints — the" >&2
-    echo "Linux VM Apple's virtualization framework provides lacks FPU ptrace" >&2
-    echo "support that CRIU requires. Run this script on a real Linux host." >&2
+    echo "Inspect logs with: docker cp $CHECKPOINT_CONTAINER:/app/cr ./cr-logs && cat ./cr-logs/dump*.log" >&2
+    echo "Common causes:" >&2
+    echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
+    echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
     echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
     exit 1
 fi
