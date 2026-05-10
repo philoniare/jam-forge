@@ -97,9 +97,8 @@ docker run \
 set -e
 
 # Verify checkpoint .img files were produced inside the container.
-if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr/." - 2>/dev/null \
-        | tar -t 2>/dev/null | grep -q '\.img$'; then
-    echo "ERROR: no checkpoint .img files were produced in /app/cr" >&2
+if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr/inventory.img" - >/dev/null 2>&1; then
+    echo "ERROR: no checkpoint produced (inventory.img missing in /app/cr)" >&2
     echo "Inspect logs with: docker cp $CHECKPOINT_CONTAINER:/app/cr ./cr-logs && cat ./cr-logs/dump*.log" >&2
     echo "Common causes:" >&2
     echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
