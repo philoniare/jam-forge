@@ -8,6 +8,7 @@ import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.service.ServiceInfo
+import io.forge.jam.core.scodec.CodecDecodingException
 
 /**
  * scodec codecs for FullJamState encoding/decoding.
@@ -233,7 +234,10 @@ object FullJamStateCodecs:
         List.fill(epochLength)(List.empty)
 
   def decodeServiceInfo(bytes: Array[Byte]): ServiceInfo =
-    serviceInfoCodec.decodeValue(BitVector(bytes)).require
+    serviceInfoCodec.decodeValue(BitVector(bytes)) match
+      case Attempt.Successful(v) => v
+      case Attempt.Failure(err)  =>
+        throw new CodecDecodingException(s"decodeServiceInfo: ${err.messageWithContext}")
 
   /** Codec for last accumulation outputs: compact list of (u32LE serviceId, 32-byte hash). */
   val lastAccumulationOutputsCodec: Codec[List[(Long, ByteVector)]] =

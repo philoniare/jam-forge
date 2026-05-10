@@ -8,8 +8,18 @@ import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.JamBytes
 
-/** JAM-specific scodec codecs for Spire unsigned integers and primitive types. */
+final class CodecDecodingException(message: String, cause: Throwable = null)
+    extends IllegalArgumentException(message, cause)
+
+/** JAM-specific scodec codecs for Spire unsigned integers and primitive types.
+  */
 object JamCodecs:
+
+  private inline def requireDecode[A](decoder: String, attempt: Attempt[A]): A =
+    attempt match
+      case Attempt.Successful(v) => v
+      case Attempt.Failure(err)  =>
+        throw new CodecDecodingException(s"$decoder: ${err.messageWithContext}")
 
   /** Codec for JamBytes wrapper around ByteVector */
   given jamBytesCodec: Codec[JamBytes] = bytes.xmap(
@@ -29,7 +39,7 @@ object JamCodecs:
 
   given uintCodec: Codec[UInt] = uint32L.xmap(
     l => UInt(l.toInt),
-    u => u.toLong & 0xFFFFFFFFL
+    u => u.toLong & 0xffffffffL
   )
 
   given ulongCodec: Codec[ULong] = int64L.xmap(
@@ -66,27 +76,28 @@ object JamCodecs:
     summon[Codec[TicketMark]]
   }
 
-  /** JAM compact integer codec for encoding non-negative Long values (0 to 2^64-1). */
+  /** JAM compact integer codec for encoding non-negative Long values (0 to
+    * 2^64-1).
+    */
   val compactInteger: Codec[Long] = new Codec[Long]:
 
     override def sizeBound: SizeBound = SizeBound.bounded(8, 72) // 1-9 bytes
 
     override def encode(value: Long): Attempt[BitVector] =
       if value < 0 then
-        Attempt.failure(Err(s"compactInteger does not support negative values: $value"))
-      else
-        Attempt.successful(BitVector(encodeCompactInteger(value)))
+        Attempt.failure(
+          Err(s"compactInteger does not support negative values: $value")
+        )
+      else Attempt.successful(BitVector(encodeCompactInteger(value)))
 
     override def decode(bits: BitVector): Attempt[DecodeResult[Long]] =
       val bytes = bits.bytes
-      if bytes.isEmpty then
-        Attempt.failure(Err.insufficientBits(8, 0))
+      if bytes.isEmpty then Attempt.failure(Err.insufficientBits(8, 0))
       else
-        val prefix = bytes(0) & 0xFF
+        val prefix = bytes(0) & 0xff
 
         // Special case: prefix = 0 means value = 0
-        if prefix == 0 then
-          Attempt.successful(DecodeResult(0L, bits.drop(8)))
+        if prefix == 0 then Attempt.successful(DecodeResult(0L, bits.drop(8)))
         else
           // Determine l from prefix
           val l =
@@ -110,7 +121,7 @@ object JamCodecs:
             if prefix == 255 then
               var value = 0L
               for i <- 0 until 8 do
-                value = value | ((bytes(1 + i) & 0xFFL) << (8 * i))
+                value = value | ((bytes(1 + i) & 0xffL) << (8 * i))
               Attempt.successful(DecodeResult(value, bits.drop(totalBits)))
             // For l=0, the value is just the prefix itself
             else if l == 0 then
@@ -123,9 +134,11 @@ object JamCodecs:
               // Read the low bytes (l bytes in little-endian)
               var lowBits = 0L
               for i <- 0 until l do
-                lowBits = lowBits | ((bytes(1 + i) & 0xFFL) << (8 * i))
+                lowBits = lowBits | ((bytes(1 + i) & 0xffL) << (8 * i))
 
-              Attempt.successful(DecodeResult(highBits | lowBits, bits.drop(totalBits)))
+              Attempt.successful(
+                DecodeResult(highBits | lowBits, bits.drop(totalBits))
+              )
 
   val compactInt: Codec[Int] = compactInteger.narrow(
     value =>
@@ -133,14 +146,16 @@ object JamCodecs:
         Attempt.failure(Err(s"compactInt value $value exceeds Int.MaxValue"))
       else if value < Int.MinValue then
         Attempt.failure(Err(s"compactInt value $value is below Int.MinValue"))
-      else
-        Attempt.successful(value.toInt),
+      else Attempt.successful(value.toInt),
     _.toLong
   )
 
   def optionCodec[A](codec: Codec[A]): Codec[Option[A]] = new Codec[Option[A]]:
 
-    override def sizeBound: SizeBound = SizeBound.bounded(8, codec.sizeBound.upperBound.map(_ + 8).getOrElse(Long.MaxValue))
+    override def sizeBound: SizeBound = SizeBound.bounded(
+      8,
+      codec.sizeBound.upperBound.map(_ + 8).getOrElse(Long.MaxValue)
+    )
 
     override def encode(value: Option[A]): Attempt[BitVector] = value match
       case None =>
@@ -152,15 +167,19 @@ object JamCodecs:
       if bits.sizeLessThan(8) then
         Attempt.failure(Err.insufficientBits(8, bits.size))
       else
-        val discriminator = (bits.take(8).toByteVector(0) & 0xFF).toByte
+        val discriminator = (bits.take(8).toByteVector(0) & 0xff).toByte
         val remainder = bits.drop(8)
         discriminator match
           case 0 =>
             Attempt.successful(DecodeResult(None, remainder))
           case 1 =>
-            codec.decode(remainder).map(result => DecodeResult(Some(result.value), result.remainder))
+            codec
+              .decode(remainder)
+              .map(result => DecodeResult(Some(result.value), result.remainder))
           case other =>
-            Attempt.failure(Err(s"Invalid option discriminator: $other (expected 0 or 1)"))
+            Attempt.failure(
+              Err(s"Invalid option discriminator: $other (expected 0 or 1)")
+            )
 
   def compactPrefixedList[A](codec: Codec[A]): Codec[List[A]] =
     listOfN(compactInt, codec)
@@ -175,11 +194,14 @@ object JamCodecs:
 
   object TicketsOrKeys:
     final case class Tickets(tickets: List[TicketMark]) extends TicketsOrKeys
-    final case class Keys(keys: List[BandersnatchPublicKey]) extends TicketsOrKeys
+    final case class Keys(keys: List[BandersnatchPublicKey])
+        extends TicketsOrKeys
 
   def ticketsOrKeysCodec(epochLength: Int): Codec[TicketsOrKeys] =
-    val ticketsListCodec: Codec[List[TicketMark]] = fixedSizeList(ticketMarkCodec, epochLength)
-    val keysListCodec: Codec[List[BandersnatchPublicKey]] = fixedSizeList(bandersnatchPublicKeyCodec, epochLength)
+    val ticketsListCodec: Codec[List[TicketMark]] =
+      fixedSizeList(ticketMarkCodec, epochLength)
+    val keysListCodec: Codec[List[BandersnatchPublicKey]] =
+      fixedSizeList(bandersnatchPublicKeyCodec, epochLength)
 
     discriminated[TicketsOrKeys]
       .by(byte)
@@ -190,7 +212,10 @@ object JamCodecs:
         keysListCodec.xmap(TicketsOrKeys.Keys.apply, _.keys)
       )
 
-  def stfResultCodec[A, E](using okCodec: Codec[A], errCodec: Codec[E]): Codec[Either[E, A]] =
+  def stfResultCodec[A, E](using
+      okCodec: Codec[A],
+      errCodec: Codec[E]
+  ): Codec[Either[E, A]] =
     new Codec[Either[E, A]]:
       override def sizeBound: SizeBound =
         val okBound = okCodec.sizeBound
@@ -209,42 +234,56 @@ object JamCodecs:
         case Left(err) =>
           errCodec.encode(err).map(bits => BitVector(0x01) ++ bits)
 
-      override def decode(bits: BitVector): Attempt[DecodeResult[Either[E, A]]] =
+      override def decode(
+          bits: BitVector
+      ): Attempt[DecodeResult[Either[E, A]]] =
         if bits.sizeLessThan(8) then
           Attempt.failure(Err.insufficientBits(8, bits.size))
         else
-          val discriminator = (bits.take(8).toByteVector(0) & 0xFF).toByte
+          val discriminator = (bits.take(8).toByteVector(0) & 0xff).toByte
           val remainder = bits.drop(8)
           discriminator match
             case 0 =>
-              okCodec.decode(remainder).map(result =>
-                DecodeResult(Right(result.value), result.remainder)
-              )
+              okCodec
+                .decode(remainder)
+                .map(result =>
+                  DecodeResult(Right(result.value), result.remainder)
+                )
             case 1 =>
-              errCodec.decode(remainder).map(result =>
-                DecodeResult(Left(result.value), result.remainder)
-              )
+              errCodec
+                .decode(remainder)
+                .map(result =>
+                  DecodeResult(Left(result.value), result.remainder)
+                )
             case other =>
-              Attempt.failure(Err(s"Invalid StfResult discriminator: $other (expected 0 or 1)"))
+              Attempt.failure(
+                Err(
+                  s"Invalid StfResult discriminator: $other (expected 0 or 1)"
+                )
+              )
 
   /** Extension method to encode values using scodec Codec */
   extension [A](value: A)
     def encode(using codec: Codec[A]): JamBytes =
       JamBytes.fromByteVector(codec.encode(value).require.bytes)
 
-  /**
-   * Encode a non-negative Long value as a JAM compact integer.
-   *
-   * @param value non-negative Long value (0 to 2^64-1)
-   * @return byte array containing the compact integer encoding
-   * @throws IllegalArgumentException if value is negative
-   */
+  /** Encode a non-negative Long value as a JAM compact integer.
+    *
+    * @param value
+    *   non-negative Long value (0 to 2^64-1)
+    * @return
+    *   byte array containing the compact integer encoding
+    * @throws IllegalArgumentException
+    *   if value is negative
+    */
   def encodeCompactInteger(value: Long): Array[Byte] =
-    require(value >= 0, s"Compact integer encoding requires non-negative value, got: $value")
+    require(
+      value >= 0,
+      s"Compact integer encoding requires non-negative value, got: $value"
+    )
 
     // Special case: value = 0
-    if value == 0L then
-      return Array[Byte](0)
+    if value == 0L then return Array[Byte](0)
 
     // Find l such that 2^(7l) <= value < 2^(7(l+1)) for l in [0..8]
     var l = 0
@@ -263,42 +302,48 @@ object JamCodecs:
         val result = new Array[Byte](1 + l)
         result(0) = prefixByte
         for i <- 0 until l do
-          result(1 + i) = ((remainder >> (8 * i)) & 0xFF).toByte
+          result(1 + i) = ((remainder >> (8 * i)) & 0xff).toByte
         return result
       l += 1
 
     // Fallback: [255] ++ E_8(value)
     val result = new Array[Byte](9)
-    result(0) = 0xFF.toByte
-    for i <- 0 until 8 do
-      result(1 + i) = ((value >> (8 * i)) & 0xFF).toByte
+    result(0) = 0xff.toByte
+    for i <- 0 until 8 do result(1 + i) = ((value >> (8 * i)) & 0xff).toByte
     result
 
-  /**
-   * Helper to decode compact integer from byte array at offset.
-   *
-   * @param data   byte array to decode from
-   * @param offset starting offset in bytes
-   * @return tuple of (decoded value, bytes consumed)
-   * @throws IllegalArgumentException if offset is negative or exceeds data length
-   */
+  /** Helper to decode compact integer from byte array at offset.
+    *
+    * @param data
+    *   byte array to decode from
+    * @param offset
+    *   starting offset in bytes
+    * @return
+    *   tuple of (decoded value, bytes consumed)
+    * @throws IllegalArgumentException
+    *   if offset is negative or exceeds data length
+    */
   def decodeCompactInteger(data: Array[Byte], offset: Int): (Long, Int) =
     require(offset >= 0, s"Offset must be non-negative: $offset")
-    require(offset < data.length, s"Offset $offset >= data length ${data.length}")
+    require(
+      offset < data.length,
+      s"Offset $offset >= data length ${data.length}"
+    )
     val bits = BitVector(data).drop(offset * 8L)
-    val result = compactInteger.decode(bits).require
+    val result =
+      requireDecode("decodeCompactInteger", compactInteger.decode(bits))
     val consumed = ((bits.size - result.remainder.size) / 8).toInt
     (result.value, consumed)
 
   /** Helper to decode u32 little-endian from byte array at offset */
   def decodeU32LE(data: Array[Byte], offset: Int): spire.math.UInt =
     val bits = BitVector(data).drop(offset * 8L)
-    val result = uint32L.decode(bits).require
-    spire.math.UInt((result.value & 0xFFFFFFFFL).toInt)
+    val result = requireDecode("decodeU32LE", uint32L.decode(bits))
+    spire.math.UInt((result.value & 0xffffffffL).toInt)
 
   /** Helper to encode u32 little-endian to byte array */
   def encodeU32LE(value: spire.math.UInt): Array[Byte] =
-    uint32L.encode(value.toLong & 0xFFFFFFFFL).require.toByteArray
+    uint32L.encode(value.toLong & 0xffffffffL).require.toByteArray
 
   /** Helper to encode u64 little-endian to byte array */
   def encodeU64LE(value: spire.math.ULong): Array[Byte] =
