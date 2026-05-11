@@ -45,14 +45,13 @@ object StateMerklization:
    * Convenience method that takes a List[KeyValue] instead of Map.
    * Uses array-based splitting to avoid intermediate Map allocations.
    */
+  private val PARALLEL_LEVELS: Int = 2
+  private val PARALLEL_MIN_SIZE: Int = 64
+
   def stateMerklize(keyvals: List[KeyValue]): Hash =
     val arr = keyvals.toArray
     merklizeArray(arr, 0, arr.length, 0)
 
-  /**
-   * Array-based Merkle computation that avoids Map allocations.
-   * Works on a slice [from, until) of the array, partitioning in-place by bit.
-   */
   private def merklizeArray(arr: Array[KeyValue], from: Int, until: Int, bitIndex: Int): Hash =
     val size = until - from
     if size == 0 then return ZERO_HASH
@@ -60,23 +59,30 @@ object StateMerklization:
       val kv = arr(from)
       return Hashing.blake2b256(leaf(kv.key, kv.value))
 
-    // Partition in-place: move items with bit=0 to left, bit=1 to right
     var lo = from
     var hi = until - 1
     while lo <= hi do
       if !getBitDirect(arr(lo).key, bitIndex) then
         lo += 1
       else
-        // Swap with hi
         val tmp = arr(lo)
         arr(lo) = arr(hi)
         arr(hi) = tmp
         hi -= 1
 
-    val mid = lo // [from, mid) = left (bit=0), [mid, until) = right (bit=1)
+    val mid = lo
 
-    val leftHash = merklizeArray(arr, from, mid, bitIndex + 1)
-    val rightHash = merklizeArray(arr, mid, until, bitIndex + 1)
+    val (leftHash, rightHash) =
+      if bitIndex < PARALLEL_LEVELS && size >= PARALLEL_MIN_SIZE then
+        val pool = java.util.concurrent.ForkJoinPool.commonPool()
+        val rightTask = pool.submit(new java.util.concurrent.Callable[Hash] {
+          override def call(): Hash = merklizeArray(arr, mid, until, bitIndex + 1)
+        })
+        val left = merklizeArray(arr, from, mid, bitIndex + 1)
+        (left, rightTask.get())
+      else
+        (merklizeArray(arr, from, mid, bitIndex + 1), merklizeArray(arr, mid, until, bitIndex + 1))
+
     Hashing.blake2b256(branch(leftHash, rightHash))
 
   /**

@@ -133,12 +133,17 @@ object ReportTransition:
   /**
    * Process all guarantees and collect results.
    */
+  private final case class RotationCache(
+    validators: List[ValidatorKey],
+    validatorsArr: Array[ValidatorKey],
+    coreAssignments: Array[Int]
+  )
+
   private def processGuarantees(
     input: ReportInput,
     preState: ReportState,
     config: ChainConfig
   ): Either[ReportErrorCode, (List[WorkReport], List[SegmentRootLookup], List[Hash])] =
-    // Accumulated state during processing
     case class ProcessState(
       seenCores: Set[Int],
       reports: List[WorkReport],
@@ -146,9 +151,31 @@ object ReportTransition:
       guarantors: List[Hash]
     )
 
+    val offendersSet: Set[Hash] = preState.offenders.toSet
+    val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
+
+    def cacheFor(ctx: RotationContext): RotationCache =
+      val key = (ctx.reportRotation.toLong << 1) | (if ctx.isCurrent then 1L else 0L)
+      rotationCache.getOrElseUpdate(key, {
+        val validators = selectValidatorSet(ctx, preState.currValidators, preState.prevValidators)
+        val randomness =
+          if ctx.isCurrent then preState.entropy(2)
+          else if ctx.isEpochChanging then preState.entropy(3)
+          else preState.entropy(2)
+        val slot =
+          if ctx.isCurrent then input.slot
+          else math.max(0, input.slot - config.rotationPeriod)
+        val assignments = calculateCoreAssignmentsArr(randomness, slot, config)
+        RotationCache(validators, validators.toArray, assignments)
+      })
+
+    val sigBuf = scala.collection.mutable.ArrayBuffer.empty[
+      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
+    ]
+
     val initial = ProcessState(Set.empty, List.empty, List.empty, List.empty)
 
-    input.guarantees.foldLeft[Either[ReportErrorCode, ProcessState]](Right(initial)) { (accum, guarantee) =>
+    val foldResult = input.guarantees.foldLeft[Either[ReportErrorCode, ProcessState]](Right(initial)) { (accum, guarantee) =>
       accum.flatMap { state =>
         for
           _ <- validateGuarantorSignatureOrder(guarantee)
@@ -161,20 +188,19 @@ object ReportTransition:
             preState.availAssignments,
             config
           )
-          _ <- validateGuarantorSignatures(
+          _ <- validateGuarantorSignaturesCached(
             guarantee,
-            preState.currValidators,
-            preState.prevValidators,
             input.slot,
-            preState.entropy,
-            preState.offenders,
+            offendersSet,
+            cacheFor,
+            sigBuf,
             config
           )
           _ <- require(!state.seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
         yield
           val ctx = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
-          val validators = selectValidatorSet(ctx, preState.currValidators, preState.prevValidators)
-          val newGuarantors = guarantee.signatures.map(sig => Hash(validators(sig.validatorIndex.toInt).ed25519.bytes))
+          val cache = cacheFor(ctx)
+          val newGuarantors = guarantee.signatures.map(sig => Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes))
 
           state.copy(
             seenCores = state.seenCores + guarantee.report.coreIndex.toInt,
@@ -186,7 +212,23 @@ object ReportTransition:
             guarantors = state.guarantors ++ newGuarantors
           )
       }
-    }.map(s => (s.reports, s.packages, s.guarantors))
+    }
+
+    foldResult.flatMap { s =>
+      val n = sigBuf.size
+      if n == 0 then Right((s.reports, s.packages, s.guarantors))
+      else
+        val tuples = sigBuf.toArray
+        val allValid = java.util.stream.IntStream
+          .range(0, n)
+          .parallel()
+          .allMatch { i =>
+            val (pk, msg, sig) = tuples(i)
+            Ed25519.verify(pk, msg, sig)
+          }
+        if !allValid then Left(ReportErrorCode.BadSignature)
+        else Right((s.reports, s.packages, s.guarantors))
+    }
 
   /** Validate guarantees are sorted by core index. */
   private def validateGuaranteesOrder(guarantees: List[GuaranteeExtrinsic]): ValidationResult =
@@ -372,16 +414,14 @@ object ReportTransition:
     val isSortedUnique = ValidationHelpers.isSortedUniqueByInt(guarantee.signatures)(_.validatorIndex.toInt)
     require(isSortedUnique, ReportErrorCode.NotSortedOrUniqueGuarantors)
 
-  /**
-   * Validate guarantor signatures.
-   */
-  private def validateGuarantorSignatures(
+  private def validateGuarantorSignaturesCached(
     guarantee: GuaranteeExtrinsic,
-    currValidators: List[ValidatorKey],
-    prevValidators: List[ValidatorKey],
     currentSlot: Long,
-    entropy: List[Hash],
-    offenders: List[Hash],
+    offendersSet: Set[Hash],
+    cacheFor: RotationContext => RotationCache,
+    sigBuf: scala.collection.mutable.ArrayBuffer[
+      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
+    ],
     config: ChainConfig
   ): ValidationResult =
     val sigCount = guarantee.signatures.length
@@ -389,62 +429,54 @@ object ReportTransition:
       return Left(ReportErrorCode.InsufficientGuarantees)
 
     val ctx = computeRotationContext(guarantee.slot.value.toLong, currentSlot, config)
-
     if ctx.reportRotation < ctx.currentRotation - 1 then
       return Left(ReportErrorCode.ReportEpochBeforeLast)
     if ctx.reportRotation > ctx.currentRotation then
       return Left(ReportErrorCode.FutureReportSlot)
 
-    val validatorKeys = selectValidatorSet(ctx, currValidators, prevValidators)
-    val coreAssignments = calculateCoreAssignments(
-      if ctx.isCurrent then entropy(2)
-      else if ctx.isEpochChanging then entropy(3)
-      else entropy(2),
-      if ctx.isCurrent then currentSlot else math.max(0, currentSlot - config.rotationPeriod),
-      config
-    )
-
-    val offendersSet = offenders.map(_.toHex).toSet
+    val cache = cacheFor(ctx)
+    val validatorsArr = cache.validatorsArr
+    val coreAssignments = cache.coreAssignments
     val reportedCore = guarantee.report.coreIndex.toInt
 
-    for signature <- guarantee.signatures do
+    val reportHash = Hashing.blake2b256(guarantee.report.encode)
+    val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
+
+    var sigs = guarantee.signatures
+    while sigs.nonEmpty do
+      val signature = sigs.head
+      sigs = sigs.tail
       val idx = signature.validatorIndex.toInt
-      if idx < 0 || idx >= validatorKeys.length then
+      if idx < 0 || idx >= validatorsArr.length then
         return Left(ReportErrorCode.BadValidatorIndex)
 
-      val validatorEd25519 = validatorKeys(idx).ed25519
-
-      if offendersSet.contains(Hash(validatorEd25519.bytes).toHex) then
+      val validatorEd25519 = validatorsArr(idx).ed25519
+      if offendersSet.contains(Hash(validatorEd25519.bytes)) then
         return Left(ReportErrorCode.BannedValidator)
-
-      if !verifySignature(validatorEd25519, guarantee, signature.signature) then
-        return Left(ReportErrorCode.BadSignature)
-
       if coreAssignments(idx) != reportedCore then
         return Left(ReportErrorCode.WrongAssignment)
+      sigBuf += ((validatorEd25519, message, signature.signature))
 
     Right(())
 
-  /**
-   * Calculate core assignments using shuffle algorithm.
-   */
-  private def calculateCoreAssignments(randomness: Hash, slot: Long, config: ChainConfig): List[Int] =
-    val source = (0 until config.validatorCount).map(i => (config.coresCount * i) / config.validatorCount).toList
-    val shuffledIndices = Shuffle.jamComputeShuffle(config.validatorCount, randomness)
+  private def calculateCoreAssignmentsArr(randomness: Hash, slot: Long, config: ChainConfig): Array[Int] =
+    val validatorCount = config.validatorCount
+    val coresCount = config.coresCount
+    val source = new Array[Int](validatorCount)
+    var i = 0
+    while i < validatorCount do
+      source(i) = (coresCount * i) / validatorCount
+      i += 1
+    val shuffledIndices = Shuffle.jamComputeShuffle(validatorCount, randomness)
     val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
-    shuffledIndices.map(idx => math.floorMod(source(idx) + shift, config.coresCount))
-
-  /**
-   * Verify Ed25519 signature.
-   */
-  private def verifySignature(
-    validatorKey: Ed25519PublicKey,
-    guarantee: GuaranteeExtrinsic,
-    signature: io.forge.jam.core.primitives.Ed25519Signature
-  ): Boolean =
-    val reportHash = Hashing.blake2b256(guarantee.report.encode)
-    val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
-    Ed25519.verify(validatorKey, message, signature)
+    val out = new Array[Int](shuffledIndices.length)
+    var j = 0
+    val it = shuffledIndices.iterator
+    while it.hasNext do
+      val idx = it.next()
+      out(j) = math.floorMod(source(idx) + shift, coresCount)
+      j += 1
+    out
 
   /**
    * Update availability assignments with new reports.

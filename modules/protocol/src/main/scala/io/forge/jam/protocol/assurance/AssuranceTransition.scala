@@ -81,48 +81,43 @@ object AssuranceTransition:
       }
     }
 
-  /**
-   * Validate a single assurance and return error if invalid.
-   */
-  private def validateSingleAssurance(
+  private def validateNonSig(
     assurance: AssuranceExtrinsic,
     input: AssuranceInput,
     state: AssuranceState
   ): Option[AssuranceErrorCode] =
-    // Check validator index bounds
     if assurance.validatorIndex.toInt >= state.currValidators.size then
       Some(AssuranceErrorCode.BadValidatorIndex)
-    // Check parent block hash matches
     else if assurance.anchor != input.parent then
       Some(AssuranceErrorCode.BadAttestationParent)
-    // Verify signature
-    else if !verifyAssuranceSignature(assurance, state.currValidators(assurance.validatorIndex.toInt)) then
-      Some(AssuranceErrorCode.BadSignature)
     else
       None
 
-  /**
-   * Validate all assurances.
-   */
   private def validateAssurances(
     input: AssuranceInput,
     state: AssuranceState
   ): Option[AssuranceErrorCode] =
-    // Early return if no assurances
     if input.assurances.isEmpty then
       None
     else
-      // Find first error in assurances
-      val firstError = input.assurances.iterator
-        .map(a => validateSingleAssurance(a, input, state))
+      val nonSigError = input.assurances.iterator
+        .map(a => validateNonSig(a, input, state))
         .collectFirst { case Some(err) => err }
 
-      firstError.orElse {
-        // Check for sorted and unique validator indices
+      nonSigError.orElse {
         if !ValidationHelpers.isSortedUniqueByInt(input.assurances)(_.validatorIndex.toInt) then
           Some(AssuranceErrorCode.NotSortedOrUniqueAssurers)
         else
-          None
+          val assurances = input.assurances.toArray
+          val n = assurances.length
+          val allValid = java.util.stream.IntStream
+            .range(0, n)
+            .parallel()
+            .allMatch { i =>
+              val a = assurances(i)
+              verifyAssuranceSignature(a, state.currValidators(a.validatorIndex.toInt))
+            }
+          if !allValid then Some(AssuranceErrorCode.BadSignature) else None
       }
 
   /**
