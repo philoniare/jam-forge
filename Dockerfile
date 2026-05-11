@@ -81,6 +81,5 @@ LABEL org.opencontainers.image.revision=${GIT_SHA}
 LABEL org.opencontainers.image.created=${BUILD_TIME}
 
 # Default invocation creates a CRaC checkpoint at /app/cr and then exits.
-# Override the command to run the server cold (without a checkpoint).
-ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["exec java $JAVA_OPTS -XX:CRaCCheckpointTo=/app/cr -jar /app/jam-conformance.jar warmup-and-serve --socket-path /tmp/jam_target.sock"]
+ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS -XX:CRaCCheckpointTo=/app/cr -jar /app/jam-conformance.jar warmup-and-serve \"$@\"", "--"]
+CMD ["--socket-path", "/tmp/jam_target.sock"]
