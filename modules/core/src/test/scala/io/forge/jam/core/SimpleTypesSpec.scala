@@ -27,18 +27,18 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
         throw new RuntimeException(s"Decode failed: $err")
 
   // ============================================================================
-  // Test 1: TicketEnvelope encode/decode (785 bytes fixed)
+  // Test 1: TicketEnvelope encode/decode (compact attempt + 784-byte signature)
   // ============================================================================
 
-  "TicketEnvelope" should "encode to exactly 785 bytes" in {
+  "TicketEnvelope" should "encode to MinSize when attempt < 128" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x42.toByte)
     val envelope = TicketEnvelope(UByte(3), signature)
     val encoded = encode(envelope)
-    encoded.length shouldBe TicketEnvelope.Size
+    encoded.length shouldBe TicketEnvelope.MinSize
     encoded.length shouldBe 785
   }
 
-  it should "encode attempt as first byte" in {
+  it should "encode attempt as first byte (compact, value < 128)" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x00.toByte)
     val envelope = TicketEnvelope(UByte(42), signature)
     val encoded = encode(envelope)
@@ -50,9 +50,20 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val envelope = TicketEnvelope(UByte(7), signature)
     val encoded = encode(envelope)
     val (decoded, consumed) = decode[TicketEnvelope](encoded)
-    consumed shouldBe TicketEnvelope.Size
+    consumed shouldBe TicketEnvelope.MinSize
     decoded.attempt shouldBe envelope.attempt
     decoded.signature shouldBe envelope.signature
+  }
+
+  it should "use 2-byte JAM-compact encoding for attempt >= 128" in {
+    val signature = JamBytes.fill(RingVrfSignatureSize)(0x00.toByte)
+    val envelope = TicketEnvelope(UByte(200), signature)
+    val encoded = encode(envelope)
+    encoded.length shouldBe TicketEnvelope.MaxSize
+    encoded.length shouldBe 786
+    val (decoded, consumed) = decode[TicketEnvelope](encoded)
+    consumed shouldBe TicketEnvelope.MaxSize
+    decoded.attempt shouldBe UByte(200)
   }
 
   // ============================================================================

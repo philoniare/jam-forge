@@ -3,6 +3,7 @@ package io.forge.jam.core.types
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.{parseHex, parseHexBytesFixed}
+import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
 import _root_.scodec.*
 import _root_.scodec.codecs.*
@@ -27,14 +28,26 @@ object tickets:
       s"Signature must be $RingVrfSignatureSize bytes, got ${signature.length}")
 
   object TicketEnvelope:
-    val Size: Int = 1 + RingVrfSignatureSize // 785 bytes
+    /** Minimum on-wire size: 1-byte compact attempt (value < 128) + signature. */
+    val MinSize: Int = 1 + RingVrfSignatureSize // 785 bytes
+    /** Maximum on-wire size: 2-byte compact attempt (value >= 128) + signature. */
+    val MaxSize: Int = 2 + RingVrfSignatureSize // 786 bytes
+
+    private val attemptCodec: Codec[UByte] =
+      JamCodecs.compactInt.exmap[UByte](
+        i =>
+          if i < 0 || i > 255 then
+            Attempt.failure(Err(s"attempt $i out of UByte range"))
+          else Attempt.successful(UByte(i)),
+        ub => Attempt.successful(ub.toInt)
+      )
 
     given Codec[TicketEnvelope] =
-      (byte :: fixedSizeBytes(RingVrfSignatureSize.toLong, bytes)).xmap(
-        { case (attemptByte, sigBytes) =>
-          TicketEnvelope(UByte(attemptByte), JamBytes.fromByteVector(sigBytes))
+      (attemptCodec :: fixedSizeBytes(RingVrfSignatureSize.toLong, bytes)).xmap(
+        { case (attempt, sigBytes) =>
+          TicketEnvelope(attempt, JamBytes.fromByteVector(sigBytes))
         },
-        te => (te.attempt.toByte, te.signature.toByteVector)
+        te => (te.attempt, te.signature.toByteVector)
       )
 
     given Decoder[TicketEnvelope] = Decoder.instance { cursor =>

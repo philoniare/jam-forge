@@ -92,7 +92,10 @@ class JsonTraceRunner(
     val traceId = traceDir.getFileName.toString
     val jsonFiles = Option(traceDir.toFile.listFiles())
       .getOrElse(Array.empty[File])
-      .filter(f => f.isFile && f.getName.endsWith(".json") && f.getName != "genesis.json")
+      .filter(f =>
+        f.isFile && f.getName.endsWith(".json") &&
+          f.getName != "genesis.json" && f.getName != "report.json"
+      )
       .sortBy(_.getName)
       .toList
 
