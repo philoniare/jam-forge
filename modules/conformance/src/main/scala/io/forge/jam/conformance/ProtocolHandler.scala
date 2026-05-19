@@ -121,9 +121,7 @@ class ProtocolHandler(
 
   /** Read a length-prefixed message from the socket.
     */
-  private def readMessage(
-      socket: Socket[IO]
-  ): IO[Option[(ProtocolMessage, Int)]] =
+  private def readMessage(socket: Socket[IO]): IO[ReadResult] =
     // Read 4-byte length prefix
     socket
       .read(4)
