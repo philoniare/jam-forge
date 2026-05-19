@@ -144,13 +144,6 @@ object ReportTransition:
     preState: ReportState,
     config: ChainConfig
   ): Either[ReportErrorCode, (List[WorkReport], List[SegmentRootLookup], List[Hash])] =
-    case class ProcessState(
-      seenCores: Set[Int],
-      reports: List[WorkReport],
-      packages: List[SegmentRootLookup],
-      guarantors: List[Hash]
-    )
-
     val offendersSet: Set[Hash] = preState.offenders.toSet
     val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
 
@@ -173,62 +166,75 @@ object ReportTransition:
       (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
     ]
 
-    val initial = ProcessState(Set.empty, List.empty, List.empty, List.empty)
+    val seenCores      = scala.collection.mutable.HashSet.empty[Int]
+    val reportsBuf     = scala.collection.mutable.ListBuffer.empty[WorkReport]
+    val packagesBuf    = scala.collection.mutable.ListBuffer.empty[SegmentRootLookup]
+    val guarantorsBuf  = scala.collection.mutable.ListBuffer.empty[Hash]
 
-    val foldResult = input.guarantees.foldLeft[Either[ReportErrorCode, ProcessState]](Right(initial)) { (accum, guarantee) =>
-      accum.flatMap { state =>
-        for
-          _ <- validateGuarantorSignatureOrder(guarantee)
-          _ <- validateWorkReport(
-            guarantee.report,
-            guarantee.slot.value.toLong,
-            input.slot,
-            preState.accounts,
-            preState.authPools,
-            preState.availAssignments,
-            config
-          )
-          _ <- validateGuarantorSignaturesCached(
-            guarantee,
-            input.slot,
-            offendersSet,
-            cacheFor,
-            sigBuf,
-            config
-          )
-          _ <- require(!state.seenCores.contains(guarantee.report.coreIndex.toInt), ReportErrorCode.CoreEngaged)
-        yield
-          val ctx = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
-          val cache = cacheFor(ctx)
-          val newGuarantors = guarantee.signatures.map(sig => Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes))
+    var remaining = input.guarantees
+    while remaining.nonEmpty do
+      val guarantee = remaining.head
+      remaining = remaining.tail
 
-          state.copy(
-            seenCores = state.seenCores + guarantee.report.coreIndex.toInt,
-            reports = state.reports :+ guarantee.report,
-            packages = state.packages :+ SegmentRootLookup(
-              guarantee.report.packageSpec.hash,
-              guarantee.report.packageSpec.exportsRoot
-            ),
-            guarantors = state.guarantors ++ newGuarantors
-          )
-      }
-    }
+      validateGuarantorSignatureOrder(guarantee) match
+        case Left(err) => return Left(err)
+        case _         => ()
 
-    foldResult.flatMap { s =>
-      val n = sigBuf.size
-      if n == 0 then Right((s.reports, s.packages, s.guarantors))
-      else
-        val tuples = sigBuf.toArray
-        val allValid = java.util.stream.IntStream
-          .range(0, n)
-          .parallel()
-          .allMatch { i =>
-            val (pk, msg, sig) = tuples(i)
-            Ed25519.verify(pk, msg, sig)
-          }
-        if !allValid then Left(ReportErrorCode.BadSignature)
-        else Right((s.reports, s.packages, s.guarantors))
-    }
+      validateWorkReport(
+        guarantee.report,
+        guarantee.slot.value.toLong,
+        input.slot,
+        preState.accounts,
+        preState.authPools,
+        preState.availAssignments,
+        config
+      ) match
+        case Left(err) => return Left(err)
+        case _         => ()
+
+      validateGuarantorSignaturesCached(
+        guarantee,
+        input.slot,
+        offendersSet,
+        cacheFor,
+        sigBuf,
+        config
+      ) match
+        case Left(err) => return Left(err)
+        case _         => ()
+
+      val coreIdx = guarantee.report.coreIndex.toInt
+      if seenCores.contains(coreIdx) then return Left(ReportErrorCode.CoreEngaged)
+      seenCores += coreIdx
+
+      val ctx   = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
+      val cache = cacheFor(ctx)
+
+      reportsBuf  += guarantee.report
+      packagesBuf += SegmentRootLookup(
+        guarantee.report.packageSpec.hash,
+        guarantee.report.packageSpec.exportsRoot
+      )
+
+      var sigs = guarantee.signatures
+      while sigs.nonEmpty do
+        val sig = sigs.head
+        sigs = sigs.tail
+        guarantorsBuf += Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes)
+
+    val n = sigBuf.size
+    if n != 0 then
+      val tuples = sigBuf.toArray
+      val allValid = java.util.stream.IntStream
+        .range(0, n)
+        .parallel()
+        .allMatch { i =>
+          val (pk, msg, sig) = tuples(i)
+          Ed25519.verify(pk, msg, sig)
+        }
+      if !allValid then return Left(ReportErrorCode.BadSignature)
+
+    Right((reportsBuf.toList, packagesBuf.toList, guarantorsBuf.toList))
 
   /** Validate guarantees are sorted by core index. */
   private def validateGuaranteesOrder(guarantees: List[GuaranteeExtrinsic]): ValidationResult =

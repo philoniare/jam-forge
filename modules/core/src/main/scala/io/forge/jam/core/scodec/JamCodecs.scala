@@ -84,11 +84,7 @@ object JamCodecs:
     override def sizeBound: SizeBound = SizeBound.bounded(8, 72) // 1-9 bytes
 
     override def encode(value: Long): Attempt[BitVector] =
-      if value < 0 then
-        Attempt.failure(
-          Err(s"compactInteger does not support negative values: $value")
-        )
-      else Attempt.successful(BitVector(encodeCompactInteger(value)))
+      Attempt.successful(BitVector(encodeCompactInteger(value)))
 
     override def decode(bits: BitVector): Attempt[DecodeResult[Long]] =
       val bytes = bits.bytes
@@ -277,40 +273,35 @@ object JamCodecs:
     *   if value is negative
     */
   def encodeCompactInteger(value: Long): Array[Byte] =
-    require(
-      value >= 0,
-      s"Compact integer encoding requires non-negative value, got: $value"
-    )
-
-    // Special case: value = 0
     if value == 0L then return Array[Byte](0)
 
-    // Find l such that 2^(7l) <= value < 2^(7(l+1)) for l in [0..8]
+    if java.lang.Long.compareUnsigned(value, 1L << 56) >= 0 then
+      val result = new Array[Byte](9)
+      result(0) = 0xff.toByte
+      var i = 0
+      while i < 8 do
+        result(1 + i) = ((value >>> (8 * i)) & 0xff).toByte
+        i += 1
+      return result
+
     var l = 0
-    while l <= 8 do
-      val lowerBound = 1L << (7 * l)
+    while l <= 7 do
       val upperBound = 1L << (7 * (l + 1))
-      if value >= lowerBound && value < upperBound then
-        // prefix = 256 - 2^(8-l) + floor(value / 2^(8*l))
-        val prefixVal = (256 - (1 << (8 - l))) + (value >>> (8 * l))
+      if java.lang.Long.compareUnsigned(value, upperBound) < 0 then
+        val prefixVal = (256 - (1 << (8 - l))) + (value >>> (8 * l)).toInt
         val prefixByte = prefixVal.toByte
-
-        // remainder = value mod 2^(8*l)
-        val remainder = value & ((1L << (8 * l)) - 1)
-
-        // E_l(remainder) -> little-endian representation in l bytes
+        val remainder =
+          if l == 0 then 0L else value & ((1L << (8 * l)) - 1)
         val result = new Array[Byte](1 + l)
         result(0) = prefixByte
-        for i <- 0 until l do
-          result(1 + i) = ((remainder >> (8 * i)) & 0xff).toByte
+        var i = 0
+        while i < l do
+          result(1 + i) = ((remainder >>> (8 * i)) & 0xff).toByte
+          i += 1
         return result
       l += 1
 
-    // Fallback: [255] ++ E_8(value)
-    val result = new Array[Byte](9)
-    result(0) = 0xff.toByte
-    for i <- 0 until 8 do result(1 + i) = ((value >> (8 * i)) & 0xff).toByte
-    result
+    throw new AssertionError(s"unreachable: value=$value")
 
   /** Helper to decode compact integer from byte array at offset.
     *

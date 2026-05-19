@@ -71,7 +71,7 @@ COPY jam-conformance/fuzz-reports/0.7.2/traces /app/jam-conformance/fuzz-reports
 ENV LD_LIBRARY_PATH=/app/lib
 ENV JAM_TRACES_DIR=/app/jam-conformance/fuzz-reports/0.7.2/traces
 ENV LOG_LEVEL=ERROR
-ENV JAVA_OPTS="-XX:+UseG1GC -Xms1g -Xmx2g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof -XX:CRaCAllowedOpenFilePrefixes=/proc/,/sys/,/dev/ -Dlogback.configurationFile=/app/logback.xml"
+ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof -XX:CRaCAllowedOpenFilePrefixes=/proc/,/sys/,/dev/ -Dlogback.configurationFile=/app/logback.xml"
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
