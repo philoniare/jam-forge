@@ -96,16 +96,29 @@ docker run \
     "${COLD_IMAGE}:latest"
 set -e
 
-# Verify checkpoint .img files were produced inside the container.
-if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr/inventory.img" - >/dev/null 2>&1; then
-    echo "ERROR: no checkpoint produced (inventory.img missing in /app/cr)" >&2
-    echo "Inspect logs with: docker cp $CHECKPOINT_CONTAINER:/app/cr ./cr-logs && cat ./cr-logs/dump*.log" >&2
-    echo "Common causes:" >&2
-    echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
-    echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
+# Verify a checkpoint was produced inside the container
+CR_LISTING_FILE="$(mktemp)"
+trap 'rm -f "$CR_LISTING_FILE"' EXIT
+if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr" - 2>/dev/null | tar -tvf - >"$CR_LISTING_FILE" 2>/dev/null; then
+    echo "ERROR: /app/cr does not exist in checkpoint container" >&2
     echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
     exit 1
 fi
+
+echo "Checkpoint directory contents (/app/cr):"
+cat "$CR_LISTING_FILE"
+
+CR_FILE_COUNT="$(awk 'BEGIN{n=0} /^-/ && $NF != "cr/" {n++} END{print n}' "$CR_LISTING_FILE")"
+if [ "${CR_FILE_COUNT:-0}" -lt 1 ]; then
+    echo "ERROR: /app/cr is empty — no checkpoint produced." >&2
+    echo "Common causes:" >&2
+    echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
+    echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
+    echo "  - CRaC engine refused to checkpoint open resources (check the JVM log above for [crac] / warp lines)." >&2
+    echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
+    exit 1
+fi
+echo "Checkpoint produced: ${CR_FILE_COUNT} file(s) in /app/cr"
 
 echo ""
 echo "=== Step 4: Commit container as runtime image (${IMAGE_NAME}:latest) ==="
