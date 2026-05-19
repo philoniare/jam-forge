@@ -12,6 +12,18 @@ import io.forge.jam.protocol.traces.{
   StateMerklization
 }
 
+/** Outcome of a single `readMessage` call.
+  *
+  *   - `Eof`: peer closed the socket; loop terminates normally.
+  *   - `Decoded`: a well-formed protocol message; loop dispatches it.
+  *   - `DecodeFailed`: the wire frame was malformed.
+  */
+sealed trait ReadResult
+object ReadResult:
+  case object Eof extends ReadResult
+  final case class Decoded(msg: ProtocolMessage, size: Int) extends ReadResult
+  final case class DecodeFailed(reason: String, size: Int) extends ReadResult
+
 /** Protocol handler for the conformance testing session.
   *
   * Manages:
@@ -43,7 +55,7 @@ class ProtocolHandler(
     logger.logInfo("Waiting for next message...") *>
       readMessage(socket)
         .flatMap {
-          case Some((msg, size)) =>
+          case ReadResult.Decoded(msg, size) =>
             logger.logInfo(
               s"Received message of size $size bytes, processing..."
             ) *>
@@ -73,7 +85,27 @@ class ProtocolHandler(
                       IO.raiseError(sendError)
                   }
               } *> connectionLoop(socket)
-          case None =>
+
+          case ReadResult.DecodeFailed(reason, size) =>
+            IO.println(
+              s"[JAM-FORGE WARN] Decode failure on $size-byte frame: $reason"
+            ) *>
+              logger.logWarning(
+                s"Decode failure on $size-byte frame: $reason"
+              ) *>
+              sendMessage(
+                socket,
+                ProtocolMessage.ErrorMsg(
+                  Error(s"Decode failure: $reason")
+                )
+              ).handleErrorWith { sendError =>
+                logger.logError(
+                  "Failed to send decode-error response, connection lost",
+                  sendError
+                ) *> IO.raiseError(sendError)
+              } *> connectionLoop(socket)
+
+          case ReadResult.Eof =>
             logger.logInfo("Connection closed by peer (read returned None)")
         }
         .handleErrorWith { error =>
@@ -100,12 +132,12 @@ class ProtocolHandler(
           logger.logInfo(
             "readMessage: socket.read(4) returned None - connection closed"
           ) *>
-            IO.pure(None)
+            IO.pure(ReadResult.Eof)
         case Some(lengthChunk) if lengthChunk.size < 4 =>
           logger.logWarning(
             s"readMessage: got partial length header (${lengthChunk.size} bytes instead of 4)"
           ) *>
-            IO.pure(None)
+            IO.pure(ReadResult.Eof)
         case Some(lengthChunk) =>
           val length = JamCodecs.decodeU32LE(lengthChunk.toArray, 0).signed
           logger.logInfo(
@@ -130,13 +162,12 @@ class ProtocolHandler(
                      val jamBytes = JamBytes(bodyBytes)
                      val (msg, _) =
                        ProtocolMessage.decodeMessage(jamBytes, 0, config)
-                     Some((msg, length))
+                     ReadResult.Decoded(msg, length)
                    catch
                      case e: Throwable =>
-                       throw new RuntimeException(
-                         s"Failed to decode message of $length bytes: ${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}",
-                         e
-                       )
+                       val reason =
+                         s"${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}"
+                       ReadResult.DecodeFailed(reason, length)
                  }
                })
       }
