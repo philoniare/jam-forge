@@ -27,7 +27,10 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
+  // TINY-config traces
   private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
+  // FULL-config traces
+  private val fullTracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "full-traces")
 
   describe("v0.7.2 Fuzz Report Traces"):
 
@@ -163,3 +166,43 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
         failures shouldBe empty
         errors shouldBe empty
+
+    describe("FULL config traces validation"):
+
+      it("should pass all FULL-config (1023-validator) fuzz report traces"):
+        assume(Files.exists(fullTracesDir), s"FULL traces directory not found: $fullTracesDir")
+
+        val runner = new JsonTraceRunner(ChainConfig.FULL, verbose = false, compareKeyvals = true)
+        val results = runner.runAllTraces(fullTracesDir)
+
+        val successes = results.collect { case s: JsonTraceResult.Success => s }
+        val failures = results.collect { case f: JsonTraceResult.Failure => f }
+        val errors = results.collect { case e: JsonTraceResult.Error => e }
+
+        val failuresByTrace = failures.groupBy(_.traceId)
+        val errorsByTrace = errors.groupBy(_.traceId)
+
+        println(s"\n=== v0.7.2 FULL Config Traces Summary ===")
+        println(s"Total files: ${results.size}")
+        println(s"Passed: ${successes.size}")
+        println(s"Failed: ${failures.size} (in ${failuresByTrace.size} traces)")
+        println(s"Errors: ${errors.size} (in ${errorsByTrace.size} traces)")
+
+        if failures.nonEmpty then
+          println(s"\n--- First 10 Failures ---")
+          failures.take(10).foreach { f =>
+            println(s"[${f.traceId}/${f.fileName}] slot=${f.slot}")
+            println(s"  Expected: ${f.expectedRoot.take(32)}...")
+            println(s"  Actual:   ${f.actualRoot.take(32)}...")
+          }
+
+        if errors.nonEmpty then
+          println(s"\n--- First 10 Errors ---")
+          errors.take(10).foreach(e => println(s"[${e.traceId}/${e.fileName}]: ${e.errorMessage.take(100)}"))
+
+        withClue(s"Failed traces: ${failuresByTrace.keys.mkString(", ")}") {
+          failures shouldBe empty
+        }
+        withClue(s"Error traces: ${errorsByTrace.keys.mkString(", ")}") {
+          errors shouldBe empty
+        }
