@@ -3,7 +3,8 @@ package io.forge.jam.protocol.history
 import io.forge.jam.core.{JamBytes, Hashing, ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.history.HistoryTypes.*
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.HistoryBridge
 
 /**
  * History State Transition Function.
@@ -31,14 +32,13 @@ object HistoryTransition:
    * @param config The chain configuration (for max cores validation).
    * @return The updated JamState.
    */
-  def stf(input: HistoricalInput, state: JamState, config: ChainConfig = ChainConfig.TINY): JamState =
-    // Extract HistoricalState using lens bundle
-    val preState = JamState.HistoryLenses.extract(state)
-
-    val postState = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    JamState.HistoryLenses.apply(state, postState)
+  def stfView(
+    input: HistoricalInput,
+    view: TrieBackedJamState
+  ): Unit =
+    val preState = HistoryBridge.extract(view)
+    val postState = stfInternal(input, preState, view.config)
+    HistoryBridge.apply(view, postState)
 
   /**
    * Internal History STF implementation using HistoricalState.

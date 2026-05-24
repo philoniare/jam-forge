@@ -29,6 +29,7 @@ import org.slf4j.LoggerFactory
 import _root_.scodec.bits.BitVector
 import _root_.scodec.Codec
 import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.trie.StateTrie
 
 /** Unified JAM state container holding all state components.
   */
@@ -542,6 +543,25 @@ object FullJamState:
       if !safroleRelated.contains(first) && !isServiceData then other += kv
 
     new KeyvalIndex(simple, serviceAccounts, rawData, original, other)
+
+  def fromTrie(
+      trie: StateTrie,
+      config: ChainConfig = ChainConfig.TINY
+  ): FullJamState =
+    val kvs = scala.collection.mutable.ListBuffer.empty[KeyValue]
+
+    StateKeys.KNOWN_PREFIXES.foreach { prefix =>
+      if prefix != 0xff then
+        val key = StateKeys.simpleKey(prefix.toByte)
+        trie.read(key).foreach(v => kvs += KeyValue(key, v))
+    }
+
+    val ffPrefix = JamBytes(Array(0xff.toByte))
+    trie.getKeyValues(ffPrefix, 8).foreach { case (k, v) =>
+      if k(2) == 0 then kvs += KeyValue(k, v)
+    }
+
+    fromKeyvals(kvs.toList, config)
 
   /** Create from raw state keyvals.
     */

@@ -1,12 +1,12 @@
 package io.forge.jam.protocol.pipeline
 
 import cats.data.StateT
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
 
 /**
@@ -23,18 +23,16 @@ final case class PipelineContext(
   disputeOffendersMark: List[Ed25519PublicKey] = List.empty,
   availableReports: List[WorkReport] = List.empty,
   accumulateRoot: Option[Hash] = None,
-  accumulationStats: Map[Long, (Long, Int)] = Map.empty,
-  // Pre-accumulation state for preimages validation (per GP §12.1)
-  preAccumulationRawServiceData: Option[Map[JamBytes, JamBytes]] = None
+  accumulationStats: Map[Long, (Long, Int)] = Map.empty
 )
 
 object PipelineContext:
-  def from(block: Block, config: ChainConfig, preState: JamState): PipelineContext =
+  def from(block: Block, config: ChainConfig, view: TrieBackedJamState): PipelineContext =
     PipelineContext(
       config = config,
       block = block,
-      preTransitionTau = preState.tau,
-      preSafroleValidators = preState.validators.current
+      preTransitionTau = view.timeslot,
+      preSafroleValidators = view.validators.current
     )
 
 /**
@@ -44,9 +42,7 @@ object PipelineTypes:
   // The base effect: Either with PipelineError
   type PipelineResult[A] = Either[PipelineError, A]
 
-  // StateT over Either for state threading with error handling
-  // StateT[F, S, A] where F = PipelineResult, S = (JamState, PipelineContext), A = output
-  type StfKleisli[A] = StateT[PipelineResult, (JamState, PipelineContext), A]
+  type StfKleisli[A] = StateT[PipelineResult, (TrieBackedJamState, PipelineContext), A]
 
   // For STFs that don't produce output
   type StfStep = StfKleisli[Unit]

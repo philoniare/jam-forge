@@ -7,7 +7,8 @@ import _root_.scodec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.protocol.safrole.SafroleTypes.*
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.SafroleBridge
 import scala.math.Ordering.Implicits.infixOrderingOps
 
 /**
@@ -28,7 +29,7 @@ import scala.math.Ordering.Implicits.infixOrderingOps
 object SafroleTransition:
 
   /**
-   * Execute the Safrole STF using unified JamState.
+   * Execute the Safrole STF over a typed view.
    *
    * Reads: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ), postOffenders
    * Writes: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ)
@@ -38,21 +39,14 @@ object SafroleTransition:
    * @param config The chain configuration.
    * @return Tuple of (updated JamState, output).
    */
-  def stf(
+  def stfView(
     input: SafroleInput,
-    state: JamState,
-    config: ChainConfig
-  ): (JamState, SafroleOutput) =
-    // Extract SafroleState using lens bundle
-    val preState = JamState.SafroleLenses.extract(state)
-
-    // Execute the internal STF logic
-    val (postState, output) = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.SafroleLenses.apply(state, postState)
-
-    (updatedState, output)
+    view: TrieBackedJamState
+  ): SafroleOutput =
+    val preState = SafroleBridge.extract(view)
+    val (postState, output) = stfInternal(input, preState, view.config)
+    SafroleBridge.apply(view, postState)
+    output
 
   /**
    * Internal Safrole STF implementation using SafroleState.

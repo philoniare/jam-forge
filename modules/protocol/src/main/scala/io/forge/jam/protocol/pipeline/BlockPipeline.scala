@@ -1,10 +1,9 @@
 package io.forge.jam.protocol.pipeline
 
-import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
 import io.forge.jam.protocol.accumulation.AccumulationExecutor
 import io.forge.jam.protocol.pipeline.PipelineTypes.*
@@ -12,39 +11,23 @@ import io.forge.jam.protocol.pipeline.LiftedStfs.*
 import io.forge.jam.protocol.pipeline.IntermediateSteps.*
 import io.forge.jam.protocol.pipeline.StfLifters.inspect
 
-/**
- * Result of a successful pipeline execution.
- */
 final case class BlockPipelineResult(
-  state: JamState,
-  safroleOutput: Option[SafroleOutputData],
-  availableReports: List[WorkReport],
-  accumulateRoot: Option[Hash],
-  accumulationStats: Map[Long, (Long, Int)]
+    safroleOutput: Option[SafroleOutputData],
+    availableReports: List[WorkReport],
+    accumulateRoot: Option[Hash],
+    accumulationStats: Map[Long, (Long, Int)]
 )
 
-/**
- * Complete block import pipeline using Kleisli composition.
- */
 object BlockPipeline:
 
-  /**
-   * Execute the full block import pipeline.
-   *
-   * @param block The block to import
-   * @param initialState The pre-state
-   * @param config Chain configuration
-   * @param skipAncestryValidation Whether to skip anchor recency validation in Reports
-   * @return Either an error or the final state with computed values
-   */
   def execute(
-    block: Block,
-    initialState: JamState,
-    config: ChainConfig,
-    skipAncestryValidation: Boolean = false,
-    sharedExecutor: Option[AccumulationExecutor] = None
+      block: Block,
+      view: TrieBackedJamState,
+      skipAncestryValidation: Boolean = false,
+      sharedExecutor: Option[AccumulationExecutor] = None
   ): Either[PipelineError, BlockPipelineResult] =
-    val initialContext = PipelineContext.from(block, config, initialState)
+    val initialContext = PipelineContext.from(block, view.config, view)
+    val storageView: Option[ServiceStorageView] = Some(view.storage)
 
     val pipeline: StfStepWith[BlockPipelineResult] = for {
       // Step 0: Validate extrinsic hash
@@ -61,7 +44,7 @@ object BlockPipeline:
       _ <- validateEntropyVrf
 
       // Capture post-Safrole tau for later restoration
-      postSafroleTau <- inspect((s, _) => s.tau)
+      postSafroleTau <- inspect((v, _) => v.timeslot)
 
       // Step 3: Disputes
       disputeOut <- disputes
@@ -78,8 +61,7 @@ object BlockPipeline:
       // Step 6: Reports
       _ <- reports(skipAncestryValidation)
 
-      // Capture pre-accumulation rawServiceDataByStateKey for preimages validation (per GP §12.1)
-      _ <- capturePreAccumulationState
+      _ <- savepointStorageView(storageView)
 
       // Step 7: Accumulation
       accOut <- accumulation(sharedExecutor)
@@ -102,14 +84,16 @@ object BlockPipeline:
       _ <- statistics
       _ <- restorePostTransitionTau(postSafroleTau)
 
-      // Extract final state and context
-      finalResult <- inspect((s, ctx) => BlockPipelineResult(
-        state = s,
-        safroleOutput = ctx.safroleOutput,
-        availableReports = ctx.availableReports,
-        accumulateRoot = ctx.accumulateRoot,
-        accumulationStats = ctx.accumulationStats
-      ))
+      _ <- discardStorageViewCheckpoint(storageView)
+
+      finalResult <- inspect((_, ctx) =>
+        BlockPipelineResult(
+          safroleOutput = ctx.safroleOutput,
+          availableReports = ctx.availableReports,
+          accumulateRoot = ctx.accumulateRoot,
+          accumulationStats = ctx.accumulationStats
+        )
+      )
     } yield finalResult
 
-    pipeline.run((initialState, initialContext)).map(_._2)
+    pipeline.run((view, initialContext)).map(_._2)

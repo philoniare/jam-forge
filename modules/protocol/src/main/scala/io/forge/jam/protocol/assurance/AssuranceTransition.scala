@@ -5,8 +5,9 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AssuranceBridge
 import io.forge.jam.crypto.Ed25519
-import io.forge.jam.protocol.state.JamState
 
 /**
  * Assurances State Transition Function.
@@ -171,48 +172,16 @@ object AssuranceTransition:
    * @param config The chain configuration.
    * @return Tuple of (updated JamState, output).
    */
-  def stf(
+  def stfViewWithValidators(
     input: AssuranceInput,
-    state: JamState,
-    config: ChainConfig
-  ): (JamState, AssuranceOutput) =
-    // Extract AssuranceState using lens bundle
-    val preState = JamState.AssuranceLenses.extract(state)
-
-    // Execute the internal STF logic
-    val (postState, output) = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.AssuranceLenses.apply(state, postState)
-
-    (updatedState, output)
-
-  /**
-   * Execute the Assurances STF with explicit validators for signature verification.
-   *
-   * @param input The assurance input containing assurances, slot, and parent hash.
-   * @param state The unified JamState.
-   * @param config The chain configuration.
-   * @param validators The validators to use for signature verification.
-   * @return Tuple of (updated JamState, output).
-   */
-  def stfWithValidators(
-    input: AssuranceInput,
-    state: JamState,
-    config: ChainConfig,
+    view: TrieBackedJamState,
     validators: List[ValidatorKey]
-  ): (JamState, AssuranceOutput) =
-    // Extract AssuranceState using lens bundle, but override currValidators
-    val preStateBase = JamState.AssuranceLenses.extract(state)
+  ): AssuranceOutput =
+    val preStateBase = AssuranceBridge.extract(view)
     val preState = preStateBase.copy(currValidators = validators)
-
-    // Execute the internal STF logic
-    val (postState, output) = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.AssuranceLenses.apply(state, postState)
-
-    (updatedState, output)
+    val (postState, output) = stfInternal(input, preState, view.config)
+    AssuranceBridge.apply(view, postState)
+    output
 
   /**
    * Internal Assurances STF implementation using AssuranceState.

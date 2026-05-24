@@ -349,22 +349,22 @@ class ProtocolHandler(
             case Some(parentState) =>
               // Import block using existing BlockImporter
               blockImporter.importBlock(block, parentState) match
-                case ImportResult.Success(postState, _, _) =>
+                case ImportResult.Success(postStateRoot, _) =>
                   // Compute header hash for this block
                   val headerBytes = block.header.encode
                   val headerHash = Hashing.blake2b256(headerBytes)
 
-                  // Store the new state
+                  val postState = blockImporter.materializePostState(config)
+
                   val isOriginal = stateStore.isOriginalBlock(parentHash)
                   stateStore.store(headerHash, postState, isOriginal)
 
-                  // Update ancestry if this is an original block
                   if isOriginal then
                     stateStore.addToAncestry(
                       AncestryItem(block.header.slot, headerHash)
                     )
 
-                  Right(postState.stateRoot)
+                  Right(postStateRoot)
 
                 case ImportResult.Failure(error, message) =>
                   Left(s"Import failed: $error - $message")

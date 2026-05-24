@@ -5,6 +5,7 @@ import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.work.ExecutionResult
+import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, ULong}
 
 import scala.collection.mutable
@@ -334,8 +335,27 @@ final class AccumulationContext(
     var yieldHash: Option[JamBytes] = None,
     var yieldCheckpoint: Option[JamBytes] = None,
     var nextAccountIndex: Long = 65536L,
-    val minPublicServiceIndex: Long = 65536L
+    val minPublicServiceIndex: Long = 65536L,
+    val storageView: Option[ServiceStorageView] = None
 ):
+
+  storageView.foreach(_.savepoint())
+
+
+  def readRawData(stateKey: JamBytes): Option[JamBytes] =
+    storageView match
+      case Some(v) => v.getByStateKey(stateKey)
+      case None    => x.rawServiceDataByStateKey.get(stateKey)
+
+  def writeRawData(stateKey: JamBytes, value: JamBytes): Unit =
+    storageView match
+      case Some(v) => v.putByStateKey(stateKey, value)
+      case None    => x.rawServiceDataByStateKey.update(stateKey, value)
+
+  def deleteRawData(stateKey: JamBytes): Unit =
+    storageView match
+      case Some(v) => v.deleteByStateKey(stateKey)
+      case None    => x.rawServiceDataByStateKey.remove(stateKey)
 
   /** Checkpoint: copy current state x to checkpoint y, including yield,
     * provisions, and transfers.
@@ -347,6 +367,10 @@ final class AccumulationContext(
     provisionsCheckpoint ++= provisions
     deferredTransfersCheckpoint.clear()
     deferredTransfersCheckpoint ++= deferredTransfers
+    storageView.foreach { v =>
+      v.discardCheckpoint()
+      v.savepoint()
+    }
 
   /** Collapse: select final state based on exit reason. On panic, out of gas,
     * page fault, or invalid code, revert to checkpoint state y.
@@ -360,8 +384,11 @@ final class AccumulationContext(
     exitReason match
       case ExitReason.PANIC | ExitReason.OUT_OF_GAS | ExitReason.PAGE_FAULT |
           ExitReason.INVALID_CODE =>
+        storageView.foreach(_.restore())
         y
-      case _ => x
+      case _ =>
+        storageView.foreach(_.discardCheckpoint())
+        x
 
   /** Get provisions based on exit reason. On panic or out of gas, use
     * checkpoint provisions.

@@ -206,7 +206,7 @@ class AccumulationHostCalls(
         0xfffffffeL,
         hashBytes
       )
-      preimage = context.x.rawServiceDataByStateKey.get(blobStateKey)
+      preimage = context.readRawData(blobStateKey)
 
     // Calculate actual offset and length based on preimage data (or 0 if not found)
     val dataSize: Long = preimage.map(_.length.toLong).getOrElse(0L)
@@ -263,10 +263,13 @@ class AccumulationHostCalls(
     // First check in-memory storage (for values written in this execution)
     var value = account.flatMap(_.storage.get(key))
 
-    // If not found in-memory, look up in raw service data using computed state key
     if value.isEmpty then
-      val stateKey = StateKey.computeStorageStateKey(targetServiceId, key)
-      value = context.x.rawServiceDataByStateKey.get(stateKey)
+      value = context.storageView match
+        case Some(v) => v.get(targetServiceId, key)
+        case None    =>
+          val stateKey =
+            StateKey.computeStorageStateKey(targetServiceId, key)
+          context.x.rawServiceDataByStateKey.get(stateKey)
 
     if value.isEmpty then
       setReg(instance, 7, HostCallResult.NONE)
@@ -307,13 +310,14 @@ class AccumulationHostCalls(
 
     val key = JamBytes(keyBuffer)
 
-    // Track old value for return value and bytes calculation
-    // Check both in-memory storage and raw service data
     var oldValue = acc.storage.get(key)
-    val stateKeyForLookup =
-      StateKey.computeStorageStateKey(context.serviceIndex, key)
     if oldValue.isEmpty then
-      oldValue = context.x.rawServiceDataByStateKey.get(stateKeyForLookup)
+      oldValue = context.storageView match
+        case Some(v) => v.get(context.serviceIndex, key)
+        case None    =>
+          val stateKeyForLookup =
+            StateKey.computeStorageStateKey(context.serviceIndex, key)
+          context.x.rawServiceDataByStateKey.get(stateKeyForLookup)
 
     val oldValueSize = oldValue.map(_.length).getOrElse(0)
     val keyWasPresent = oldValue.isDefined
@@ -352,15 +356,21 @@ class AccumulationHostCalls(
     // Compute state key for raw storage updates
     val stateKey = StateKey.computeStorageStateKey(context.serviceIndex, key)
 
-    // Apply the write
+    val viewInstalled = context.storageView.isDefined
     if valueLen == 0 then
       // Delete key
       if keyWasPresent then
         acc.storage.remove(key)
-        context.x.rawServiceDataByStateKey.remove(stateKey)
+        if viewInstalled then
+          context.storageView.foreach(_.delete(context.serviceIndex, key))
+        else
+          context.x.rawServiceDataByStateKey.remove(stateKey)
     else
       acc.storage(key) = newValue.get
-      context.x.rawServiceDataByStateKey(stateKey) = newValue.get
+      if viewInstalled then
+        context.storageView.foreach(_.put(context.serviceIndex, key, newValue.get))
+      else
+        context.x.rawServiceDataByStateKey(stateKey) = newValue.get
 
     // Update account info with new bytes/items
     val updatedInfo = info.copy(
@@ -711,8 +721,8 @@ class AccumulationHostCalls(
         codeHashLength,
         JamBytes(codeHashBuffer)
       )
-    context.x.rawServiceDataByStateKey(preimageInfoStateKey) =
-      StateKey.encodePreimageInfoValue(List.empty)
+    val newEncoded = StateKey.encodePreimageInfoValue(List.empty)
+    context.writeRawData(preimageInfoStateKey, newEncoded)
 
     // Deduct balance from creator
     val updatedCreatorInfo = acc.info.copy(
@@ -791,12 +801,8 @@ class AccumulationHostCalls(
           derivedLength.toInt,
           preimageHash
         )
-        val matchingInfoEntry = context.x.rawServiceDataByStateKey.find {
-          case (key, _) =>
-            java.util.Arrays.equals(key.toArray, expectedKey.toArray)
-        }
-        matchingInfoEntry match
-          case Some((_, infoValue)) =>
+        context.readRawData(expectedKey) match
+          case Some(infoValue) =>
             StateKey.decodePreimageInfoValue(infoValue)
           case None =>
             setReg(instance, 7, HostCallResult.HUH)
@@ -827,14 +833,24 @@ class AccumulationHostCalls(
         .order(java.nio.ByteOrder.LITTLE_ENDIAN)
         .putInt(ejectServiceId.toInt)
         .array()
-    val keysToRemove = context.x.rawServiceDataByStateKey.keys.filter { key =>
+    val matchesEjectedService = (key: JamBytes) =>
       key.length >= 8 &&
-      key.toArray(0) == serviceIdBytes(0) &&
-      key.toArray(2) == serviceIdBytes(1) &&
-      key.toArray(4) == serviceIdBytes(2) &&
-      key.toArray(6) == serviceIdBytes(3)
-    }.toList
-    keysToRemove.foreach(context.x.rawServiceDataByStateKey.remove)
+        key.toArray(0) == serviceIdBytes(0) &&
+        key.toArray(2) == serviceIdBytes(1) &&
+        key.toArray(4) == serviceIdBytes(2) &&
+        key.toArray(6) == serviceIdBytes(3)
+    val byteOnePrefix = JamBytes(Array(serviceIdBytes(0)))
+    val keysToRemove: List[JamBytes] = context.storageView match
+      case Some(v) =>
+        v.enumerate(byteOnePrefix, 8)
+          .map(_._1)
+          .filter(matchesEjectedService)
+          .toList
+      case None =>
+        context.x.rawServiceDataByStateKey.keys
+          .filter(matchesEjectedService)
+          .toList
+    keysToRemove.foreach(context.deleteRawData)
 
     // Also remove the service account key from rawServiceAccountsByStateKey
     val serviceAccountKey = StateKey.computeServiceAccountKey(ejectServiceId)
@@ -968,14 +984,13 @@ class AccumulationHostCalls(
     val key = PreimageKey(Hash(hashBuffer), length)
     var request = account.flatMap(_.preimageRequests.get(key))
 
-    // If not in memory, check raw state data for preimage info
     if request.isEmpty then
       val infoStateKey = StateKey.computePreimageInfoStateKey(
         context.serviceIndex,
         length,
         JamBytes(hashBuffer)
       )
-      val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
+      val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
         // Decode preimage info from raw state
         val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
@@ -1028,14 +1043,13 @@ class AccumulationHostCalls(
     val key = PreimageKey(Hash(hashBuffer), length)
     var existingRequest = acc.preimageRequests.get(key)
 
-    // Also check raw state for preimage info if not found in memory
     if existingRequest.isEmpty then
       val infoStateKey = StateKey.computePreimageInfoStateKey(
         context.serviceIndex,
         length,
         JamBytes(hashBuffer)
       )
-      val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
+      val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
         val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
         existingRequest = Some(PreimageRequest(timeslots))
@@ -1069,14 +1083,11 @@ class AccumulationHostCalls(
       JamBytes(hashBuffer)
     )
 
-    // Apply the change
     if notRequestedYet then
       // New request: start with empty list (preimage not yet available)
       val newTimeslots = List.empty[Long]
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
-      // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) =
-        StateKey.encodePreimageInfoValue(newTimeslots)
+      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
       // Update footprint
       val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
       context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
@@ -1084,9 +1095,7 @@ class AccumulationHostCalls(
       // Re-solicit: append current timeslot (requesting again)
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
-      // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) =
-        StateKey.encodePreimageInfoValue(newTimeslots)
+      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
 
     setReg(instance, 7, HostCallResult.OK)
 
@@ -1122,14 +1131,13 @@ class AccumulationHostCalls(
     val key = PreimageKey(Hash(hashBuffer), length)
     var existingRequest = acc.preimageRequests.get(key)
 
-    // Also check raw state for preimage info if not found in memory
     if existingRequest.isEmpty then
       val infoStateKey = StateKey.computePreimageInfoStateKey(
         context.serviceIndex,
         length,
         JamBytes(hashBuffer)
       )
-      val rawInfoData = context.x.rawServiceDataByStateKey.get(infoStateKey)
+      val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
         val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
         existingRequest = Some(PreimageRequest(timeslots))
@@ -1162,13 +1170,11 @@ class AccumulationHostCalls(
       JamBytes(hashBuffer)
     )
 
-    // Apply the change
     val info = acc.info
     if canExpunge then
       // Remove the preimage info entry
       acc.preimageRequests.remove(key)
-      // Remove from raw state data
-      context.x.rawServiceDataByStateKey.remove(stateKey)
+      context.deleteRawData(stateKey)
       // Also remove the preimage blob if it exists
       val preimageHash = Hash(hashBuffer)
       acc.preimages.remove(preimageHash)
@@ -1178,7 +1184,7 @@ class AccumulationHostCalls(
           0xfffffffeL,
           JamBytes(preimageHash.bytes)
         )
-      context.x.rawServiceDataByStateKey.remove(preimageStateKey)
+      context.deleteRawData(preimageStateKey)
       // Update footprint: decrease items by 2 and bytes by 81 + length
       val newItems = math.max(0, info.items - 2)
       val newBytes = math.max(0L, info.bytesUsed - 81 - length)
@@ -1188,17 +1194,13 @@ class AccumulationHostCalls(
       // Append current timeslot (marking as forgotten)
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
-      // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) =
-        StateKey.encodePreimageInfoValue(newTimeslots)
+      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
     else if isAvailable3 then
       // Update to [requestedAt[2], timeslot]
       val newTimeslots =
         List(existingRequest.get.requestedAt(2), context.timeslot)
       acc.preimageRequests(key) = PreimageRequest(newTimeslots)
-      // Write to raw state data
-      context.x.rawServiceDataByStateKey(stateKey) =
-        StateKey.encodePreimageInfoValue(newTimeslots)
+      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
 
     setReg(instance, 7, HostCallResult.OK)
 

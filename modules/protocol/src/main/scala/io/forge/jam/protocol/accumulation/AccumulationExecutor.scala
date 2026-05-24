@@ -9,6 +9,7 @@ import io.forge.jam.pvm.memory.Memory.isReadable
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
+import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UByte}
 
 import scala.collection.mutable
@@ -16,6 +17,12 @@ import scala.collection.mutable
 /** Orchestrates PVM execution for accumulation.
   */
 class AccumulationExecutor(val config: ChainConfig):
+
+  private var currentStorageView: Option[ServiceStorageView] = None
+  def setStorageView(view: Option[ServiceStorageView]): Unit =
+    currentStorageView = view
+  def storageView: Option[ServiceStorageView] = currentStorageView
+
   // LRU-bounded module cache to prevent unbounded memory growth
   private val MAX_MODULE_CACHE_SIZE = 256
   private val moduleCache
@@ -98,7 +105,8 @@ class AccumulationExecutor(val config: ChainConfig):
       timeslot = timeslot,
       entropy = entropy,
       nextAccountIndex = nextAccountIndex,
-      minPublicServiceIndex = minPublicServiceIndex
+      minPublicServiceIndex = minPublicServiceIndex,
+      storageView = currentStorageView
     )
 
     // Execute PVM

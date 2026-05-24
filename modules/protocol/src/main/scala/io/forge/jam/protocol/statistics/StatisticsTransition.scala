@@ -2,9 +2,9 @@ package io.forge.jam.protocol.statistics
 
 import cats.syntax.all.*
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.StatisticsBridge
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
-import io.forge.jam.protocol.state.JamState
-import monocle.syntax.all.*
 import scodec.bits.ByteVector
 
 /**
@@ -28,16 +28,14 @@ object StatisticsTransition:
    * @param config The chain configuration.
    * @return Tuple of (updated JamState, optional StatOutput).
    */
-  def stf(input: StatInput, state: JamState, config: ChainConfig): (JamState, Option[StatOutput]) =
-    // Extract StatState using lens bundle
-    val preState = JamState.StatisticsLenses.extract(state)
-
-    val (postState, output) = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.StatisticsLenses.apply(state, postState)
-
-    (updatedState, output)
+  def stfView(
+    input: StatInput,
+    view: TrieBackedJamState
+  ): Option[StatOutput] =
+    val preState = StatisticsBridge.extract(view)
+    val (postState, output) = stfInternal(input, preState, view.config)
+    StatisticsBridge.apply(view, postState)
+    output
 
   /**
    * Internal Statistics STF implementation using StatState.

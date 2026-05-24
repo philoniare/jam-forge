@@ -139,19 +139,20 @@ class JsonTraceRunner(
 
       // Step 4: Compare post-state
       result match
-        case ImportResult.Success(actualPostState, _, _) =>
-          if actualPostState.stateRoot == traceStep.postState.stateRoot then
+        case ImportResult.Success(actualRoot, _) =>
+          if actualRoot == traceStep.postState.stateRoot then
             JsonTraceResult.Success(effectiveTraceId, fileName, slot)
           else
-            val keyvalDiffs = if compareKeyvals then
-              Some(computeKeyvalDiffs(traceStep.postState.keyvals, actualPostState.keyvals))
-            else
-              None
+            val keyvalDiffs =
+              if compareKeyvals then
+                val actualKeyvals = importer.materializePostState(config).keyvals
+                Some(computeKeyvalDiffs(traceStep.postState.keyvals, actualKeyvals))
+              else None
 
             if verbose then
               println(s"  [$fileName] FAIL - state root mismatch")
               println(s"    Expected: ${traceStep.postState.stateRoot.toHex}")
-              println(s"    Actual:   ${actualPostState.stateRoot.toHex}")
+              println(s"    Actual:   ${actualRoot.toHex}")
               keyvalDiffs.foreach(d => println(s"    Diffs: $d"))
 
             JsonTraceResult.Failure(
@@ -159,7 +160,7 @@ class JsonTraceRunner(
               fileName,
               slot,
               traceStep.postState.stateRoot.toHex,
-              actualPostState.stateRoot.toHex,
+              actualRoot.toHex,
               keyvalDiffs
             )
 

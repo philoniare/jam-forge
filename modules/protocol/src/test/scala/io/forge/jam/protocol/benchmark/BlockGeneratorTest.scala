@@ -19,36 +19,41 @@ class BlockGeneratorTest extends AnyFunSpec with Matchers:
       .getOrElse(throw new RuntimeException("Cannot load genesis"))
     genesis.state
 
+  private def setup(genesis: RawState): (BlockImporter, BlockGenerator) =
+    val importer = new BlockImporter(config)
+    val store = importer.store
+    store.bootstrap(genesis.keyvals.map(kv => (kv.key, kv.value)))
+    assert(store.currentRoot == genesis.stateRoot, "genesis bootstrap mismatch")
+    val validators = DevKeyStore.getAllTinyValidators()
+    val generator = new BlockGenerator(config, validators, store)
+    (importer, generator)
+
   describe("BlockGenerator"):
     it("should generate a valid block 1 from genesis"):
       val genesis = loadGenesis()
-      val validators = DevKeyStore.getAllTinyValidators()
-      val generator = new BlockGenerator(config, validators)
-      val importer = new BlockImporter(config)
+      val (importer, generator) = setup(genesis)
 
-      val block = generator.generateBlock(genesis, slot = 1)
+      val block = generator.generateBlock(genesis.stateRoot, slot = 1)
 
       block.header.slot.value.toInt shouldBe 1
       block.header.parentStateRoot shouldBe genesis.stateRoot
       block.header.seal.length shouldBe 96
       block.header.entropySource.length shouldBe 96
 
-      val result = importer.importBlock(block, genesis)
+      val result = importer.importBlock(block, RawState(genesis.stateRoot, Nil))
       result shouldBe a[ImportResult.Success]
 
     it("should chain multiple blocks"):
       val genesis = loadGenesis()
-      val validators = DevKeyStore.getAllTinyValidators()
-      val generator = new BlockGenerator(config, validators)
-      val importer = new BlockImporter(config)
+      val (importer, generator) = setup(genesis)
 
-      var state = genesis
+      var parentRoot = genesis.stateRoot
       for slot <- 1 to 25 do // 25 blocks = 2+ epochs
-        val block = generator.generateBlock(state, slot.toLong)
-        val result = importer.importBlock(block, state)
+        val block = generator.generateBlock(parentRoot, slot.toLong)
+        val result = importer.importBlock(block, RawState(parentRoot, Nil))
         result match
-          case ImportResult.Success(postState, _, _) =>
-            state = postState
+          case ImportResult.Success(_, _) =>
+            parentRoot = importer.currentTrieRoot
           case ImportResult.Failure(err, msg) =>
             fail(s"Block $slot failed: $err - $msg")
 

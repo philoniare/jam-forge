@@ -15,8 +15,8 @@ import io.forge.jam.core.{constants, Shuffle}
 import io.forge.jam.crypto.{Ed25519ZebraWrapper, SigningContext}
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.*
-import io.forge.jam.protocol.state.JamState
-import io.forge.jam.protocol.traces.{FullJamState, RawState}
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
+import io.forge.jam.core.trie.StateTrieStore
 import io.forge.jam.vrfs.BandersnatchWrapper
 import spire.math.{UInt, UShort}
 import _root_.scodec.Codec
@@ -28,7 +28,12 @@ import scala.util.Random
  * Exercises the full pipeline: Safrole, guarantees, assurances, PVM accumulation,
  * storage writes, transfers, preimages, and service lifecycle.
  */
-class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.ValidatorKeys], seed: Long = 42L):
+class BlockGenerator(
+  config: ChainConfig,
+  validators: Array[DevKeyStore.ValidatorKeys],
+  store: StateTrieStore,
+  seed: Long = 42L
+):
 
   private var lastHeaderHash: Option[Hash] = None
   private var blockCounter = 0L
@@ -59,24 +64,26 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
   private val bsKeyToIndex: Map[String, Int] =
     validators.zipWithIndex.map { case (v, i) => v.bandersnatchPublic.map("%02x".format(_)).mkString -> i }.toMap
 
-  def generateBlock(preState: RawState, slot: Long): Block =
+  def generateBlock(parentRoot: Hash, slot: Long): Block =
     blockCounter += 1
-    val fullState = FullJamState.fromKeyvals(preState.keyvals, config)
-    val jamState = JamState.fromFullJamState(fullState, config)
+    val trie = store.at(parentRoot)
+    val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie))
+
+    val preTau = view.timeslot
 
     val dummyEntropy = Hash(new Array[Byte](32))
     val safroleInput = SafroleInput(slot = slot, entropy = dummyEntropy, extrinsic = List.empty)
-    val (postSafroleJamState, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
+    val safroleOutput = SafroleTransition.stfView(safroleInput, view)
 
     val outputData = safroleOutput match
       case Right(data) => data
       case Left(_) => throw new RuntimeException(s"Safrole failed for slot $slot")
 
     val slotIndex = (slot % config.epochLength).toInt
-    val (authorIndex, authorBsSecret) = findSealingValidator(postSafroleJamState, slotIndex)
+    val (authorIndex, authorBsSecret) = findSealingValidator(view, slotIndex)
 
-    val (guarantees, assurances) = buildExtrinsics(jamState, postSafroleJamState, slot)
-    val preimages = buildPreimages(jamState, slot)
+    val (guarantees, assurances) = buildExtrinsics(view, slot, preTau)
+    val preimages = buildPreimages(view, slot)
 
     val extrinsic = Extrinsic(
       tickets = List.empty,
@@ -88,14 +95,14 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     val extrinsicHash = computeExtrinsicHash(extrinsic)
 
     val parentHash = lastHeaderHash.getOrElse {
-      jamState.beta.history.lastOption.map(_.headerHash).getOrElse(Hash.zero)
+      view.beta.history.lastOption.map(_.headerHash).getOrElse(Hash.zero)
     }
 
-    val sealEntropy = if postSafroleJamState.entropy.pool.length > 3
-      then postSafroleJamState.entropy.pool(3).bytes
+    val sealEntropy = if view.entropy.pool.length > 3
+      then view.entropy.pool(3).bytes
       else new Array[Byte](32)
 
-    val sealVrfInput = postSafroleJamState.gamma.s match
+    val sealVrfInput = view.gamma.st match
       case TicketsOrKeys.Keys(_) => SigningContext.fallbackSealInputData(sealEntropy)
       case TicketsOrKeys.Tickets(tickets) =>
         SigningContext.safroleTicketInputData(sealEntropy, tickets(slotIndex).attempt.toByte)
@@ -108,7 +115,7 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     val headerCodec = Header.headerCodec(config.validatorCount, config.epochLength)
     val headerWithEntropy = Header(
       parent = parentHash,
-      parentStateRoot = preState.stateRoot,
+      parentStateRoot = parentRoot,
       extrinsicHash = extrinsicHash,
       slot = Timeslot(UInt(slot.toInt)),
       epochMark = outputData.epochMark,
@@ -132,12 +139,12 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
   // --- Extrinsic Generation ---
 
   private def buildExtrinsics(
-    preState: JamState,
-    postSafroleState: JamState,
-    slot: Long
+    view: TrieBackedJamState,
+    slot: Long,
+    preTau: Long
   ): (List[GuaranteeExtrinsic], List[AssuranceExtrinsic]) =
-    val reports = preState.cores.reports
-    val recentHistory = preState.beta.history
+    val reports = view.cores.reports
+    val recentHistory = view.beta.history
 
     val core0Pending = reports.lift(0).flatten.isDefined
     val core1Pending = reports.lift(1).flatten.isDefined
@@ -153,11 +160,11 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
       val guarantees = scala.collection.mutable.ListBuffer[GuaranteeExtrinsic]()
 
       // Core 0: always try
-      buildGuarantee(preState, postSafroleState, slot, coreIndex = 0).foreach(guarantees += _)
+      buildGuarantee(view, slot, preTau, coreIndex = 0).foreach(guarantees += _)
 
       // Core 1: ~40% of blocks (both cores active)
       if rng.nextDouble() < 0.4 then
-        buildGuarantee(preState, postSafroleState, slot, coreIndex = 1).foreach(guarantees += _)
+        buildGuarantee(view, slot, preTau, coreIndex = 1).foreach(guarantees += _)
 
       (guarantees.sortBy(_.report.coreIndex.toInt).toList, List.empty)
     else
@@ -177,20 +184,20 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     }.toList
 
   private def buildGuarantee(
-    preState: JamState,
-    postSafroleState: JamState,
+    view: TrieBackedJamState,
     slot: Long,
+    preTau: Long,
     coreIndex: Int
   ): Option[GuaranteeExtrinsic] =
-    val recentHistory = preState.beta.history
+    val recentHistory = view.beta.history
     if recentHistory.size < 2 then return None
 
-    val coreAuthPool = preState.authPools.lift(coreIndex).getOrElse(List.empty)
+    val coreAuthPool = view.authPools.lift(coreIndex).getOrElse(List.empty)
     if coreAuthPool.isEmpty then return None
     val authorizerHash = coreAuthPool.head
 
     val anchorEntry = recentHistory(recentHistory.size - 2)
-    val serviceCodeHash = preState.accumulation.serviceAccounts
+    val serviceCodeHash = view.accumulation.serviceAccounts
       .find(_.id == 0).map(_.data.service.codeHash).getOrElse(return None)
 
     packageNonce += 1
@@ -246,7 +253,7 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
         stateRoot = anchorEntry.stateRoot,
         beefyRoot = anchorEntry.beefyRoot,
         lookupAnchor = anchorEntry.headerHash,
-        lookupAnchorSlot = Timeslot(UInt(preState.tau.toInt)),
+        lookupAnchorSlot = Timeslot(UInt(preTau.toInt)),
         prerequisites = prerequisites
       ),
       coreIndex = CoreIndex(coreIndex),
@@ -261,7 +268,7 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     val reportHash = Hashing.blake2b256(reportEncoded)
     val sigMessage = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
 
-    val entropy = postSafroleState.entropy.pool
+    val entropy = view.entropy.pool
     val coreAssignments = calculateCoreAssignments(entropy(2), slot, config)
     val assignedValidators = coreAssignments.zipWithIndex
       .filter(_._1 == coreIndex).map(_._2).take(3)
@@ -276,7 +283,7 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     Some(GuaranteeExtrinsic(report, Timeslot(UInt(slot.toInt)), signatures))
 
   // Preimage submissions (~15% of blocks after block 10)
-  private def buildPreimages(preState: JamState, slot: Long): List[Preimage] =
+  private def buildPreimages(view: TrieBackedJamState, slot: Long): List[Preimage] =
     if slot < 10 || rng.nextDouble() > 0.15 then return List.empty
     val blob = preimageBlobs(rng.nextInt(preimageBlobs.length))
     // Preimage requires the service to have solicited it first, which is complex.
@@ -291,8 +298,8 @@ class BlockGenerator(config: ChainConfig, validators: Array[DevKeyStore.Validato
     val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
     shuffledIndices.map(idx => math.floorMod(source(idx) + shift, config.coresCount))
 
-  private def findSealingValidator(state: JamState, slotIndex: Int): (Int, Array[Byte]) =
-    state.gamma.s match
+  private def findSealingValidator(view: TrieBackedJamState, slotIndex: Int): (Int, Array[Byte]) =
+    view.gamma.st match
       case TicketsOrKeys.Keys(keys) =>
         val keyHex = keys(slotIndex).bytes.map("%02x".format(_)).mkString
         bsKeyToIndex.get(keyHex) match

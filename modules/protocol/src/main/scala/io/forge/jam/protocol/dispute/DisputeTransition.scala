@@ -12,9 +12,10 @@ import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.dispute.DisputeTypes.*
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.DisputeBridge
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.Ed25519
-import io.forge.jam.protocol.state.JamState
 import _root_.scodec.Codec
 
 /** Disputes State Transition Function.
@@ -376,36 +377,14 @@ object DisputeTransition:
     // Return the unsorted offendersMark for the output
     (newState, afterFaults.offendersMark)
 
-  /** Execute the Disputes STF using unified JamState.
-    *
-    * Reads: judgements (psi), cores.reports (rho), tau, validators.current
-    * (kappa), validators.previous (lambda) Writes: judgements (psi),
-    * cores.reports (rho)
-    *
-    * @param input
-    *   The dispute input containing verdicts, culprits, and faults.
-    * @param state
-    *   The unified JamState.
-    * @param config
-    *   The chain configuration.
-    * @return
-    *   Tuple of (updated JamState, output).
-    */
-  def stf(
+  def stfView(
       input: DisputeInput,
-      state: JamState,
-      config: ChainConfig
-  ): (JamState, DisputeOutput) =
-    // Extract DisputeState using lens bundle
-    val preState = JamState.DisputeLenses.extract(state)
-
-    // Execute the internal STF logic
-    val (postState, output) = stfInternal(input, preState, config)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.DisputeLenses.apply(state, postState)
-
-    (updatedState, output)
+      view: TrieBackedJamState
+  ): DisputeOutput =
+    val preState = DisputeBridge.extract(view)
+    val (postState, output) = stfInternal(input, preState, view.config)
+    DisputeBridge.apply(view, postState)
+    output
 
   /** Internal Disputes STF implementation using DisputeState. Exposed for unit
     * testing with module-specific state types.

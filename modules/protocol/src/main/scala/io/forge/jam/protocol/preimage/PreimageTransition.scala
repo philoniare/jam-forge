@@ -8,7 +8,7 @@ import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.protocol.preimage.PreimageTypes.*
 import io.forge.jam.protocol.accumulation.StateKey
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
 
 /**
  * Preimages State Transition Function.
@@ -82,122 +82,57 @@ object PreimageTransition:
       historyItem.value.isEmpty
     }
 
-  /**
-   * Check if a preimage was solicited by looking up directly from rawServiceDataByStateKey.
-   * This is the primary check method since preimagesStatus may not be populated from raw state.
-   */
-  private def isPreimageSolicitedFromRaw(
-    serviceId: Long,
-    hash: Array[Byte],
-    length: Int,
-    rawServiceDataByStateKey: Map[JamBytes, JamBytes]
-  ): Boolean =
-    // Compute the state key for this preimage request
-    val stateKey = StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
-
-    // Look up the key in rawServiceDataByStateKey
-    rawServiceDataByStateKey.get(stateKey) match
-      case Some(value) =>
-        // Decode the timeslots list
-        val timeslots = StateKey.decodePreimageInfoValue(value)
-        // Solicited means the list is empty (requested but not yet provided)
-        timeslots.isEmpty
-      case None =>
-        // Key not found, preimage was not requested
-        false
-
-  /**
-   * Execute the Preimages STF using unified JamState.
-   *
-   * This implementation uses rawServiceDataByStateKey directly for lookups,
-   * since preimagesStatus may not be populated from the raw state encoding.
-   *
-   * @param input The preimage input containing preimages and slot.
-   * @param state The unified JamState.
-   * @return Tuple of (updated JamState, PreimageOutput).
-   */
-  def stf(input: PreimageInput, state: JamState): (JamState, PreimageOutput) =
-    stfWithPreAccumState(input, state, state.rawServiceDataByStateKey)
-
-  /**
-   * Execute the Preimages STF using unified JamState with explicit pre-accumulation state.
-   *
-   * Per GP §12.1, preimage validation uses the pre-accumulation state (accountspre),
-   * not the post-accumulation state.
-   *
-   * @param input The preimage input containing preimages and slot.
-   * @param state The unified JamState (post-accumulation).
-   * @param preAccumRawServiceData The rawServiceDataByStateKey from BEFORE accumulation.
-   * @return Tuple of (updated JamState, PreimageOutput).
-   */
-  def stfWithPreAccumState(
+  def stfView(
     input: PreimageInput,
-    state: JamState,
-    preAccumRawServiceData: Map[JamBytes, JamBytes]
-  ): (JamState, PreimageOutput) =
-    // First validate that preimages are sorted and unique by (requester, hash)
+    view: TrieBackedJamState
+  ): PreimageOutput =
     if !arePreimagesSortedAndUnique(input.preimages) then
-      return (state, StfResult.error(PreimageErrorCode.PreimagesNotSortedUnique))
+      return StfResult.error(PreimageErrorCode.PreimagesNotSortedUnique)
 
-    // Check if all preimages are solicited using PRE-ACCUMULATION rawServiceDataByStateKey
-    // Per GP §12.1: "The data must have been solicited by a service but not yet provided in the *prior* state"
     val validationResult = input.preimages.traverse { submission =>
       val serviceId = submission.requester.value.toLong
       val hash = Hashing.blake2b256(submission.blob).bytes
       val length = submission.blob.length
 
-      // Check if the service account exists (can use current state for this)
-      val accountExists = state.accumulation.serviceAccounts.exists(_.id == serviceId)
-      if !accountExists then
-        Left(PreimageErrorCode.PreimageUnneeded)
-      // Check if preimage is solicited using PRE-ACCUMULATION raw state
-      else if !isPreimageSolicitedFromRaw(serviceId, hash, length, preAccumRawServiceData) then
-        Left(PreimageErrorCode.PreimageUnneeded)
+      val accountExists =
+        view.accumulation.serviceAccounts.exists(_.id == serviceId)
+      if !accountExists then Left(PreimageErrorCode.PreimageUnneeded)
       else
-        Right(submission)
+        val infoStateKey =
+          StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
+        view.storage.readTrie(infoStateKey) match
+          case Some(value)
+              if StateKey.decodePreimageInfoValue(value).isEmpty =>
+            Right(submission)
+          case _ => Left(PreimageErrorCode.PreimageUnneeded)
     }
 
     if validationResult.isLeft then
-      return (state, StfResult.error(validationResult.left.toOption.get))
-
-    // Process preimages and update rawServiceDataByStateKey
-    // IMPORTANT: Only add preimage info if the request still exists in POST-accumulation state.
-    // If accumulation deleted/reverted the request (e.g., service PANIC), don't add the preimage.
-    var updatedRawServiceData = state.rawServiceDataByStateKey
-    val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)
+      return StfResult.error(validationResult.left.toOption.get)
 
     for submission <- input.preimages do
       val serviceId = submission.requester.value.toLong
       val hash = Hashing.blake2b256(submission.blob).bytes
       val length = submission.blob.length
 
-      // Compute the preimage info state key
-      val infoStateKey = StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
-
-      // Check if the preimage request still exists in POST-accumulation state
-      // If accumulation deleted/reverted the request, don't add the preimage info
-      val requestStillExists = state.rawServiceDataByStateKey.contains(infoStateKey)
+      val infoStateKey =
+        StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
+      val requestStillExists = view.storage.getByStateKey(infoStateKey).isDefined
 
       if requestStillExists then
         val newTimeslots = List(input.slot)
-        val newInfoValue = StateKey.encodePreimageInfoValue(newTimeslots)
+        view.storage.putByStateKey(
+          infoStateKey,
+          StateKey.encodePreimageInfoValue(newTimeslots)
+        )
+        val blobStateKey = StateKey.computeServiceDataStateKey(
+          serviceId,
+          0xfffffffeL,
+          JamBytes(hash)
+        )
+        view.storage.putByStateKey(blobStateKey, submission.blob)
 
-        updatedRawServiceData = updatedRawServiceData.updated(infoStateKey, newInfoValue)
-
-        // Add preimage blob to state using discriminator 0xFFFFFFFE
-        val blobStateKey = StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, JamBytes(hash))
-        updatedRawServiceData = updatedRawServiceData.updated(blobStateKey, submission.blob)
-
-        // Track statistics update
-        val (currentCount, currentSize) = statsUpdates.getOrElse(serviceId, (0, 0L))
-        statsUpdates(serviceId) = (currentCount + 1, currentSize + length.toLong)
-
-    // Update JamState with new rawServiceDataByStateKey
-    val updatedState = state.copy(
-      rawServiceDataByStateKey = updatedRawServiceData
-    )
-
-    (updatedState, StfResult.success(()))
+    StfResult.success(())
 
   /**
    * Internal Preimages STF implementation using PreimageState.

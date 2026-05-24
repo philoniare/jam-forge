@@ -166,16 +166,17 @@ class ConformanceTestRunner(
 
       case Some(parentState) =>
         blockImporter.importBlock(block, parentState) match
-          case ImportResult.Success(postState, _, _) =>
+          case ImportResult.Success(postStateRoot, _) =>
             val headerBytes = block.header.encode
             val headerHash = Hashing.blake2b256(headerBytes)
             val isOriginal = stateStore.isOriginalBlock(parentHash)
+            val postState = blockImporter.materializePostState(config)
             stateStore.store(headerHash, postState, isOriginal)
 
             if isOriginal then
               stateStore.addToAncestry(AncestryItem(block.header.slot, headerHash))
 
-            ProtocolMessage.StateRootMsg(StateRoot(postState.stateRoot))
+            ProtocolMessage.StateRootMsg(StateRoot(postStateRoot))
 
           case ImportResult.Failure(error, message) =>
             ProtocolMessage.ErrorMsg(Error(s"Import failed: $error - $message"))

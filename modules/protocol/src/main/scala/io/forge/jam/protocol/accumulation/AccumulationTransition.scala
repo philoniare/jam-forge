@@ -3,7 +3,8 @@ package io.forge.jam.protocol.accumulation
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AccumulationBridge
 import org.bouncycastle.jcajce.provider.digest.Keccak
 
 import scala.collection.mutable
@@ -15,98 +16,34 @@ import io.forge.jam.core.types.epoch.ValidatorKey
   */
 object AccumulationTransition:
 
-  /** Execute the Accumulation STF using unified JamState.
-    *
-    * Reads: tau, entropy.pool[0], accumulation (readyQueue, accumulated,
-    * privileges, serviceAccounts), validators.queue, authQueues Writes:
-    * accumulation (readyQueue, accumulated, privileges, serviceAccounts),
-    * validators.queue, authQueues
-    *
-    * @param input
-    *   The accumulation input containing slot and reports
-    * @param state
-    *   The unified JamState
-    * @param config
-    *   The chain configuration
-    * @param prevSlot
-    *   The previous block's slot (τ) - used for ready queue clearing per Gray
-    *   Paper
-    * @return
-    *   Tuple of (updated JamState, AccumulationOutput)
-    */
-  def stf(
+  def stfView(
       input: AccumulationInput,
-      state: JamState,
-      config: ChainConfig,
+      view: TrieBackedJamState,
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor] = None
-  ): (JamState, AccumulationOutput) =
-    val entropyBytes = state.entropy.firstAsBytes
-
-    // Convert validator queue to JamBytes for PartialState initialization
-    val initStagingSet: List[JamBytes] =
-      state.validators.queue.map(vk => vk.toJamBytes)
-
-    // Convert auth queues to JamBytes for PartialState initialization
-    val initAuthQueues: List[List[JamBytes]] =
-      state.authQueues.map(_.map(h => JamBytes(h.bytes)))
-
-    // Convert JamState fields to AccumulationState for existing logic
-    val preState = AccumulationState(
-      slot = state.tau,
-      entropy = entropyBytes,
-      readyQueue = state.accumulation.readyQueue,
-      accumulated = state.accumulation.accumulated,
-      privileges = state.accumulation.privileges,
-      statistics = List.empty, // Not used in accumulation input
-      accounts = state.accumulation.serviceAccounts,
-      rawServiceDataByStateKey =
-        mutable.Map.from(state.rawServiceDataByStateKey)
-    )
+  ): AccumulationOutput =
+    val pre = AccumulationBridge.extract(view)
 
     val (postState, postStagingSet, postAuthQueues, output) =
       stfInternal(
         input,
-        preState,
-        initStagingSet,
-        initAuthQueues,
-        config,
+        pre.state,
+        pre.initStagingSet,
+        pre.initAuthQueues,
+        view.config,
         prevSlot,
         sharedExecutor
       )
 
-    val stagingSetChanged =
-      postStagingSet.map(_.toHex) != initStagingSet.map(_.toHex)
-
-    // Convert staging set back to ValidatorKey list only if it changed
-    val newValidatorQueue: List[ValidatorKey] =
-      if stagingSetChanged then postStagingSet.map(ValidatorKey.fromJamBytes)
-      else state.validators.queue
-
-    // Check if auth queues actually changed
-    val authQueuesChanged =
-      postAuthQueues.map(_.map(_.toHex)) != initAuthQueues.map(_.map(_.toHex))
-
-    // Convert auth queues back to Hash list only if changed
-    val newAuthQueues: List[List[Hash]] =
-      if authQueuesChanged then
-        postAuthQueues.map(_.map(jb => Hash(jb.toArray)))
-      else state.authQueues
-
-    // Update JamState with results
-    val updatedState = state.copy(
-      validators = state.validators.copy(queue = newValidatorQueue),
-      authQueues = newAuthQueues,
-      accumulation = state.accumulation.copy(
-        readyQueue = postState.readyQueue,
-        accumulated = postState.accumulated,
-        privileges = postState.privileges,
-        serviceAccounts = postState.accounts
-      ),
-      rawServiceDataByStateKey = postState.rawServiceDataByStateKey.toMap
+    AccumulationBridge.apply(
+      view,
+      postState,
+      postStagingSet,
+      pre.initStagingSet,
+      postAuthQueues,
+      pre.initAuthQueues
     )
-
-    (updatedState, output)
+    output
 
   /** Internal Accumulation STF implementation using AccumulationState.
     *
@@ -823,7 +760,12 @@ object AccumulationTransition:
     // Process preimage integrations on the final merged state
     val stateAfterPreimages =
       if allProvisions.nonEmpty then
-        preimageIntegration(allProvisions.toSet, finalState, timeslot)
+        preimageIntegration(
+          allProvisions.toSet,
+          finalState,
+          timeslot,
+          executor.storageView
+        )
       else finalState
     AccumulationExecResult(
       stateAfterPreimages,
@@ -891,7 +833,8 @@ object AccumulationTransition:
   private def preimageIntegration(
       provisions: Set[(Long, JamBytes)],
       state: PartialState,
-      timeslot: Long
+      timeslot: Long,
+      view: Option[ServiceStorageView] = None
   ): PartialState =
     for (serviceId, preimage) <- provisions do
       state.accounts.get(serviceId).foreach { account =>
@@ -908,24 +851,27 @@ object AccumulationTransition:
             // Update preimage info with current timeslot
             account.preimageRequests(preimageKey) =
               PreimageRequest(List(timeslot))
-            // Store the preimage blob
             account.preimages(preimageHashAsHash) = preimage
 
-            // Update raw state data
             val infoStateKey = StateKey.computePreimageInfoStateKey(
               serviceId,
               length,
               preimageHashBytes
             )
-            state.rawServiceDataByStateKey(infoStateKey) =
+            val infoValue =
               StateKey.encodePreimageInfoValue(List(timeslot))
-
             val blobStateKey = StateKey.computeServiceDataStateKey(
               serviceId,
               0xfffffffeL,
               preimageHashBytes
             )
-            state.rawServiceDataByStateKey(blobStateKey) = preimage
+            view match
+              case Some(v) =>
+                v.putByStateKey(infoStateKey, infoValue)
+                v.putByStateKey(blobStateKey, preimage)
+              case None =>
+                state.rawServiceDataByStateKey(infoStateKey) = infoValue
+                state.rawServiceDataByStateKey(blobStateKey) = preimage
         }
       }
     state

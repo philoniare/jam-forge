@@ -10,7 +10,8 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.service.ServiceAccount
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.ReportBridge
 import io.forge.jam.crypto.Ed25519
 import spire.math.ULong
 
@@ -75,21 +76,16 @@ object ReportTransition:
    * @param skipAncestryValidation When true, skip anchor recency validation
    * @return Tuple of (updated JamState, ReportOutput)
    */
-  def stf(
+  def stfView(
     input: ReportInput,
-    state: JamState,
-    config: ChainConfig,
+    view: TrieBackedJamState,
     skipAncestryValidation: Boolean = false
-  ): (JamState, ReportOutput) =
-    // Extract ReportState using lens bundle
-    val preState = JamState.ReportLenses.extract(state)
-
-    val (postState, output) = stfInternal(input, preState, config, skipAncestryValidation)
-
-    // Apply results back using lens bundle
-    val updatedState = JamState.ReportLenses.apply(state, postState)
-
-    (updatedState, output)
+  ): ReportOutput =
+    val preState = ReportBridge.extract(view)
+    val (postState, output) =
+      stfInternal(input, preState, view.config, skipAncestryValidation)
+    ReportBridge.apply(view, postState)
+    output
 
   /**
    * Internal Reports STF implementation using ReportState.

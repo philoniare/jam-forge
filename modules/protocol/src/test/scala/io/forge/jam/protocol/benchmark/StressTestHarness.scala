@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.benchmark
 
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, Genesis}
 import io.forge.jam.protocol.TestFileLoader
 import io.circe.Decoder
@@ -52,15 +53,24 @@ class StressTestHarness(config: StressTestConfig):
     // Load genesis
     val genesis = loadGenesis()
     val validators = DevKeyStore.getAllTinyValidators()
-    val generator = new BlockGenerator(config.chainConfig, validators)
+
     val importer = new BlockImporter(config.chainConfig)
+    val store = importer.store
+    val genesisStateRoot = genesis.stateRoot
+    if store.currentRoot != genesisStateRoot then
+      store.bootstrap(genesis.keyvals.map(kv => (kv.key, kv.value)))
+      assert(
+        store.currentRoot == genesisStateRoot,
+        s"genesis bootstrap mismatch: store=${store.currentRoot} genesis=$genesisStateRoot"
+      )
+    val generator = new BlockGenerator(config.chainConfig, validators, store)
 
     println(s"=== JAM Stress Test ===")
     println(s"Total blocks: ${config.totalBlocks}")
     println(s"Window size: ${config.windowSize}")
     println()
 
-    var currentState = genesis
+    var currentRoot: Hash = genesisStateRoot
     var slot = 1L
     val windows = scala.collection.mutable.ListBuffer[MetricSnapshot]()
     val blockTimes = new Array[Long](config.windowSize) // ring buffer for p99
@@ -86,11 +96,11 @@ class StressTestHarness(config: StressTestConfig):
       val blockStart = System.nanoTime()
 
       try
-        val block = generator.generateBlock(currentState, slot)
-        val result = importer.importBlock(block, currentState)
+        val block = generator.generateBlock(currentRoot, slot)
+        val result = importer.importBlock(block, RawState(currentRoot, Nil))
         result match
-          case ImportResult.Success(postState, _, _) =>
-            currentState = postState
+          case ImportResult.Success(_, _) =>
+            currentRoot = importer.currentTrieRoot
             slot += 1
           case ImportResult.Failure(err, msg) =>
             errors += 1

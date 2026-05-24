@@ -5,8 +5,9 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.safrole.SafroleTransition
-import io.forge.jam.protocol.state.JamState
-import io.forge.jam.protocol.traces.{TraceStep, Genesis, FullJamState, InputExtractor, BlockImporter}
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
+import io.forge.jam.protocol.traces.{TraceStep, Genesis, InputExtractor, BlockImporter}
+import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrieStore}
 import io.circe.Decoder
 
 // Import Block JSON decoder (provides all needed decoders transitively)
@@ -101,11 +102,13 @@ object TracesBenchmark:
               errors += 1
             case Right(step) =>
               // Run Safrole STF (core state transition)
-              val fullPreState = FullJamState.fromKeyvals(step.preState.keyvals, config)
-              val jamState = JamState.fromFullJamState(fullPreState, config)
+              val store = new StateTrieStore(new InMemoryTrieBackend)
+              val root = store.bootstrap(step.preState.keyvals.map(kv => (kv.key, kv.value)))
+              val trie = store.at(root)
+              val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie))
               val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
-              val (_, safroleOutput) = SafroleTransition.stf(safroleInput, jamState, config)
+              val safroleOutput = SafroleTransition.stfView(safroleInput, view)
 
               if safroleOutput.isRight then
                 processedSteps += 1

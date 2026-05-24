@@ -22,17 +22,14 @@ import io.forge.jam.protocol.preimage.PreimageTypes.*
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.*
 import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
-import io.forge.jam.protocol.state.JamState
-import org.slf4j.LoggerFactory
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
+import io.forge.jam.core.trie.{StateTrieStore, InMemoryTrieBackend}
 
-/** Result of a block import operation.
-  */
 sealed trait ImportResult
 
 object ImportResult:
   final case class Success(
-      postState: RawState,
-      computedFullState: FullJamState,
+      postStateRoot: Hash,
       safroleState: Option[SafroleState] = None
   ) extends ImportResult
 
@@ -80,13 +77,23 @@ enum ImportError:
   */
 class BlockImporter(
     config: ChainConfig = ChainConfig.TINY,
-    skipAncestryValidation: Boolean = false
+    skipAncestryValidation: Boolean = false,
+    externalTrieStore: Option[StateTrieStore] = None
 ):
-  private val logger = LoggerFactory.getLogger(getClass)
 
   // Shared PVM module cache across block imports to avoid recompiling same service code
   private val sharedExecutor =
     new io.forge.jam.protocol.accumulation.AccumulationExecutor(config)
+
+  private val trieStore: StateTrieStore =
+    externalTrieStore.getOrElse(new StateTrieStore(new InMemoryTrieBackend))
+
+  def store: StateTrieStore = trieStore
+
+  private var bootstrapCount: Int = 0
+  def bootstrapCalls: Int = bootstrapCount
+
+  def currentTrieRoot: Hash = trieStore.currentRoot
 
   /** Imports a block and applies all state transitions using the unified
     * JamState pipeline. Returns the computed post-state with updated state
@@ -107,23 +114,37 @@ class BlockImporter(
           "Block's parent_state_root does not match pre-state root"
         )
 
-      // Step 1: Decode full pre-state from keyvals and convert to JamState
-      val fullPreState = FullJamState.fromKeyvals(preState.keyvals, config)
-      val jamState = JamState.fromFullJamState(fullPreState, config)
+      if trieStore.currentRoot != block.header.parentStateRoot then
+        trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value)))
+        bootstrapCount += 1
+        if trieStore.currentRoot != block.header.parentStateRoot then
+          return ImportResult.Failure(
+            ImportError.InvalidStateRoot,
+            s"Bootstrapped state root ${trieStore.currentRoot} does not match " +
+              s"block parent_state_root ${block.header.parentStateRoot}"
+          )
+      val trie = trieStore.at(block.header.parentStateRoot)
 
-      // Step 2: Execute the STF pipeline using Kleisli composition
-      BlockPipeline.execute(
-        block,
-        jamState,
-        config,
-        skipAncestryValidation,
-        Some(sharedExecutor)
-      ) match
+      val storageView = new ServiceStorageView(trie)
+      val view = new TrieBackedJamState(trie, config, storageView)
+
+      sharedExecutor.setStorageView(Some(storageView))
+
+      val pipelineResult =
+        try
+          BlockPipeline.execute(
+            block,
+            view,
+            skipAncestryValidation,
+            Some(sharedExecutor)
+          )
+        finally sharedExecutor.setStorageView(None)
+
+      pipelineResult match
         case Left(error) =>
           ImportResult.Failure(mapPipelineError(error), error.message)
 
         case Right(result) =>
-          // Step 3: Compute final core statistics (combines guarantees, available reports, assurances)
           val finalCoreStats = computeFinalCoreStatistics(
             guarantees = block.extrinsic.guarantees,
             availableReports = result.availableReports,
@@ -131,46 +152,35 @@ class BlockImporter(
             maxCores = config.coresCount
           )
 
-          // Step 4: Compute final service statistics (fresh each block)
           val finalServiceStats = computeFinalServiceStatistics(
             guarantees = block.extrinsic.guarantees,
             preimages = block.extrinsic.preimages,
             accumulationStats = result.accumulationStats
           )
 
-          // Step 5: Convert final JamState to FullJamState for encoding
-          val finalJamState = result.state.copy(
-            cores = result.state.cores.copy(statistics = finalCoreStats),
-            serviceStatistics = finalServiceStats
-          )
-          val mergedState = JamState.toFullJamState(finalJamState)
+          view.cores.statistics = finalCoreStats
+          view.serviceStatistics = finalServiceStats
 
-          // Step 6: Encode merged state back to keyvals
-          val postKeyvals = mergedState.toKeyvals(config, Some(fullPreState))
+          view.commit(trie)
+          storageView.commit(trie)
+          trie.save()
+          trieStore.markCommitted(trie.rootHash)
+          trieStore.gc()
 
-          // Step 7: Compute state root via Merkle trie
-          val stateRoot = StateMerklization.stateMerklize(postKeyvals)
-          val rawPostState = RawState(stateRoot, postKeyvals)
-
-          // Extract SafroleState for backward compatibility
           val safrolePostState = SafroleState(
-            tau = finalJamState.tau,
-            eta = finalJamState.entropy.pool,
-            lambda = finalJamState.validators.previous,
-            kappa = finalJamState.validators.current,
-            gammaK = finalJamState.validators.nextEpoch,
-            iota = finalJamState.validators.queue,
-            gammaA = finalJamState.gamma.a,
-            gammaS = finalJamState.gamma.s,
-            gammaZ = finalJamState.gamma.z,
-            postOffenders = finalJamState.postOffenders
+            tau = view.timeslot,
+            eta = view.entropy.pool,
+            lambda = view.validators.previous,
+            kappa = view.validators.current,
+            gammaK = view.validators.nextEpoch,
+            iota = view.validators.queue,
+            gammaA = view.gamma.a,
+            gammaS = view.gamma.st,
+            gammaZ = view.gamma.z,
+            postOffenders = view.postOffenders
           )
 
-          ImportResult.Success(
-            rawPostState,
-            mergedState,
-            Some(safrolePostState)
-          )
+          ImportResult.Success(trie.rootHash, Some(safrolePostState))
     catch
       case e: Throwable =>
         e.printStackTrace()
@@ -366,8 +376,8 @@ class BlockImporter(
   ): (Option[SafroleState], Option[String]) =
     try
       importBlock(block, preState) match
-        case ImportResult.Success(_, _, safroleState) => (safroleState, None)
-        case ImportResult.Failure(_, message)         => (None, Some(message))
+        case ImportResult.Success(_, safroleState) => (safroleState, None)
+        case ImportResult.Failure(_, message)      => (None, Some(message))
     catch
       case e: Exception =>
         (None, Some(s"Exception: ${e.getMessage}"))
@@ -381,11 +391,16 @@ class BlockImporter(
       expectedPostState: RawState
   ): Boolean =
     importBlock(block, preState) match
-      case ImportResult.Success(actualPostState, _, _) =>
-        // Compare computed post-state root with expected
-        actualPostState.stateRoot == expectedPostState.stateRoot
+      case ImportResult.Success(actualRoot, _) =>
+        actualRoot == expectedPostState.stateRoot
       case ImportResult.Failure(_, _) =>
         false
+
+  def materializePostState(config: ChainConfig = ChainConfig.TINY): RawState =
+    val trie = trieStore.at(trieStore.currentRoot)
+    val pairs = trie.getKeyValues(JamBytes.empty, 0)
+    val kvs = pairs.map { case (k, v) => KeyValue(k, v) }
+    RawState(trieStore.currentRoot, kvs)
 
 /** Extracts STF inputs from block and state.
   */

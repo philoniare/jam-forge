@@ -2,7 +2,8 @@ package io.forge.jam.protocol.authorization
 
 import io.forge.jam.core.constants
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
-import io.forge.jam.protocol.state.JamState
+import io.forge.jam.protocol.state.TrieBackedJamState
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AuthorizationBridge
 
 /**
  * Authorization State Transition Function.
@@ -23,14 +24,13 @@ object AuthorizationTransition:
    * @param config The chain configuration.
    * @return The updated JamState.
    */
-  def stf(input: AuthInput, state: JamState, @annotation.nowarn("msg=unused") config: io.forge.jam.core.ChainConfig): JamState =
-    // Extract AuthState using lens bundle
-    val preState = JamState.AuthorizationLenses.extract(state)
-
+  def stfView(
+      input: AuthInput,
+      view: TrieBackedJamState
+  ): Unit =
+    val preState = AuthorizationBridge.extract(view)
     val postState = stfInternal(input, preState)
-
-    // Apply results back using lens bundle
-    JamState.AuthorizationLenses.apply(state, postState)
+    AuthorizationBridge.apply(view, postState)
 
   /**
    * Internal Authorization STF implementation using AuthState.
