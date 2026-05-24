@@ -557,8 +557,7 @@ class AccumulationHostCalls(
     val validatorKeySize = 336
     val totalLength = validatorKeySize * config.validatorCount
 
-    // Check if memory is readable - PANIC if not
-    if !isMemoryWritable(instance, startAddr, totalLength) then
+    if !instance.isMemoryReadable(startAddr, totalLength) then
       throw new RuntimeException(
         s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength"
       )

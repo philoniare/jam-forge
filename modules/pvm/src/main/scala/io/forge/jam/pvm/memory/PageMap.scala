@@ -43,7 +43,11 @@ final class PageMap(val pageSize: UInt):
     if length == 0 then 0
     else
       val startPage = address.signed >>> pageSizeShift
-      val endAddress = address.signed + length - 1
+      val addrUnsigned = address.signed.toLong & 0xFFFFFFFFL
+      val endAddrLong = addrUnsigned + length.toLong - 1L
+      val endAddress: Int =
+        if endAddrLong > 0xFFFFFFFFL then 0xFFFFFFFF // UInt32.max as signed Int = -1
+        else endAddrLong.toInt
       val endPage = endAddress >>> pageSizeShift
       endPage - startPage + 1
 
