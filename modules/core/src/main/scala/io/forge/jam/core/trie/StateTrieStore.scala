@@ -2,10 +2,13 @@ package io.forge.jam.core.trie
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
+import scala.collection.mutable
 
 final class StateTrieStore(val backend: InMemoryTrieBackend):
 
   private var pinned: Hash = Hash.zero
+  private val serviceInfoCache = mutable.HashMap.empty[Long, JamBytes]
+  private var knownServiceIdsCache: Option[Set[Long]] = None
 
   def currentRoot: Hash = pinned
 
@@ -21,9 +24,30 @@ final class StateTrieStore(val backend: InMemoryTrieBackend):
     trie.update(keyvals.map { case (k, v) => (k, Some(v)) })
     trie.save()
     pinned = trie.rootHash
+    serviceInfoCache.clear()
+    knownServiceIdsCache = None
     pinned
 
   def markCommitted(root: Hash): Unit =
     pinned = root
 
   def gc(): Unit = backend.gc()
+
+  def cachedServiceInfo(id: Long): Option[JamBytes] = serviceInfoCache.get(id)
+
+  def putCachedServiceInfo(id: Long, encoded: JamBytes): Unit =
+    serviceInfoCache.update(id, encoded)
+
+  def evictCachedServiceInfo(id: Long): Unit =
+    serviceInfoCache.remove(id)
+
+  def cachedServiceIds: Option[Set[Long]] = knownServiceIdsCache
+
+  def primeKnownServiceIds(ids: Set[Long]): Unit =
+    knownServiceIdsCache = Some(ids)
+
+  def addKnownServiceId(id: Long): Unit =
+    knownServiceIdsCache = knownServiceIdsCache.map(_ + id)
+
+  def removeKnownServiceId(id: Long): Unit =
+    knownServiceIdsCache = knownServiceIdsCache.map(_ - id)

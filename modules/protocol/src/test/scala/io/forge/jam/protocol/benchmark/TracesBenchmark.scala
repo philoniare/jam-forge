@@ -105,7 +105,7 @@ object TracesBenchmark:
               val store = new StateTrieStore(new InMemoryTrieBackend)
               val root = store.bootstrap(step.preState.keyvals.map(kv => (kv.key, kv.value)))
               val trie = store.at(root)
-              val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie))
+              val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie), Some(store))
               val safroleInput = InputExtractor.extractSafroleInput(step.block)
 
               val safroleOutput = SafroleTransition.stfView(safroleInput, view)

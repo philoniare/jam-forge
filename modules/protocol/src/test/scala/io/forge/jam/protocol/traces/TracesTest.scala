@@ -88,7 +88,7 @@ class TracesTest extends AnyFunSuite with Matchers:
     val store = new StateTrieStore(new InMemoryTrieBackend)
     val root = store.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value)))
     val trie = store.at(root)
-    val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie))
+    val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie), Some(store))
     val output = SafroleTransition.stfView(input, view)
     (view, output)
 

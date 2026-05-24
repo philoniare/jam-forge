@@ -67,7 +67,7 @@ class BlockGenerator(
   def generateBlock(parentRoot: Hash, slot: Long): Block =
     blockCounter += 1
     val trie = store.at(parentRoot)
-    val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie))
+    val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie), Some(store))
 
     val preTau = view.timeslot
 

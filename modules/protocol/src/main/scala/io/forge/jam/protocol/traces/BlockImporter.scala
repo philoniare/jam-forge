@@ -126,7 +126,7 @@ class BlockImporter(
       val trie = trieStore.at(block.header.parentStateRoot)
 
       val storageView = new ServiceStorageView(trie)
-      val view = new TrieBackedJamState(trie, config, storageView)
+      val view = new TrieBackedJamState(trie, config, storageView, Some(trieStore))
 
       sharedExecutor.setStorageView(Some(storageView))
 
