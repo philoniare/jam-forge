@@ -347,6 +347,16 @@ final class AccumulationContext(
       case Some(v) => v.getByStateKey(stateKey)
       case None    => x.rawServiceDataByStateKey.get(stateKey)
 
+  def readRawDataFor(
+      ownerServiceId: Long,
+      stateKey: JamBytes
+  ): Option[JamBytes] =
+    if ownerServiceId == serviceIndex then readRawData(stateKey)
+    else
+      storageView match
+        case Some(v) => v.readTrie(stateKey)
+        case None    => x.rawServiceDataByStateKey.get(stateKey)
+
   def writeRawData(stateKey: JamBytes, value: JamBytes): Unit =
     storageView match
       case Some(v) => v.putByStateKey(stateKey, value)

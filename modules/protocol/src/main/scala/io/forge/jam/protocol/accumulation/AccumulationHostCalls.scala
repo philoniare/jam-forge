@@ -206,7 +206,7 @@ class AccumulationHostCalls(
         0xfffffffeL,
         hashBytes
       )
-      preimage = context.readRawData(blobStateKey)
+      preimage = context.readRawDataFor(targetServiceId, blobStateKey)
 
     // Calculate actual offset and length based on preimage data (or 0 if not found)
     val dataSize: Long = preimage.map(_.length.toLong).getOrElse(0L)
@@ -264,12 +264,8 @@ class AccumulationHostCalls(
     var value = account.flatMap(_.storage.get(key))
 
     if value.isEmpty then
-      value = context.storageView match
-        case Some(v) => v.get(targetServiceId, key)
-        case None    =>
-          val stateKey =
-            StateKey.computeStorageStateKey(targetServiceId, key)
-          context.x.rawServiceDataByStateKey.get(stateKey)
+      val stateKey = StateKey.computeStorageStateKey(targetServiceId, key)
+      value = context.readRawDataFor(targetServiceId, stateKey)
 
     if value.isEmpty then
       setReg(instance, 7, HostCallResult.NONE)
@@ -801,7 +797,7 @@ class AccumulationHostCalls(
           derivedLength.toInt,
           preimageHash
         )
-        context.readRawData(expectedKey) match
+        context.readRawDataFor(ejectServiceId, expectedKey) match
           case Some(infoValue) =>
             StateKey.decodePreimageInfoValue(infoValue)
           case None =>
