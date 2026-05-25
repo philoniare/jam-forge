@@ -128,8 +128,6 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       case Some(leaf) =>
         if java.util.Arrays.equals(TrieNode.leafKey(leaf).toArray, key.toArray) then
           unrefNode(rootHash)
-          if leaf.nodeType == TrieNodeType.RegularLeaf then
-            unrefValue(Hash(leaf.right.toArray))
           Hash.zero
         else
           rootHash
@@ -154,9 +152,6 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     pendingNodes.update(branch.hash, branch)
     refNode(branch.hash)
     branch.hash
-
-  private def unrefValue(h: Hash): Unit =
-    valueRefDeltas.update(h, valueRefDeltas(h) - 1)
 
   private def emitLeaf(key: JamBytes, value: JamBytes): Hash =
     val leaf = TrieNode.leaf(key, value)
