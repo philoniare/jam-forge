@@ -49,7 +49,7 @@ ENV JAM_BUILD_TIME=${BUILD_TIME}
 RUN echo "Building for git=${GIT_SHA} at ${BUILD_TIME}" && \
     sbt clean "conformance/assembly"
 
-# Stage 3: "Cold" runtime image — CRaC-enabled JDK
+# Stage 3: Runtime image
 FROM azul/zulu-openjdk:21-jdk-crac-latest
 
 WORKDIR /app
@@ -65,13 +65,9 @@ COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure
 COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conformance.jar /app/
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
 
-# Traces are needed during the warmup/checkpoint creation step.
-COPY jam-conformance/fuzz-reports/0.7.2/traces /app/jam-conformance/fuzz-reports/0.7.2/traces
-
 ENV LD_LIBRARY_PATH=/app/lib
-ENV JAM_TRACES_DIR=/app/jam-conformance/fuzz-reports/0.7.2/traces
 ENV LOG_LEVEL=ERROR
-ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof -XX:CRaCAllowedOpenFilePrefixes=/proc/,/sys/,/dev/ -XX:UseAVX=2 -Dlogback.configurationFile=/app/logback.xml"
+ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof -Dlogback.configurationFile=/app/logback.xml"
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
@@ -80,6 +76,5 @@ ENV JAM_BUILD_TIME=${BUILD_TIME}
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 LABEL org.opencontainers.image.created=${BUILD_TIME}
 
-# Default invocation creates a CRaC checkpoint at /app/cr and then exits.
-ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS -XX:CRaCCheckpointTo=/app/cr -jar /app/jam-conformance.jar warmup-and-serve \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS -jar /app/jam-conformance.jar \"$@\"", "--"]
 CMD ["--socket-path", "/tmp/jam_target.sock"]

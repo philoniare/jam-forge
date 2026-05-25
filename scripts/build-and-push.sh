@@ -2,12 +2,10 @@
 set -euo pipefail
 
 # Build and push jam-forge Docker image to GitHub Container Registry.
-# The image ships with a pre-baked CRaC checkpoint so `docker run` restores a
-# warm JVM and immediately starts the conformance fuzz server.
-#
+# Starts the conformance fuzz server on a cold JVM (no CRaC checkpoint, no
+# startup warmup).
 
 IMAGE_NAME="jam-forge"
-COLD_IMAGE="jam-forge-cold"
 REGISTRY="ghcr.io"
 
 NO_CACHE="--no-cache"
@@ -55,7 +53,7 @@ BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 FULL_IMAGE_LATEST="${REGISTRY}/${GH_USER:-local}/${IMAGE_NAME}:latest"
 FULL_IMAGE_TAG="${REGISTRY}/${GH_USER:-local}/${IMAGE_NAME}:${EXTRA_TAG}"
-echo "=== Building ${IMAGE_NAME} (CRaC) for linux/amd64 ==="
+echo "=== Building ${IMAGE_NAME} for linux/amd64 ==="
 echo "  git:        ${GIT_SHA}${GIT_DIRTY}"
 echo "  built-at:   ${BUILD_TIME}"
 echo "  tags:       :latest, :${EXTRA_TAG}"
@@ -65,80 +63,29 @@ echo "  no-cache:   ${NO_CACHE:-(use cache)}"
 echo ""
 echo "=== Step 1: Remove existing local images ==="
 docker image rm -f "${IMAGE_NAME}:latest" 2>/dev/null || true
-docker image rm -f "${COLD_IMAGE}:latest" 2>/dev/null || true
 docker image rm -f "${FULL_IMAGE_LATEST}" 2>/dev/null || true
 docker image rm -f "${FULL_IMAGE_TAG}" 2>/dev/null || true
 
 echo ""
-echo "=== Step 2: Build cold image (${COLD_IMAGE}:latest) ==="
+echo "=== Step 2: Build runtime image (${IMAGE_NAME}:latest) ==="
 docker build \
     --platform linux/amd64 \
     --pull \
     $NO_CACHE \
     --build-arg GIT_SHA="${GIT_SHA}${GIT_DIRTY}" \
     --build-arg BUILD_TIME="${BUILD_TIME}" \
-    -t "${COLD_IMAGE}:latest" \
+    -t "${IMAGE_NAME}:latest" \
     -f Dockerfile \
     .
 
-echo ""
-echo "=== Step 3: Produce CRaC checkpoint inside container ==="
-CHECKPOINT_CONTAINER="jam-crac-checkpoint"
-docker rm -f "$CHECKPOINT_CONTAINER" 2>/dev/null || true
-
-set +e
-docker run \
-    --platform linux/amd64 \
-    --privileged \
-    --security-opt seccomp=unconfined \
-    --security-opt apparmor=unconfined \
-    --name "$CHECKPOINT_CONTAINER" \
-    "${COLD_IMAGE}:latest"
-set -e
-
-# Verify a checkpoint was produced inside the container
-CR_LISTING_FILE="$(mktemp)"
-trap 'rm -f "$CR_LISTING_FILE"' EXIT
-if ! docker cp "$CHECKPOINT_CONTAINER:/app/cr" - 2>/dev/null | tar -tvf - >"$CR_LISTING_FILE" 2>/dev/null; then
-    echo "ERROR: /app/cr does not exist in checkpoint container" >&2
-    echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
-    exit 1
-fi
-
-echo "Checkpoint directory contents (/app/cr):"
-cat "$CR_LISTING_FILE"
-
-CR_FILE_COUNT="$(awk 'BEGIN{n=0} /^-/ && $NF != "cr/" {n++} END{print n}' "$CR_LISTING_FILE")"
-HAS_DUMP="$(awk '/\.img$/ {found=1} END{print found+0}' "$CR_LISTING_FILE")"
-if [ "${CR_FILE_COUNT:-0}" -lt 1 ] || [ "${HAS_DUMP:-0}" -ne 1 ]; then
-    echo "ERROR: /app/cr does not contain a valid CRaC checkpoint." >&2
-    echo "Found ${CR_FILE_COUNT:-0} files; .img dump present: ${HAS_DUMP:-0}" >&2
-    echo "Common causes:" >&2
-    echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
-    echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
-    echo "  - CRaC engine refused to checkpoint open resources (check the JVM log above for [crac] / warp lines)." >&2
-    echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
-    exit 1
-fi
-echo "Checkpoint produced: ${CR_FILE_COUNT} file(s) in /app/cr (memory dump present)"
-
-echo ""
-echo "=== Step 4: Commit container as runtime image (${IMAGE_NAME}:latest) ==="
-docker commit \
-    --change 'ENTRYPOINT ["java", "-XX:CRaCRestoreFrom=/app/cr"]' \
-    --change 'CMD []' \
-    "$CHECKPOINT_CONTAINER" \
-    "${IMAGE_NAME}:latest" >/dev/null
-docker rm -f "$CHECKPOINT_CONTAINER" >/dev/null
-
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "${IMAGE_NAME}:latest")"
-echo "=== Built runtime image id: ${IMAGE_ID} ==="
+echo "=== Built image id: ${IMAGE_ID} ==="
 
 if [ -z "$SKIP_VERIFY" ]; then
     echo ""
-    echo "=== Step 5: Verify the cold image contains current source ==="
+    echo "=== Step 3: Verify the image contains current source ==="
     TMP_DIR="$(mktemp -d)"
-    CID="$(docker create --platform linux/amd64 "${COLD_IMAGE}:latest")"
+    CID="$(docker create --platform linux/amd64 "${IMAGE_NAME}:latest")"
     docker cp "$CID:/app/jam-conformance.jar" "$TMP_DIR/jam-conformance.jar"
     docker rm -f "$CID" >/dev/null
 
@@ -155,10 +102,9 @@ if [ -z "$SKIP_VERIFY" ]; then
         exit 1
     fi
 
-    # Smoke test the cold image (--help works without a checkpoint context).
-    if ! docker run --rm --platform linux/amd64 --entrypoint java "${COLD_IMAGE}:latest" \
+    if ! docker run --rm --platform linux/amd64 --entrypoint java "${IMAGE_NAME}:latest" \
             -jar /app/jam-conformance.jar --help 2>/dev/null | grep -q 'JAM Forge'; then
-        echo "ERROR: smoke test failed — cold image doesn't respond to --help." >&2
+        echo "ERROR: smoke test failed — image doesn't respond to --help." >&2
         exit 1
     fi
     rm -rf "$TMP_DIR"
@@ -168,16 +114,16 @@ fi
 if [ -n "$SKIP_PUSH" ]; then
     echo ""
     echo "=== Skipping push (--skip-push). Local image: ${IMAGE_NAME}:latest ==="
-    echo "    Run with: docker run --rm --privileged -v /tmp:/tmp ${IMAGE_NAME}:latest"
+    echo "    Run with: docker run --rm ${IMAGE_NAME}:latest"
     exit 0
 fi
 
 echo ""
-echo "=== Step 6: Log into GHCR ==="
+echo "=== Step 4: Log into GHCR ==="
 echo "$GH_DOCKER_TOKEN" | docker login "$REGISTRY" -u "$GH_USER" --password-stdin
 
 echo ""
-echo "=== Step 7: Tag and push ==="
+echo "=== Step 5: Tag and push ==="
 docker tag "${IMAGE_NAME}:latest" "$FULL_IMAGE_LATEST"
 docker tag "${IMAGE_NAME}:latest" "$FULL_IMAGE_TAG"
 docker push "$FULL_IMAGE_LATEST"
