@@ -109,8 +109,10 @@ echo "Checkpoint directory contents (/app/cr):"
 cat "$CR_LISTING_FILE"
 
 CR_FILE_COUNT="$(awk 'BEGIN{n=0} /^-/ && $NF != "cr/" {n++} END{print n}' "$CR_LISTING_FILE")"
-if [ "${CR_FILE_COUNT:-0}" -lt 1 ]; then
-    echo "ERROR: /app/cr is empty — no checkpoint produced." >&2
+HAS_DUMP="$(awk '/pages-1.img|core-[0-9]+.img/ {found=1} END{print found+0}' "$CR_LISTING_FILE")"
+if [ "${CR_FILE_COUNT:-0}" -lt 1 ] || [ "${HAS_DUMP:-0}" -ne 1 ]; then
+    echo "ERROR: /app/cr does not contain a valid CRaC checkpoint." >&2
+    echo "Found ${CR_FILE_COUNT:-0} files; pages-1.img/core-*.img present: ${HAS_DUMP:-0}" >&2
     echo "Common causes:" >&2
     echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
     echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
@@ -118,14 +120,12 @@ if [ "${CR_FILE_COUNT:-0}" -lt 1 ]; then
     echo "(Leaving $CHECKPOINT_CONTAINER for inspection — remove with: docker rm -f $CHECKPOINT_CONTAINER)" >&2
     exit 1
 fi
-echo "Checkpoint produced: ${CR_FILE_COUNT} file(s) in /app/cr"
+echo "Checkpoint produced: ${CR_FILE_COUNT} file(s) in /app/cr (memory dump present)"
 
 echo ""
 echo "=== Step 4: Commit container as runtime image (${IMAGE_NAME}:latest) ==="
-# Override CMD so `docker run` restores from the baked-in checkpoint instead of
-# running the warmup-and-serve workflow again.
 docker commit \
-    --change 'ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS -XX:CRaCRestoreFrom=/app/cr"]' \
+    --change 'ENTRYPOINT ["java", "-XX:CRaCRestoreFrom=/app/cr"]' \
     --change 'CMD []' \
     "$CHECKPOINT_CONTAINER" \
     "${IMAGE_NAME}:latest" >/dev/null
