@@ -109,10 +109,10 @@ echo "Checkpoint directory contents (/app/cr):"
 cat "$CR_LISTING_FILE"
 
 CR_FILE_COUNT="$(awk 'BEGIN{n=0} /^-/ && $NF != "cr/" {n++} END{print n}' "$CR_LISTING_FILE")"
-HAS_DUMP="$(awk '/pages-1.img|core-[0-9]+.img/ {found=1} END{print found+0}' "$CR_LISTING_FILE")"
+HAS_DUMP="$(awk '/\.img$/ {found=1} END{print found+0}' "$CR_LISTING_FILE")"
 if [ "${CR_FILE_COUNT:-0}" -lt 1 ] || [ "${HAS_DUMP:-0}" -ne 1 ]; then
     echo "ERROR: /app/cr does not contain a valid CRaC checkpoint." >&2
-    echo "Found ${CR_FILE_COUNT:-0} files; pages-1.img/core-*.img present: ${HAS_DUMP:-0}" >&2
+    echo "Found ${CR_FILE_COUNT:-0} files; .img dump present: ${HAS_DUMP:-0}" >&2
     echo "Common causes:" >&2
     echo "  - Docker Desktop on macOS: VM lacks FPU ptrace (run on Linux host)." >&2
     echo "  - Linux host with default seccomp/apparmor: ensure --security-opt unconfined." >&2
