@@ -20,7 +20,7 @@ object WarmupRunner extends Resource:
     *   unavailable
     */
   def warmupAndCheckpoint(socketPath: Path): Boolean =
-    // runWarmup()
+    runWarmup()
 
     Core.getGlobalContext.register(WarmupRunner)
 
@@ -89,7 +89,7 @@ object WarmupRunner extends Resource:
     )
 
     val startTime = System.nanoTime()
-    val results = runner.runAllTraces(tracesDir, maxTraces = 0)
+    val results = runner.runAllTraces(tracesDir, maxTraces = 3)
     val elapsed = (System.nanoTime() - startTime) / 1_000_000
 
     val successes = results.count(_.isInstanceOf[JsonTraceResult.Success])

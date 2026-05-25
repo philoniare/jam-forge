@@ -125,7 +125,8 @@ echo "=== Step 4: Commit container as runtime image (${IMAGE_NAME}:latest) ==="
 # Override CMD so `docker run` restores from the baked-in checkpoint instead of
 # running the warmup-and-serve workflow again.
 docker commit \
-    --change 'CMD ["exec java $JAVA_OPTS -XX:CRaCRestoreFrom=/app/cr"]' \
+    --change 'ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS -XX:CRaCRestoreFrom=/app/cr"]' \
+    --change 'CMD []' \
     "$CHECKPOINT_CONTAINER" \
     "${IMAGE_NAME}:latest" >/dev/null
 docker rm -f "$CHECKPOINT_CONTAINER" >/dev/null
