@@ -41,6 +41,12 @@ final class InMemoryTrieBackend extends StateTrieBackend:
       valueRefs.remove(h)
     }
 
+  def clear(): Unit =
+    nodes.clear()
+    values.clear()
+    nodeRefs.clear()
+    valueRefs.clear()
+
   def nodeCount: Int = nodes.size
   def valueCount: Int = values.size
   def nodeRefcount(h: Hash): Long = nodeRefs.getOrElse(h, 0L)

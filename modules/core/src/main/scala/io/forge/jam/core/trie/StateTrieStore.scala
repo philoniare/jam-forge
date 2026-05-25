@@ -20,6 +20,7 @@ final class StateTrieStore(val backend: InMemoryTrieBackend):
     StateTrie.at(backend, root)
 
   def bootstrap(keyvals: Seq[(JamBytes, JamBytes)]): Hash =
+    backend.clear()
     val trie = StateTrie.at(backend, Hash.zero)
     trie.update(keyvals.map { case (k, v) => (k, Some(v)) })
     trie.save()

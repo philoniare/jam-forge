@@ -14,3 +14,4 @@ trait StateTrieBackend:
   def readRawValue(hash: Hash): Option[JamBytes]
   def batchUpdate(ops: Seq[BackendOp]): Unit
   def gc(): Unit
+  def clear(): Unit
