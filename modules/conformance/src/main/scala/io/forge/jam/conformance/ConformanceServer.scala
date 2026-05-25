@@ -113,7 +113,7 @@ object ConformanceServerApp extends IOApp:
           .sliding(2)
           .collectFirst { case List("--socket-path", p) => Paths.get(p) }
           .getOrElse(Paths.get("/tmp/jam_target.sock"))
-        // IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
+        IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
           runServer(ServerConfig(socketPath = socketPath))
 
       // Fuzz command (used by conformance harness)

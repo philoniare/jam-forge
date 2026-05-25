@@ -20,7 +20,7 @@ object WarmupRunner extends Resource:
     *   unavailable
     */
   def warmupAndCheckpoint(socketPath: Path): Boolean =
-    runWarmup()
+    // runWarmup()
 
     Core.getGlobalContext.register(WarmupRunner)
 
