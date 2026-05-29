@@ -17,7 +17,8 @@ import io.forge.jam.protocol.accumulation.{
   AccumulationServiceItem,
   AccumulationServiceData,
   AccumulationReadyRecord,
-  Privileges
+  Privileges,
+  StateKey
 }
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.protocol.report.ReportTypes.{
@@ -282,7 +283,7 @@ final case class FullJamState(
     while sa.nonEmpty do
       val item = sa.head
       sa = sa.tail
-      val serviceKey = encodeServiceAccountKey(item.id)
+      val serviceKey = StateKey.computeServiceAccountKey(item.id)
       val infoUnchanged =
         preInfoById.get(item.id).exists(_ eq item.data.service)
       val encoded =
@@ -330,18 +331,6 @@ final case class FullJamState(
   /** Encode authorization pools using FullJamStateCodecs. */
   private def encodeAuthPools(pools: List[List[Hash]]): JamBytes =
     encode(FullJamStateCodecs.authPoolsCodec(pools.length), pools)
-
-  /** Encode service account key. Format: prefix 255, service ID interleaved at
-    * positions 1, 3, 5, 7
-    */
-  private def encodeServiceAccountKey(serviceId: Long): JamBytes =
-    val key = new Array[Byte](31)
-    key(0) = StateKeys.SERVICE_ACCOUNT
-    key(1) = (serviceId & 0xff).toByte
-    key(3) = ((serviceId >> 8) & 0xff).toByte
-    key(5) = ((serviceId >> 16) & 0xff).toByte
-    key(7) = ((serviceId >> 24) & 0xff).toByte
-    JamBytes(key)
 
   /** Encode timeslot using FullJamStateCodecs. */
   private def encodeTimeslot(tau: Long): JamBytes =

@@ -484,39 +484,3 @@ final case class AccumulationOneResult(
     gasUsed: Long,
     provisions: Set[(Long, JamBytes)]
 )
-
-/** Result of parallel accumulation.
-  *
-  * @param postState
-  *   Combined modified state
-  * @param deferredTransfers
-  *   All outgoing transfers
-  * @param outputs
-  *   Set of (serviceIndex, hash) pairs
-  * @param gasUsed
-  *   Service to gas used mapping
-  */
-final case class AccumulationParResult(
-    postState: PartialState,
-    deferredTransfers: List[DeferredTransfer],
-    outputs: Set[Commitment],
-    gasUsed: List[(Long, Long)]
-)
-
-/** Result of sequential accumulation.
-  *
-  * @param reportsAccumulated
-  *   Number of reports accumulated
-  * @param postState
-  *   Final state after all accumulation
-  * @param outputs
-  *   Set of (serviceIndex, hash) pairs
-  * @param gasUsed
-  *   Service to gas used mapping
-  */
-final case class AccumulationSeqResult(
-    reportsAccumulated: Int,
-    postState: PartialState,
-    outputs: Set[Commitment],
-    gasUsed: List[(Long, Long)]
-)

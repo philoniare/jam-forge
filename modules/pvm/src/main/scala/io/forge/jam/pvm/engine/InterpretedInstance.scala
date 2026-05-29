@@ -4,7 +4,7 @@ import scala.collection.mutable.ArrayBuffer
 import spire.math.{UInt, UByte, UShort, ULong}
 import io.forge.jam.pvm.types.*
 import io.forge.jam.pvm.{InterruptKind, SegfaultInfo, Abi, Instruction, MemoryResult}
-import io.forge.jam.pvm.memory.{BasicMemory, DynamicMemory}
+import io.forge.jam.pvm.memory.BasicMemory
 import io.forge.jam.pvm.program.{Program, InstructionDecoder}
 import java.io.{FileWriter, PrintWriter}
 import com.typesafe.scalalogging.StrictLogging
@@ -100,7 +100,6 @@ final case class CompiledInstruction(
 final class InterpretedInstance private (
   val module: InterpretedModule,
   val basicMemory: BasicMemory,
-  val dynamicMemory: Option[DynamicMemory],
   val regs: Array[Long],
   private var _programCounter: ProgramCounter,
   private var _programCounterValid: Boolean,
@@ -610,7 +609,6 @@ object InterpretedInstance:
     val instance = new InterpretedInstance(
       module = module,
       basicMemory = BasicMemory.create(module.memoryMap, module.roData, module.rwData, initialHeapSize, argumentData),
-      dynamicMemory = None,
       regs = new Array[Long](Reg.Count),
       _programCounter = ProgramCounter.MaxValue,
       _programCounterValid = false,

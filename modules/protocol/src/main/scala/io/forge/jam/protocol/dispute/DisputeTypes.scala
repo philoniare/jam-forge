@@ -6,6 +6,7 @@ import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
@@ -200,20 +201,7 @@ object DisputeTypes:
     )
 
     // Circe JSON decoder for DisputeOutput
-    given circeDecoder: Decoder[DisputeOutput] =
-      Decoder.instance { cursor =>
-        val okResult = cursor.get[DisputeOutputMarks]("ok")
-        val errResult = cursor.get[DisputeErrorCode]("err")
-        (okResult, errResult) match
-          case (Right(ok), _) => Right(StfResult.success(ok))
-          case (_, Right(err)) => Right(StfResult.error(err))
-          case (Left(_), Left(_)) =>
-            cursor.downField("ok").focus match
-              case Some(_) =>
-                cursor.get[DisputeOutputMarks]("ok").map(ok => StfResult.success(ok))
-              case None =>
-                cursor.get[DisputeErrorCode]("err").map(err => StfResult.error(err))
-      }
+    given circeDecoder: Decoder[DisputeOutput] = JsonHelpers.stfResultDecoder[DisputeOutputMarks, DisputeErrorCode]
 
   /**
    * Test case for Disputes STF.

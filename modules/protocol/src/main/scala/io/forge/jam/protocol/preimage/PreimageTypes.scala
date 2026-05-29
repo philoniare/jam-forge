@@ -9,6 +9,7 @@ import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactPrefixedList}
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder
 
 /**
@@ -268,16 +269,7 @@ object PreimageTypes:
 
     given Codec[PreimageOutput] = JamCodecs.stfResultCodec[Unit, PreimageErrorCode]
 
-    given circeDecoder: Decoder[PreimageOutput] =
-      Decoder.instance { cursor =>
-        val okResult = cursor.downField("ok").focus
-        val errResult = cursor.get[PreimageErrorCode]("err")
-
-        if okResult.isDefined then
-          Right(StfResult.success(()))
-        else
-          errResult.map(err => StfResult.error(err))
-      }
+    given circeDecoder: Decoder[PreimageOutput] = JsonHelpers.stfResultDecoder[Unit, PreimageErrorCode]
 
   /**
    * Test case for Preimages STF.

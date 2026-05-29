@@ -8,6 +8,7 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.service.ServiceAccount
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.json.JsonHelpers
 import io.forge.jam.core.scodec.JamCodecs
 import io.circe.Decoder
 import _root_.scodec.Codec
@@ -448,16 +449,7 @@ object ReportTypes:
   object ReportOutput:
     given Codec[ReportOutput] = JamCodecs.stfResultCodec[ReportOutputMarks, ReportErrorCode]
 
-    given circeDecoder: Decoder[ReportOutput] =
-      Decoder.instance { cursor =>
-        val okResult = cursor.downField("ok").focus
-        val errResult = cursor.get[ReportErrorCode]("err")
-
-        if okResult.isDefined then
-          cursor.get[ReportOutputMarks]("ok").map(marks => StfResult.success(marks))
-        else
-          errResult.map(err => StfResult.error(err))
-      }
+    given circeDecoder: Decoder[ReportOutput] = JsonHelpers.stfResultDecoder[ReportOutputMarks, ReportErrorCode]
 
   /**
    * Test case for Reports STF.

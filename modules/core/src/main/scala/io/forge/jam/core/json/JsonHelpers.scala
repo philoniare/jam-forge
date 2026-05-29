@@ -1,7 +1,8 @@
 package io.forge.jam.core.json
 
-import io.circe.DecodingFailure
+import io.circe.{Decoder, DecodingFailure}
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.StfResult
 
 /**
  * Common JSON parsing helpers for JAM types.
@@ -60,3 +61,14 @@ object JsonHelpers:
     }
     val (errors, successes) = results.partitionMap(identity)
     if errors.nonEmpty then Left(errors.head) else Right(successes)
+
+  /**
+   * Decode a "ok|err" discriminated result into an StfResult.
+   */
+  def stfResultDecoder[Ok, Err](using Decoder[Ok], Decoder[Err]): Decoder[StfResult[Ok, Err]] =
+    Decoder.instance { cursor =>
+      if cursor.downField("ok").focus.isDefined then
+        cursor.get[Ok]("ok").map(ok => StfResult.success(ok))
+      else
+        cursor.get[Err]("err").map(err => StfResult.error(err))
+    }

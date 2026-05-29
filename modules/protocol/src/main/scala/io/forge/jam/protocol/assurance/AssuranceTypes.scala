@@ -6,6 +6,7 @@ import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
+import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder
 import spire.math.UByte
 import _root_.scodec.Codec
@@ -138,21 +139,7 @@ object AssuranceTypes:
         summon[Codec[AssuranceErrorCode]]
       )
 
-    given circeDecoder: Decoder[AssuranceOutput] =
-      Decoder.instance { cursor =>
-        val okResult = cursor.get[AssuranceOutputMarks]("ok")
-        val errResult = cursor.get[AssuranceErrorCode]("err")
-        (okResult, errResult) match
-          case (Right(ok), _) => Right(StfResult.success(ok))
-          case (_, Right(err)) => Right(StfResult.error(err))
-          case (Left(_), Left(_)) =>
-            // Try to determine which field is present
-            cursor.downField("ok").focus match
-              case Some(_) =>
-                cursor.get[AssuranceOutputMarks]("ok").map(ok => StfResult.success(ok))
-              case None =>
-                cursor.get[AssuranceErrorCode]("err").map(err => StfResult.error(err))
-      }
+    given circeDecoder: Decoder[AssuranceOutput] = JsonHelpers.stfResultDecoder[AssuranceOutputMarks, AssuranceErrorCode]
 
   /**
    * Test case for Assurances STF.

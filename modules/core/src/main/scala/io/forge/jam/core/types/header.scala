@@ -6,6 +6,7 @@ import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
+import io.forge.jam.core.scodec.JamCodecs
 import _root_.scodec.*
 import _root_.scodec.bits.*
 import _root_.scodec.codecs.*
@@ -23,11 +24,6 @@ object header:
   val SealSize: Int = 96
 
   // Private codecs for primitive types
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(32L, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
-
   private val timeslotCodec: Codec[Timeslot] = uint32L.xmap(
     v => Timeslot(UInt(v.toInt)),
     ts => ts.value.toLong & 0xFFFFFFFFL
@@ -37,98 +33,6 @@ object header:
     v => ValidatorIndex(UShort(v)),
     vi => vi.value.toInt
   )
-
-  /**
-   * JAM compact integer codec.
-   * Encodes non-negative integers using variable-length format.
-   */
-  private val compactIntCodec: Codec[Long] = new Codec[Long] {
-    def sizeBound: SizeBound = SizeBound.bounded(8, 72) // 1 to 9 bytes
-
-    def encode(value: Long): Attempt[BitVector] =
-      if value < 0 then
-        Attempt.failure(Err("No negative values allowed"))
-      else if value == 0 then
-        Attempt.successful(BitVector(0x00))
-      else
-        // Find l such that 2^(7l) <= x < 2^(7(l+1)) for l in [0..8]
-        var l = 0
-        var found = false
-        var result: BitVector = BitVector.empty
-        while l <= 8 && !found do
-          val lowerBound = 1L << (7 * l)
-          val upperBound = 1L << (7 * (l + 1))
-          if value >= lowerBound && value < upperBound then
-            val prefixVal = (256 - (1 << (8 - l))) + (value >>> (8 * l))
-            val remainder = value & ((1L << (8 * l)) - 1)
-            val arr = new Array[Byte](1 + l)
-            arr(0) = prefixVal.toByte
-            for i <- 0 until l do
-              arr(1 + i) = ((remainder >> (8 * i)) & 0xFF).toByte
-            result = BitVector(arr)
-            found = true
-          l += 1
-        if !found then
-          // Fallback: [255] ++ E_8(x)
-          val arr = new Array[Byte](9)
-          arr(0) = 0xFF.toByte
-          for i <- 0 until 8 do
-            arr(1 + i) = ((value >> (8 * i)) & 0xFF).toByte
-          result = BitVector(arr)
-        Attempt.successful(result)
-
-    def decode(bits: BitVector): Attempt[DecodeResult[Long]] =
-      if bits.isEmpty then
-        Attempt.failure(Err.insufficientBits(8, 0))
-      else
-        val prefix = (bits.take(8).toByteVector.head & 0xFF)
-        if prefix == 0 then
-          Attempt.successful(DecodeResult(0L, bits.drop(8)))
-        else
-          val l =
-            if prefix < 128 then 0
-            else if prefix < 192 then 1
-            else if prefix < 224 then 2
-            else if prefix < 240 then 3
-            else if prefix < 248 then 4
-            else if prefix < 252 then 5
-            else if prefix < 254 then 6
-            else if prefix < 255 then 7
-            else 8
-
-          if prefix == 255 then
-            val needed = 72 // 8 bits prefix + 64 bits value
-            if bits.size < needed then
-              Attempt.failure(Err.insufficientBits(needed, bits.size))
-            else
-              val valueBytes = bits.drop(8).take(64).toByteVector
-              var value = 0L
-              for i <- 0 until 8 do
-                value = value | ((valueBytes(i).toLong & 0xFF) << (8 * i))
-              Attempt.successful(DecodeResult(value, bits.drop(72)))
-          else if l == 0 then
-            Attempt.successful(DecodeResult(prefix.toLong, bits.drop(8)))
-          else
-            val needed = 8 + l * 8
-            if bits.size < needed then
-              Attempt.failure(Err.insufficientBits(needed, bits.size))
-            else
-              val base = 256 - (1 << (8 - l))
-              val highBits = (prefix - base).toLong << (8 * l)
-              val lowBytes = bits.drop(8).take(l * 8).toByteVector
-              var lowBits = 0L
-              for i <- 0 until l do
-                lowBits = lowBits | ((lowBytes(i).toLong & 0xFF) << (8 * i))
-              Attempt.successful(DecodeResult(highBits | lowBits, bits.drop(needed)))
-  }
-
-  /**
-   * Option codec using 0/1 discriminator byte.
-   */
-  private def optionCodec[A](codec: Codec[A]): Codec[Option[A]] =
-    discriminated[Option[A]].by(byte)
-      .subcaseP(0) { case None => None }(provide(None))
-      .subcaseP(1) { case Some(v) => Some(v) }(codec.xmap(Some(_), _.get))
 
   /**
    * Block header containing all block metadata.
@@ -168,17 +72,17 @@ object header:
      * Create a header codec that knows the config-dependent sizes.
      */
     def headerCodec(validatorCount: Int, epochLength: Int): Codec[Header] =
-      val epochMarkOpt = optionCodec(EpochMark.epochMarkCodec(validatorCount))
-      val ticketsMarkOpt = optionCodec(
+      val epochMarkOpt = JamCodecs.optionCodec(EpochMark.epochMarkCodec(validatorCount))
+      val ticketsMarkOpt = JamCodecs.optionCodec(
         vectorOfN(provide(epochLength), summon[Codec[TicketMark]]).xmap(_.toList, _.toVector)
       )
-      val offendersCodec = compactIntCodec.flatZip { count =>
-        vectorOfN(provide(count.toInt), hashCodec).xmap(_.toList, _.toVector)
+      val offendersCodec = JamCodecs.compactInteger.flatZip { count =>
+        vectorOfN(provide(count.toInt), JamCodecs.hashCodec).xmap(_.toList, _.toVector)
       }.xmap(_._2, list => (list.length.toLong, list))
 
-      (hashCodec ::
-        hashCodec ::
-        hashCodec ::
+      (JamCodecs.hashCodec ::
+        JamCodecs.hashCodec ::
+        JamCodecs.hashCodec ::
         timeslotCodec ::
         epochMarkOpt ::
         ticketsMarkOpt ::

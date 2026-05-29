@@ -17,6 +17,17 @@ object StfLifters:
       case Left(err)     => Left(wrapError(err))
   }
 
+  def liftStandardCtx[I, O, E](
+      stf: (I, TrieBackedJamState, PipelineContext) => Either[E, O],
+      extractInput: PipelineContext => I,
+      wrapError: E => PipelineError
+  ): StfStepWith[O] = StateT { case (view, ctx) =>
+    val input = extractInput(ctx)
+    stf(input, view, ctx) match
+      case Right(output) => Right(((view, ctx), output))
+      case Left(err)     => Left(wrapError(err))
+  }
+
   def liftStateOnly[I](
       stf: (I, TrieBackedJamState) => Unit,
       extractInput: PipelineContext => I

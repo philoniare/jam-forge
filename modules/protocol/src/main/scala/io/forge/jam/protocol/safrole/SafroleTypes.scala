@@ -5,6 +5,7 @@ import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicK
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.json.JsonHelpers
 import io.circe.{Decoder, DecodingFailure}
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
@@ -230,19 +231,7 @@ object SafroleTypes:
       )
 
     // Circe JSON decoder for SafroleOutput
-    given circeDecoder: Decoder[SafroleOutput] = Decoder.instance { cursor =>
-      val okResult = cursor.get[SafroleOutputData]("ok")
-      val errResult = cursor.get[SafroleErrorCode]("err")
-      (okResult, errResult) match
-        case (Right(ok), _) => Right(StfResult.success(ok))
-        case (_, Right(err)) => Right(StfResult.error(err))
-        case (Left(_), Left(_)) =>
-          cursor.downField("ok").focus match
-            case Some(_) =>
-              cursor.get[SafroleOutputData]("ok").map(ok => StfResult.success(ok))
-            case None =>
-              cursor.get[SafroleErrorCode]("err").map(err => StfResult.error(err))
-    }
+    given circeDecoder: Decoder[SafroleOutput] = JsonHelpers.stfResultDecoder[SafroleOutputData, SafroleErrorCode]
 
   /**
    * Test case for Safrole STF.

@@ -24,7 +24,8 @@ import io.forge.jam.protocol.accumulation.{
   AccumulationReadyRecord,
   AccumulationServiceData,
   AccumulationServiceItem,
-  Privileges
+  Privileges,
+  StateKey
 }
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import io.forge.jam.protocol.report.ReportTypes.{
@@ -587,7 +588,7 @@ final class TrieBackedJamState(
         val prev = _serviceAccountsPreInfo.get(item.id)
         if !prev.contains(item.data.service) then
           val encoded = TrieBackedJamState.encodeServiceInfo(item.data.service)
-          updates += ((TrieBackedJamState.encodeServiceAccountKey(item.id),
+          updates += ((StateKey.computeServiceAccountKey(item.id),
             Some(encoded)))
           store.foreach { s =>
             s.putCachedServiceInfo(item.id, encoded)
@@ -597,7 +598,7 @@ final class TrieBackedJamState(
       }
       _serviceAccountsPreIds.foreach { id =>
         if !currIds.contains(id) then
-          updates += ((TrieBackedJamState.encodeServiceAccountKey(id), None))
+          updates += ((StateKey.computeServiceAccountKey(id), None))
           store.foreach { s =>
             s.evictCachedServiceInfo(id)
             s.removeKnownServiceId(id)
@@ -897,7 +898,7 @@ object TrieBackedJamState:
             case Some(encoded) =>
               out += materialize(id, encoded)
             case None =>
-              val key = encodeServiceAccountKey(id)
+              val key = StateKey.computeServiceAccountKey(id)
               trie.read(key).foreach { encoded =>
                 store.foreach(_.putCachedServiceInfo(id, encoded))
                 out += materialize(id, encoded)
@@ -1065,12 +1066,3 @@ object TrieBackedJamState:
 
   private def encodeServiceInfo(info: ServiceInfo): JamBytes =
     encodeJB(FullJamStateCodecs.serviceInfoCodec, info)
-
-  private def encodeServiceAccountKey(serviceId: Long): JamBytes =
-    val key = new Array[Byte](31)
-    key(0) = StateKeys.SERVICE_ACCOUNT
-    key(1) = (serviceId & 0xff).toByte
-    key(3) = ((serviceId >> 8) & 0xff).toByte
-    key(5) = ((serviceId >> 16) & 0xff).toByte
-    key(7) = ((serviceId >> 24) & 0xff).toByte
-    JamBytes(key)

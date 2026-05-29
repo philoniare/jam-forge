@@ -12,12 +12,14 @@ import io.forge.jam.protocol.report.ReportTransition
 import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.accumulation.{
   AccumulationTransition,
+  AccumulationInput,
   AccumulationOutputData,
   AccumulationExecutor
 }
 import io.forge.jam.protocol.history.HistoryTransition
 import io.forge.jam.protocol.authorization.AuthorizationTransition
 import io.forge.jam.protocol.preimage.PreimageTransition
+import io.forge.jam.protocol.preimage.PreimageTypes.PreimageErrorCode
 import io.forge.jam.protocol.statistics.StatisticsTransition
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
 import io.forge.jam.protocol.traces.InputExtractor
@@ -40,57 +42,45 @@ object LiftedStfs:
     wrapError = (e: DisputeErrorCode) => PipelineError.DisputeErr(e)
   )
 
-  val assurances: StfStepWith[AssuranceOutputMarks] = StateT {
-    case (view, ctx) =>
-      val input = InputExtractor.extractAssuranceInput(ctx.block)
-      val output = AssuranceTransition.stfViewWithValidators(
-        input,
-        view,
-        ctx.preSafroleValidators
-      )
-      output match
-        case Right(out) => Right(((view, ctx), out))
-        case Left(err)  => Left(PipelineError.AssuranceErr(err))
-  }
+  val assurances: StfStepWith[AssuranceOutputMarks] = liftStandardCtx(
+    stf = (input: AssuranceInput, view, ctx) =>
+      AssuranceTransition.stfViewWithValidators(input, view, ctx.preSafroleValidators),
+    extractInput = ctx => InputExtractor.extractAssuranceInput(ctx.block),
+    wrapError = (e: AssuranceErrorCode) => PipelineError.AssuranceErr(e)
+  )
 
   // 4. Reports STF (special: has skipAncestryValidation param)
-  def reports(skipAncestryValidation: Boolean): StfStepWith[ReportOutputMarks] = StateT {
-    case (view, ctx) =>
-      val input = ReportInput(
-        guarantees = ctx.block.extrinsic.guarantees,
-        slot = ctx.block.header.slot.value.toLong
-      )
-      val output = ReportTransition.stfView(input, view, skipAncestryValidation)
-      output match
-        case Right(out) => Right(((view, ctx), out))
-        case Left(err)  => Left(PipelineError.ReportErr(err))
-  }
+  def reports(skipAncestryValidation: Boolean): StfStepWith[ReportOutputMarks] =
+    liftStandard(
+      stf = (input, view) =>
+        ReportTransition.stfView(input, view, skipAncestryValidation),
+      extractInput = ctx =>
+        ReportInput(
+          guarantees = ctx.block.extrinsic.guarantees,
+          slot = ctx.block.header.slot.value.toLong
+        ),
+      wrapError = (e: ReportErrorCode) => PipelineError.ReportErr(e)
+    )
 
   def accumulation(
       sharedExecutor: Option[AccumulationExecutor] = None
-  ): StfStepWith[AccumulationOutputData] = StateT {
-    case (view, ctx) =>
-      val input = InputExtractor.extractAccumulationInput(
-        ctx.availableReports,
-        ctx.block.header.slot.value.toLong
-      )
-      val output = AccumulationTransition.stfView(
-        input,
-        view,
-        ctx.preTransitionTau,
-        sharedExecutor
-      )
-      output match
-        case Right(out) => Right(((view, ctx), out))
-        case Left(_)    => Left(PipelineError.AccumulationErr("Accumulation failed"))
-  }
+  ): StfStepWith[AccumulationOutputData] =
+    liftStandardCtx(
+      stf = (input: AccumulationInput, view, ctx) =>
+        AccumulationTransition.stfView(input, view, ctx.preTransitionTau, sharedExecutor),
+      extractInput = ctx =>
+        InputExtractor.extractAccumulationInput(
+          ctx.availableReports,
+          ctx.block.header.slot.value.toLong
+        ),
+      wrapError = (_: Nothing) => PipelineError.AccumulationErr("Accumulation failed")
+    )
 
-  def history(accumulateRoot: Hash): StfStep = StateT {
-    case (view, ctx) =>
-      val input = InputExtractor.extractHistoryInput(ctx.block, accumulateRoot)
-      HistoryTransition.stfView(input, view)
-      Right(((view, ctx), ()))
-  }
+  def history(accumulateRoot: Hash): StfStep =
+    liftStateOnly(
+      stf = (input, view) => HistoryTransition.stfView(input, view),
+      extractInput = ctx => InputExtractor.extractHistoryInput(ctx.block, accumulateRoot)
+    )
 
   // 7. Authorization STF (state-only)
   val authorization: StfStep = liftStateOnly(
@@ -98,17 +88,12 @@ object LiftedStfs:
     extractInput = ctx => InputExtractor.extractAuthInput(ctx.block)
   )
 
-  val preimages: StfStepWith[Unit] = StateT {
-    case (view, ctx) =>
-      val input = InputExtractor.extractPreimageInput(
-        ctx.block,
-        ctx.block.header.slot.value.toLong
-      )
-      val output = PreimageTransition.stfView(input, view)
-      output match
-        case Left(err) => Left(PipelineError.PreimageErr(err))
-        case Right(_)  => Right(((view, ctx), ()))
-  }
+  val preimages: StfStepWith[Unit] = liftStandard(
+    stf = (input, view) => PreimageTransition.stfView(input, view),
+    extractInput = ctx =>
+      InputExtractor.extractPreimageInput(ctx.block, ctx.block.header.slot.value.toLong),
+    wrapError = (e: PreimageErrorCode) => PipelineError.PreimageErr(e)
+  )
 
   val statistics: StfStepWith[Option[StatOutput]] = StateT {
     case (view, ctx) =>
