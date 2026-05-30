@@ -29,7 +29,7 @@ object FuzzEnv:
           }
           Some(ServerConfig(
             socketPath = Paths.get(sockPath),
-            logPath = ServerConfig().logPath,
+            logPath = ServerConfig(chainConfig = ChainConfig.TINY).logPath,
             dataPath = Some(Paths.get(dataPath)),
             chainConfig = chain
           ))

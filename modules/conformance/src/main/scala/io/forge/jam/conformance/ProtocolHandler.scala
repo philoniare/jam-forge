@@ -34,7 +34,7 @@ object ReadResult:
 class ProtocolHandler(
     stateStore: StateStore,
     logger: FileLogger,
-    config: ChainConfig = ChainConfig.TINY
+    config: ChainConfig
 ):
   // BlockImporter will be created after handshake when we know the negotiated features.
   private var blockImporter: BlockImporter = _

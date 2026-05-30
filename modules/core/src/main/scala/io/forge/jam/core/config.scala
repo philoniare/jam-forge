@@ -38,6 +38,8 @@ final case class ChainConfig(
   maxDependencies: Int = 8,
   /** Maximum number of work items/results per work report */
   maxWorkItems: Int = 16,
+  /** Erasure-coding piece size in bytes */
+  ecPieceSize: Int = 684,
   /** Maximum accumulation gas per work report */
   reportAccGas: Long = 10_000_000L,
   /** Ticket cutoff phase within epoch (tickets rejected when phase >= ticketCutoff) */
@@ -86,7 +88,8 @@ object ChainConfig:
     serviceMinBalance = 100L,
     additionalMinBalancePerStateItem = 10L,
     additionalMinBalancePerStateByte = 1L,
-    maxLookupAnchorAge = 24L
+    maxLookupAnchorAge = 24L,
+    ecPieceSize = 4
   )
 
   /**

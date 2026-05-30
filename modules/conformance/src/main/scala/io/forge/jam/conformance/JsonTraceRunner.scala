@@ -51,7 +51,7 @@ object JsonTraceResult:
  * @param compareKeyvals When true, also compare individual keyvals on failure
  */
 class JsonTraceRunner(
-  config: ChainConfig = ChainConfig.TINY,
+  config: ChainConfig,
   verbose: Boolean = false,
   compareKeyvals: Boolean = false
 ):

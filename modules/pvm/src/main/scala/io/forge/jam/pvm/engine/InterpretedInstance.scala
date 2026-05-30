@@ -3,7 +3,7 @@ package io.forge.jam.pvm.engine
 import scala.collection.mutable.ArrayBuffer
 import spire.math.{UInt, UByte, UShort, ULong}
 import io.forge.jam.pvm.types.*
-import io.forge.jam.pvm.{InterruptKind, SegfaultInfo, Abi, Instruction, MemoryResult}
+import io.forge.jam.pvm.{InterruptKind, SegfaultInfo, Abi, PvmConstants, Instruction, MemoryResult}
 import io.forge.jam.pvm.memory.BasicMemory
 import io.forge.jam.pvm.program.{Program, InstructionDecoder}
 import java.io.{FileWriter, PrintWriter}
@@ -274,10 +274,12 @@ final class InterpretedInstance private (
     Step.Interrupt
 
   override def segfault(pc: ProgramCounter, pageAddress: UInt): Int =
-    _programCounter = pc
-    _programCounterValid = true
-    _interrupt = InterruptKind.Segfault(SegfaultInfo(pageAddress, pageSize))
-    Step.Interrupt
+    if pageAddress.toLong < PvmConstants.MinValidAddress.toLong then panic(pc)
+    else
+      _programCounter = pc
+      _programCounterValid = true
+      _interrupt = InterruptKind.Segfault(SegfaultInfo(pageAddress, pageSize))
+      Step.Interrupt
 
   // ============================================================================
   // Memory Operations (UInt address versions for API compatibility)

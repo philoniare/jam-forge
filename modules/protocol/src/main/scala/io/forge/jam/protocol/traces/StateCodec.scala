@@ -161,7 +161,7 @@ object StateCodec:
     */
   def decodeSafroleState(
       keyvals: List[KeyValue],
-      config: ChainConfig = ChainConfig.TINY
+      config: ChainConfig
   ): SafroleState =
     var tau: Long = 0
     var eta: List[Hash] = List.fill(4)(Hash.zero)

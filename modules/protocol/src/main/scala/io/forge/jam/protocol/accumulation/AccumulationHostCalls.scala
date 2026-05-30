@@ -1279,9 +1279,6 @@ class AccumulationHostCalls(
   private def buildConstantsBlob(): Array[Byte] =
     val buffer = new java.io.ByteArrayOutputStream(256)
 
-    // Config-dependent values
-    val isTiny = config.validatorCount == 6
-
     buffer.write(
       encodeLong(config.additionalMinBalancePerStateItem)
     ) // additionalMinBalancePerStateItem (UInt64)
@@ -1348,7 +1345,7 @@ class AccumulationHostCalls(
     buffer.write(encodeIntLE(64_000)) // Cmaxauthcodesize (UInt32)
     buffer.write(encodeIntLE(13_791_360)) // Cmaxbundlesize (UInt32)
     buffer.write(encodeIntLE(4_000_000)) // Cmaxservicecodesize (UInt32)
-    buffer.write(encodeIntLE(if isTiny then 4 else 684)) // Cecpiecesize (UInt32)
+    buffer.write(encodeIntLE(config.ecPieceSize)) // Cecpiecesize (UInt32)
     buffer.write(encodeIntLE(3072)) // maxWorkPackageImports (UInt32)
     buffer.write(
       encodeIntLE(config.numEcPiecesPerSegment)

@@ -115,7 +115,7 @@ final case class FullJamState(
   /** Convert back to raw keyvals for state root computation.
     */
   def toKeyvals(
-      config: ChainConfig = ChainConfig.TINY,
+      config: ChainConfig,
       preState: Option[FullJamState] = None
   ): List[KeyValue] =
     val builder = scala.collection.mutable.ListBuffer[KeyValue]()
@@ -535,7 +535,7 @@ object FullJamState:
 
   def fromTrie(
       trie: StateTrie,
-      config: ChainConfig = ChainConfig.TINY
+      config: ChainConfig
   ): FullJamState =
     val kvs = scala.collection.mutable.ListBuffer.empty[KeyValue]
 
@@ -556,7 +556,7 @@ object FullJamState:
     */
   def fromKeyvals(
       keyvals: List[KeyValue],
-      config: ChainConfig = ChainConfig.TINY
+      config: ChainConfig
   ): FullJamState =
     val idx = buildIndex(keyvals)
 
@@ -809,7 +809,7 @@ object FullJamState:
 
   /** Create an empty/default FullJamState.
     */
-  def empty(config: ChainConfig = ChainConfig.TINY): FullJamState =
+  def empty(config: ChainConfig): FullJamState =
     val emptyValidatorKey = ValidatorKey(
       BandersnatchPublicKey.zero,
       Ed25519PublicKey(new Array[Byte](Ed25519PublicKey.Size)),

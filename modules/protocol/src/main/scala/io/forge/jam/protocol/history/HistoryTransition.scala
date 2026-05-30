@@ -52,7 +52,7 @@ object HistoryTransition:
   def stfInternal(
     input: HistoricalInput,
     preState: HistoricalState,
-    config: ChainConfig = ChainConfig.TINY
+    config: ChainConfig
   ): HistoricalState =
     input.validate(config)
 

@@ -76,7 +76,7 @@ enum ImportError:
   *   When true, skip anchor recency validation in Reports STF.
   */
 class BlockImporter(
-    config: ChainConfig = ChainConfig.TINY,
+    config: ChainConfig,
     skipAncestryValidation: Boolean = false,
     externalTrieStore: Option[StateTrieStore] = None
 ):
@@ -396,7 +396,7 @@ class BlockImporter(
       case ImportResult.Failure(_, _) =>
         false
 
-  def materializePostState(config: ChainConfig = ChainConfig.TINY): RawState =
+  def materializePostState(config: ChainConfig): RawState =
     val trie = trieStore.at(trieStore.currentRoot)
     val pairs = trie.getKeyValues(JamBytes.empty, 0)
     val kvs = pairs.map { case (k, v) => KeyValue(k, v) }
@@ -529,6 +529,6 @@ object StateEncoder:
     */
   def encodeFullState(
       state: FullJamState,
-      config: ChainConfig = ChainConfig.TINY
+      config: ChainConfig
   ): List[KeyValue] =
     state.toKeyvals(config)

@@ -24,9 +24,6 @@ enum Opcode(val value: Int):
   /** Fallthrough - explicit basic block boundary */
   case Fallthrough extends Opcode(1)
 
-  /** Memset - memory set operation */
-  case Memset extends Opcode(2)
-
   /** Ecalli - host call instruction */
   case Ecalli extends Opcode(10)
 

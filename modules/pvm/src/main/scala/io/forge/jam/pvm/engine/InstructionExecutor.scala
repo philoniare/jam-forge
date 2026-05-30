@@ -31,8 +31,6 @@ object InstructionExecutor:
     arr(Opcode.Panic.value) = (_, ctx, pc, _) => ctx.panic(pc)
     arr(Opcode.Fallthrough.value) = (_, ctx, _, nextPc) =>
       ctx.resolveFallthrough(nextPc)
-    arr(Opcode.Memset.value) = (_, ctx, _, _) =>
-      ctx.advance() // TODO: Implement memset
 
     // ========================================================================
     // Jump Instructions

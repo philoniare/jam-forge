@@ -21,14 +21,14 @@ final case class ServerConfig(
     socketPath: Path = Paths.get("/tmp/jam_target.sock"),
     logPath: Path = Paths.get("/tmp/jam_conformance.log"),
     dataPath: Option[Path] = None,
-    chainConfig: ChainConfig = ChainConfig.TINY
+    chainConfig: ChainConfig
 )
 
 object ServerConfig:
   /** Parse configuration from command line arguments.
     */
   def fromArgs(args: List[String]): Either[String, ServerConfig] =
-    var config = ServerConfig()
+    var config = ServerConfig(chainConfig = ChainConfig.TINY)
     var remaining = args
 
     while remaining.nonEmpty do
@@ -114,11 +114,11 @@ object ConformanceServerApp extends IOApp:
           .collectFirst { case List("--socket-path", p) => Paths.get(p) }
           .getOrElse(Paths.get("/tmp/jam_target.sock"))
         IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
-          runServer(ServerConfig(socketPath = socketPath))
+          runServer(ServerConfig(socketPath = socketPath, chainConfig = ChainConfig.TINY))
 
       // Fuzz command (used by conformance harness)
       case "fuzz" :: socketPath :: _ =>
-        val config = ServerConfig(socketPath = Paths.get(socketPath))
+        val config = ServerConfig(socketPath = Paths.get(socketPath), chainConfig = ChainConfig.TINY)
         runServer(config)
 
       // Legacy/default: parse --socket-path, --log-path options

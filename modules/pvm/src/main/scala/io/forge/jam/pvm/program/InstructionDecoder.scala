@@ -17,8 +17,7 @@ object InstructionDecoder:
 
   private val arglessOpcodes: Map[Opcode, Instruction] = Map(
     Opcode.Panic -> Instruction.Panic,
-    Opcode.Fallthrough -> Instruction.Fallthrough,
-    Opcode.Memset -> Instruction.Memset
+    Opcode.Fallthrough -> Instruction.Fallthrough
   )
 
   private val regs2Opcodes: Map[Opcode, (Int, Int) => Instruction] = Map(
@@ -151,7 +150,7 @@ object InstructionDecoder:
       case Some(op) if storeImmIndirectOpcodes.contains(op) => val (r, o, v) = readRegImmImm(chunk, len); storeImmIndirectOpcodes(op)(r, o, v)
       case Some(Opcode.Ecalli) => Instruction.Ecalli(signExtend(chunk, len * 8))
       case Some(Opcode.Jump) => Instruction.Jump((offset + signExtend(chunk, len * 8).toInt).toLong & 0xFFFFFFFFL)
-      case Some(Opcode.LoadImm64) => Instruction.LoadImm64((code(offset + 1) & 0xFF) % NumGeneralRegisters, readLong(code, offset + 2))
+      case Some(Opcode.LoadImm64) => Instruction.LoadImm64(clampReg(code(offset + 1) & 0xFF), readLong(code, offset + 2))
       case Some(Opcode.LoadImmAndJumpIndirect) => val (a, b, i1, i2) = readRegs2Imm2(chunk, len); Instruction.LoadImmAndJumpIndirect(a, b, i1, i2)
       case _ => Instruction.Panic
 
@@ -183,36 +182,39 @@ object InstructionDecoder:
     if bits <= 0 then 0L else if bits >= 64 then value
     else { val s = 1L << (bits - 1); if (value & s) != 0 then value | (-1L << bits) else value & ((1L << bits) - 1) }
 
+  /** Decode a register index: clamp to the 13 registers */
+  private inline def clampReg(raw: Int): Int = math.min(12, raw)
+
   private def readRegImm(chunk: Long, len: Int): (Int, Long) =
-    ((chunk & 0xF).toInt % NumGeneralRegisters, signExtend(chunk >>> 8, len * 8 - 8))
+    (clampReg((chunk & 0xF).toInt), signExtend(chunk >>> 8, len * 8 - 8))
 
   private def readRegs2(chunk: Long): (Int, Int) =
-    ((chunk & 0xF).toInt % NumGeneralRegisters, ((chunk >> 4) & 0xF).toInt % NumGeneralRegisters)
+    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt))
 
   private def readRegs2Imm(chunk: Long, len: Int): (Int, Int, Long) =
-    ((chunk & 0xF).toInt % NumGeneralRegisters, ((chunk >> 4) & 0xF).toInt % NumGeneralRegisters, signExtend(chunk >>> 8, len * 8 - 8))
+    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt), signExtend(chunk >>> 8, len * 8 - 8))
 
   private def readRegs2Offset(chunk: Long, instrOffset: Int, len: Int): (Int, Int, Long) =
     val (r1, r2, imm) = readRegs2Imm(chunk, len); (r1, r2, (instrOffset + imm.toInt).toLong & 0xFFFFFFFFL)
 
   private def readRegs3(chunk: Long): (Int, Int, Int) =
-    (((chunk >> 8) & 0xF).toInt % NumGeneralRegisters, (chunk & 0xF).toInt % NumGeneralRegisters, ((chunk >> 4) & 0xF).toInt % NumGeneralRegisters)
+    (clampReg(((chunk >> 8) & 0xFF).toInt), clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt))
 
   private def readImmImm(chunk: Long, len: Int): (Long, Long) =
     val aux = (chunk & 0x7).toInt; val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
     val sc = chunk >>> 8; (signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))
 
   private def readRegImmOffset(chunk: Long, instrOffset: Int, len: Int): (Int, Long, Long) =
-    val reg = (chunk & 0xF).toInt % NumGeneralRegisters; val aux = ((chunk >> 4) & 0x7).toInt
+    val reg = clampReg((chunk & 0xF).toInt); val aux = ((chunk >> 4) & 0x7).toInt
     val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
     val sc = chunk >>> 8; (reg, signExtend(sc, b1 * 8), (instrOffset + signExtend(sc >>> (b1 * 8), b2 * 8).toInt).toLong & 0xFFFFFFFFL)
 
   private def readRegImmImm(chunk: Long, len: Int): (Int, Long, Long) =
-    val reg = (chunk & 0xF).toInt % NumGeneralRegisters; val aux = ((chunk >> 4) & 0x7).toInt
+    val reg = clampReg((chunk & 0xF).toInt); val aux = ((chunk >> 4) & 0x7).toInt
     val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
     val sc = chunk >>> 8; (reg, signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))
 
   private def readRegs2Imm2(chunk: Long, len: Int): (Int, Int, Long, Long) =
-    val r1 = (chunk & 0xF).toInt % NumGeneralRegisters; val r2 = ((chunk >> 4) & 0xF).toInt % NumGeneralRegisters
+    val r1 = clampReg((chunk & 0xF).toInt); val r2 = clampReg(((chunk >> 4) & 0xF).toInt)
     val aux = ((chunk >> 8) & 0x7).toInt; val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 2))
     val sc = chunk >>> 16; (r1, r2, signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))

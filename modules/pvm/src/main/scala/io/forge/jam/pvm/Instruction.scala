@@ -4,7 +4,7 @@ package io.forge.jam.pvm
  * Sealed trait hierarchy for PVM instructions.
  *
  * Instructions are organized by operand pattern:
- * - Argless: no operands (Panic, Fallthrough, Memset)
+ * - Argless: no operands (Panic, Fallthrough)
  * - RegImm: register + immediate
  * - RegRegImm: two registers + immediate
  * - RegRegReg: three registers
@@ -33,10 +33,6 @@ object Instruction:
   /** Fallthrough - explicit basic block boundary */
   case object Fallthrough extends Instruction:
     def opcode: Opcode = Opcode.Fallthrough
-
-  /** Memset - memory set operation */
-  case object Memset extends Instruction:
-    def opcode: Opcode = Opcode.Memset
 
   /** Invalid - represents an invalid/unknown instruction */
   case object Invalid extends Instruction:

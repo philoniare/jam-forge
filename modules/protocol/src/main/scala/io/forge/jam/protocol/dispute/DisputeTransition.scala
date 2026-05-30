@@ -191,8 +191,11 @@ object DisputeTransition:
           // For a good verdict (supermajority positive), faults must have voted false
           if fault.vote then return Some(DisputeErrorCode.FaultVerdictWrong)
 
-    // Now compute bad targets from validated verdicts
+    // Now compute bad/good targets from validated verdicts -> posterior sets badset'/goodset'
     val newBadTargets = computeBadTargets(disputes.verdicts)
+    val newGoodTargets = computeGoodTargets(disputes.verdicts, config)
+    val badsetPrime: Set[Hash] = state.psi.bad.toSet ++ newBadTargets
+    val goodsetPrime: Set[Hash] = state.psi.good.toSet ++ newGoodTargets
 
     // 3. Validate culprits ordering
     if !ValidationHelpers.isSortedUniqueByBytes(disputes.culprits)(_.key.bytes)
@@ -252,6 +255,11 @@ object DisputeTransition:
 
       if !Ed25519.verify(fault.key, message, fault.signature) then
         return Some(DisputeErrorCode.BadSignature)
+
+      val faultInBad = badsetPrime.contains(fault.target)
+      val faultInGood = goodsetPrime.contains(fault.target)
+      if !(faultInBad == !faultInGood && faultInBad == fault.vote) then
+        return Some(DisputeErrorCode.FaultVerdictWrong)
 
     None
 
@@ -315,17 +323,6 @@ object DisputeTransition:
     // Process faults using foldLeft
     val afterFaults = disputes.faults.foldLeft(afterCulprits) {
       (state, fault) =>
-        val isBad = state.bad.exists(h =>
-          java.util.Arrays.equals(h.bytes, fault.target.bytes)
-        )
-        val isGood = state.good.exists(h =>
-          java.util.Arrays.equals(h.bytes, fault.target.bytes)
-        )
-
-        // A fault exists if:
-        // - Report is in good but validator voted false (they were wrong)
-        // - Report is in bad but validator voted true (they were wrong)
-        val voteConflicts = (isGood && !fault.vote) || (isBad && fault.vote)
         val keyInOffenders = preState.psi.offenders.exists(k =>
           java.util.Arrays.equals(k.bytes, fault.key.bytes)
         )
@@ -333,7 +330,7 @@ object DisputeTransition:
           java.util.Arrays.equals(k.bytes, fault.key.bytes)
         )
 
-        if voteConflicts && !keyInOffenders && !keyAlreadyAdded then
+        if !keyInOffenders && !keyAlreadyAdded then
           state.copy(
             offendersMark = state.offendersMark :+ fault.key,
             newOffendersSet = state.newOffendersSet + fault.key

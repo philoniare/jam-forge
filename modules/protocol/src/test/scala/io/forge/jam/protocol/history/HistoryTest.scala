@@ -11,6 +11,7 @@ import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.TestHelpers.hashFilled
 import io.forge.jam.protocol.history.HistoryTypes.*
 import io.forge.jam.protocol.history.HistoryTransition
+import io.forge.jam.core.ChainConfig
 
 /**
  * Tests for the History State Transition Function.
@@ -91,7 +92,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
       workPackages = List.empty
     )
 
-    val postState = HistoryTransition.stfInternal(input, preState)
+    val postState = HistoryTransition.stfInternal(input, preState, ChainConfig.TINY)
 
     // History should still have 8 entries
     postState.beta.history should have size 8
@@ -123,7 +124,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState)
+          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState, ChainConfig.TINY)
           assertHistoryStateEquals(testCase.postState, postState, testCaseName)
   }
 
@@ -147,7 +148,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState)
+          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState, ChainConfig.TINY)
           assertHistoryStateEquals(testCase.postState, postState, testCaseName)
   }
 
