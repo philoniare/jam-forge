@@ -312,6 +312,11 @@ object ReportTypes:
       }
 
   /**
+   * A single entry of the ancestor set A, containing slot and header hash.
+   */
+  final case class AncestorHeader(slot: Long, headerHash: Hash)
+
+  /**
    * Report input containing guarantees and slot.
    */
   final case class ReportInput(

@@ -369,6 +369,145 @@ class ReportTest extends AnyFunSuite with Matchers:
     postState shouldBe preState
   }
 
+  // ---------------------------------------------------------------------------
+  // Lookup-anchor vs anchor validation
+  // ---------------------------------------------------------------------------
+
+  private val betaWithBlock01: HistoricalBetaContainer =
+    HistoricalBetaContainer(
+      history = List(
+        HistoricalBeta(
+          headerHash = Hash(Array.fill(32)(0x01.toByte)),
+          beefyRoot = Hash(Array.fill(32)(0x02.toByte)),
+          stateRoot = Hash(Array.fill(32)(0x03.toByte)),
+          reported = List.empty
+        )
+      ),
+      mmr = HistoricalMmr(List.empty)
+    )
+
+  private def anchorGuaranteeInput(
+    anchor: Hash,
+    lookupAnchor: Hash,
+    lookupAnchorSlot: Int,
+    blockSlot: Int
+  ): ReportInput =
+    val workReport = WorkReport(
+      packageSpec = PackageSpec(
+        hash = Hash(Array.fill(32)(0x11.toByte)),
+        length = UInt(1000),
+        erasureRoot = Hash(Array.fill(32)(0x12.toByte)),
+        exportsRoot = Hash(Array.fill(32)(0x13.toByte)),
+        exportsCount = UShort(1)
+      ),
+      context = Context(
+        anchor = anchor,
+        stateRoot = Hash(Array.fill(32)(0x15.toByte)),
+        beefyRoot = Hash(Array.fill(32)(0x16.toByte)),
+        lookupAnchor = lookupAnchor,
+        lookupAnchorSlot = Timeslot(lookupAnchorSlot),
+        prerequisites = List.empty
+      ),
+      coreIndex = CoreIndex(0),
+      authorizerHash = Hash(Array.fill(32)(0x18.toByte)),
+      authGasUsed = Gas(0),
+      authOutput = JamBytes(emptyBytes),
+      segmentRootLookup = List.empty,
+      results = List(WorkResult(
+        serviceId = ServiceId(42),
+        codeHash = Hash(Array.fill(32)(0x19.toByte)),
+        payloadHash = Hash(Array.fill(32)(0x1A.toByte)),
+        accumulateGas = Gas(1000),
+        result = ExecutionResult.Ok(JamBytes(emptyBytes)),
+        refineLoad = RefineLoad(Gas(100), UShort(0), UShort(0), UInt(0), UShort(0))
+      ))
+    )
+    val guarantee = GuaranteeExtrinsic(
+      report = workReport,
+      slot = Timeslot(blockSlot),
+      signatures = List(
+        GuaranteeSignature(ValidatorIndex(0), Ed25519Signature(Array.fill(64)(0.toByte))),
+        GuaranteeSignature(ValidatorIndex(1), Ed25519Signature(Array.fill(64)(0.toByte)))
+      )
+    )
+    ReportInput(guarantees = List(guarantee), slot = blockSlot)
+
+  test("lookup anchor too old yields LookupAnchorNotRecent (not AnchorNotRecent)") {
+    // blockSlot - lookupAnchorSlot = 30 - 1 = 29 > maxLookupAnchorAge(TINY) = 24
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0x01.toByte)),
+      lookupAnchor = Hash(Array.fill(32)(0x01.toByte)),
+      lookupAnchorSlot = 1,
+      blockSlot = 30)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
+    output.swap.toOption shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    postState shouldBe preState
+  }
+
+  test("lookup anchor absent from beta with no ancestor set yields LookupAnchorNotRecent") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0x01.toByte)),        // present in β
+      lookupAnchor = Hash(Array.fill(32)(0xFF.toByte)),  // absent from β
+      lookupAnchorSlot = 5,
+      blockSlot = 10)
+    // No ancestor set -> β-membership fallback -> lookup anchor missing.
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
+    output.swap.toOption shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    postState shouldBe preState
+  }
+
+  test("lookup anchor found in ancestor set (deeper than beta) passes the lookup-anchor check") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val lookupAnchor = Hash(Array.fill(32)(0xFF.toByte)) // absent from β
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0xEE.toByte)),        // absent from β -> AnchorNotRecent once lookup passes
+      lookupAnchor = lookupAnchor,
+      lookupAnchorSlot = 5,
+      blockSlot = 10)
+    // Ancestor set records the lookup anchor by (slot, hash): the lookup-anchor check passes,
+    // so the failure surfaces on the *anchor* — proving the ancestor set was consulted.
+    val ancestry = List(AncestorHeader(5L, lookupAnchor))
+    val (postState, output) =
+      ReportTransition.stfInternal(input, preState, TinyConfig, skipAncestryValidation = false, ancestry)
+    output.swap.toOption shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    postState shouldBe preState
+  }
+
+  test("ancestor-set lookup anchor with mismatched timeslot is rejected (LookupAnchorNotRecent)") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val lookupAnchor = Hash(Array.fill(32)(0xFF.toByte))
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0x01.toByte)),
+      lookupAnchor = lookupAnchor,
+      lookupAnchorSlot = 5,
+      blockSlot = 10)
+    // Same header hash but a different recorded slot: the spec requires both to match.
+    val ancestry = List(AncestorHeader(6L, lookupAnchor))
+    val (postState, output) =
+      ReportTransition.stfInternal(input, preState, TinyConfig, skipAncestryValidation = false, ancestry)
+    output.swap.toOption shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    postState shouldBe preState
+  }
+
+  test("anchor absent from beta still yields AnchorNotRecent (anchor path unchanged)") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0xFF.toByte)),        // absent from β
+      lookupAnchor = Hash(Array.fill(32)(0x01.toByte)),  // present in β -> lookup passes via fallback
+      lookupAnchorSlot = 1,
+      blockSlot = 10)
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
+    output.swap.toOption shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    postState shouldBe preState
+  }
+
   test("duplicate package detection") {
     // Test that duplicate packages within a batch are rejected
     val authHash = Hash(Array.fill(32)(0xAA.toByte))

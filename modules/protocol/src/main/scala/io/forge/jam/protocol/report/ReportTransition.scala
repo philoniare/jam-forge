@@ -79,11 +79,12 @@ object ReportTransition:
   def stfView(
     input: ReportInput,
     view: TrieBackedJamState,
-    skipAncestryValidation: Boolean = false
+    skipAncestryValidation: Boolean = false,
+    ancestry: List[AncestorHeader] = List.empty
   ): ReportOutput =
     val preState = ReportBridge.extract(view)
     val (postState, output) =
-      stfInternal(input, preState, view.config, skipAncestryValidation)
+      stfInternal(input, preState, view.config, skipAncestryValidation, ancestry)
     ReportBridge.apply(view, postState)
     output
 
@@ -99,7 +100,8 @@ object ReportTransition:
     input: ReportInput,
     preState: ReportState,
     config: ChainConfig,
-    skipAncestryValidation: Boolean = false
+    skipAncestryValidation: Boolean = false,
+    ancestry: List[AncestorHeader] = List.empty
   ): (ReportState, ReportOutput) =
     val result =
       for
@@ -107,7 +109,7 @@ object ReportTransition:
         _ <- validateNoDuplicatePackages(input.guarantees, preState)
         _ <- validateAnchorAge(input.guarantees, input.slot, config)
         _ <- if skipAncestryValidation then Right(())
-        else validateAnchor(input.guarantees, preState.recentBlocks, input.slot, config)
+        else validateAnchor(input.guarantees, preState.recentBlocks, ancestry, input.slot, config)
         processedGuarantees <- processGuarantees(input, preState, config)
       yield processedGuarantees
 
@@ -298,7 +300,7 @@ object ReportTransition:
     for guarantee <- guarantees do
       val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.value.toLong
       if lookupAnchorSlot > currentSlot || currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
-        return Left(ReportErrorCode.AnchorNotRecent)
+        return Left(ReportErrorCode.LookupAnchorNotRecent)
     Right(())
 
   /**
@@ -307,6 +309,7 @@ object ReportTransition:
   private def validateAnchor(
     guarantees: List[GuaranteeExtrinsic],
     recentBlocks: HistoricalBetaContainer,
+    ancestry: List[AncestorHeader],
     currentSlot: Long,
     config: ChainConfig
   ): ValidationResult =
@@ -315,12 +318,16 @@ object ReportTransition:
     for guarantee <- guarantees do
       val context = guarantee.report.context
 
-      // Find and validate lookup anchor block
-      val lookupAnchorBlock = recentBlocks.history.find(_.headerHash == context.lookupAnchor)
-      if lookupAnchorBlock.isEmpty then
-        return Left(ReportErrorCode.AnchorNotRecent)
+      val lookupAnchorSlot = context.lookupAnchorSlot.value.toLong
+      val lookupAnchorPresent =
+        if ancestry.nonEmpty then
+          ancestry.exists(a => a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot)
+        else
+          recentBlocks.history.exists(_.headerHash == context.lookupAnchor)
+      if !lookupAnchorPresent then
+        return Left(ReportErrorCode.LookupAnchorNotRecent)
 
-      // Find and validate anchor block
+      // Find and validate anchor block (gp: within recent history β = last Crecenthistorylen blocks)
       val anchorBlock = recentBlocks.history.find(_.headerHash == context.anchor)
       if anchorBlock.isEmpty then
         return Left(ReportErrorCode.AnchorNotRecent)

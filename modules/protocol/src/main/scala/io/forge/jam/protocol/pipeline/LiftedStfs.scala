@@ -49,11 +49,14 @@ object LiftedStfs:
     wrapError = (e: AssuranceErrorCode) => PipelineError.AssuranceErr(e)
   )
 
-  // 4. Reports STF (special: has skipAncestryValidation param)
-  def reports(skipAncestryValidation: Boolean): StfStepWith[ReportOutputMarks] =
+  // 4. Reports STF (special: has skipAncestryValidation + ancestor-set params)
+  def reports(
+      skipAncestryValidation: Boolean,
+      ancestry: List[AncestorHeader] = List.empty
+  ): StfStepWith[ReportOutputMarks] =
     liftStandard(
       stf = (input, view) =>
-        ReportTransition.stfView(input, view, skipAncestryValidation),
+        ReportTransition.stfView(input, view, skipAncestryValidation, ancestry),
       extractInput = ctx =>
         ReportInput(
           guarantees = ctx.block.extrinsic.guarantees,

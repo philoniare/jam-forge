@@ -2,6 +2,7 @@ package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.conformance.ConformanceCodecs.encode
+import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
 
 import java.io.File
@@ -165,7 +166,10 @@ class ConformanceTestRunner(
         ProtocolMessage.ErrorMsg(Error(s"Parent state not found: ${parentHash.toHex.take(16)}..."))
 
       case Some(parentState) =>
-        blockImporter.importBlock(block, parentState) match
+        val ancestry = stateStore.getAncestry.map(a =>
+          AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
+        )
+        blockImporter.importBlock(block, parentState, ancestry) match
           case ImportResult.Success(postStateRoot, _) =>
             val headerBytes = block.header.encode
             val headerHash = Hashing.blake2b256(headerBytes)

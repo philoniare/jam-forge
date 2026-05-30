@@ -106,7 +106,11 @@ class BlockImporter(
     * @return
     *   ImportResult indicating success with new state or failure with error
     */
-  def importBlock(block: Block, preState: RawState): ImportResult =
+  def importBlock(
+      block: Block,
+      preState: RawState,
+      ancestry: List[AncestorHeader] = List.empty
+  ): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
         return ImportResult.Failure(
@@ -136,7 +140,8 @@ class BlockImporter(
             block,
             view,
             skipAncestryValidation,
-            Some(sharedExecutor)
+            Some(sharedExecutor),
+            ancestry
           )
         finally sharedExecutor.setStorageView(None)
 

@@ -3,6 +3,7 @@ package io.forge.jam.protocol.pipeline
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
 import io.forge.jam.protocol.accumulation.AccumulationExecutor
@@ -24,7 +25,8 @@ object BlockPipeline:
       block: Block,
       view: TrieBackedJamState,
       skipAncestryValidation: Boolean = false,
-      sharedExecutor: Option[AccumulationExecutor] = None
+      sharedExecutor: Option[AccumulationExecutor] = None,
+      ancestry: List[AncestorHeader] = List.empty
   ): Either[PipelineError, BlockPipelineResult] =
     val initialContext = PipelineContext.from(block, view.config, view)
     val storageView: Option[ServiceStorageView] = Some(view.storage)
@@ -59,7 +61,7 @@ object BlockPipeline:
       _ <- updateRecentHistoryPartial
 
       // Step 6: Reports
-      _ <- reports(skipAncestryValidation)
+      _ <- reports(skipAncestryValidation, ancestry)
 
       _ <- savepointStorageView(storageView)
 

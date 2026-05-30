@@ -5,6 +5,7 @@ import fs2.io.net.Socket
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.traces.{
   BlockImporter,
   ImportResult,
@@ -347,8 +348,11 @@ class ProtocolHandler(
             case None =>
               Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
             case Some(parentState) =>
+              val ancestry = stateStore.getAncestry.map(a =>
+                AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
+              )
               // Import block using existing BlockImporter
-              blockImporter.importBlock(block, parentState) match
+              blockImporter.importBlock(block, parentState, ancestry) match
                 case ImportResult.Success(postStateRoot, _) =>
                   // Compute header hash for this block
                   val headerBytes = block.header.encode
