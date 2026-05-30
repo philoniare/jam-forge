@@ -123,8 +123,8 @@ object ReportTransition:
           servicesStatistics = updateServiceStatistics(input.guarantees)
         )
         val outputMarks = ReportOutputMarks(
-          reported = packages.sortBy(_.workPackageHash.toHex),
-          reporters = guarantors.distinct.sortBy(_.toHex)
+          reported = packages.sortBy(_.workPackageHash),
+          reporters = guarantors.distinct.sorted
         )
         (postState, StfResult.success(outputMarks))
 

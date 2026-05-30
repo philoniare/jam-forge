@@ -100,6 +100,11 @@ object DisputeTransition:
     // Collect all ed25519 keys from kappa and lambda validator sets
     val validGuarantorKeys = (state.kappa ++ state.lambda).map(_.ed25519).toSet
 
+    val psiGoodSet = state.psi.good.toSet
+    val psiBadSet = state.psi.bad.toSet
+    val psiWonkySet = state.psi.wonky.toSet
+    val psiOffendersSet = state.psi.offenders.toSet
+
     // 1. Validate verdicts ordering first
     if !ValidationHelpers.isSortedUniqueByBytes(disputes.verdicts)(
         _.target.bytes
@@ -157,15 +162,9 @@ object DisputeTransition:
       if !allValid then return Some(DisputeErrorCode.BadSignature)
 
       // Validate target has not already been judged
-      if state.psi.good.exists(h =>
-          java.util.Arrays.equals(h.bytes, verdict.target.bytes)
-        ) ||
-        state.psi.bad.exists(h =>
-          java.util.Arrays.equals(h.bytes, verdict.target.bytes)
-        ) ||
-        state.psi.wonky.exists(h =>
-          java.util.Arrays.equals(h.bytes, verdict.target.bytes)
-        )
+      if psiGoodSet.contains(verdict.target) ||
+        psiBadSet.contains(verdict.target) ||
+        psiWonkySet.contains(verdict.target)
       then return Some(DisputeErrorCode.AlreadyJudged)
 
       // For all-negative verdicts, require at least 2 culprits
@@ -204,9 +203,7 @@ object DisputeTransition:
     // 4. Validate each culprit
     for culprit <- disputes.culprits do
       // Validate culprit key is from a known guarantor (validator)
-      if !validGuarantorKeys.exists(k =>
-          java.util.Arrays.equals(k.bytes, culprit.key.bytes)
-        )
+      if !validGuarantorKeys.contains(culprit.key)
       then return Some(DisputeErrorCode.BadGuarantorKey)
 
       val message = constants.JAM_GUARANTEE_BYTES ++ culprit.target.bytes
@@ -216,18 +213,12 @@ object DisputeTransition:
         return Some(DisputeErrorCode.BadSignature)
 
       // Check if already an offender
-      if state.psi.offenders.exists(k =>
-          java.util.Arrays.equals(k.bytes, culprit.key.bytes)
-        )
+      if psiOffendersSet.contains(culprit.key)
       then return Some(DisputeErrorCode.OffenderAlreadyReported)
 
       // Validate that culprit target will be judged bad (or was already bad in state)
-      val targetIsBad = newBadTargets.exists(h =>
-        java.util.Arrays.equals(h.bytes, culprit.target.bytes)
-      ) ||
-        state.psi.bad.exists(h =>
-          java.util.Arrays.equals(h.bytes, culprit.target.bytes)
-        )
+      val targetIsBad =
+        newBadTargets.contains(culprit.target) || psiBadSet.contains(culprit.target)
       if !targetIsBad then return Some(DisputeErrorCode.CulpritsVerdictNotBad)
 
     // 5. Validate faults ordering
@@ -237,15 +228,11 @@ object DisputeTransition:
     // 6. Validate each fault
     for fault <- disputes.faults do
       // Validate fault key is from a known validator
-      if !validGuarantorKeys.exists(k =>
-          java.util.Arrays.equals(k.bytes, fault.key.bytes)
-        )
+      if !validGuarantorKeys.contains(fault.key)
       then return Some(DisputeErrorCode.BadAuditorKey)
 
       // Check if already an offender
-      if state.psi.offenders.exists(k =>
-          java.util.Arrays.equals(k.bytes, fault.key.bytes)
-        )
+      if psiOffendersSet.contains(fault.key)
       then return Some(DisputeErrorCode.OffenderAlreadyReported)
 
       val prefixBytes =

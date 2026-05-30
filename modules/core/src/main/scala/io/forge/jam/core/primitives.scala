@@ -80,6 +80,8 @@ object primitives:
         fromHex(cleanHex).left.map(err => s"Invalid hash: $err")
     }
 
+    given Ordering[Hash] = (a, b) => a.toByteVector.compare(b.toByteVector)
+
   // ============================================================================
   // Bandersnatch Types
   // ============================================================================

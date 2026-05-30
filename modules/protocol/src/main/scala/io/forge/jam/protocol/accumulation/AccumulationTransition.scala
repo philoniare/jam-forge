@@ -232,7 +232,7 @@ object AccumulationTransition:
     val commitments = outerResult.commitments
 
     // 9. Rotate accumulated array (sliding window)
-    val newAccumulatedList = actuallyAccumulated.toList.sortBy(_.toHex)
+    val newAccumulatedList = actuallyAccumulated.toList.sorted
     val newAccumulatedArray = (0 until config.epochLength).map { idx =>
       if idx == config.epochLength - 1 then
         // New items at last position
@@ -305,7 +305,7 @@ object AccumulationTransition:
 
     // 16. Convert commitments to list format for state storage (key 0x10)
     val commitmentsList =
-      commitments.toList.sortBy(c => (c.serviceIndex, c.hash.toHex)).map { c =>
+      commitments.toList.sortBy(c => (c.serviceIndex, c.hash)).map { c =>
         (c.serviceIndex, c.hash)
       }
 
@@ -925,7 +925,7 @@ object AccumulationTransition:
 
     // Sort by service index, then by hash for deterministic ordering
     val sortedCommitments =
-      commitments.toList.sortBy(c => (c.serviceIndex, c.hash.toHex))
+      commitments.toList.sortBy(c => (c.serviceIndex, c.hash))
     val nodes = sortedCommitments.map { commitment =>
       val buffer = ByteBuffer.allocate(4 + 32).order(ByteOrder.LITTLE_ENDIAN)
       buffer.putInt(commitment.serviceIndex.toInt)

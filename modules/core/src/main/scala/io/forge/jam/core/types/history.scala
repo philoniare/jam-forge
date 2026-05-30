@@ -74,7 +74,7 @@ object history:
         { case (headerHash, beefyRoot, stateRoot, reported) =>
           HistoricalBeta(headerHash, beefyRoot, stateRoot, reported)
         },
-        hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.reported.sortBy(_.hash.toHex))
+        hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.reported.sortBy(_.hash))
       )
 
     given Decoder[HistoricalBeta] =

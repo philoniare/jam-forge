@@ -527,13 +527,13 @@ extension (state: PartialState)
           data = AccumulationServiceData(
             service = account.info,
             storage = account.storage.toList
-              .sortBy(_._1.toHex)
+              .sortBy(_._1)
               .map { case (key, value) => StorageMapEntry(key, value) },
             preimages = account.preimages.toList
-              .sortBy(_._1.toHex)
+              .sortBy(_._1)
               .map { case (hash, blob) => PreimageHash(hash, blob) },
             preimageRequests = account.preimageRequests.toList
-              .sortBy(_._1.hash.toHex)
+              .sortBy(_._1.hash)
               .map { case (key, request) =>
                 PreimageRequestsMapKey(key.hash, request.requestedAt)
               }

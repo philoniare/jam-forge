@@ -163,7 +163,7 @@ object workpackage:
         },
         wr => {
           // Sort segment root lookup by work package hash (as in original encoder)
-          val sortedLookup = wr.segmentRootLookup.sortBy(_.workPackageHash.toHex)
+          val sortedLookup = wr.segmentRootLookup.sortBy(_.workPackageHash)
           (wr.packageSpec, wr.context, wr.coreIndex.toInt, wr.authorizerHash, wr.authGasUsed.toLong, wr.authOutput, sortedLookup, wr.results)
         }
       )
