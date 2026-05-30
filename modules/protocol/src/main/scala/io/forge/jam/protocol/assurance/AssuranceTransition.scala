@@ -129,8 +129,6 @@ object AssuranceTransition:
     state: AssuranceState,
     config: ChainConfig
   ): Set[Int] =
-    val requiredAssurances = config.superMajority
-
     // For each core, count how many validators have assured it
     val counts = scala.collection.mutable.Map[Int, Int]()
     for assurance <- input.assurances do
@@ -139,7 +137,7 @@ object AssuranceTransition:
         if isBitSet(bitfieldBytes, coreIndex) then
           counts(coreIndex) = counts.getOrElse(coreIndex, 0) + 1
 
-    counts.filter { case (_, count) => count > requiredAssurances }.keySet.toSet
+    counts.filter { case (_, count) => 3 * count > 2 * config.validatorCount }.keySet.toSet
 
   /**
    * Get work reports from available cores in sorted order.

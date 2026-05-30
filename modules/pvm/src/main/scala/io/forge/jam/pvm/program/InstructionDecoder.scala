@@ -148,8 +148,8 @@ object InstructionDecoder:
       case Some(op) if regImmOffsetOpcodes.contains(op) => val (r, i, o) = readRegImmOffset(chunk, offset, len); regImmOffsetOpcodes(op)(r, i, o)
       case Some(op) if storeImmOpcodes.contains(op) => val (a, v) = readImmImm(chunk, len); storeImmOpcodes(op)(a, v)
       case Some(op) if storeImmIndirectOpcodes.contains(op) => val (r, o, v) = readRegImmImm(chunk, len); storeImmIndirectOpcodes(op)(r, o, v)
-      case Some(Opcode.Ecalli) => Instruction.Ecalli(signExtend(chunk, len * 8))
-      case Some(Opcode.Jump) => Instruction.Jump((offset + signExtend(chunk, len * 8).toInt).toLong & 0xFFFFFFFFL)
+      case Some(Opcode.Ecalli) => Instruction.Ecalli(signExtend(chunk, math.min(4, len) * 8))
+      case Some(Opcode.Jump) => Instruction.Jump((offset + signExtend(chunk, math.min(4, len) * 8).toInt).toLong & 0xFFFFFFFFL)
       case Some(Opcode.LoadImm64) => Instruction.LoadImm64(clampReg(code(offset + 1) & 0xFF), readLong(code, offset + 2))
       case Some(Opcode.LoadImmAndJumpIndirect) => val (a, b, i1, i2) = readRegs2Imm2(chunk, len); Instruction.LoadImmAndJumpIndirect(a, b, i1, i2)
       case _ => Instruction.Panic
