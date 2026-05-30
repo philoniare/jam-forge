@@ -12,16 +12,9 @@ object InstructionExecutor:
       ExecutionContext,
       ProgramCounter,
       ProgramCounter
-  ) => Option[UInt]
-
-  private inline def expect[I <: Instruction](
-      instr: Instruction
-  )(using ct: scala.reflect.ClassTag[I]): I =
-    if ct.runtimeClass.isInstance(instr) then instr.asInstanceOf[I]
-    else
-      throw new IllegalStateException(
-        s"PVM dispatch invariant violated: expected ${ct.runtimeClass.getSimpleName} but got ${instr.getClass.getSimpleName}"
-      )
+  ) => Int
+  private inline def expect[I <: Instruction](instr: Instruction): I =
+    instr.asInstanceOf[I]
 
   private val handlers: Array[Handler] =
     val arr = new Array[Handler](256)
@@ -915,12 +908,12 @@ object InstructionExecutor:
     * @param nextPc
     *   The next program counter (for fallthrough)
     * @return
-    *   Some(target) to continue execution, None to interrupt
+    *   the next compiled offset to continue execution, or a negative sentinel
     */
   def execute(
       instruction: Instruction,
       ctx: ExecutionContext,
       pc: ProgramCounter,
       nextPc: ProgramCounter
-  ): Option[UInt] =
+  ): Int =
     handlers(instruction.opcode.value)(instruction, ctx, pc, nextPc)

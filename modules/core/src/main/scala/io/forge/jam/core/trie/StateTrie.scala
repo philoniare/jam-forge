@@ -22,7 +22,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         case TrieNodeType.EmbeddedLeaf =>
           TrieNode.embeddedValue(node)
         case TrieNodeType.RegularLeaf =>
-          val vh = Hash(node.right.toArray)
+          val vh = Hash.fromByteVectorUnsafe(node.right.toByteVector)
           pendingValues.get(vh).orElse(backend.readRawValue(vh))
         case TrieNodeType.Branch =>
           None
@@ -59,8 +59,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         emitLeaf(key, value)
       case Some(node) if node.nodeType == TrieNodeType.Branch =>
         val bit = bitAt(key, depth)
-        val leftHash = Hash(node.left.toArray)
-        val rightHash = Hash(node.right.toArray)
+        val leftHash = Hash.fromByteVectorUnsafe(node.left.toByteVector)
+        val rightHash = Hash.fromByteVectorUnsafe(node.right.toByteVector)
         val newChildHash =
           if bit then insert(rightHash, key, value, depth + 1)
           else insert(leftHash, key, value, depth + 1)
@@ -73,7 +73,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         newBranch.hash
       case Some(leaf) =>
         val existingKey = TrieNode.leafKey(leaf)
-        if java.util.Arrays.equals(existingKey.toArray, key.toArray) then
+        if existingKey.toByteVector == key.toByteVector then
           unrefNode(rootHash)
           emitLeaf(key, value)
         else
@@ -94,7 +94,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       pendingNodes.update(existing.hash, existing)
       refNode(existing.hash)
       if existing.nodeType == TrieNodeType.RegularLeaf then
-        refValue(Hash(existing.right.toArray))
+        refValue(Hash.fromByteVectorUnsafe(existing.right.toByteVector))
       val branch =
         if newBit then TrieNode.branch(existing.hash, newLeafHash)
         else TrieNode.branch(newLeafHash, existing.hash)
@@ -116,8 +116,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       case None => rootHash
       case Some(node) if node.nodeType == TrieNodeType.Branch =>
         val bit = bitAt(key, depth)
-        val leftHash = Hash(node.left.toArray)
-        val rightHash = Hash(node.right.toArray)
+        val leftHash = Hash.fromByteVectorUnsafe(node.left.toByteVector)
+        val rightHash = Hash.fromByteVectorUnsafe(node.right.toByteVector)
         val newLeftHash = if bit then leftHash else delete(leftHash, key, depth + 1)
         val newRightHash = if bit then delete(rightHash, key, depth + 1) else rightHash
         if newLeftHash == leftHash && newRightHash == rightHash then
@@ -126,7 +126,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           unrefNode(rootHash)
           collapseBranch(newLeftHash, newRightHash)
       case Some(leaf) =>
-        if java.util.Arrays.equals(TrieNode.leafKey(leaf).toArray, key.toArray) then
+        if TrieNode.leafKey(leaf).toByteVector == key.toByteVector then
           unrefNode(rootHash)
           Hash.zero
         else
@@ -183,8 +183,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         node.nodeType match
           case TrieNodeType.Branch =>
             val childHash =
-              if bitAt(prefix, depth) then Hash(node.right.toArray)
-              else Hash(node.left.toArray)
+              if bitAt(prefix, depth) then Hash.fromByteVectorUnsafe(node.right.toByteVector)
+              else Hash.fromByteVectorUnsafe(node.left.toByteVector)
             findSubtreeRoot(childHash, prefix, bitsCount, depth + 1)
           case _ =>
             val leafKey = TrieNode.leafKey(node)
@@ -201,14 +201,14 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
   private def collectLeaves(node: TrieNode, buf: mutable.ArrayBuffer[(JamBytes, JamBytes)]): Unit =
     node.nodeType match
       case TrieNodeType.Branch =>
-        getNode(Hash(node.left.toArray)).foreach(collectLeaves(_, buf))
-        getNode(Hash(node.right.toArray)).foreach(collectLeaves(_, buf))
+        getNode(Hash.fromByteVectorUnsafe(node.left.toByteVector)).foreach(collectLeaves(_, buf))
+        getNode(Hash.fromByteVectorUnsafe(node.right.toByteVector)).foreach(collectLeaves(_, buf))
       case TrieNodeType.EmbeddedLeaf =>
         TrieNode.embeddedValue(node).foreach { v =>
           buf += ((TrieNode.leafKey(node), v))
         }
       case TrieNodeType.RegularLeaf =>
-        val vh = Hash(node.right.toArray)
+        val vh = Hash.fromByteVectorUnsafe(node.right.toByteVector)
         pendingValues.get(vh).orElse(backend.readRawValue(vh)).foreach { v =>
           buf += ((TrieNode.leafKey(node), v))
         }
@@ -222,11 +222,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       node.nodeType match
         case TrieNodeType.Branch =>
           val childHash =
-            if bitAt(key, depth) then Hash(node.right.toArray)
-            else Hash(node.left.toArray)
+            if bitAt(key, depth) then Hash.fromByteVectorUnsafe(node.right.toByteVector)
+            else Hash.fromByteVectorUnsafe(node.left.toByteVector)
           findLeaf(childHash, key, depth + 1)
         case _ =>
-          if java.util.Arrays.equals(TrieNode.leafKey(node).toArray, key.toArray) then Some(node)
+          if TrieNode.leafKey(node).toByteVector == key.toByteVector then Some(node)
           else None
     }
 

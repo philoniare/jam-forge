@@ -24,27 +24,32 @@ object StateKey:
    * @return 31-byte state key
    */
   def computeServiceDataStateKey(serviceIndex: Long, discriminator: Long, data: JamBytes): JamBytes =
-    // Encode discriminator as 4-byte little-endian using codec
-    val valEncoded = JamCodecs.encodeU32LE(UInt(discriminator.toInt))
+    // Build blake2b input: 4-byte LE discriminator || data, in a single array
+    val disc = discriminator.toInt
+    val dataArr = data.toArray
+    val h = new Array[Byte](4 + dataArr.length)
+    h(0) = (disc & 0xFF).toByte
+    h(1) = ((disc >> 8) & 0xFF).toByte
+    h(2) = ((disc >> 16) & 0xFF).toByte
+    h(3) = ((disc >> 24) & 0xFF).toByte
+    System.arraycopy(dataArr, 0, h, 4, dataArr.length)
 
-    // h = valEncoded + data
-    val h = valEncoded ++ data.toArray
-
-    // a = blake2b256(h)
+    // a = blake2b256(h) — use the Array[Byte] overload (byte-identical to the JamBytes one)
     val a = Hashing.blake2b256(h).bytes
 
-    // Construct the state key by interleaving service index with hash
-    val serviceBytes = JamCodecs.encodeU32LE(UInt(serviceIndex.toInt))
-
+    val svc = serviceIndex.toInt
     val stateKey = new Array[Byte](31)
 
-    // First 8 bytes: interleave service index with hash
+    // First 8 bytes: interleave service index (LE) with hash bytes 0..3
     // Pattern: [s0, h0, s1, h1, s2, h2, s3, h3]
-    var i = 0
-    while i < 4 do
-      stateKey(i * 2) = serviceBytes(i)
-      stateKey(i * 2 + 1) = a(i)
-      i += 1
+    stateKey(0) = (svc & 0xFF).toByte
+    stateKey(1) = a(0)
+    stateKey(2) = ((svc >> 8) & 0xFF).toByte
+    stateKey(3) = a(1)
+    stateKey(4) = ((svc >> 16) & 0xFF).toByte
+    stateKey(5) = a(2)
+    stateKey(6) = ((svc >> 24) & 0xFF).toByte
+    stateKey(7) = a(3)
 
     // Remaining bytes from hash (bytes 4-26, which is 23 bytes)
     System.arraycopy(a, 4, stateKey, 8, 23)

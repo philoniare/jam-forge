@@ -216,11 +216,9 @@ final case class PartialState(
     PartialState(
       accounts = mutable.Map.from(accounts.view.mapValues(_.copy())),
       stagingSet =
-        mutable.ListBuffer.from(stagingSet.map(b => JamBytes(b.toArray))),
+        mutable.ListBuffer.from(stagingSet),
       authQueue = mutable.ListBuffer.from(
-        authQueue.map(q =>
-          mutable.ListBuffer.from(q.map(h => JamBytes(h.toArray)))
-        )
+        authQueue.map(q => mutable.ListBuffer.from(q))
       ),
       manager = manager,
       assigners = mutable.ListBuffer.from(assigners),

@@ -57,22 +57,16 @@ object StatisticsTransition:
     else
       (preState.valsCurrStats, preState.valsLastStats)
 
-    // Helper to update stat at index
-    def updateStatAt(stats: List[StatCount], idx: Int, f: StatCount => StatCount): List[StatCount] =
-      stats.zipWithIndex.map { case (stat, i) => if i == idx then f(stat) else stat }
+    val statsArr: Array[StatCount] = baseStats.toArray
 
     // Update author's stats
     val authorIdx = input.authorIndex.toInt
-    val afterAuthor = updateStatAt(
-      baseStats,
-      authorIdx,
-      stat =>
-        stat.copy(
-          blocks = stat.blocks + 1,
-          tickets = stat.tickets + input.extrinsic.tickets.size,
-          preImages = stat.preImages + input.extrinsic.preimages.size,
-          preImagesSize = stat.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
-        )
+    val a = statsArr(authorIdx)
+    statsArr(authorIdx) = a.copy(
+      blocks = a.blocks + 1,
+      tickets = a.tickets + input.extrinsic.tickets.size,
+      preImages = a.preImages + input.extrinsic.preimages.size,
+      preImagesSize = a.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
     )
 
     // For each guarantee, determine which validator set to use based on epoch
@@ -95,22 +89,19 @@ object StatisticsTransition:
     }.toSet
 
     // Update guarantees - for each validator v, check if their Ed25519 key is in reporters
-    val afterGuarantees = preState.currValidators.zipWithIndex.foldLeft(afterAuthor) {
-      case (stats, (validator, idx)) =>
-        if reporters.contains(validator.ed25519.toByteVector) then
-          updateStatAt(stats, idx, stat => stat.copy(guarantees = stat.guarantees + 1))
-        else
-          stats
-    }
+    for ((validator, idx) <- preState.currValidators.zipWithIndex) do
+      if reporters.contains(validator.ed25519.toByteVector) then
+        val s = statsArr(idx)
+        statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
 
-    // Update assurances using foldLeft
-    val afterAssurances = input.extrinsic.assurances.foldLeft(afterGuarantees) { (stats, assurance) =>
+    // Update assurances
+    for (assurance <- input.extrinsic.assurances) do
       val idx = assurance.validatorIndex.toInt
-      updateStatAt(stats, idx, stat => stat.copy(assurances = stat.assurances + 1))
-    }
+      val s = statsArr(idx)
+      statsArr(idx) = s.copy(assurances = s.assurances + 1)
 
     val postState = StatState(
-      valsCurrStats = afterAssurances,
+      valsCurrStats = statsArr.toList,
       valsLastStats = lastStats,
       slot = preState.slot,
       currValidators = preState.currValidators,

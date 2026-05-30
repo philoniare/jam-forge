@@ -55,7 +55,7 @@ object TrieNode:
       val l = new Array[Byte](32)
       l(0) = 0
       System.arraycopy(key.toArray, 0, l, 1, 31)
-      TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), JamBytes(Hashing.blake2b256(value).bytes))
+      TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), JamBytes.fromByteVector(Hashing.blake2b256(value).toByteVector))
 
   def leafKey(node: TrieNode): JamBytes =
     require(node.nodeType != TrieNodeType.Branch, "leafKey is only defined on leaf nodes")

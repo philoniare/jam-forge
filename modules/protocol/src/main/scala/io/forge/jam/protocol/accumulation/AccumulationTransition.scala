@@ -631,12 +631,13 @@ object AccumulationTransition:
       val operands =
         serviceOperands.getOrElse(serviceId, mutable.ListBuffer.empty).toList
       val alwaysAccGas = alwaysAccers.getOrElse(serviceId, 0L)
-      val workItemGas = operands.collect {
-        case AccumulationOperand.WorkItem(op) => op.gasLimit
-      }.sum
-      val transferGas = operands.collect {
-        case AccumulationOperand.Transfer(t) => t.gasLimit
-      }.sum
+      var workItemGas = 0L
+      var transferGas = 0L
+      operands.foreach {
+        case AccumulationOperand.WorkItem(op) => workItemGas += op.gasLimit
+        case AccumulationOperand.Transfer(t)  => transferGas += t.gasLimit
+        case _                                => ()
+      }
       val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
       val execResult = executor.executeService(
