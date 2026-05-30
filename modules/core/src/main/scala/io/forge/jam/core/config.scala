@@ -33,9 +33,11 @@ final case class ChainConfig(
   /** Assurance timeout period in slots */
   assuranceTimeoutPeriod: Int = 5,
   /** Maximum age of lookup anchor in slots */
-  maxLookupAnchorAge: Long = 14_000L,
+  maxLookupAnchorAge: Long = 14_400L,
   /** Maximum number of dependencies per work report */
   maxDependencies: Int = 8,
+  /** Maximum number of work items/results per work report */
+  maxWorkItems: Int = 16,
   /** Maximum accumulation gas per work report */
   reportAccGas: Long = 10_000_000L,
   /** Ticket cutoff phase within epoch (tickets rejected when phase >= ticketCutoff) */
@@ -101,7 +103,7 @@ object ChainConfig:
     maxTicketsPerExtrinsic = 16,
     rotationPeriod = 10,
     numEcPiecesPerSegment = 6,
-    maxBlockGas = 35_000_000L,
+    maxBlockGas = 3_500_000_000L,
     maxRefineGas = 5_000_000_000L,
     reportAccGas = 10_000_000L,
     ticketCutoff = 500,

@@ -1306,14 +1306,14 @@ class AccumulationHostCalls(
       encodeLong(config.maxRefineGas)
     ) // workPackageRefineGas (UInt64)
     buffer.write(
-      encodeLong(if isTiny then config.maxBlockGas else 3_500_000_000L)
+      encodeLong(config.maxBlockGas)
     ) // totalAccumulationGas (UInt64)
     buffer.write(
       encodeShort(config.maxBlockHistory)
     ) // recentHistorySize (UInt16)
     buffer.write(
-      encodeShort(16)
-    ) // maxWorkItems (UInt16) - same for both configs
+      encodeShort(config.maxWorkItems)
+    ) // maxWorkItems (UInt16)
     buffer.write(
       encodeShort(config.maxDependencies)
     ) // maxDepsInWorkReport (UInt16)
@@ -1321,7 +1321,7 @@ class AccumulationHostCalls(
       encodeShort(config.maxTicketsPerExtrinsic)
     ) // maxTicketsPerExtrinsic (UInt16)
     buffer.write(
-      encodeIntLE(if isTiny then 24 else 14400)
+      encodeIntLE(config.maxLookupAnchorAge.toInt)
     ) // maxLookupAnchorAge (UInt32)
     buffer.write(
       encodeShort(config.ticketsPerValidator)

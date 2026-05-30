@@ -364,6 +364,7 @@ object ReportTransition:
     for
       _ <- require(guaranteeSlot <= currentSlot, ReportErrorCode.FutureReportSlot)
       _ <- require(workReport.results.nonEmpty, ReportErrorCode.MissingWorkResults)
+      _ <- require(workReport.results.length <= config.maxWorkItems, ReportErrorCode.WorkReportTooBig)
       _ <- require(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
       _ <- {

@@ -229,6 +229,8 @@ object SafroleTransition:
     // Skip if in epoch tail
     if phase >= config.ticketCutoff then
       Left(SafroleErrorCode.UnexpectedTicket)
+    else if tickets.length > config.maxTicketsPerExtrinsic then
+      Left(SafroleErrorCode.Reserved)
     else
       processTickets(postState, tickets, verificationGammaZ, config, None, List.empty)
 

@@ -119,8 +119,8 @@ object IntermediateSteps:
       else
         Right(())
     catch
-      case _: Exception =>
-        Right(())
+      case e: Exception =>
+        Left(PipelineError.HeaderVerificationErr(s"Extrinsic hash validation failed: ${e.getMessage}"))
   }
 
   val validateEntropyVrf: StfStep = validate { (view, ctx) =>
