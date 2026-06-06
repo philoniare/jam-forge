@@ -159,7 +159,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         // Verify slot is updated
         postState.slot shouldBe testCase.input.slot
         // Verify entropy is preserved
-        java.util.Arrays.equals(postState.entropy.toArray, testCase.preState.entropy.toArray) shouldBe true
+        postState.entropy.toArray shouldBe testCase.preState.entropy.toArray
   }
 
   test("privileges preservation") {
@@ -202,7 +202,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
     val expectedData = expected.toOption.get
     val actualData = actual.toOption.get
 
-    java.util.Arrays.equals(expectedData.ok.toArray, actualData.ok.toArray) shouldBe true withClue
+    expectedData.ok.toArray shouldBe actualData.ok.toArray withClue
       s"Output mismatch in test case: $testCaseName. Expected: ${expectedData.ok.toHex.take(64)}, Actual: ${actualData.ok.toHex.take(64)}"
 
   /**
@@ -217,7 +217,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
     expected.slot shouldBe actual.slot withClue s"Slot mismatch in test case: $testCaseName"
 
     // Compare entropy
-    java.util.Arrays.equals(expected.entropy.toArray, actual.entropy.toArray) shouldBe true withClue
+    expected.entropy.toArray shouldBe actual.entropy.toArray withClue
       s"Entropy mismatch in test case: $testCaseName"
 
     // Compare ready queue
@@ -238,7 +238,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       expSlot.size shouldBe actSlot.size withClue
         s"Accumulated slot $idx size mismatch in test case: $testCaseName. Expected: ${expSlot.size}, Actual: ${actSlot.size}"
       for (exp, act) <- expSlot.zip(actSlot) do
-        java.util.Arrays.equals(exp.toArray, act.toArray) shouldBe true withClue
+        exp.toArray shouldBe act.toArray withClue
           s"Accumulated hash mismatch at slot $idx in test case: $testCaseName"
 
     // Compare privileges
@@ -330,7 +330,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
     val actService = actual.data.service
     // expService.version shouldBe actService.version withClue
     // s"ServiceInfo version mismatch for service ${expected.id} in test case: $testCaseName"
-    java.util.Arrays.equals(expService.codeHash.bytes, actService.codeHash.bytes) shouldBe true withClue
+    expService.codeHash.bytes shouldBe actService.codeHash.bytes withClue
       s"ServiceInfo codeHash mismatch for service ${expected.id} in test case: $testCaseName"
     expService.balance shouldBe actService.balance withClue
       s"ServiceInfo balance mismatch for service ${expected.id} in test case: $testCaseName"

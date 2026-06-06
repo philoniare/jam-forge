@@ -159,7 +159,7 @@ class PreimagesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckProperty
 
       // Property: same blob should produce same hash
       val hash2 = Hashing.blake2b256(blob)
-      java.util.Arrays.equals(hash.bytes, hash2.bytes) shouldBe true
+      hash.bytes shouldBe hash2.bytes
     }
   }
 
@@ -236,7 +236,7 @@ class PreimagesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckProperty
 
       // GP: Hash must be deterministic
       val hash2 = Hashing.blake2b256(blob)
-      java.util.Arrays.equals(hash.bytes, hash2.bytes) shouldBe true
+      hash.bytes shouldBe hash2.bytes
     }
   }
 

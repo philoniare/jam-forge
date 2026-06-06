@@ -41,7 +41,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         case (peak1, peak2) =>
           (peak1, peak2) match
             case (Some(h1), Some(h2)) =>
-              java.util.Arrays.equals(h1.bytes, h2.bytes) shouldBe true
+              h1.bytes shouldBe h2.bytes
             case (None, None) =>
               succeed
             case _ =>
@@ -67,7 +67,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val beefyRoot2 = HistoryTransition.calculateBeefyRoot(mmr)
 
       // Property: same MMR state should produce same beefy root
-      java.util.Arrays.equals(beefyRoot1.bytes, beefyRoot2.bytes) shouldBe true
+      beefyRoot1.bytes shouldBe beefyRoot2.bytes
     }
   }
 
@@ -85,7 +85,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     val beefyRoot = HistoryTransition.calculateBeefyRoot(emptyMmr)
 
     // Property: empty MMR should produce zero hash
-    java.util.Arrays.equals(beefyRoot.bytes, Hash.zero.bytes) shouldBe true
+    beefyRoot.bytes shouldBe Hash.zero.bytes
   }
 
   test("property: single peak MMR returns that peak as beefy root") {
@@ -94,7 +94,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val beefyRoot = HistoryTransition.calculateBeefyRoot(singlePeakMmr)
 
       // Property: single peak should be returned as beefy root
-      java.util.Arrays.equals(beefyRoot.bytes, singlePeak.bytes) shouldBe true
+      beefyRoot.bytes shouldBe singlePeak.bytes
     }
   }
 
@@ -117,9 +117,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val postState = HistoryTransition.stfInternal(input, preState, testConfig)
 
       // Property: history should contain the new block's header hash
-      val hasNewBlock = postState.beta.history.exists { beta =>
-        java.util.Arrays.equals(beta.headerHash.bytes, input.headerHash.bytes)
-      }
+      val hasNewBlock = postState.beta.history.exists(_.headerHash == input.headerHash)
       hasNewBlock shouldBe true
     }
   }
@@ -157,8 +155,8 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       postState1.beta.history.size shouldBe postState2.beta.history.size
       postState1.beta.history.zip(postState2.beta.history).foreach {
         case (b1, b2) =>
-          java.util.Arrays.equals(b1.headerHash.bytes, b2.headerHash.bytes) shouldBe true
-          java.util.Arrays.equals(b1.beefyRoot.bytes, b2.beefyRoot.bytes) shouldBe true
+          b1.headerHash.bytes shouldBe b2.headerHash.bytes
+          b1.beefyRoot.bytes shouldBe b2.beefyRoot.bytes
       }
     }
   }
@@ -169,7 +167,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
       // Property: the newest block should have zero state root initially
       val newestBlock = postState.beta.history.last
-      java.util.Arrays.equals(newestBlock.stateRoot.bytes, Hash.zero.bytes) shouldBe true
+      newestBlock.stateRoot.bytes shouldBe Hash.zero.bytes
     }
   }
 
@@ -182,7 +180,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         // The second-to-last block (if exists) should have the parent state root
         if postState.beta.history.size >= 2 then
           val secondToLast = postState.beta.history(postState.beta.history.size - 2)
-          java.util.Arrays.equals(secondToLast.stateRoot.bytes, input.parentStateRoot.bytes) shouldBe true
+          secondToLast.stateRoot.bytes shouldBe input.parentStateRoot.bytes
       }
     }
   }
@@ -197,8 +195,8 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
       newestBlock.reported.zip(input.workPackages).foreach {
         case (reported, inputPkg) =>
-          java.util.Arrays.equals(reported.hash.bytes, inputPkg.hash.bytes) shouldBe true
-          java.util.Arrays.equals(reported.exportsRoot.bytes, inputPkg.exportsRoot.bytes) shouldBe true
+          reported.hash.bytes shouldBe inputPkg.hash.bytes
+          reported.exportsRoot.bytes shouldBe inputPkg.exportsRoot.bytes
       }
     }
   }
@@ -210,7 +208,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val superPeak2 = HistoryTransition.mmrSuperPeak(peaks)
 
       // Property: same peaks should produce same super peak
-      java.util.Arrays.equals(superPeak1.bytes, superPeak2.bytes) shouldBe true
+      superPeak1.bytes shouldBe superPeak2.bytes
     }
   }
 
@@ -243,7 +241,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val merged2 = io.forge.jam.core.Hashing.keccak256(
         io.forge.jam.core.JamBytes(left.bytes) ++ io.forge.jam.core.JamBytes(right.bytes)
       )
-      java.util.Arrays.equals(merged.bytes, merged2.bytes) shouldBe true
+      merged.bytes shouldBe merged2.bytes
     }
   }
 
@@ -264,9 +262,9 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       // GP: Same inputs produce identical outputs
       postState1.beta.history.size shouldBe postState2.beta.history.size
       postState1.beta.history.zip(postState2.beta.history).foreach { case (b1, b2) =>
-        java.util.Arrays.equals(b1.headerHash.bytes, b2.headerHash.bytes) shouldBe true
-        java.util.Arrays.equals(b1.beefyRoot.bytes, b2.beefyRoot.bytes) shouldBe true
-        java.util.Arrays.equals(b1.stateRoot.bytes, b2.stateRoot.bytes) shouldBe true
+        b1.headerHash.bytes shouldBe b2.headerHash.bytes
+        b1.beefyRoot.bytes shouldBe b2.beefyRoot.bytes
+        b1.stateRoot.bytes shouldBe b2.stateRoot.bytes
       }
     }
   }
@@ -282,7 +280,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
       // GP: Different from single peak
       val singlePeakResult = HistoryTransition.mmrSuperPeak(List(p1))
-      java.util.Arrays.equals(singlePeakResult.bytes, p1.bytes) shouldBe true
+      singlePeakResult.bytes shouldBe p1.bytes
     }
   }
 
@@ -295,7 +293,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
         // GP: New block's state root starts as zero hash
         postState.beta.history.lastOption.foreach { lastBlock =>
-          java.util.Arrays.equals(lastBlock.stateRoot.bytes, new Array[Byte](32)) shouldBe true
+          lastBlock.stateRoot.bytes shouldBe new Array[Byte](32)
         }
 
         // GP: The parent state root from input should be used to correct previous block

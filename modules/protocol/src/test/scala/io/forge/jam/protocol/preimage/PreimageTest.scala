@@ -115,10 +115,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val updatedAccount = postState.accounts.find(_.id == 5).get
     updatedAccount.data.preimages.size shouldBe 1
     updatedAccount.data.preimages.head.hash shouldBe hash
-    java.util.Arrays.equals(
-      updatedAccount.data.preimages.head.blob.toArray,
-      blob.toArray
-    ) shouldBe true
+    updatedAccount.data.preimages.head.blob shouldBe blob
   }
 
   test("lookup metadata update") {
@@ -151,9 +148,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
 
     // Verify lookup metadata was updated with timestamp
     val updatedAccount = postState.accounts.find(_.id == 7).get
-    val updatedMeta = updatedAccount.data.lookupMeta.find { m =>
-      java.util.Arrays.equals(m.key.hash.bytes, hash.bytes)
-    }.get
+    val updatedMeta = updatedAccount.data.lookupMeta.find(_.key.hash == hash).get
 
     updatedMeta.value.size shouldBe 1
     updatedMeta.value.head shouldBe slot
@@ -240,9 +235,9 @@ class PreimageTest extends AnyFunSuite with Matchers:
         s"Preimages size mismatch for account ${exp.id} in test case: $testCaseName"
 
       exp.data.preimages.zip(act.data.preimages).zipWithIndex.foreach { case ((expP, actP), pIdx) =>
-        java.util.Arrays.equals(expP.hash.bytes, actP.hash.bytes) shouldBe true withClue
+        expP.hash.bytes shouldBe actP.hash.bytes withClue
           s"Preimage hash mismatch at index $pIdx for account ${exp.id} in test case: $testCaseName"
-        java.util.Arrays.equals(expP.blob.toArray, actP.blob.toArray) shouldBe true withClue
+        expP.blob.toArray shouldBe actP.blob.toArray withClue
           s"Preimage blob mismatch at index $pIdx for account ${exp.id} in test case: $testCaseName"
       }
 
@@ -251,7 +246,7 @@ class PreimageTest extends AnyFunSuite with Matchers:
         s"LookupMeta size mismatch for account ${exp.id} in test case: $testCaseName"
 
       exp.data.lookupMeta.zip(act.data.lookupMeta).zipWithIndex.foreach { case ((expM, actM), mIdx) =>
-        java.util.Arrays.equals(expM.key.hash.bytes, actM.key.hash.bytes) shouldBe true withClue
+        expM.key.hash.bytes shouldBe actM.key.hash.bytes withClue
           s"LookupMeta hash mismatch at index $mIdx for account ${exp.id} in test case: $testCaseName"
         expM.key.length shouldBe actM.key.length withClue
           s"LookupMeta length mismatch at index $mIdx for account ${exp.id} in test case: $testCaseName"

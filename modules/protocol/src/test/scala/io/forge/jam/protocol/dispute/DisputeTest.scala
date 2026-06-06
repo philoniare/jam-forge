@@ -252,7 +252,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
 
         expectedMarks.offenders.zip(actualMarks.offenders).zipWithIndex.foreach {
           case ((exp, act), index) =>
-            java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+            exp.bytes shouldBe act.bytes withClue
               s"Offender mismatch at index $index in test case: $testCaseName"
         }
 
@@ -278,25 +278,25 @@ class DisputeTest extends AnyFunSuite with Matchers:
 
     expected.psi.good.zip(actual.psi.good).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+        exp.bytes shouldBe act.bytes withClue
           s"Psi good mismatch at index $idx in test case: $testCaseName"
     }
 
     expected.psi.bad.zip(actual.psi.bad).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+        exp.bytes shouldBe act.bytes withClue
           s"Psi bad mismatch at index $idx in test case: $testCaseName"
     }
 
     expected.psi.wonky.zip(actual.psi.wonky).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+        exp.bytes shouldBe act.bytes withClue
           s"Psi wonky mismatch at index $idx in test case: $testCaseName"
     }
 
     expected.psi.offenders.zip(actual.psi.offenders).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+        exp.bytes shouldBe act.bytes withClue
           s"Psi offenders mismatch at index $idx in test case: $testCaseName"
     }
 
@@ -318,9 +318,9 @@ class DisputeTest extends AnyFunSuite with Matchers:
     expected.kappa.size shouldBe actual.kappa.size withClue s"Kappa size mismatch in test case: $testCaseName"
     expected.kappa.zip(actual.kappa).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bandersnatch.bytes, act.bandersnatch.bytes) shouldBe true withClue
+        exp.bandersnatch.bytes shouldBe act.bandersnatch.bytes withClue
           s"Kappa bandersnatch mismatch at index $idx in test case: $testCaseName"
-        java.util.Arrays.equals(exp.ed25519.bytes, act.ed25519.bytes) shouldBe true withClue
+        exp.ed25519.bytes shouldBe act.ed25519.bytes withClue
           s"Kappa ed25519 mismatch at index $idx in test case: $testCaseName"
     }
 
@@ -328,8 +328,8 @@ class DisputeTest extends AnyFunSuite with Matchers:
     expected.lambda.size shouldBe actual.lambda.size withClue s"Lambda size mismatch in test case: $testCaseName"
     expected.lambda.zip(actual.lambda).zipWithIndex.foreach {
       case ((exp, act), idx) =>
-        java.util.Arrays.equals(exp.bandersnatch.bytes, act.bandersnatch.bytes) shouldBe true withClue
+        exp.bandersnatch.bytes shouldBe act.bandersnatch.bytes withClue
           s"Lambda bandersnatch mismatch at index $idx in test case: $testCaseName"
-        java.util.Arrays.equals(exp.ed25519.bytes, act.ed25519.bytes) shouldBe true withClue
+        exp.ed25519.bytes shouldBe act.ed25519.bytes withClue
           s"Lambda ed25519 mismatch at index $idx in test case: $testCaseName"
     }

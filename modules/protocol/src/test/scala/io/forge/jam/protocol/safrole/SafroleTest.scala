@@ -194,16 +194,16 @@ class SafroleTest extends AnyFunSuite with Matchers:
         // Compare epoch_mark
         (expectedData.epochMark, actualData.epochMark) match {
           case (Some(expMark), Some(actMark)) =>
-            java.util.Arrays.equals(expMark.entropy.bytes, actMark.entropy.bytes) shouldBe true withClue
+            expMark.entropy.bytes shouldBe actMark.entropy.bytes withClue
               s"Epoch mark entropy mismatch in test case: $testCaseName"
-            java.util.Arrays.equals(expMark.ticketsEntropy.bytes, actMark.ticketsEntropy.bytes) shouldBe true withClue
+            expMark.ticketsEntropy.bytes shouldBe actMark.ticketsEntropy.bytes withClue
               s"Epoch mark ticketsEntropy mismatch in test case: $testCaseName"
             expMark.validators.size shouldBe actMark.validators.size withClue
               s"Epoch mark validators size mismatch in test case: $testCaseName"
             expMark.validators.zip(actMark.validators).zipWithIndex.foreach { case ((exp, act), idx) =>
-              java.util.Arrays.equals(exp.bandersnatch.bytes, act.bandersnatch.bytes) shouldBe true withClue
+              exp.bandersnatch.bytes shouldBe act.bandersnatch.bytes withClue
                 s"Epoch mark validator bandersnatch mismatch at index $idx in test case: $testCaseName"
-              java.util.Arrays.equals(exp.ed25519.bytes, act.ed25519.bytes) shouldBe true withClue
+              exp.ed25519.bytes shouldBe act.ed25519.bytes withClue
                 s"Epoch mark validator ed25519 mismatch at index $idx in test case: $testCaseName"
             }
           case (None, None) => // Both None is fine
@@ -219,7 +219,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
             expTickets.size shouldBe actTickets.size withClue
               s"Tickets mark size mismatch in test case: $testCaseName"
             expTickets.zip(actTickets).zipWithIndex.foreach { case ((exp, act), idx) =>
-              java.util.Arrays.equals(exp.id.toArray, act.id.toArray) shouldBe true withClue
+              exp.id.toArray shouldBe act.id.toArray withClue
                 s"Tickets mark ID mismatch at index $idx in test case: $testCaseName"
               exp.attempt shouldBe act.attempt withClue
                 s"Tickets mark attempt mismatch at index $idx in test case: $testCaseName"
@@ -251,7 +251,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
     // Compare eta (4 entropy values)
     expected.eta.size shouldBe actual.eta.size withClue s"Eta size mismatch in test case: $testCaseName"
     expected.eta.zip(actual.eta).zipWithIndex.foreach { case ((exp, act), idx) =>
-      java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+      exp.bytes shouldBe act.bytes withClue
         s"Eta[$idx] mismatch in test case: $testCaseName. Expected: ${exp.bytes.take(8).map(b => f"$b%02x").mkString}, Actual: ${act.bytes.take(8).map(b => f"$b%02x").mkString}"
     }
 
@@ -275,7 +275,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
     expected.gammaA.size shouldBe actual.gammaA.size withClue
       s"GammaA (ticket accumulator) size mismatch in test case: $testCaseName. Expected: ${expected.gammaA.size}, Actual: ${actual.gammaA.size}"
     expected.gammaA.zip(actual.gammaA).zipWithIndex.foreach { case ((exp, act), idx) =>
-      java.util.Arrays.equals(exp.id.toArray, act.id.toArray) shouldBe true withClue
+      exp.id.toArray shouldBe act.id.toArray withClue
         s"GammaA ticket ID mismatch at index $idx in test case: $testCaseName"
       exp.attempt shouldBe act.attempt withClue
         s"GammaA ticket attempt mismatch at index $idx in test case: $testCaseName"
@@ -287,7 +287,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
         expTickets.size shouldBe actTickets.size withClue
           s"GammaS tickets size mismatch in test case: $testCaseName"
         expTickets.zip(actTickets).zipWithIndex.foreach { case ((exp, act), idx) =>
-          java.util.Arrays.equals(exp.id.toArray, act.id.toArray) shouldBe true withClue
+          exp.id.toArray shouldBe act.id.toArray withClue
             s"GammaS ticket ID mismatch at index $idx in test case: $testCaseName"
           exp.attempt shouldBe act.attempt withClue
             s"GammaS ticket attempt mismatch at index $idx in test case: $testCaseName"
@@ -296,7 +296,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
         expKeys.size shouldBe actKeys.size withClue
           s"GammaS keys size mismatch in test case: $testCaseName"
         expKeys.zip(actKeys).zipWithIndex.foreach { case ((exp, act), idx) =>
-          java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+          exp.bytes shouldBe act.bytes withClue
             s"GammaS key mismatch at index $idx in test case: $testCaseName"
         }
       case (TicketsOrKeys.Tickets(_), TicketsOrKeys.Keys(_)) =>
@@ -306,14 +306,14 @@ class SafroleTest extends AnyFunSuite with Matchers:
     }
 
     // Compare gammaZ (ring commitment)
-    java.util.Arrays.equals(expected.gammaZ.toArray, actual.gammaZ.toArray) shouldBe true withClue
+    expected.gammaZ.toArray shouldBe actual.gammaZ.toArray withClue
       s"GammaZ (ring commitment) mismatch in test case: $testCaseName"
 
     // Compare postOffenders
     expected.postOffenders.size shouldBe actual.postOffenders.size withClue
       s"PostOffenders size mismatch in test case: $testCaseName"
     expected.postOffenders.zip(actual.postOffenders).zipWithIndex.foreach { case ((exp, act), idx) =>
-      java.util.Arrays.equals(exp.bytes, act.bytes) shouldBe true withClue
+      exp.bytes shouldBe act.bytes withClue
         s"PostOffenders mismatch at index $idx in test case: $testCaseName"
     }
   }
@@ -328,13 +328,13 @@ class SafroleTest extends AnyFunSuite with Matchers:
     testCaseName: String
   ): Unit = {
     expected.zip(actual).zipWithIndex.foreach { case ((exp, act), idx) =>
-      java.util.Arrays.equals(exp.bandersnatch.bytes, act.bandersnatch.bytes) shouldBe true withClue
+      exp.bandersnatch.bytes shouldBe act.bandersnatch.bytes withClue
         s"$fieldName bandersnatch mismatch at index $idx in test case: $testCaseName"
-      java.util.Arrays.equals(exp.ed25519.bytes, act.ed25519.bytes) shouldBe true withClue
+      exp.ed25519.bytes shouldBe act.ed25519.bytes withClue
         s"$fieldName ed25519 mismatch at index $idx in test case: $testCaseName"
-      java.util.Arrays.equals(exp.bls.bytes, act.bls.bytes) shouldBe true withClue
+      exp.bls.bytes shouldBe act.bls.bytes withClue
         s"$fieldName bls mismatch at index $idx in test case: $testCaseName"
-      java.util.Arrays.equals(exp.metadata.toArray, act.metadata.toArray) shouldBe true withClue
+      exp.metadata.toArray shouldBe act.metadata.toArray withClue
         s"$fieldName metadata mismatch at index $idx in test case: $testCaseName"
     }
   }

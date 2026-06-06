@@ -101,7 +101,7 @@ class AuthorizationsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPro
           postQueue.size shouldBe preQueue.size
           postQueue.zip(preQueue).foreach {
             case (postHash, preHash) =>
-              java.util.Arrays.equals(postHash.bytes, preHash.bytes) shouldBe true
+              postHash.bytes shouldBe preHash.bytes
           }
       }
     }
@@ -153,7 +153,7 @@ class AuthorizationsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPro
           pool1.size shouldBe pool2.size
           pool1.zip(pool2).foreach {
             case (h1, h2) =>
-              java.util.Arrays.equals(h1.bytes, h2.bytes) shouldBe true
+              h1.bytes shouldBe h2.bytes
           }
       }
 
@@ -163,7 +163,7 @@ class AuthorizationsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPro
           queue1.size shouldBe queue2.size
           queue1.zip(queue2).foreach {
             case (h1, h2) =>
-              java.util.Arrays.equals(h1.bytes, h2.bytes) shouldBe true
+              h1.bytes shouldBe h2.bytes
           }
       }
     }
@@ -207,7 +207,7 @@ class AuthorizationsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPro
             // Pool should have exactly 1 item (from queue at position slot % Q)
             postPool.size shouldBe 1
             val expectedHash = queue(0) // slot = 0, so 0 % Q = 0
-            java.util.Arrays.equals(postPool.head.bytes, expectedHash.bytes) shouldBe true
+            postPool.head.bytes shouldBe expectedHash.bytes
       }
     }
   }

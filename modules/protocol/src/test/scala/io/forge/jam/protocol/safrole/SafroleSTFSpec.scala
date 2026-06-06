@@ -150,7 +150,7 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         whenever(output.isRight) {
           // Property: eta[0] should be blake2b256(previous_eta[0] || input_entropy)
           val expectedEta0 = Hashing.blake2b256(preState.eta.head.bytes ++ inputEntropy.bytes)
-          java.util.Arrays.equals(postState.eta.head.bytes, expectedEta0.bytes) shouldBe true
+          postState.eta.head.bytes shouldBe expectedEta0.bytes
         }
       }
     }
@@ -178,9 +178,9 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
           whenever(output.isRight) {
             // Property: eta[1], eta[2], eta[3] should remain unchanged when not crossing epoch boundary
-            java.util.Arrays.equals(postState.eta(1).bytes, preState.eta(1).bytes) shouldBe true
-            java.util.Arrays.equals(postState.eta(2).bytes, preState.eta(2).bytes) shouldBe true
-            java.util.Arrays.equals(postState.eta(3).bytes, preState.eta(3).bytes) shouldBe true
+            postState.eta(1).bytes shouldBe preState.eta(1).bytes
+            postState.eta(2).bytes shouldBe preState.eta(2).bytes
+            postState.eta(3).bytes shouldBe preState.eta(3).bytes
           }
         }
       }
@@ -205,13 +205,13 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         // Property: lambda <- kappa (previous epoch validators get old current validators)
         postState.lambda.zip(stateAtEpochEnd.kappa).foreach {
           case (post, pre) =>
-            java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+            post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
         }
 
         // Property: kappa <- gammaK (current validators get old queued validators)
         postState.kappa.zip(stateAtEpochEnd.gammaK).foreach {
           case (post, pre) =>
-            java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+            post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
         }
       }
     }
@@ -240,25 +240,25 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
             // Property: lambda should remain unchanged
             postState.lambda.zip(preState.lambda).foreach {
               case (post, pre) =>
-                java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+                post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
             }
 
             // Property: kappa should remain unchanged
             postState.kappa.zip(preState.kappa).foreach {
               case (post, pre) =>
-                java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+                post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
             }
 
             // Property: gammaK should remain unchanged
             postState.gammaK.zip(preState.gammaK).foreach {
               case (post, pre) =>
-                java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+                post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
             }
 
             // Property: iota should remain unchanged
             postState.iota.zip(preState.iota).foreach {
               case (post, pre) =>
-                java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
+                post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
             }
           }
         }
@@ -487,12 +487,12 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         case (TicketsOrKeys.Keys(keys1), TicketsOrKeys.Keys(keys2)) =>
           keys1.zip(keys2).foreach {
             case (k1, k2) =>
-              java.util.Arrays.equals(k1.bytes, k2.bytes) shouldBe true
+              k1.bytes shouldBe k2.bytes
           }
         case (TicketsOrKeys.Tickets(t1), TicketsOrKeys.Tickets(t2)) =>
           t1.zip(t2).foreach {
             case (m1, m2) =>
-              java.util.Arrays.equals(m1.id.toArray, m2.id.toArray) shouldBe true
+              m1.id.toArray shouldBe m2.id.toArray
           }
         case _ =>
           fail("gammaS types should be identical for identical inputs")

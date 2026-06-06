@@ -169,23 +169,17 @@ object DisputeTransition:
 
       // For all-negative verdicts, require at least 2 culprits
       if negativeVotes == verdict.votes.size && positiveVotes == 0 then
-        val culpritsForTarget = disputes.culprits.count(c =>
-          java.util.Arrays.equals(c.target.bytes, verdict.target.bytes)
-        )
+        val culpritsForTarget = disputes.culprits.count(_.target == verdict.target)
         if culpritsForTarget < 2 then
           return Some(DisputeErrorCode.NotEnoughCulprits)
 
       // For supermajority positive verdicts, require at least one fault
       if positiveVotes >= config.votesPerVerdict then
-        val hasFault = disputes.faults.exists(f =>
-          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes)
-        )
+        val hasFault = disputes.faults.exists(_.target == verdict.target)
         if !hasFault then return Some(DisputeErrorCode.NotEnoughFaults)
 
         // Validate fault votes are opposite of verdict outcome
-        val matchingFaults = disputes.faults.filter(f =>
-          java.util.Arrays.equals(f.target.bytes, verdict.target.bytes)
-        )
+        val matchingFaults = disputes.faults.filter(_.target == verdict.target)
         for fault <- matchingFaults do
           // For a good verdict (supermajority positive), faults must have voted false
           if fault.vote then return Some(DisputeErrorCode.FaultVerdictWrong)
@@ -292,12 +286,8 @@ object DisputeTransition:
     // Process culprits using foldLeft
     val afterCulprits = disputes.culprits.foldLeft(afterVerdicts) {
       (state, culprit) =>
-        val keyInOffenders = preState.psi.offenders.exists(k =>
-          java.util.Arrays.equals(k.bytes, culprit.key.bytes)
-        )
-        val keyAlreadyAdded = state.newOffendersSet.exists(k =>
-          java.util.Arrays.equals(k.bytes, culprit.key.bytes)
-        )
+        val keyInOffenders = preState.psi.offenders.contains(culprit.key)
+        val keyAlreadyAdded = state.newOffendersSet.contains(culprit.key)
 
         if !keyInOffenders && !keyAlreadyAdded then
           state.copy(
@@ -310,12 +300,8 @@ object DisputeTransition:
     // Process faults using foldLeft
     val afterFaults = disputes.faults.foldLeft(afterCulprits) {
       (state, fault) =>
-        val keyInOffenders = preState.psi.offenders.exists(k =>
-          java.util.Arrays.equals(k.bytes, fault.key.bytes)
-        )
-        val keyAlreadyAdded = state.newOffendersSet.exists(k =>
-          java.util.Arrays.equals(k.bytes, fault.key.bytes)
-        )
+        val keyInOffenders = preState.psi.offenders.contains(fault.key)
+        val keyAlreadyAdded = state.newOffendersSet.contains(fault.key)
 
         if !keyInOffenders && !keyAlreadyAdded then
           state.copy(
@@ -343,12 +329,8 @@ object DisputeTransition:
         )
 
         // Clear if the report is in bad or wonky
-        val isInvalid = afterFaults.bad.exists(h =>
-          java.util.Arrays.equals(h.bytes, reportHash.bytes)
-        ) ||
-          afterFaults.wonky.exists(h =>
-            java.util.Arrays.equals(h.bytes, reportHash.bytes)
-          )
+        val isInvalid = afterFaults.bad.contains(reportHash) ||
+          afterFaults.wonky.contains(reportHash)
 
         if isInvalid then None else Some(assignment)
       }

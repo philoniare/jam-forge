@@ -131,10 +131,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       whenever(output.isRight) {
         // GP: All previous offenders must still be present
         preState.psi.offenders.foreach { preOffender =>
-          val found = postState.psi.offenders.exists { postOffender =>
-            java.util.Arrays.equals(preOffender.bytes, postOffender.bytes)
-          }
-          found shouldBe true
+          postState.psi.offenders.contains(preOffender) shouldBe true
         }
 
         // GP: Offenders list size never decreases
@@ -155,9 +152,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       whenever(output.isRight) {
         // All original offenders must be preserved
         initialPsi.offenders.foreach { originalOffender =>
-          postState.psi.offenders.exists { postOffender =>
-            java.util.Arrays.equals(originalOffender.bytes, postOffender.bytes)
-          } shouldBe true
+          postState.psi.offenders.contains(originalOffender) shouldBe true
         }
       }
     }
@@ -187,16 +182,16 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
         postState.kappa.size shouldBe preState.kappa.size
         postState.kappa.zip(preState.kappa).foreach {
           case (post, pre) =>
-            java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
-            java.util.Arrays.equals(post.ed25519.bytes, pre.ed25519.bytes) shouldBe true
+            post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
+            post.ed25519.bytes shouldBe pre.ed25519.bytes
         }
 
         // GP: λ (previous validators) unchanged
         postState.lambda.size shouldBe preState.lambda.size
         postState.lambda.zip(preState.lambda).foreach {
           case (post, pre) =>
-            java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
-            java.util.Arrays.equals(post.ed25519.bytes, pre.ed25519.bytes) shouldBe true
+            post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
+            post.ed25519.bytes shouldBe pre.ed25519.bytes
         }
       }
     }

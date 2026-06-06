@@ -313,8 +313,8 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         // GP: currValidators must be preserved
         postState.currValidators.size shouldBe preState.currValidators.size
         postState.currValidators.zip(preState.currValidators).foreach { case (post, pre) =>
-          java.util.Arrays.equals(post.bandersnatch.bytes, pre.bandersnatch.bytes) shouldBe true
-          java.util.Arrays.equals(post.ed25519.bytes, pre.ed25519.bytes) shouldBe true
+          post.bandersnatch.bytes shouldBe pre.bandersnatch.bytes
+          post.ed25519.bytes shouldBe pre.ed25519.bytes
         }
 
         // GP: prevValidators must be preserved

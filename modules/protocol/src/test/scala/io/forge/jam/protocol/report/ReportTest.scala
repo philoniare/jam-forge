@@ -657,10 +657,7 @@ class ReportTest extends AnyFunSuite with Matchers:
           case (true, true) =>
             val expAssign = exp.get
             val actAssign = act.get
-            java.util.Arrays.equals(
-              expAssign.report.packageSpec.hash.bytes,
-              actAssign.report.packageSpec.hash.bytes
-            ) shouldBe true withClue
+            expAssign.report.packageSpec.hash shouldBe actAssign.report.packageSpec.hash withClue
               s"Assignment package hash mismatch at index $idx in test case: $testCaseName"
           case (false, false) => ()
           case (true, false) =>

@@ -43,7 +43,7 @@ object IntermediateSteps:
             Left(PipelineError.HeaderVerificationErr(s"InvalidSlotIndex: $slotIndex >= ${keys.length}"))
           else
             val expectedKey = keys(slotIndex)
-            if !java.util.Arrays.equals(expectedKey.bytes, blockAuthorKey.bytes) then
+            if expectedKey != blockAuthorKey then
               Left(PipelineError.HeaderVerificationErr("UnexpectedAuthor"))
             else
               val vrfInput = SigningContext.fallbackSealInputData(entropy)
