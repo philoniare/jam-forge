@@ -68,74 +68,77 @@ class Ed25519Test extends AnyFunSuite with Matchers:
   /**
    * ZIP-215 Compliance Test
    *
-   * The test checks:
-   * 1. Canonical public keys (pk_canonical: true) should be ACCEPTED by the library
-   * 2. Non-canonical public keys (pk_canonical: false) should be REJECTED
-   * 3. Canonical R values (r_canonical: true) should be ACCEPTED
-   * 4. Non-canonical R values (r_canonical: false) should be REJECTED
+   * ZIP 215 (https://zips.z.cash/zip-0215) is asymmetric about canonicality, and the
+   * distinction is the whole point of these vectors:
+   *   - the SCALAR s MUST be canonical (s < q);
+   *   - the POINTS A and R MAY be non-canonical -- "y-coordinates need not be reduced
+   *     mod p". Such an encoding denotes the same curve point as its reduction.
    *
-   * A ZIP-215 compliant implementation must:
-   * - Accept all canonically-encoded points
-   * - Reject non-canonically encoded points (y >= p)
-   * - Provide consistent results between single and batch verification
+   * So a non-canonical point encoding must NOT be rejected for being non-canonical.
+   * Rejecting it is a ZIP-215 violation, not compliance.
+   *
+   * We cannot assert a per-vector accept/reject verdict here: vectors.json carries
+   * inputs and canonicality metadata but no expected results, so any blanket verdict
+   * would be pinning observed behaviour rather than testing the rule. Instead we test
+   * the invariant the rule implies:
+   *
+   *   verify(non-canonical encoding) == verify(its canonical reduction)
+   *
+   * A canonicality pre-filter (the ZIP-215 violation this test exists to catch) breaks
+   * that equality immediately -- it rejects the non-canonical form while accepting its
+   * canonical twin.
    */
+  /** Ed25519 field prime p = 2^255 - 19 */
+  private val FieldPrime: BigInt = (BigInt(1) << 255) - 19
+
+  /** Reduce a 32-byte little-endian point encoding to its canonical form (y mod p),
+    * preserving the sign bit. Returns None when the encoding is already canonical.
+    */
+  private def canonicalReduction(hex: String): Option[String] =
+    val n = BigInt(1, hexToBytes(hex).reverse)
+    val sign = (n >> 255) & 1
+    val y = n & ((BigInt(1) << 255) - 1)
+    if y < FieldPrime then None
+    else
+      val reduced = (y % FieldPrime) | (sign << 255)
+      val le = reduced.toByteArray.reverse.padTo(32, 0.toByte).take(32)
+      Some(le.map(b => f"${b & 0xff}%02x").mkString)
+
+  private def verifyVector(v: TestVector): Boolean =
+    Ed25519.verify(hexToBytes(v.pk), hexToBytes(v.msg), hexToBytes(v.r) ++ hexToBytes(v.s))
+
   test("ZIP-215 compliance validation") {
     val vectors = loadTestVectors()
 
-    // Track failed canonical vectors (should all verify)
-    var canonicalPkRejected = 0
-    val canonicalPkRejectedNumbers = scala.collection.mutable.ListBuffer[Int]()
-
-    // Track incorrectly accepted non-canonical inputs
-    val nonCanonicalPkVectors = vectors.filter(!_.pk_canonical)
-    var nonCanonicalPkAccepted = 0
-
-    val nonCanonicalRVectors = vectors.filter(v => v.pk_canonical && !v.r_canonical)
-    var nonCanonicalRAccepted = 0
-
-    // Test canonical vectors - should verify successfully
-    val fullyCanonicalVectors = vectors.filter(v => v.pk_canonical && v.r_canonical)
-    for vector <- fullyCanonicalVectors do
-      val pk = hexToBytes(vector.pk)
-      val r = hexToBytes(vector.r)
-      val s = hexToBytes(vector.s)
-      val msg = hexToBytes(vector.msg)
-      val signature = r ++ s
-
-      if !Ed25519.verify(pk, msg, signature) then
-        canonicalPkRejected += 1
-        canonicalPkRejectedNumbers += vector.number
-
-    // Test non-canonical public keys - should be REJECTED
-    for vector <- nonCanonicalPkVectors do
-      val pk = hexToBytes(vector.pk)
-      val r = hexToBytes(vector.r)
-      val s = hexToBytes(vector.s)
-      val msg = hexToBytes(vector.msg)
-      val signature = r ++ s
-
-      if Ed25519.verify(pk, msg, signature) then
-        nonCanonicalPkAccepted += 1
-
-    // Test non-canonical R values - should be REJECTED
-    for vector <- nonCanonicalRVectors do
-      val pk = hexToBytes(vector.pk)
-      val r = hexToBytes(vector.r)
-      val s = hexToBytes(vector.s)
-      val msg = hexToBytes(vector.msg)
-      val signature = r ++ s
-
-      if Ed25519.verify(pk, msg, signature) then
-        nonCanonicalRAccepted += 1
-
-    // Assert all compliance requirements
-    withClue(s"Canonical vectors should verify (failed: ${canonicalPkRejectedNumbers.mkString(", ")})") {
-      canonicalPkRejected shouldBe 0
+    // 1. Fully canonical vectors establish the baseline.
+    val fullyCanonical = vectors.filter(v => v.pk_canonical && v.r_canonical)
+    val canonicalRejected = fullyCanonical.filterNot(verifyVector).map(_.number)
+    withClue(s"Canonical vectors should verify (failed: ${canonicalRejected.mkString(", ")})") {
+      canonicalRejected shouldBe empty
     }
-    withClue("Non-canonical public keys should be rejected") {
-      nonCanonicalPkAccepted shouldBe 0
+
+    // 2. Rule 3: a non-canonical point encoding denotes the same point as its
+    //    reduction, so it must produce the same verdict. Pair each non-canonical
+    //    vector with the vector holding its reduced encoding, all else equal.
+    val byKey = vectors.map(v => (v.pk, v.r, v.s, v.msg) -> v).toMap
+    val pairs = vectors.flatMap { v =>
+      canonicalReduction(v.pk)
+        .flatMap(red => byKey.get((red, v.r, v.s, v.msg)))
+        .map(twin => (v, twin))
     }
-    withClue("Non-canonical R values should be rejected") {
-      nonCanonicalRAccepted shouldBe 0
+
+    withClue("vectors.json should contain non-canonical/canonical point pairs to compare") {
+      pairs should not be empty
+    }
+
+    val divergent = pairs.collect {
+      case (v, twin) if verifyVector(v) != verifyVector(twin) =>
+        s"#${v.number} (${v.desc}) => ${verifyVector(v)} but canonical twin #${twin.number} => ${verifyVector(twin)}"
+    }
+    withClue(
+      s"ZIP-215 rule 3: non-canonical point encodings must verify identically to their " +
+        s"canonical reduction. Divergences indicate a canonicality pre-filter:\n  ${divergent.mkString("\n  ")}\n"
+    ) {
+      divergent shouldBe empty
     }
   }

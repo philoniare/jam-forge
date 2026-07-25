@@ -7,7 +7,6 @@ edition = "2021"
 ed25519-zebra = "4.0.3"
 jni = "0.21.1"
 hex = "0.4.3"
-curve25519-dalek = "4.1"
 
 [lib]
 crate-type = ["cdylib"]
