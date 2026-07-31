@@ -336,8 +336,15 @@ object DisputeTransition:
       }
     }
 
+    def sortedHashes(hs: List[Hash]): List[Hash] =
+      hs.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
     val newPsi =
-      Psi(afterFaults.good, afterFaults.bad, afterFaults.wonky, finalOffenders)
+      Psi(
+        sortedHashes(afterFaults.good),
+        sortedHashes(afterFaults.bad),
+        sortedHashes(afterFaults.wonky),
+        finalOffenders.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
+      )
     val newState = preState.copy(psi = newPsi, rho = newRho)
 
     // Return the unsorted offendersMark for the output

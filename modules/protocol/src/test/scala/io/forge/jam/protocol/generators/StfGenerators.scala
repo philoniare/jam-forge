@@ -494,6 +494,8 @@ object StfGenerators:
    * Generator for Psi (judgment state).
    */
   val genPsi: Gen[Psi] =
+    def sortedHashes(hs: List[Hash]): List[Hash] =
+      hs.distinct.sortWith((a, b) => JamBytes.compareUnsigned(a.bytes, b.bytes) < 0)
     for
       goodCount <- Gen.choose(0, 3)
       good <- Gen.listOfN(goodCount, genHash)
@@ -503,7 +505,12 @@ object StfGenerators:
       wonky <- Gen.listOfN(wonkyCount, genHash)
       offendersCount <- Gen.choose(0, 3)
       offenders <- Gen.listOfN(offendersCount, genEd25519PublicKey)
-    yield Psi(good, bad, wonky, offenders)
+    yield Psi(
+      sortedHashes(good),
+      sortedHashes(bad),
+      sortedHashes(wonky),
+      offenders.distinct.sortWith((a, b) => JamBytes.compareUnsigned(a.bytes, b.bytes) < 0)
+    )
 
   /**
    * Generator for empty Dispute (no verdicts, culprits, or faults).
