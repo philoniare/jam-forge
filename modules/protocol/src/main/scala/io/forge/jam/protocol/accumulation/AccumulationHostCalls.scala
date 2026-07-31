@@ -219,9 +219,8 @@ class AccumulationHostCalls(
         s"Lookup PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
       )
 
-    // Now handle the different cases
     if account.isEmpty then
-      setReg(instance, 7, HostCallResult.WHO)
+      setReg(instance, 7, HostCallResult.NONE)
       return
 
     if preimage.isEmpty then

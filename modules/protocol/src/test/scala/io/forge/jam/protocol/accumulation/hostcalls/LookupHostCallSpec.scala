@@ -11,7 +11,7 @@ import spire.math.ULong
  */
 class LookupHostCallSpec extends HostCallTestBase:
 
-  test("LOOKUP: returns WHO for non-existent service") {
+  test("LOOKUP: returns NONE for non-existent service") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -28,7 +28,7 @@ class LookupHostCallSpec extends HostCallTestBase:
 
     hostCalls.dispatch(HostCall.LOOKUP, instance)
 
-    ULong(instance.reg(7)) shouldBe HostCallResult.WHO
+    ULong(instance.reg(7)) shouldBe HostCallResult.NONE
   }
 
   test("LOOKUP: returns NONE for non-existent preimage") {
