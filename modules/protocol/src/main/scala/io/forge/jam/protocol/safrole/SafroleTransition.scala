@@ -254,7 +254,11 @@ object SafroleTransition:
           val combinedTickets = (postState.gammaA ++ accumulatedTickets)
             .sortBy(_.id)
             .take(config.epochLength)
-          Right(postState.copy(gammaA = combinedTickets))
+          val survivingIds = combinedTickets.map(_.id).toSet
+          if accumulatedTickets.exists(t => !survivingIds.contains(t.id)) then
+            Left(SafroleErrorCode.Reserved)
+          else
+            Right(postState.copy(gammaA = combinedTickets))
         else
           Right(postState)
 
