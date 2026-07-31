@@ -34,7 +34,7 @@ class AccumulationExecutor(val config: ChainConfig):
       ): Boolean =
         size() > MAX_MODULE_CACHE_SIZE
     }
-  private val MAX_SERVICE_CODE_SIZE: Int = 4 * 1024 * 1024
+  private val MAX_SERVICE_CODE_SIZE: Int = 4_000_000
   private val JAM_PAGE_SIZE = 4096
 
   /** Execute accumulation for a single service. Implements the Psi_A function
