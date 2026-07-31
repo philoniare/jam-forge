@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.safrole
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
-import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
+import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import _root_.scodec.bits.BitVector
 import _root_.scodec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
@@ -167,6 +167,7 @@ object SafroleTransition:
         validator.copy(
           bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
           ed25519 = Ed25519PublicKey(new Array[Byte](32)),
+          bls = BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
           metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
         )
       else
