@@ -29,6 +29,11 @@ import scala.math.Ordering.Implicits.infixOrderingOps
 object SafroleTransition:
 
   /**
+   * Signals an unrecoverable native-crypto fault
+   */
+  final class SafroleCryptoFailure(message: String) extends RuntimeException(message)
+
+  /**
    * Execute the Safrole STF over a typed view.
    *
    * Reads: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ), postOffenders
@@ -67,7 +72,9 @@ object SafroleTransition:
       else
         processValidSlot(input, preState, config)
     catch
-      case _: Exception =>
+      case e: SafroleCryptoFailure => throw e
+      case e: Exception =>
+        System.err.println(s"[SafroleTransition] swallowed exception, reporting Reserved: $e")
         (preState, StfResult.error(SafroleErrorCode.Reserved))
 
   /** Epoch timing context extracted from slot values */
@@ -123,7 +130,7 @@ object SafroleTransition:
 
     ticketResult match
       case Left(error) =>
-        (stateAfterEpoch, StfResult.error(error))
+        (preState, StfResult.error(error))
       case Right(stateAfterTickets) =>
         // Process entropy accumulation and update timeslot
         val newEta0 = Hashing.blake2b256(preState.eta.head.bytes ++ input.entropy.bytes)
@@ -177,7 +184,9 @@ object SafroleTransition:
     // Generate new ring root
     val newGammaZ = BandersnatchWrapper
       .generateRingRoot(newGammaK.map(_.bandersnatch), config.validatorCount)
-      .getOrElse(preState.gammaZ)
+      .getOrElse(
+        throw new SafroleCryptoFailure("Bandersnatch ring-root generation failed during epoch transition")
+      )
 
     // Determine sealing sequence
     val useTickets = ctx.newEpoch == ctx.prevEpoch + 1 &&

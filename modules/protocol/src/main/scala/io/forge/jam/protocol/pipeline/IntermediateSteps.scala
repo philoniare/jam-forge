@@ -21,17 +21,19 @@ object IntermediateSteps:
     val authorIndex = block.header.authorIndex.value.toInt
 
     val kappa = view.validators.current
+    val pool = view.entropy.pool
     if authorIndex < 0 || authorIndex >= kappa.length then
       Left(
         PipelineError.HeaderVerificationErr(s"InvalidAuthorIndex: $authorIndex >= ${kappa.length}")
       )
+    else if pool.length != 4 then
+      Left(
+        PipelineError.HeaderVerificationErr(s"CorruptEntropyPool: length ${pool.length} != 4")
+      )
     else
       val blockAuthorKey = kappa(authorIndex).bandersnatch
 
-      val pool = view.entropy.pool
-      val entropy =
-        if pool.length > 3 then pool(3).bytes
-        else new Array[Byte](32)
+      val entropy = pool(3).bytes
 
       val fullHeaderBytes =
         summon[Codec[io.forge.jam.core.types.header.Header]].encode(block.header).require.bytes.toArray
@@ -126,23 +128,27 @@ object IntermediateSteps:
   val validateEntropyVrf: StfStep = validate { (view, ctx) =>
     val block = ctx.block
     val authorIndex = block.header.authorIndex.value.toInt
-    val blockAuthorKey = view.validators.current(authorIndex).bandersnatch
-
-    val sealVrfOutput = BandersnatchVrf.getVrfOutput(block.header.seal.toArray)
-    if sealVrfOutput.isEmpty then
-      Left(PipelineError.HeaderVerificationErr("Cannot extract VRF output from seal"))
+    val kappa = view.validators.current
+    if authorIndex < 0 || authorIndex >= kappa.length then
+      Left(PipelineError.HeaderVerificationErr(s"InvalidAuthorIndex: $authorIndex >= ${kappa.length}"))
     else
-      val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
-      val vrfResult = BandersnatchVrf.ietfVrfVerify(
-        blockAuthorKey.bytes,
-        vrfInput,
-        Array.empty[Byte],
-        block.header.entropySource.toArray
-      )
-      if vrfResult.isEmpty then
-        Left(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
+      val blockAuthorKey = kappa(authorIndex).bandersnatch
+
+      val sealVrfOutput = BandersnatchVrf.getVrfOutput(block.header.seal.toArray)
+      if sealVrfOutput.isEmpty then
+        Left(PipelineError.HeaderVerificationErr("Cannot extract VRF output from seal"))
       else
-        Right(())
+        val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
+        val vrfResult = BandersnatchVrf.ietfVrfVerify(
+          blockAuthorKey.bytes,
+          vrfInput,
+          Array.empty[Byte],
+          block.header.entropySource.toArray
+        )
+        if vrfResult.isEmpty then
+          Left(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
+        else
+          Right(())
   }
 
   val validateEpochMark: StfStep = validate { (_, ctx) =>

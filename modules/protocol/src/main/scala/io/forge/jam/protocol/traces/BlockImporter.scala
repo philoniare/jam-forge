@@ -426,12 +426,16 @@ object InputExtractor:
         val output = BandersnatchWrapper.getIetfVrfOutput(entropyBytes)
         if output != null && output.length == 32 then Hash(output)
         else
-          // Fallback: use first 32 bytes if native extraction fails
-          Hash(entropyBytes.take(32))
+          throw new IllegalStateException(
+            "Bandersnatch IETF VRF output extraction failed for header entropy source"
+          )
       catch
+        case e: IllegalStateException => throw e
         case e: Exception =>
-          // Fallback: use first 32 bytes if native library unavailable
-          Hash(entropyBytes.take(32))
+          throw new IllegalStateException(
+            s"Bandersnatch native VRF-output extraction unavailable for header entropy source: ${e.getMessage}",
+            e
+          )
 
     SafroleInput(
       slot = header.slot.value.toLong,
