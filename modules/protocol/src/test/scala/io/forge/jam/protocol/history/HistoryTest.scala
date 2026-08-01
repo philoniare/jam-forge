@@ -148,7 +148,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
           // Test state transition
-          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState, ChainConfig.TINY)
+          val postState = HistoryTransition.stfInternal(testCase.input, testCase.preState, ChainConfig.FULL)
           assertHistoryStateEquals(testCase.postState, postState, testCaseName)
   }
 
