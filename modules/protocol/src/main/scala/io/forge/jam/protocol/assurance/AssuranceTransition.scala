@@ -71,9 +71,12 @@ object AssuranceTransition:
    * Validate that assurance bitfields only reference engaged cores.
    */
   private def validateCoreEngagement(assurances: List[AssuranceExtrinsic], state: AssuranceState): Boolean =
+    val coresCount = state.availAssignments.size
     assurances.forall { assurance =>
       val bitfieldBytes = assurance.bitfield.toArray
-      state.availAssignments.zipWithIndex.forall {
+      val noPaddingBitsSet =
+        (coresCount until (bitfieldBytes.length * 8)).forall(pos => !isBitSet(bitfieldBytes, pos))
+      noPaddingBitsSet && state.availAssignments.zipWithIndex.forall {
         case (assignment, coreIndex) =>
           val isSet = isBitSet(bitfieldBytes, coreIndex)
           val isEngaged = assignment.isDefined
