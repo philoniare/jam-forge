@@ -202,7 +202,7 @@ object AssuranceTransition:
 
     // Validate core engagement
     if !validateCoreEngagement(input.assurances, preState) then
-      (postTimeoutState, StfResult.error(AssuranceErrorCode.CoreNotEngaged))
+      (preState, StfResult.error(AssuranceErrorCode.CoreNotEngaged))
     else
       // Validate assurances
       validateAssurances(input, preState) match
