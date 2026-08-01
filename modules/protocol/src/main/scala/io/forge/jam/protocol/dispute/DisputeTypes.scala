@@ -141,9 +141,14 @@ object DisputeTypes:
     case CulpritsVerdictNotBad
 
   object DisputeErrorCode:
-    given Codec[DisputeErrorCode] = byte.xmap(
-      b => DisputeErrorCode.fromOrdinal(b.toInt & 0xFF),
-      e => e.ordinal.toByte
+    given Codec[DisputeErrorCode] = byte.exmap(
+      b =>
+        val ordinal = b.toInt & 0xFF
+        if ordinal < DisputeErrorCode.values.length then
+          _root_.scodec.Attempt.successful(DisputeErrorCode.fromOrdinal(ordinal))
+        else
+          _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid DisputeErrorCode ordinal: $ordinal")),
+      e => _root_.scodec.Attempt.successful(e.ordinal.toByte)
     )
 
     given Decoder[DisputeErrorCode] =
