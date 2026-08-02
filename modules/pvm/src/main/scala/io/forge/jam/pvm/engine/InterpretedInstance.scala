@@ -205,16 +205,13 @@ final class InterpretedInstance private (
     _compiledOffsetInt + 1
 
   override def resolveJump(pc: ProgramCounter): Int =
-    if pc.value.signed == Abi.VmAddrReturnToHost.signed then
-      finished()
+    val packed = compiledOffsetForBlock.getOrNull(pc.value)
+    if packed != null then
+      val (isValid, offset) = PackedTarget.unpack(packed)
+      if isValid then offset.signed else panic(pc)
     else
-      val packed = compiledOffsetForBlock.getOrNull(pc.value)
-      if packed != null then
-        val (isValid, offset) = PackedTarget.unpack(packed)
-        if isValid then offset.signed else Step.Interrupt
-      else
-        if !isJumpTargetValid(pc) then Step.Interrupt
-        else compileBlock(pc)
+      if !isJumpTargetValid(pc) then panic(pc)
+      else compileBlock(pc)
 
   override def resolveFallthrough(pc: ProgramCounter): Int =
     val packed = compiledOffsetForBlock.getOrNull(pc.value)
