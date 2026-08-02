@@ -60,13 +60,14 @@ object AuthorizationTransition:
             currentPool
         }
 
-        // Step 2: Append new item from queue at cyclic position slot % queue_size
-        val poolWithNew = if coreQueue.nonEmpty then
-          val queueIndex = (input.slot % coreQueue.size).toInt
-          val newItem = coreQueue(queueIndex)
-          poolAfterRemoval :+ newItem
-        else
-          poolAfterRemoval
+        // Step 2: Append new item from queue at cyclic position slot % Q.
+        require(
+          coreQueue.size == constants.Q,
+          s"authQueue for core $coreIndex has size ${coreQueue.size}, expected ${constants.Q}"
+        )
+        val queueIndex = (input.slot % constants.Q).toInt
+        val newItem = coreQueue(queueIndex)
+        val poolWithNew = poolAfterRemoval :+ newItem
 
         // Step 3: Take rightmost O items (i.e., drop from front if size > O)
         poolWithNew.takeRight(constants.O)
