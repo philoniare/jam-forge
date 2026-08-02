@@ -114,6 +114,11 @@ object StateKey:
    * @return Encoded bytes as JamBytes
    */
   def encodePreimageInfoValue(timeslots: List[Long]): JamBytes =
+    if timeslots.size > 3 then
+      throw new RuntimeException(
+        s"Preimage info encode error: at most 3 timeslot entries allowed, got ${timeslots.size}"
+      )
+
     val builder = JamBytes.newBuilder
 
     // Compact length encoding (simple 1-byte count for 0-3 values)
@@ -137,6 +142,14 @@ object StateKey:
 
     val bytes = data.toArray
     val count = bytes(0).toInt & 0xFF
+    if count > 3 then
+      throw new RuntimeException(
+        s"Preimage info decode error: at most 3 timeslot entries allowed, got count=$count"
+      )
+    if bytes.length != 1 + count * 4 then
+      throw new RuntimeException(
+        s"Preimage info decode error: expected ${1 + count * 4} bytes for count=$count, got ${bytes.length}"
+      )
     if count == 0 then
       return List.empty
 
@@ -144,9 +157,8 @@ object StateKey:
     var i = 0
     while i < count do
       val offset = 1 + i * 4
-      if offset + 4 <= bytes.length then
-        val ts = JamCodecs.decodeU32LE(bytes, offset).toLong
-        timeslots += ts
+      val ts = JamCodecs.decodeU32LE(bytes, offset).toLong
+      timeslots += ts
       i += 1
 
     timeslots.toList
