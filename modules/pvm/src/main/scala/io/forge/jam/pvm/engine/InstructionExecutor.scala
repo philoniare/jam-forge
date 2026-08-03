@@ -63,8 +63,9 @@ object InstructionExecutor:
 
     arr(Opcode.LoadImmAndJump.value) = (instr, ctx, _, _) =>
       val i = expect[Instruction.LoadImmAndJump](instr)
-      ctx.setReg32Int(i.reg, i.imm.toInt)
-      ctx.resolveJump(ProgramCounter(i.target.toInt))
+      val r = ctx.resolveJump(ProgramCounter(i.target.toInt))
+      if r >= 0 then ctx.setReg32Int(i.reg, i.imm.toInt)
+      r
 
     arr(Opcode.LoadImmAndJumpIndirect.value) = (instr, ctx, pc, _) =>
       val i = expect[Instruction.LoadImmAndJumpIndirect](instr)
