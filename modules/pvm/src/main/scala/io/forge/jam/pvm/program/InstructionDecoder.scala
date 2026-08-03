@@ -172,7 +172,7 @@ object InstructionDecoder:
 
   private def getSkip(bitmask: Array[Byte], codeLength: Int, offset: Int): Int =
     var cur = offset + 1; var skip = 1
-    while cur < codeLength && skip < MaxInstructionSize do
+    while cur < codeLength && skip <= MaxInstructionSize do
       val byteIdx = cur >> 3; val bitIdx = cur & 7
       if byteIdx < bitmask.length && ((bitmask(byteIdx) >> bitIdx) & 1) == 1 then return skip
       cur += 1; skip += 1
