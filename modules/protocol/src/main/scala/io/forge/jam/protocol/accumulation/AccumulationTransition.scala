@@ -847,18 +847,27 @@ object AccumulationTransition:
 
         // Look up the preimage info entry
         val preimageKey = PreimageKey(preimageHashAsHash, length)
-        account.preimageRequests.get(preimageKey).foreach { info =>
+        val infoStateKey = StateKey.computePreimageInfoStateKey(
+          serviceId,
+          length,
+          preimageHashBytes
+        )
+        val request: Option[PreimageRequest] =
+          account.preimageRequests.get(preimageKey).orElse {
+            val rawInfoData = view match
+              case Some(v) => v.readTrie(infoStateKey)
+              case None    => state.rawServiceDataByStateKey.get(infoStateKey)
+            rawInfoData.map { raw =>
+              PreimageRequest(StateKey.decodePreimageInfoValue(raw))
+            }
+          }
+        request.foreach { info =>
           if info.requestedAt.isEmpty then
             // Update preimage info with current timeslot
             account.preimageRequests(preimageKey) =
               PreimageRequest(List(timeslot))
             account.preimages(preimageHashAsHash) = preimage
 
-            val infoStateKey = StateKey.computePreimageInfoStateKey(
-              serviceId,
-              length,
-              preimageHashBytes
-            )
             val infoValue =
               StateKey.encodePreimageInfoValue(List(timeslot))
             val blobStateKey = StateKey.computeServiceDataStateKey(

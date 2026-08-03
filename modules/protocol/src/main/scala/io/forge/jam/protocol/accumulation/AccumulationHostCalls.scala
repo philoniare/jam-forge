@@ -1201,7 +1201,10 @@ class AccumulationHostCalls(
   /** provide (26): Provide a preimage for another service.
     */
   private def handleProvide(instance: PvmInstance): Unit =
-    val targetServiceId = getReg(instance, 7).toLong
+    val r7 = getReg(instance, 7)
+    val targetServiceId =
+      if r7 == ULong(0xffffffffffffffffL) then context.serviceIndex
+      else r7.toLong
     val blobAddr = getReg(instance, 8).toInt
     val blobLen = getReg(instance, 9).toInt
 
@@ -1221,12 +1224,20 @@ class AccumulationHostCalls(
 
     // Check if preimage has been solicited
     val preimageKey = PreimageKey(Hash(preimageHash.bytes.toArray), blobLen)
-    val preimageRequest = targetAccount.get.preimageRequests.get(preimageKey)
-    val existingPreimage =
-      targetAccount.get.preimages.get(Hash(preimageHash.bytes.toArray))
+    var preimageRequest = targetAccount.get.preimageRequests.get(preimageKey)
 
-    // If no request exists OR preimage already provided -> HUH
-    if preimageRequest.isEmpty || existingPreimage.isDefined then
+    if preimageRequest.isEmpty then
+      val infoStateKey = StateKey.computePreimageInfoStateKey(
+        targetServiceId,
+        blobLen,
+        JamBytes(preimageHash.bytes)
+      )
+      val rawInfoData = context.readRawDataFor(targetServiceId, infoStateKey)
+      if rawInfoData.isDefined then
+        val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
+        preimageRequest = Some(PreimageRequest(timeslots))
+
+    if preimageRequest.isEmpty || preimageRequest.get.requestedAt.nonEmpty then
       setReg(instance, 7, HostCallResult.HUH)
       return
 
