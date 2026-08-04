@@ -26,6 +26,30 @@ class AccumulationHostCalls(
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
+  /** Read a register as a spec offset/length argument and clamp it to
+    * `available` using unsigned-64-bit min()
+    */
+  private def argClampedLen(
+      instance: PvmInstance,
+      reg: Int,
+      available: Long
+  ): Int =
+    val v = getReg(instance, reg)
+    val cap = ULong(available)
+    (if v < cap then v else cap).toLong.toInt
+
+  /** Read a register as a full-width (unsigned 64-bit) service id
+    */
+  private def argServiceId(instance: PvmInstance, reg: Int): ULong =
+    getReg(instance, reg)
+
+  /** Read a register as a value that the spec constrains to `Nbits(32)`
+    * (preimage lengths, counts, core/service indices used as array bounds).
+    */
+  private def argU32(instance: PvmInstance, reg: Int): Option[Long] =
+    val v = getReg(instance, reg)
+    if v > ULong(0xffffffffL) then None else Some(v.toLong)
+
   private def readGuestBytes(
       instance: PvmInstance,
       address: Int,
@@ -138,25 +162,26 @@ class AccumulationHostCalls(
   private def handleFetch(instance: PvmInstance): Unit =
     val selector = getReg(instance, 10).toInt
     val outputAddr = getReg(instance, 7).toInt
-    val offset = getReg(instance, 8).toInt
-    val length = getReg(instance, 9).toInt
-    val index = getReg(instance, 11).toInt
+    val index = argU32(instance, 11)
 
     val data: Option[Array[Byte]] = selector match
       case FetchSelector.CONSTANTS      => Some(getConstantsBlob())
       case FetchSelector.ENTROPY        => Some(context.entropy.toArray)
       case FetchSelector.ALL_OPERANDS   => Some(encodeOperandsList())
       case FetchSelector.SINGLE_OPERAND =>
-        if index < operands.size then Some(encodeOperand(operands(index)))
-        else None
+        index match
+          case Some(i) if i < operands.size =>
+            Some(encodeOperand(operands(i.toInt)))
+          case _ => None
       case _ => None
 
     data match
       case None =>
         setReg(instance, 7, HostCallResult.NONE)
       case Some(bytes) =>
-        val actualOffset = math.min(offset, bytes.length)
-        val actualLength = math.min(length, bytes.length - actualOffset)
+        val actualOffset = argClampedLen(instance, 8, bytes.length.toLong)
+        val actualLength =
+          argClampedLen(instance, 9, (bytes.length - actualOffset).toLong)
         val slice = bytes.slice(actualOffset, actualOffset + actualLength)
 
         // Check if output address is writable - PANIC if not
@@ -288,9 +313,13 @@ class AccumulationHostCalls(
     */
   private def handleWrite(instance: PvmInstance): Unit =
     val keyAddr = getReg(instance, 7).toInt
-    val keyLen = getReg(instance, 8).toInt
     val valueAddr = getReg(instance, 9).toInt
-    val valueLen = getReg(instance, 10).toInt
+    val keyLen = argU32(instance, 8).getOrElse(
+      throw new RuntimeException("Write PANIC: key length out of 32-bit range")
+    ).toInt
+    val valueLen = argU32(instance, 10).getOrElse(
+      throw new RuntimeException("Write PANIC: value length out of 32-bit range")
+    ).toInt
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -437,7 +466,13 @@ class AccumulationHostCalls(
     val newDelegator = getReg(instance, 9).toLong
     val newRegistrar = getReg(instance, 10).toLong
     val alwaysAccPtr = getReg(instance, 11).toInt
-    val alwaysAccCount = getReg(instance, 12).toInt
+    val alwaysAccCount = argU32(instance, 12)
+      .getOrElse(
+        throw new RuntimeException(
+          "Bless PANIC: always-acc count out of 32-bit range"
+        )
+      )
+      .toInt
 
     // Read assigners array (4 bytes per core)
     val coresCount = config.coresCount
@@ -496,7 +531,7 @@ class AccumulationHostCalls(
     * targetCoreIndex, reg8 = authorizationQueue address, reg9 = new assigner
     */
   private def handleAssign(instance: PvmInstance): Unit =
-    val targetCoreIndex = getReg(instance, 7).toInt
+    val targetCoreIndexU = getReg(instance, 7)
     val startAddr = getReg(instance, 8).toInt
     val newAssigner = getReg(instance, 9).toLong
 
@@ -509,10 +544,12 @@ class AccumulationHostCalls(
         s"Assign PANIC: Failed to read authorization queue from memory at $startAddr"
       )
 
-    // Check core index bounds
-    if targetCoreIndex >= config.coresCount then
+    // Check core index bounds (unsigned 64-bit)
+    if targetCoreIndexU >= ULong(config.coresCount.toLong) then
       setReg(instance, 7, HostCallResult.CORE)
       return
+
+    val targetCoreIndex = targetCoreIndexU.toInt
 
     // Check if caller is current assigner for this core
     if targetCoreIndex >= context.x.assigners.size ||
@@ -625,8 +662,13 @@ class AccumulationHostCalls(
     */
   private def handleNew(instance: PvmInstance): Unit =
     val codeHashAddr = getReg(instance, 7).toInt
-    val codeHashLength =
-      getReg(instance, 8).toInt // Length for preimage info key
+    val codeHashLength = argU32(instance, 8)
+      .getOrElse(
+        throw new RuntimeException(
+          "New PANIC: preimage length out of 32-bit range"
+        )
+      )
+      .toInt
     val minAccumulateGas = getReg(instance, 9).toLong
     val minMemoGas = getReg(instance, 10).toLong
     val gratisStorage = getReg(instance, 11).toLong
@@ -855,7 +897,7 @@ class AccumulationHostCalls(
   /** transfer (20): Queue a deferred transfer.
     */
   private def handleTransfer(instance: PvmInstance): Unit =
-    val destination = (getReg(instance, 7) & ULong(0xffffffffL)).toLong
+    val destination = argServiceId(instance, 7).toLong
     val amount = getReg(instance, 8).toLong
     val gasLimit = getReg(instance, 9).toLong
     val memoAddr = getReg(instance, 10).toInt
