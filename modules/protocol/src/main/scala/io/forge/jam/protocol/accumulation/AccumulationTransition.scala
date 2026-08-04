@@ -131,7 +131,7 @@ object AccumulationTransition:
     val allQueuedWithSlots =
       existingQueuedWithSlots ++ editedNewRecords.map(r => (m, r))
 
-    val (readyToAccumulate, stillQueuedWithSlots) =
+    val (readyToAccumulate, _) =
       extractAccumulatableWithSlots(
         allQueuedWithSlots,
         historicallyAccumulated.toSet
@@ -144,53 +144,6 @@ object AccumulationTransition:
       historicallyAccumulated += hash
     }
 
-    // 7. Rebuild ready queue with remaining records
-    val accumulatedThisBlock = newAccumulated.toSet
-
-    val newQueuedReportsNotAccumulated = stillQueuedWithSlots
-      .filter { case (slot, record) =>
-        slot == m && newRecords.exists(nr =>
-          JamBytes(nr.report.packageSpec.hash.bytes.toArray) ==
-            JamBytes(record.report.packageSpec.hash.bytes.toArray)
-        )
-      }
-      .map(_._2)
-
-    // Edit dependencies to remove accumulated hashes
-    val editedNewQueuedReports = editReadyQueueRecords(
-      newQueuedReportsNotAccumulated,
-      accumulatedThisBlock
-    )
-
-    val finalReadyQueue = (0 until config.epochLength).map { idx =>
-      val i =
-        ((m - idx) % config.epochLength + config.epochLength) % config.epochLength
-      if i == 0 then
-        // Current slot: ONLY new queued reports from this block, with dependencies edited
-        editedNewQueuedReports
-      else if i >= 1 && i < deltaT then
-        // Slots that wrapped around - clear them
-        List.empty[AccumulationReadyRecord]
-      else
-        // Other slots: keep remaining items that weren't accumulated, with dependencies edited
-        val records = stillQueuedWithSlots.filter(_._1 == idx).map(_._2).toList
-        editReadyQueueRecords(records, accumulatedThisBlock)
-    }.toList
-
-    val accumulatedSnapshot = historicallyAccumulated.toSet
-    require(
-      finalReadyQueue.forall { slotRecords =>
-        slotRecords.forall { record =>
-          val recordHash =
-            JamBytes(record.report.packageSpec.hash.bytes.toArray)
-          !accumulatedSnapshot.contains(recordHash) &&
-          record.dependencies.forall(h =>
-            !accumulatedSnapshot.contains(JamBytes(h.bytes))
-          )
-        }
-      },
-      "Ready-queue post-condition violated: an accumulated hash leaked into the final queue"
-    )
 
     // 8. Execute PVM for accumulated reports (respecting gas budget)
     val allToAccumulate = immediateReports ++ readyToAccumulate
@@ -230,6 +183,33 @@ object AccumulationTransition:
     val newPartialState = outerResult.postState
     val gasUsedPerService = outerResult.gasUsedMap
     val commitments = outerResult.commitments
+
+    // Rebuild ready queue
+    val finalReadyQueue = (0 until config.epochLength).map { idx =>
+      val i =
+        ((m - idx) % config.epochLength + config.epochLength) % config.epochLength
+      if i == 0 then
+        editReadyQueueRecords(editedNewRecords, actuallyAccumulated)
+      else if i >= 1 && i < deltaT then
+        // Slots that wrapped around - clear them
+        List.empty[AccumulationReadyRecord]
+      else
+        editReadyQueueRecords(workingReadyQueue(idx), actuallyAccumulated)
+    }.toList
+
+    require(
+      finalReadyQueue.forall { slotRecords =>
+        slotRecords.forall { record =>
+          val recordHash =
+            JamBytes(record.report.packageSpec.hash.bytes.toArray)
+          !actuallyAccumulated.contains(recordHash) &&
+          record.dependencies.forall(h =>
+            !actuallyAccumulated.contains(JamBytes(h.bytes))
+          )
+        }
+      },
+      "Ready-queue post-condition violated: an accumulated hash leaked into the final queue"
+    )
 
     // 9. Rotate accumulated array (sliding window)
     val newAccumulatedList = actuallyAccumulated.toList.sorted

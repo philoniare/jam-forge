@@ -162,6 +162,57 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         postState.entropy.toArray shouldBe testCase.preState.entropy.toArray
   }
 
+  test("gas cutoff: overflow reports survive in the ready queue (ACC-003)") {
+    val folderPath = "stf/accumulate/tiny"
+    val testCaseName = "accumulate_ready_queued_reports-1"
+    val testDataResult = TestFileLoader.loadJsonFromTestVectors[AccumulationCase](folderPath, testCaseName)
+
+    testDataResult match
+      case Left(error) =>
+        fail(s"Failed to load test case $testCaseName: $error")
+      case Right(testCase) =>
+        val preReadyCount =
+          testCase.preState.readyQueue.map(_.size).sum
+        preReadyCount shouldBe 9 withClue
+          "Fixture precondition: 9 ready-queued reports expected"
+
+        val (fullState, _, _, _) = AccumulationTransition.stfInternal(
+          testCase.input,
+          testCase.preState,
+          List.empty,
+          List.empty,
+          TinyConfig,
+          testCase.preState.slot
+        )
+        fullState.readyQueue.map(_.size).sum shouldBe 0 withClue
+          "With full gas budget all topologically-ready reports should accumulate"
+
+        val starvedConfig = TinyConfig.copy(
+          maxBlockGas = 1L,
+          reportAccGas = 0L,
+          coresCount = 1
+        )
+        val (starvedState, _, _, _) = AccumulationTransition.stfInternal(
+          testCase.input,
+          testCase.preState,
+          List.empty,
+          List.empty,
+          starvedConfig,
+          testCase.preState.slot
+        )
+
+        starvedState.readyQueue.map(_.size).sum shouldBe 9 withClue
+          "Gas-cutoff overflow reports must survive in the ready queue"
+
+        val preDeps = testCase.preState.readyQueue.flatMap(_.flatMap(_.dependencies)).size
+        starvedState.readyQueue.flatMap(_.flatMap(_.dependencies)).size shouldBe preDeps withClue
+          "Dependencies on unaccumulated reports must not be pruned"
+
+        // accumulated'[Cepochlen-1] must reflect the actually-accumulated set (empty).
+        starvedState.accumulated.last shouldBe empty withClue
+          "No reports accumulated under the starved budget -> empty new accumulated slot"
+  }
+
   test("privileges preservation") {
     // Test that privileges are preserved when no services accumulate
     val folderPath = "stf/accumulate/tiny"
