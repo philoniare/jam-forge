@@ -784,18 +784,7 @@ object AccumulationTransition:
     for (id, _) <- initialState.accounts do
       if !postState.accounts.contains(id) then changes.removedAccounts += id
 
-    // Check for privilege changes
-    if postState.manager != initialState.manager then
-      changes.managerChange = Some(postState.manager)
-    if postState.delegator != initialState.delegator then
-      changes.delegatorChange = Some(postState.delegator)
-    if postState.registrar != initialState.registrar then
-      changes.registrarChange = Some(postState.registrar)
-    if postState.assigners != initialState.assigners then
-      changes.assignersChange = Some(postState.assigners.toList)
-    if postState.alwaysAccers != initialState.alwaysAccers then
-      changes.alwaysAccersChange = Some(postState.alwaysAccers.toMap)
-
+    
     // Check for rawServiceData changes (added or updated keys)
     for (key, value) <- postState.rawServiceDataByStateKey do
       val initValue = initialState.rawServiceDataByStateKey.get(key)
@@ -988,11 +977,6 @@ object AccumulationTransition:
 class AccountChanges:
   val accountUpdates: mutable.Map[Long, ServiceAccount] = mutable.Map.empty
   val removedAccounts: mutable.Set[Long] = mutable.Set.empty
-  var managerChange: Option[Long] = None
-  var delegatorChange: Option[Long] = None
-  var registrarChange: Option[Long] = None
-  var assignersChange: Option[List[Long]] = None
-  var alwaysAccersChange: Option[Map[Long, Long]] = None
   // Storage data changes (for WRITE host call updates)
   val rawServiceDataUpdates: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty
   val rawServiceDataRemovals: mutable.Set[JamBytes] = mutable.Set.empty
@@ -1000,27 +984,23 @@ class AccountChanges:
   def checkAndMerge(other: AccountChanges): Unit =
     // Merge account updates
     for (id, account) <- other.accountUpdates do
-      if !accountUpdates.contains(id) then accountUpdates(id) = account
+      accountUpdates.get(id) match
+        case Some(existing) if existing != account =>
+          throw new RuntimeException(
+            s"Conflicting parallel account updates for service $id: block invalid"
+          )
+        case _ => accountUpdates(id) = account
 
     // Merge removed accounts
     removedAccounts ++= other.removedAccounts
 
-    // Merge privilege changes
-    if other.managerChange.isDefined && managerChange.isEmpty then
-      managerChange = other.managerChange
-    if other.delegatorChange.isDefined && delegatorChange.isEmpty then
-      delegatorChange = other.delegatorChange
-    if other.registrarChange.isDefined && registrarChange.isEmpty then
-      registrarChange = other.registrarChange
-    if other.assignersChange.isDefined && assignersChange.isEmpty then
-      assignersChange = other.assignersChange
-    if other.alwaysAccersChange.isDefined && alwaysAccersChange.isEmpty then
-      alwaysAccersChange = other.alwaysAccersChange
-
-    // Merge rawServiceData updates (first write wins for conflicts)
     for (key, value) <- other.rawServiceDataUpdates do
-      if !rawServiceDataUpdates.contains(key) then
-        rawServiceDataUpdates(key) = value
+      rawServiceDataUpdates.get(key) match
+        case Some(existing) if existing != value =>
+          throw new RuntimeException(
+            s"Conflicting parallel storage updates for key $key: block invalid"
+          )
+        case _ => rawServiceDataUpdates(key) = value
     rawServiceDataRemovals ++= other.rawServiceDataRemovals
 
   def applyTo(state: PartialState): Unit =
@@ -1048,20 +1028,7 @@ class AccountChanges:
       // Also remove the service account key from rawServiceAccountsByStateKey
       val serviceAccountKey = StateKey.computeServiceAccountKey(id)
       state.rawServiceAccountsByStateKey.remove(serviceAccountKey)
-
-    // Apply privilege changes
-    managerChange.foreach(state.manager = _)
-    delegatorChange.foreach(state.delegator = _)
-    registrarChange.foreach(state.registrar = _)
-    assignersChange.foreach { assigners =>
-      state.assigners.clear()
-      state.assigners ++= assigners
-    }
-    alwaysAccersChange.foreach { alwaysAccers =>
-      state.alwaysAccers.clear()
-      state.alwaysAccers ++= alwaysAccers
-    }
-
+    
     // Apply rawServiceData changes
     for key <- rawServiceDataRemovals do
       state.rawServiceDataByStateKey.remove(key)
