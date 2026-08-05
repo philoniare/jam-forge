@@ -95,7 +95,7 @@ object PreimageTransition:
       val length = submission.blob.length
 
       val accountExists =
-        view.accumulation.serviceAccounts.exists(_.id == serviceId)
+        view.storage.readTrie(StateKey.computeServiceAccountKey(serviceId)).isDefined
       if !accountExists then Left(PreimageErrorCode.PreimageUnneeded)
       else
         val infoStateKey =
