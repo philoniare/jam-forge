@@ -1016,12 +1016,30 @@ class AccountChanges:
         .order(ByteOrder.LITTLE_ENDIAN)
         .putInt(id.toInt)
         .array()
+      def isChapterKey(arr: Array[Byte]): Boolean =
+        var i = 1
+        while i < arr.length do
+          if arr(i) != 0 then return false
+          i += 1
+        true
+      def isAccountRecordKey(arr: Array[Byte]): Boolean =
+        if (arr(0) & 0xff) != 0xff then false
+        else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
+        else
+          var i = 8
+          while i < arr.length do
+            if arr(i) != 0 then return false
+            i += 1
+          true
       val keysToRemove = state.rawServiceDataByStateKey.keys.filter { key =>
-        key.length >= 8 &&
-        key.toArray(0) == serviceIdBytes(0) &&
-        key.toArray(2) == serviceIdBytes(1) &&
-        key.toArray(4) == serviceIdBytes(2) &&
-        key.toArray(6) == serviceIdBytes(3)
+        val arr = key.toArray
+        arr.length >= 8 &&
+        arr(0) == serviceIdBytes(0) &&
+        arr(2) == serviceIdBytes(1) &&
+        arr(4) == serviceIdBytes(2) &&
+        arr(6) == serviceIdBytes(3) &&
+        !isChapterKey(arr) &&
+        !isAccountRecordKey(arr)
       }.toList
       keysToRemove.foreach(state.rawServiceDataByStateKey.remove)
 

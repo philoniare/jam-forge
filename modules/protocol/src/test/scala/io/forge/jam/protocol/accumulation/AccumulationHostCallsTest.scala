@@ -51,6 +51,9 @@ class MockPvmInstance(
   override def isMemoryReadable(address: Int, length: Int): Boolean =
     isMemoryAccessible(address, length)
 
+  override def isMemoryWritable(address: Int, length: Int): Boolean =
+    isMemoryAccessible(address, length)
+
   /**
    * Helper to write multiple bytes to memory.
    */

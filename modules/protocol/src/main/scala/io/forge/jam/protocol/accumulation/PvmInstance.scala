@@ -58,3 +58,12 @@ trait PvmInstance:
   def isMemoryAccessible(address: Int, length: Int): Boolean
 
   def isMemoryReadable(address: Int, length: Int): Boolean
+
+  /**
+   * Check if memory is writable at the given address and length.
+   *
+   * @param address Starting address
+   * @param length Number of bytes
+   * @return true if memory is writable
+   */
+  def isMemoryWritable(address: Int, length: Int): Boolean

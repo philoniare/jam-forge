@@ -869,12 +869,30 @@ class AccumulationHostCalls(
         .order(java.nio.ByteOrder.LITTLE_ENDIAN)
         .putInt(ejectServiceId.toInt)
         .array()
+    def isChapterKey(arr: Array[Byte]): Boolean =
+      var i = 1
+      while i < arr.length do
+        if arr(i) != 0 then return false
+        i += 1
+      true
+    def isAccountRecordKey(arr: Array[Byte]): Boolean =
+      if (arr(0) & 0xff) != 0xff then false
+      else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
+      else
+        var i = 8
+        while i < arr.length do
+          if arr(i) != 0 then return false
+          i += 1
+        true
     val matchesEjectedService = (key: JamBytes) =>
-      key.length >= 8 &&
-        key.toArray(0) == serviceIdBytes(0) &&
-        key.toArray(2) == serviceIdBytes(1) &&
-        key.toArray(4) == serviceIdBytes(2) &&
-        key.toArray(6) == serviceIdBytes(3)
+      val arr = key.toArray
+      arr.length >= 8 &&
+        arr(0) == serviceIdBytes(0) &&
+        arr(2) == serviceIdBytes(1) &&
+        arr(4) == serviceIdBytes(2) &&
+        arr(6) == serviceIdBytes(3) &&
+        !isChapterKey(arr) &&
+        !isAccountRecordKey(arr)
     val byteOnePrefix = JamBytes(Array(serviceIdBytes(0)))
     val keysToRemove: List[JamBytes] = context.storageView match
       case Some(v) =>
@@ -913,45 +931,7 @@ class AccumulationHostCalls(
       )
 
     // 2. Check if destination exists (WHO)
-    var destExists = accounts.contains(destination)
-    if !destExists then
-      val destStateKey = StateKey.computeServiceAccountKey(destination)
-      val rawMap = context.x.rawServiceAccountsByStateKey
-      val rawDestData =
-        rawMap.find { case (k, _) => k.toHex == destStateKey.toHex }.map(_._2)
-      if rawDestData.isDefined then
-        // Try to decode destination account from raw state
-        val bytes = rawDestData.get.toArray
-        if bytes.length >= 89 then
-          // Decode ServiceInfo from raw bytes (little-endian)
-          val codeHash = Hash(bytes.slice(0, 32))
-          val balance = decodeLE(bytes, 32, 8)
-          val minItemGas = decodeLE(bytes, 40, 8)
-          val minMemoGas = decodeLE(bytes, 48, 8)
-          val byteCount = decodeLE(bytes, 56, 8)
-          val items = decodeLE(bytes, 64, 4).toInt
-          val depositOffset = decodeLE(bytes, 68, 8)
-
-          val destInfo = ServiceInfo(
-            codeHash = codeHash,
-            balance = balance,
-            minItemGas = minItemGas,
-            minMemoGas = minMemoGas,
-            bytesUsed = byteCount,
-            items = items,
-            depositOffset = depositOffset
-          )
-          val destAccount = ServiceAccount(
-            info = destInfo,
-            storage = mutable.Map.empty,
-            preimages = mutable.Map.empty,
-            preimageRequests = mutable.Map.empty
-          )
-          // Add to accounts map for future lookups
-          accounts(destination) = destAccount
-          destExists = true
-
-    if !destExists then
+    if !accounts.contains(destination) then
       setReg(instance, 7, HostCallResult.WHO)
       return
 
@@ -1478,7 +1458,7 @@ class AccumulationHostCalls(
       address: Int,
       length: Int
   ): Boolean =
-    instance.isMemoryAccessible(address, length)
+    instance.isMemoryWritable(address, length)
 
   /** Read memory from PVM instance, returns true on success */
   private def readMemory(

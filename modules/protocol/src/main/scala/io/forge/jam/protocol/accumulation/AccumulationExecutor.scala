@@ -4,7 +4,7 @@ import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.pvm.{InterruptKind, MemoryResult}
-import io.forge.jam.pvm.memory.Memory.isReadable
+import io.forge.jam.pvm.memory.Memory.{isReadable, isWritable}
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
@@ -475,4 +475,7 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
 
   override def isMemoryReadable(address: Int, length: Int): Boolean =
     length >= 0 && instance.basicMemory.isReadable(UInt(address), length)
+
+  override def isMemoryWritable(address: Int, length: Int): Boolean =
+    length >= 0 && instance.basicMemory.isWritable(UInt(address), length)
 
