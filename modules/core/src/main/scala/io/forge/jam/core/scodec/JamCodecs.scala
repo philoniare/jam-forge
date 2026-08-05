@@ -118,7 +118,11 @@ object JamCodecs:
               var value = 0L
               for i <- 0 until 8 do
                 value = value | ((bytes(1 + i) & 0xffL) << (8 * i))
-              Attempt.successful(DecodeResult(value, bits.drop(totalBits)))
+              if java.lang.Long.compareUnsigned(value, 1L << 56) < 0 then
+                Attempt.failure(
+                  Err("compactInteger: non-minimal encoding (9-byte prefix)")
+                )
+              else Attempt.successful(DecodeResult(value, bits.drop(totalBits)))
             // For l=0, the value is just the prefix itself
             else if l == 0 then
               Attempt.successful(DecodeResult(prefix.toLong, bits.drop(8)))
@@ -132,9 +136,15 @@ object JamCodecs:
               for i <- 0 until l do
                 lowBits = lowBits | ((bytes(1 + i) & 0xffL) << (8 * i))
 
-              Attempt.successful(
-                DecodeResult(highBits | lowBits, bits.drop(totalBits))
-              )
+              val value = highBits | lowBits
+              if value < (1L << (7 * l)) then
+                Attempt.failure(
+                  Err(s"compactInteger: non-minimal encoding (l=$l prefix)")
+                )
+              else
+                Attempt.successful(
+                  DecodeResult(value, bits.drop(totalBits))
+                )
 
   val compactInt: Codec[Int] = compactInteger.narrow(
     value =>
