@@ -309,7 +309,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
     isValid shouldBe true
   }
 
-  test("GP: bad reports in psi.bad are cleared from rho (eq:removenonpositive)") {
+  test("GP: psi.bad without a verdict this block does NOT clear rho (eq:removenonpositive, ADV-4)") {
     import io.forge.jam.core.Hashing
     import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
     import _root_.scodec.Codec
@@ -326,7 +326,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       // Create rho with this assignment at index 0, rest are None
       val rhoWithReport = Some(assignment) :: List.fill(tinyConfig.coresCount - 1)(None)
 
-      // Create psi with the report hash in bad list
+      // Create psi with the report hash already in the (cumulative) bad list
       val psiWithBad = Psi(
         good = List.empty,
         bad = List(reportHash),
@@ -340,21 +340,18 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
         rho = rhoWithReport
       )
 
-      // Run STF with empty disputes (the clearing happens based on existing psi.bad)
+      // Run STF with empty disputes
       val input = DisputeInput(Dispute(List.empty, List.empty, List.empty))
       val (postState, output) = DisputeTransition.stfInternal(input, stateWithBadReport, tinyConfig)
 
       whenever(output.isRight) {
-        // GP eq:removenonpositive: Report with hash in bad should be cleared from rho
-        postState.rho.head shouldBe None
-
-        // Other rho entries should remain unchanged
-        postState.rho.tail shouldBe rhoWithReport.tail
+        postState.rho.head shouldBe Some(assignment)
+        postState.rho shouldBe rhoWithReport
       }
     }
   }
 
-  test("GP: wonky reports in psi.wonky are cleared from rho (eq:removenonpositive)") {
+  test("GP: psi.wonky without a verdict this block does NOT clear rho (eq:removenonpositive, ADV-4)") {
     import io.forge.jam.core.Hashing
     import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
     import _root_.scodec.Codec
@@ -369,7 +366,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       val assignment = AvailabilityAssignment(workReport, 200L)
       val rhoWithReport = None :: Some(assignment) :: List.fill(tinyConfig.coresCount - 2)(None)
 
-      // Create psi with the report hash in wonky list
+      // Create psi with the report hash already in the (cumulative) wonky list
       val psiWithWonky = Psi(
         good = List.empty,
         bad = List.empty,
@@ -386,8 +383,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       val (postState, output) = DisputeTransition.stfInternal(input, stateWithWonkyReport, tinyConfig)
 
       whenever(output.isRight) {
-        // GP eq:removenonpositive: Report with hash in wonky should be cleared from rho
-        postState.rho(1) shouldBe None
+        postState.rho(1) shouldBe Some(assignment)
       }
     }
   }

@@ -319,22 +319,28 @@ object DisputeTransition:
     val finalOffenders = preState.psi.offenders ++ sortedNewOffenders
 
     // Clear invalid reports from rho
-    val newRho = preState.rho.map { assignmentOpt =>
-      assignmentOpt.flatMap { assignment =>
-        val reportHash = Hashing.blake2b256(
-          summon[Codec[WorkReport]]
-            .encode(assignment.report)
-            .require
-            .toByteArray
-        )
+    val clearedHashes: Set[Hash] = disputes.verdicts.flatMap { verdict =>
+      val positiveVotes = verdict.votes.count(_.vote)
+      if positiveVotes == 0 || positiveVotes == config.oneThird then
+        Some(verdict.target)
+      else None
+    }.toSet
 
-        // Clear if the report is in bad or wonky
-        val isInvalid = afterFaults.bad.contains(reportHash) ||
-          afterFaults.wonky.contains(reportHash)
+    val newRho =
+      if clearedHashes.isEmpty then preState.rho
+      else
+        preState.rho.map { assignmentOpt =>
+          assignmentOpt.flatMap { assignment =>
+            val reportHash = Hashing.blake2b256(
+              summon[Codec[WorkReport]]
+                .encode(assignment.report)
+                .require
+                .toByteArray
+            )
 
-        if isInvalid then None else Some(assignment)
-      }
-    }
+            if clearedHashes.contains(reportHash) then None else Some(assignment)
+          }
+        }
 
     def sortedHashes(hs: List[Hash]): List[Hash] =
       hs.sortWith((a, b) => compareUnsigned(a.bytes, b.bytes) < 0)
