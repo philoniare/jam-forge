@@ -106,7 +106,7 @@ object ReportTransition:
     val result =
       for
         _ <- validateGuaranteesOrder(input.guarantees)
-        _ <- validateNoDuplicatePackages(input.guarantees, preState)
+        _ <- validateNoDuplicatePackages(input.guarantees, preState, input)
         _ <- validateAnchorAge(input.guarantees, input.slot, config)
         _ <- if skipAncestryValidation then Right(())
         else validateAnchor(input.guarantees, preState.recentBlocks, ancestry, input.slot, config)
@@ -244,7 +244,8 @@ object ReportTransition:
    */
   private def validateNoDuplicatePackages(
     guarantees: List[GuaranteeExtrinsic],
-    preState: ReportState
+    preState: ReportState,
+    input: ReportInput
   ): ValidationResult =
     val recentBlocks = preState.recentBlocks
     val packageHashes = guarantees.map(_.report.packageSpec.hash)
@@ -254,9 +255,12 @@ object ReportTransition:
       return Left(ReportErrorCode.DuplicatePackage)
 
     val historyHashes = recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet
+    val availHashes = preState.availAssignments.flatten.map(_.report.packageSpec.hash).toSet
     val allPipelinedHashes = historyHashes ++
       preState.readyQueuePackageHashes ++
-      preState.accumulatedPackageHashes
+      preState.accumulatedPackageHashes ++
+      availHashes ++
+      input.knownPackages
     if packageHashes.exists(allPipelinedHashes.contains) then
       return Left(ReportErrorCode.DuplicatePackage)
 

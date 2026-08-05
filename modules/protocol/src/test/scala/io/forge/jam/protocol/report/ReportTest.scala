@@ -574,6 +574,67 @@ class ReportTest extends AnyFunSuite with Matchers:
     postState shouldBe preState
   }
 
+  test("known-package duplicate detection (WR-1)") {
+    val authHash = Hash(Array.fill(32)(0xAA.toByte))
+    val authPools = List(List(authHash), List(authHash))
+    val packageHash = Hash(Array.fill(32)(0x11.toByte))
+
+    val preState = createMinimalState(
+      TinyConfig.validatorCount,
+      TinyConfig.coresCount,
+      authPools = authPools
+    )
+
+    val workReport = WorkReport(
+      packageSpec = PackageSpec(
+        hash = packageHash,
+        length = UInt(1000),
+        erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
+        exportsCount = UShort(1)
+      ),
+      context = Context(
+        anchor = Hash(Array.fill(32)(0x04.toByte)),
+        stateRoot = Hash(Array.fill(32)(0x05.toByte)),
+        beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
+        lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
+        lookupAnchorSlot = Timeslot(1),
+        prerequisites = List.empty
+      ),
+      coreIndex = CoreIndex(0),
+      authorizerHash = authHash,
+      authGasUsed = Gas(0),
+      authOutput = JamBytes(emptyBytes),
+      segmentRootLookup = List.empty,
+      results = List(WorkResult(
+        serviceId = ServiceId(42),
+        codeHash = Hash(Array.fill(32)(0x09.toByte)),
+        payloadHash = Hash(Array.fill(32)(0x0A.toByte)),
+        accumulateGas = Gas(1000),
+        result = ExecutionResult.Ok(JamBytes(emptyBytes)),
+        refineLoad = RefineLoad(Gas(100), UShort(0), UShort(0), UInt(0), UShort(0))
+      ))
+    )
+
+    val guarantee = GuaranteeExtrinsic(
+      report = workReport,
+      slot = Timeslot(10),
+      signatures = List.empty
+    )
+
+    val input = ReportInput(
+      guarantees = List(guarantee),
+      slot = 10,
+      knownPackages = List(packageHash)
+    )
+
+    val (postState, output) = ReportTransition.stfInternal(input, preState, TinyConfig)
+
+    output.isLeft shouldBe true
+    output.left.toOption.get shouldBe ReportErrorCode.DuplicatePackage
+    postState shouldBe preState
+  }
+
   test("tiny config state transition from test vectors") {
     val folderPath = "stf/reports/tiny"
     val testCaseNamesResult = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
