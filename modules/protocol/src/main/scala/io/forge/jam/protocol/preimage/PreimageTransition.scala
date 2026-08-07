@@ -82,30 +82,43 @@ object PreimageTransition:
       historyItem.value.isEmpty
     }
 
+  private def validatePreimages(
+    preimages: List[Preimage],
+    isProvidable: (Long, Array[Byte], Int) => Boolean
+  ): Either[PreimageErrorCode, Unit] =
+    if !arePreimagesSortedAndUnique(preimages) then
+      Left(PreimageErrorCode.PreimagesNotSortedUnique)
+    else
+      preimages
+        .traverse { submission =>
+          val serviceId = submission.requester.value.toLong
+          val hash = Hashing.blake2b256(submission.blob).bytes
+          val length = submission.blob.length
+          Either.cond(
+            isProvidable(serviceId, hash, length),
+            (),
+            PreimageErrorCode.PreimageUnneeded
+          )
+        }
+        .map(_ => ())
+
   def stfView(
     input: PreimageInput,
     view: TrieBackedJamState
   ): PreimageOutput =
-    if !arePreimagesSortedAndUnique(input.preimages) then
-      return StfResult.error(PreimageErrorCode.PreimagesNotSortedUnique)
-
-    val validationResult = input.preimages.traverse { submission =>
-      val serviceId = submission.requester.value.toLong
-      val hash = Hashing.blake2b256(submission.blob).bytes
-      val length = submission.blob.length
-
-      val accountExists =
-        view.storage.readTrie(StateKey.computeServiceAccountKey(serviceId)).isDefined
-      if !accountExists then Left(PreimageErrorCode.PreimageUnneeded)
-      else
-        val infoStateKey =
-          StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
-        view.storage.readTrie(infoStateKey) match
-          case Some(value)
-              if StateKey.decodePreimageInfoValue(value).isEmpty =>
-            Right(submission)
-          case _ => Left(PreimageErrorCode.PreimageUnneeded)
-    }
+    val validationResult = validatePreimages(
+      input.preimages,
+      (serviceId, hash, length) =>
+        val accountExists =
+          view.storage.readTrie(StateKey.computeServiceAccountKey(serviceId)).isDefined
+        if !accountExists then false
+        else
+          val infoStateKey =
+            StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
+          view.storage.readTrie(infoStateKey) match
+            case Some(value) => StateKey.decodePreimageInfoValue(value).isEmpty
+            case None        => false
+    )
 
     if validationResult.isLeft then
       return StfResult.error(validationResult.left.toOption.get)
@@ -117,9 +130,11 @@ object PreimageTransition:
 
       val infoStateKey =
         StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
-      val requestStillExists = view.storage.getByStateKey(infoStateKey).isDefined
+      val stillRequested = view.storage.getByStateKey(infoStateKey) match
+        case Some(value) => StateKey.decodePreimageInfoValue(value).isEmpty
+        case None        => false
 
-      if requestStillExists then
+      if stillRequested then
         val newTimeslots = List(input.slot)
         view.storage.putByStateKey(
           infoStateKey,
@@ -147,23 +162,16 @@ object PreimageTransition:
   ): (PreimageState, PreimageOutput) =
     val accountsById = preState.accounts.view.map(a => a.id -> a).toMap
 
-    // First check if all preimages are needed (account exists, lookup entry exists with empty value)
-    val validationResult = input.preimages.traverse { submission =>
-      accountsById.get(submission.requester.value.toLong)
-        .toRight(PreimageErrorCode.PreimageUnneeded)
-        .flatMap { account =>
-          val hash = Hashing.blake2b256(submission.blob).bytes
-          val length = submission.blob.length.toLong
-          Either.cond(isPreimageSolicited(account, hash, length), submission, PreimageErrorCode.PreimageUnneeded)
-        }
-    }
+    val validationResult = validatePreimages(
+      input.preimages,
+      (serviceId, hash, length) =>
+        accountsById.get(serviceId).exists(account =>
+          isPreimageSolicited(account, hash, length.toLong)
+        )
+    )
 
     if validationResult.isLeft then
       return (preState, StfResult.error(validationResult.left.toOption.get))
-
-    // Then validate that preimages are sorted and unique by (requester, hash)
-    if !arePreimagesSortedAndUnique(input.preimages) then
-      return (preState, StfResult.error(PreimageErrorCode.PreimagesNotSortedUnique))
 
     // Track statistics updates by service ID
     val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)

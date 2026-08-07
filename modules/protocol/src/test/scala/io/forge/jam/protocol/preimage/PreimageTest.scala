@@ -76,12 +76,11 @@ class PreimageTest extends AnyFunSuite with Matchers:
     val preimage2 = Preimage(requester = ServiceId(UInt(1)), blob = blob2)
     val input = PreimageInput(preimages = List(preimage1, preimage2), slot = 100)
 
-    // This will first fail because preimages are not solicited
     val (_, output) = PreimageTransition.stfInternal(input, preState)
 
-    // Expected to fail because preimages are not solicited (no lookup entry exists)
+    // Expected to fail because preimages are not sorted by (requester, blob)
     output.isLeft shouldBe true
-    output.left.toOption.get shouldBe PreimageErrorCode.PreimageUnneeded
+    output.left.toOption.get shouldBe PreimageErrorCode.PreimagesNotSortedUnique
   }
 
   test("preimage storage by service") {
