@@ -907,8 +907,17 @@ object TrieBackedJamState:
       case None =>
         val ffPrefix = JamBytes(Array(0xff.toByte))
         val ids = mutable.HashSet.empty[Long]
+        def isAccountRecordKey(arr: Array[Byte]): Boolean =
+          if (arr(0) & 0xff) != 0xff then false
+          else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
+          else
+            var i = 8
+            while i < arr.length do
+              if arr(i) != 0 then return false
+              i += 1
+            true
         trie.getKeyValues(ffPrefix, 8).foreach { case (k, v) =>
-          if k(2) == 0 then
+          if isAccountRecordKey(k.toArray) then
             val serviceId =
               ((k(1).toLong & 0xff)) |
                 ((k(3).toLong & 0xff) << 8) |
