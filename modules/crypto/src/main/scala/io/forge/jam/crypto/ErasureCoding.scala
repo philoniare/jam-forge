@@ -32,6 +32,10 @@ object ErasureCoding:
     override def getMessage: String = s"Invalid basic size: $size (must be even)"
   case object InvalidShardsCount extends ErasureCodingError:
     override def getMessage: String = "Insufficient shards for reconstruction"
+  case class InvalidRecoveryCount(recoveryCount: Int) extends ErasureCodingError:
+    override def getMessage: String = s"Invalid recovery count: $recoveryCount (basicSize/2 exceeds validatorCount)"
+  case object RaggedShards extends ErasureCodingError:
+    override def getMessage: String = "Shards have inconsistent (ragged) lengths"
   case object EncodeFailed extends ErasureCodingError:
     override def getMessage: String = "Erasure coding encode failed"
   case object RecoverFailed extends ErasureCodingError:
@@ -116,6 +120,7 @@ object ErasureCoding:
    */
   def chunk(data: Array[Byte], basicSize: Int, validatorCount: Int): Either[ErasureCodingError, Array[Array[Byte]]] =
     if basicSize % 2 != 0 then Left(InvalidBasicSize(basicSize))
+    else if basicSize / 2 > validatorCount then Left(InvalidRecoveryCount(validatorCount - basicSize / 2))
     else if data.isEmpty then Right(Array.empty)
     else
       ensureInitialized()
@@ -166,13 +171,14 @@ object ErasureCoding:
     basicSize: Int,
     validatorCount: Int
   ): Either[ErasureCodingError, Array[Byte]] =
-    if shards.isEmpty then Right(Array.empty)
+    if shards.isEmpty then Left(InvalidShardsCount)
     else if basicSize % 2 != 0 then Left(InvalidBasicSize(basicSize))
     else
       val originalCount = basicSize / 2
       val recoveryCount = validatorCount - originalCount
 
       if shards.length < originalCount then Left(InvalidShardsCount)
+      else if shards.exists(_.data.length != shards(0).data.length) then Left(RaggedShards)
       else
         ensureInitialized()
 
