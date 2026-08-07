@@ -61,13 +61,14 @@ object StatisticsTransition:
 
     // Update author's stats
     val authorIdx = input.authorIndex.toInt
-    val a = statsArr(authorIdx)
-    statsArr(authorIdx) = a.copy(
-      blocks = a.blocks + 1,
-      tickets = a.tickets + input.extrinsic.tickets.size,
-      preImages = a.preImages + input.extrinsic.preimages.size,
-      preImagesSize = a.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
-    )
+    if authorIdx >= 0 && authorIdx < statsArr.length then
+      val a = statsArr(authorIdx)
+      statsArr(authorIdx) = a.copy(
+        blocks = a.blocks + 1,
+        tickets = a.tickets + input.extrinsic.tickets.size,
+        preImages = a.preImages + input.extrinsic.preimages.size,
+        preImagesSize = a.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
+      )
 
     // For each guarantee, determine which validator set to use based on epoch
     val reporters: Set[ByteVector] = input.extrinsic.guarantees.flatMap { guarantee =>
@@ -97,8 +98,9 @@ object StatisticsTransition:
     // Update assurances
     for (assurance <- input.extrinsic.assurances) do
       val idx = assurance.validatorIndex.toInt
-      val s = statsArr(idx)
-      statsArr(idx) = s.copy(assurances = s.assurances + 1)
+      if idx >= 0 && idx < statsArr.length then
+        val s = statsArr(idx)
+        statsArr(idx) = s.copy(assurances = s.assurances + 1)
 
     val postState = StatState(
       valsCurrStats = statsArr.toList,
