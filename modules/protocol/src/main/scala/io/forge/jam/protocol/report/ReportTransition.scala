@@ -164,7 +164,6 @@ object ReportTransition:
       (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
     ]
 
-    val seenCores      = scala.collection.mutable.HashSet.empty[Int]
     val reportsBuf     = scala.collection.mutable.ListBuffer.empty[WorkReport]
     val packagesBuf    = scala.collection.mutable.ListBuffer.empty[SegmentRootLookup]
     val guarantorsBuf  = scala.collection.mutable.ListBuffer.empty[Hash]
@@ -200,10 +199,6 @@ object ReportTransition:
       ) match
         case Left(err) => return Left(err)
         case _         => ()
-
-      val coreIdx = guarantee.report.coreIndex.toInt
-      if seenCores.contains(coreIdx) then return Left(ReportErrorCode.CoreEngaged)
-      seenCores += coreIdx
 
       val ctx   = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
       val cache = cacheFor(ctx)
@@ -254,7 +249,9 @@ object ReportTransition:
     if packageHashes.distinct.size != packageHashes.size then
       return Left(ReportErrorCode.DuplicatePackage)
 
-    val historyHashes = recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet
+    val historyReported: Map[Hash, Hash] =
+      recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
+    val historyHashes = historyReported.keySet
     val availHashes = preState.availAssignments.flatten.map(_.report.packageSpec.hash).toSet
     val allPipelinedHashes = historyHashes ++
       preState.readyQueuePackageHashes ++
@@ -274,9 +271,7 @@ object ReportTransition:
     do
       val validLookup = batchPackages.get(lookup.workPackageHash) match
         case Some(exportsRoot) => lookup.segmentTreeRoot == exportsRoot
-        case None => recentBlocks.history.exists(_.reported.exists(r =>
-            r.hash == lookup.workPackageHash && r.exportsRoot == lookup.segmentTreeRoot
-          ))
+        case None => historyReported.get(lookup.workPackageHash).contains(lookup.segmentTreeRoot)
       if !validLookup then
         return Left(ReportErrorCode.SegmentRootLookupInvalid)
 
@@ -287,7 +282,7 @@ object ReportTransition:
       prerequisite <- guarantee.report.context.prerequisites
     do
       val exists = batchHashSet.contains(prerequisite) ||
-        recentBlocks.history.exists(_.reported.exists(_.hash == prerequisite))
+        historyReported.contains(prerequisite)
       if !exists then
         return Left(ReportErrorCode.DependencyMissing)
 
@@ -318,6 +313,8 @@ object ReportTransition:
     config: ChainConfig
   ): ValidationResult =
     val batchPackages = guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
+    val historyReported: Map[Hash, Hash] =
+      recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
 
     for guarantee <- guarantees do
       val context = guarantee.report.context
@@ -327,7 +324,9 @@ object ReportTransition:
         if ancestry.nonEmpty then
           ancestry.exists(a => a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot)
         else
-          recentBlocks.history.exists(_.headerHash == context.lookupAnchor)
+          recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
+            lookupAnchorSlot <= currentSlot &&
+            currentSlot - lookupAnchorSlot <= config.maxLookupAnchorAge
       if !lookupAnchorPresent then
         return Left(ReportErrorCode.LookupAnchorNotRecent)
 
@@ -349,12 +348,11 @@ object ReportTransition:
             lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == exportsRoot
           )
         }
-        val existsInHistory = recentBlocks.history.exists(_.reported.exists { reported =>
-          reported.hash == prerequisite &&
+        val existsInHistory = historyReported.get(prerequisite).exists { exportsRoot =>
           guarantee.report.segmentRootLookup.forall(lookup =>
-            lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == reported.exportsRoot
+            lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == exportsRoot
           )
-        })
+        }
         if !existsInBatch && !existsInHistory then
           return Left(ReportErrorCode.DependencyMissing)
 
