@@ -199,16 +199,14 @@ object FullJamStateCodecs:
   def decodeAuthPools(bytes: Array[Byte], coresCount: Int): List[List[Hash]] =
     authPoolsCodec(coresCount).decodeValue(BitVector(bytes)) match
       case Attempt.Successful(pools) => pools
-      case Attempt.Failure(_) =>
-        // Return empty pools on error (matching existing behavior)
-        List.fill(coresCount)(List.empty[Hash])
+      case Attempt.Failure(err) =>
+        throw new CodecDecodingException(s"decodeAuthPools: ${err.messageWithContext}")
 
   def decodeAuthQueues(bytes: Array[Byte], coresCount: Int, queueSize: Int): List[List[Hash]] =
     authQueuesCodec(coresCount, queueSize).decodeValue(BitVector(bytes)) match
       case Attempt.Successful(queues) => queues
-      case Attempt.Failure(_) =>
-        // Return empty queues on error (matching existing behavior)
-        List.fill(coresCount)(List.fill(queueSize)(Hash.zero))
+      case Attempt.Failure(err) =>
+        throw new CodecDecodingException(s"decodeAuthQueues: ${err.messageWithContext}")
 
   def decodeActivityStatistics(
     bytes: Array[Byte],
@@ -217,21 +215,14 @@ object FullJamStateCodecs:
   ): ActivityStatisticsData =
     activityStatisticsCodec(validatorCount, coresCount).decodeValue(BitVector(bytes)) match
       case Attempt.Successful(stats) => stats
-      case Attempt.Failure(_) =>
-        // Return empty stats on error (matching existing behavior)
-        ActivityStatisticsData(
-          accumulator = List.fill(validatorCount)(StatCountData.zero),
-          previous = List.fill(validatorCount)(StatCountData.zero),
-          core = List.fill(coresCount)(CoreStatisticsData.zero),
-          service = List.empty
-        )
+      case Attempt.Failure(err) =>
+        throw new CodecDecodingException(s"decodeActivityStatistics: ${err.messageWithContext}")
 
   def decodeAccumulationHistory(bytes: Array[Byte], epochLength: Int): List[List[ByteVector]] =
     accumulationHistoryCodec(epochLength).decodeValue(BitVector(bytes)) match
       case Attempt.Successful(history) => history
-      case Attempt.Failure(_) =>
-        // Return empty history on error (matching existing behavior)
-        List.fill(epochLength)(List.empty)
+      case Attempt.Failure(err) =>
+        throw new CodecDecodingException(s"decodeAccumulationHistory: ${err.messageWithContext}")
 
   def decodeServiceInfo(bytes: Array[Byte]): ServiceInfo =
     serviceInfoCodec.decodeValue(BitVector(bytes)) match
@@ -251,7 +242,8 @@ object FullJamStateCodecs:
   def decodeLastAccumulationOutputs(bytes: Array[Byte]): List[(Long, ByteVector)] =
     lastAccumulationOutputsCodec.decodeValue(BitVector(bytes)) match
       case Attempt.Successful(outputs) => outputs
-      case Attempt.Failure(_) => List.empty
+      case Attempt.Failure(err) =>
+        throw new CodecDecodingException(s"decodeLastAccumulationOutputs: ${err.messageWithContext}")
 
   def encodeLastAccumulationOutputs(outputs: List[(Long, ByteVector)]): ByteVector =
     // Sort by service ID before encoding as per Gray Paper
