@@ -697,11 +697,10 @@ class ReportTest extends AnyFunSuite with Matchers:
       case (Right(_), Left(actualErr)) =>
         fail(s"Expected success but got error $actualErr in test case: $testCaseName")
       case (Right(expMarks), Right(actMarks)) =>
-        // Both are success, compare output marks
-        expMarks.reported.size shouldBe actMarks.reported.size withClue
-          s"Reported packages count mismatch in test case: $testCaseName"
-        expMarks.reporters.size shouldBe actMarks.reporters.size withClue
-          s"Reporters count mismatch in test case: $testCaseName"
+        actMarks.reported shouldBe expMarks.reported withClue
+          s"Reported packages mismatch in test case: $testCaseName"
+        actMarks.reporters shouldBe expMarks.reporters withClue
+          s"Reporters mismatch in test case: $testCaseName"
 
   // Helper method to compare ReportState instances
   private def assertReportStateEquals(
@@ -718,8 +717,10 @@ class ReportTest extends AnyFunSuite with Matchers:
           case (true, true) =>
             val expAssign = exp.get
             val actAssign = act.get
-            expAssign.report.packageSpec.hash shouldBe actAssign.report.packageSpec.hash withClue
-              s"Assignment package hash mismatch at index $idx in test case: $testCaseName"
+            actAssign.report shouldBe expAssign.report withClue
+              s"Assignment work report mismatch at index $idx in test case: $testCaseName"
+            actAssign.timeout shouldBe expAssign.timeout withClue
+              s"Assignment timeout mismatch at index $idx in test case: $testCaseName"
           case (false, false) => ()
           case (true, false) =>
             fail(s"Expected assignment at index $idx but got none in test case: $testCaseName")
@@ -727,8 +728,40 @@ class ReportTest extends AnyFunSuite with Matchers:
             fail(s"Expected no assignment at index $idx but got one in test case: $testCaseName")
     }
 
-    expected.coresStatistics.size shouldBe actual.coresStatistics.size withClue
+    actual.coresStatistics.size shouldBe expected.coresStatistics.size withClue
       s"CoreStatistics size mismatch in test case: $testCaseName"
+    expected.coresStatistics.zip(actual.coresStatistics).zipWithIndex.foreach {
+      case ((exp, act), idx) =>
+        val where = s"core $idx in test case: $testCaseName"
+        act.daLoad shouldBe exp.daLoad withClue s"coresStatistics.daLoad mismatch at $where"
+        act.popularity shouldBe exp.popularity withClue s"coresStatistics.popularity mismatch at $where"
+        act.imports shouldBe exp.imports withClue s"coresStatistics.imports mismatch at $where"
+        act.extrinsicCount shouldBe exp.extrinsicCount withClue s"coresStatistics.extrinsicCount mismatch at $where"
+        act.extrinsicSize shouldBe exp.extrinsicSize withClue s"coresStatistics.extrinsicSize mismatch at $where"
+        act.exports shouldBe exp.exports withClue s"coresStatistics.exports mismatch at $where"
+        act.bundleSize shouldBe exp.bundleSize withClue s"coresStatistics.bundleSize mismatch at $where"
+        act.gasUsed shouldBe exp.gasUsed withClue s"coresStatistics.gasUsed mismatch at $where"
+    }
 
-    expected.servicesStatistics.size shouldBe actual.servicesStatistics.size withClue
+    actual.servicesStatistics.size shouldBe expected.servicesStatistics.size withClue
       s"ServicesStatistics size mismatch in test case: $testCaseName"
+    expected.servicesStatistics.zip(actual.servicesStatistics).foreach {
+      case (exp, act) =>
+        act.id shouldBe exp.id withClue
+          s"servicesStatistics.id mismatch in test case: $testCaseName"
+        val where = s"service ${exp.id} in test case: $testCaseName"
+        val e = exp.record
+        val a = act.record
+        a.providedCount shouldBe e.providedCount withClue s"servicesStatistics.providedCount mismatch at $where"
+        a.providedSize shouldBe e.providedSize withClue s"servicesStatistics.providedSize mismatch at $where"
+        a.refinementCount shouldBe e.refinementCount withClue s"servicesStatistics.refinementCount mismatch at $where"
+        a.refinementGasUsed shouldBe e.refinementGasUsed withClue
+          s"servicesStatistics.refinementGasUsed mismatch at $where"
+        a.extrinsicCount shouldBe e.extrinsicCount withClue s"servicesStatistics.extrinsicCount mismatch at $where"
+        a.extrinsicSize shouldBe e.extrinsicSize withClue s"servicesStatistics.extrinsicSize mismatch at $where"
+        a.imports shouldBe e.imports withClue s"servicesStatistics.imports mismatch at $where"
+        a.exports shouldBe e.exports withClue s"servicesStatistics.exports mismatch at $where"
+        a.accumulateCount shouldBe e.accumulateCount withClue s"servicesStatistics.accumulateCount mismatch at $where"
+        a.accumulateGasUsed shouldBe e.accumulateGasUsed withClue
+          s"servicesStatistics.accumulateGasUsed mismatch at $where"
+    }

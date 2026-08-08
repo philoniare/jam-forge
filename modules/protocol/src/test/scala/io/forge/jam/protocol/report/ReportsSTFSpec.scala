@@ -4,10 +4,26 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 import org.scalacheck.Gen
-import io.forge.jam.core.ChainConfig
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.primitives.{
+  Hash,
+  ServiceId,
+  ValidatorIndex,
+  Timeslot,
+  Ed25519Signature,
+  Gas,
+  CoreIndex
+}
+import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
+import io.forge.jam.core.types.dispute.GuaranteeSignature
+import io.forge.jam.core.types.work.{ExecutionResult, PackageSpec}
+import io.forge.jam.core.types.workresult.{WorkResult, RefineLoad}
+import io.forge.jam.core.types.context.Context
 import io.forge.jam.protocol.generators.StfGenerators.*
 import io.forge.jam.protocol.report.ReportTypes.*
+import io.forge.jam.protocol.report.ReportTransition
+import spire.math.{UInt, UShort}
 
 /**
  * - Work report processing validates all required fields
@@ -76,6 +92,126 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       coresStatistics = coresStatistics,
       servicesStatistics = List.empty
     )
+
+  private val zeroHash: Hash = Hash(Array.fill(32)(0.toByte))
+
+  private def hashOf(b: Int): Hash = Hash(Array.fill(32)(b.toByte))
+
+  /** A well-formed-enough work report; individual fields are overridden per test. */
+  private def buildWorkReport(
+    coreIndex: Int = 0,
+    packageHash: Hash = hashOf(0x11),
+    lookupAnchorSlot: Int = 1,
+    results: List[WorkResult] = List(
+      WorkResult(
+        serviceId = ServiceId(42),
+        codeHash = hashOf(0x09),
+        payloadHash = hashOf(0x0a),
+        accumulateGas = Gas(1000),
+        result = ExecutionResult.Ok(JamBytes(Array.emptyByteArray)),
+        refineLoad = RefineLoad(Gas(100), UShort(0), UShort(0), UInt(0), UShort(0))
+      )
+    ),
+    prerequisites: List[Hash] = List.empty,
+    segmentRootLookup: List[io.forge.jam.core.types.workpackage.SegmentRootLookup] = List.empty
+  ): WorkReport =
+    WorkReport(
+      packageSpec = PackageSpec(
+        hash = packageHash,
+        length = UInt(1000),
+        erasureRoot = hashOf(0x02),
+        exportsRoot = hashOf(0x03),
+        exportsCount = UShort(1)
+      ),
+      context = Context(
+        anchor = hashOf(0x04),
+        stateRoot = hashOf(0x05),
+        beefyRoot = hashOf(0x06),
+        lookupAnchor = hashOf(0x07),
+        lookupAnchorSlot = Timeslot(lookupAnchorSlot),
+        prerequisites = prerequisites
+      ),
+      coreIndex = CoreIndex(coreIndex),
+      authorizerHash = hashOf(0x08),
+      authGasUsed = Gas(0),
+      authOutput = JamBytes(Array.emptyByteArray),
+      segmentRootLookup = segmentRootLookup,
+      results = results
+    )
+
+  /** A guarantee with `sigCount` credentials over the given report. */
+  private def buildGuarantee(report: WorkReport, slot: Int, sigCount: Int): GuaranteeExtrinsic =
+    GuaranteeExtrinsic(
+      report = report,
+      slot = Timeslot(slot),
+      signatures = (0 until sigCount).toList.map(i =>
+        GuaranteeSignature(ValidatorIndex(i), Ed25519Signature(Array.fill(64)(0.toByte)))
+      )
+    )
+
+  private val reportAuthorizerHash: Hash = hashOf(0x08)
+  private val reportServiceId: Long = 42L
+  private val reportCodeHash: Hash = hashOf(0x09)
+
+  private def minimalState(config: ChainConfig): ReportState =
+    val emptyValidatorKey = io.forge.jam.core.types.epoch.ValidatorKey(
+      bandersnatch = io.forge.jam.core.primitives.BandersnatchPublicKey(Array.fill(32)(0.toByte)),
+      ed25519 = io.forge.jam.core.primitives.Ed25519PublicKey(Array.fill(32)(0.toByte)),
+      bls = io.forge.jam.core.primitives.BlsPublicKey(Array.fill(144)(0.toByte)),
+      metadata = JamBytes.zeros(128)
+    )
+    val account = io.forge.jam.core.types.service.ServiceAccount(
+      id = reportServiceId,
+      data = io.forge.jam.core.types.service.ServiceData(
+        io.forge.jam.core.types.service.ServiceInfo(
+          codeHash = reportCodeHash,
+          balance = 0L,
+          minItemGas = 0L,
+          minMemoGas = 0L,
+          bytesUsed = 0L,
+          items = 0
+        )
+      )
+    )
+    ReportState(
+      availAssignments = List.fill(config.coresCount)(None),
+      currValidators = List.fill(config.validatorCount)(emptyValidatorKey),
+      prevValidators = List.fill(config.validatorCount)(emptyValidatorKey),
+      entropy = List.fill(4)(zeroHash),
+      offenders = List.empty,
+      recentBlocks =
+        io.forge.jam.core.types.history.HistoricalBetaContainer(
+          List.empty,
+          io.forge.jam.core.types.history.HistoricalMmr(List.empty)
+        ),
+      authPools = List.fill(config.coresCount)(List(reportAuthorizerHash)),
+      accounts = List(account),
+      coresStatistics = List.fill(config.coresCount)(CoreStatisticsRecord()),
+      servicesStatistics = List.empty
+    )
+
+  /**
+   * Add the given package hashes to recent history as "reported" packages so
+   * they count as satisfied prerequisites (otherwise validateNoDuplicatePackages
+   * rejects unknown prerequisites with DependencyMissing before the per-report
+   * dependency-count check is reached).
+   */
+  private def withHistoryReported(state: ReportState, packages: List[Hash]): ReportState =
+    val reported = packages.map(h =>
+      io.forge.jam.core.types.history.ReportedWorkPackage(hash = h, exportsRoot = zeroHash)
+    )
+    val beta = io.forge.jam.core.types.history.HistoricalBeta(
+      headerHash = hashOf(0x55),
+      beefyRoot = zeroHash,
+      stateRoot = zeroHash,
+      reported = reported
+    )
+    state.copy(recentBlocks =
+      state.recentBlocks.copy(history = List(beta))
+    )
+
+  private def runStf(input: ReportInput, state: ReportState): ReportOutput =
+    ReportTransition.stfInternal(input, state, testConfig, skipAncestryValidation = true)._2
 
   test("property: availAssignments size matches cores count") {
     forAll(genReportState(testConfig)) { state =>
@@ -153,7 +289,7 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     }
   }
 
-  test("property: empty guarantees input does not change state") {
+  test("property: empty guarantees input leaves availability assignments unchanged") {
     forAll(genReportState(testConfig)) { preState =>
       val input = ReportInput(
         guarantees = List.empty,
@@ -161,11 +297,10 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         knownPackages = List.empty
       )
 
-      // Note: ReportTransition.stfInternal is not directly accessible,
-      // so we test the state structure invariants instead
+      val (postState, output) = ReportTransition.stfInternal(input, preState, testConfig)
 
-      // Property: with empty guarantees, availAssignments should remain unchanged
-      preState.availAssignments.size shouldBe testConfig.coresCount
+      output.isRight shouldBe true
+      postState.availAssignments shouldBe preState.availAssignments
     }
   }
 
@@ -323,247 +458,244 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     }
   }
 
-  test("GP: guarantees must be sorted by core index") {
-    // GP: Guarantees are validated to be sorted by core index
-    // This is tested by generating valid inputs and checking they are sorted
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
+  test("GP: unsorted guarantor credentials are rejected (NotSortedOrUniqueGuarantors)") {
+    val report = buildWorkReport(coreIndex = 0)
+    val guarantee = GuaranteeExtrinsic(
+      report = report,
+      slot = Timeslot(10),
+      signatures = List(
+        GuaranteeSignature(ValidatorIndex(1), Ed25519Signature(Array.fill(64)(0.toByte))),
+        GuaranteeSignature(ValidatorIndex(0), Ed25519Signature(Array.fill(64)(0.toByte)))
       )
-
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-
-      // GP: Empty guarantees should pass ordering check
-      output.isRight shouldBe true
-    }
+    )
+    val input = ReportInput(List(guarantee), slot = 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.NotSortedOrUniqueGuarantors)
   }
 
-  test("GP: report accumulate gas limit is enforced") {
-    // GP: Total gas from all results must not exceed reportAccGas
-    testConfig.reportAccGas should be > 0L
-  }
-
-  test("GP: max dependencies limit is enforced") {
-    // GP: prerequisites + segmentRootLookup <= maxDependencies
-    testConfig.maxDependencies should be > 0
-  }
-
-  test("GP: rotation period determines validator set selection") {
-    // GP: Report rotation = slot / rotationPeriod
-    // If report rotation == current rotation, use current validators
-    // Otherwise, check epoch boundary rules
-    testConfig.rotationPeriod should be > 0
-  }
-
-  test("GP: guarantee requires 2-3 signatures") {
-    // GP: Guarantee must have between 2 and 3 signatures
-    // Less than 2 -> InsufficientGuarantees
-    // More than 3 -> InsufficientGuarantees
-    // This is verified in validateGuarantorSignatures
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
+  test("GP: report accumulate gas above limit is rejected (WorkReportGasTooHigh)") {
+    val report = buildWorkReport(
+      coreIndex = 0,
+      results = List(
+        WorkResult(
+          serviceId = ServiceId(42),
+          codeHash = hashOf(0x09),
+          payloadHash = hashOf(0x0a),
+          accumulateGas = Gas(testConfig.reportAccGas + 1L),
+          result = ExecutionResult.Ok(JamBytes(Array.emptyByteArray)),
+          refineLoad = RefineLoad(Gas(100), UShort(0), UShort(0), UInt(0), UShort(0))
+        )
       )
-
-      // GP: With empty guarantees, signature validation is not triggered
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-      output.isRight shouldBe true
-    }
+    )
+    val input = ReportInput(List(buildGuarantee(report, slot = 10, sigCount = 2)), slot = 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.WorkReportGasTooHigh)
   }
 
-  test("GP: coresStatistics updated based on guarantees") {
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      val (postState, output) = ReportTransition.stfInternal(input, preState, testConfig)
-
-      whenever(output.isRight) {
-        // GP: coresStatistics size should match cores count
-        postState.coresStatistics.size shouldBe testConfig.coresCount
-      }
-    }
-  }
-
-  test("GP: guarantees must be ordered by core index (OutOfOrderGuarantee)") {
-    // GP: Guarantees must be sorted by core index in ascending order
-    // This is validated in validateGuarantees
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      // GP: Empty guarantees trivially satisfy ordering
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-      output.isRight shouldBe true
-    }
-  }
-
-  test("GP: core index must be valid (BadCoreIndex)") {
-    // GP: Core index must be < C (cores count)
-    testConfig.coresCount shouldBe 2 // TINY has 2 cores
-
-    // Valid core indices are 0 and 1 for TINY config
-    (0 until testConfig.coresCount).foreach { idx =>
-      idx should be < testConfig.coresCount
-    }
-  }
-
-  test("GP: report slot must not be in future (FutureReportSlot)") {
-    // GP: Work report slot <= current block slot
-    forAll(genReportState(testConfig)) { preState =>
-      val currentSlot = 100L
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = currentSlot,
-        knownPackages = List.empty
-      )
-
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-
-      // GP: Should succeed with current slot
-      output.isRight shouldBe true
-    }
-  }
-
-  test("GP: report epoch must be current or previous (ReportEpochBeforeLast)") {
-    // GP: Report epoch must be >= current_epoch - 1
-    val epochLength = testConfig.epochLength
-    epochLength should be > 0
-
-    // At slot 100, epoch = 100 / 12 = 8 (for TINY with epochLength=12)
-    val currentSlot = 100L
-    val currentEpoch = currentSlot / epochLength
-
-    // Valid epochs are currentEpoch and currentEpoch - 1
-    val validEpochs = Set(currentEpoch, currentEpoch - 1)
-    validEpochs.size shouldBe 2
-  }
-
-  test("GP: guarantee requires 2-3 signatures (InsufficientGuarantees)") {
-    // GP: Each guarantee must have between 2 and 3 signatures
-    // Less than 2 -> InsufficientGuarantees
-    // More than 3 -> InsufficientGuarantees
-    val minSignatures = 2
-    val maxSignatures = 3
-
-    (minSignatures to maxSignatures).foreach { count =>
-      count should be >= 2
-      count should be <= 3
-    }
-  }
-
-  test("GP: guarantor indices must be sorted unique (NotSortedOrUniqueGuarantors)") {
-    // GP: Guarantor credentials must be sorted by validator index and unique
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      // GP: Empty guarantees have no guarantors to validate
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-      output.isRight shouldBe true
-    }
-  }
-
-  test("GP: core must not be engaged (CoreEngaged)") {
-    // GP: No report may be placed on core with report pending availability
-    forAll(genReportState(testConfig)) { preState =>
-      // GP: availAssignments tracks pending reports
-      preState.availAssignments.size shouldBe testConfig.coresCount
-
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      val (postState, output) = ReportTransition.stfInternal(input, preState, testConfig)
-
-      whenever(output.isRight) {
-        // GP: Empty guarantees don't engage any cores
-        postState.availAssignments.size shouldBe testConfig.coresCount
-      }
-    }
-  }
-
-  test("GP: anchor must be in recent history (AnchorNotRecent)") {
-    // GP: Anchor block must be within last H blocks
-    val recentHistoryLen = io.forge.jam.core.constants.H
-    recentHistoryLen shouldBe 8
-  }
-
-  test("GP: no duplicate packages (DuplicatePackage)") {
-    // GP: Work package hash must not appear in recent history or pending
-    forAll(genReportState(testConfig)) { preState =>
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      // GP: Empty guarantees have no packages to check
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-      output.isRight shouldBe true
-    }
-  }
-
-  test("GP: authorizer must be in pool (CoreUnauthorized)") {
-    // GP: Authorizer hash must be present in core's authorization pool
-    forAll(genReportState(testConfig)) { preState =>
-      // GP: Each core has an auth pool
-      preState.authPools.size shouldBe testConfig.coresCount
-    }
-  }
-
-  test("GP: total accumulate gas must respect limit (WorkReportGasTooHigh)") {
-    // GP: Sum of work-digest gas limits <= G_acc
-    val maxAccGas = testConfig.reportAccGas
-    maxAccGas should be > 0L
-  }
-
-  test("GP: service gas must respect minimum (ServiceItemGasTooLow)") {
-    // GP: Each work-digest gas limit >= service's minAccGas
-    forAll(genReportState(testConfig)) { preState =>
-      // GP: Services have minAccGas in their account
-      val input = ReportInput(
-        guarantees = List.empty,
-        slot = 100L,
-        knownPackages = List.empty
-      )
-
-      val (_, output) = ReportTransition.stfInternal(input, preState, testConfig)
-      output.isRight shouldBe true
-    }
-  }
-
-  test("GP: max dependencies limit enforced (TooManyDependencies)") {
-    // GP: |prerequisites| + |segmentRootLookup| <= maxDependencies
+  test("GP: dependency count at and above the limit (TooManyDependencies boundary)") {
+    // GP: |prerequisites| + |segmentRootLookup| <= maxDependencies.
+    // Seed every prerequisite into recent history so it is a satisfied dependency;
+    // the only thing that varies between the two cases is the dependency *count*.
     val maxDeps = testConfig.maxDependencies
-    maxDeps shouldBe 8
+    val overPrereqs = (0 to maxDeps).toList.map(hashOf) // maxDeps + 1 entries
+    val seeded = withHistoryReported(minimalState(testConfig), overPrereqs)
+
+    // Exactly maxDeps prerequisites passes the dependency-count gate (it fails
+    // later on signature verification, never TooManyDependencies).
+    val atLimit = buildWorkReport(prerequisites = overPrereqs.take(maxDeps))
+    val atLimitOut = runStf(ReportInput(List(buildGuarantee(atLimit, 10, 2)), 10L), seeded)
+    atLimitOut.swap.toOption should not be Some(ReportErrorCode.TooManyDependencies)
+
+    // One over the limit is rejected with TooManyDependencies.
+    val overLimit = buildWorkReport(prerequisites = overPrereqs)
+    val overLimitOut = runStf(ReportInput(List(buildGuarantee(overLimit, 10, 2)), 10L), seeded)
+    overLimitOut.swap.toOption shouldBe Some(ReportErrorCode.TooManyDependencies)
   }
 
-  test("GP: validator index must be valid (BadValidatorIndex)") {
-    // GP: Guarantor validator index must be < V
-    forAll(genReportState(testConfig)) { preState =>
-      preState.currValidators.size shouldBe testConfig.validatorCount
-      preState.prevValidators.size shouldBe testConfig.validatorCount
-    }
+  test("GP: report from before the previous rotation is rejected (ReportEpochBeforeLast)") {
+    val rp = testConfig.rotationPeriod
+    val currentSlot = 100L
+    val staleSlot = currentSlot - (rp.toLong * 2L) // two rotations earlier
+    // Keep the lookup anchor inside Cmaxlookupanchorage of the current slot so
+    // validateAnchorAge passes and the rotation-window check is what fires.
+    val report = buildWorkReport(coreIndex = 0, lookupAnchorSlot = (currentSlot - 1L).toInt)
+    val input = ReportInput(List(buildGuarantee(report, staleSlot.toInt, sigCount = 2)), currentSlot)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.ReportEpochBeforeLast)
   }
 
-  test("GP: lookup anchor must not be too old (LookupAnchorNotRecent)") {
-    // GP: lookup_anchor_slot >= current_slot - maxLookupAnchorage
+  test("GP: credential count outside 2-3 is rejected (InsufficientGuarantees)") {
+    // GP: each guarantee must carry between 2 and 3 credentials.
+    val report = buildWorkReport(coreIndex = 0)
+
+    // 1 credential -> InsufficientGuarantees
+    val one = ReportInput(List(buildGuarantee(report, 10, sigCount = 1)), 10L)
+    runStf(one, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.InsufficientGuarantees)
+
+    // 4 credentials -> InsufficientGuarantees
+    val four = ReportInput(List(buildGuarantee(report, 10, sigCount = 4)), 10L)
+    runStf(four, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.InsufficientGuarantees)
+
+    val two = ReportInput(List(buildGuarantee(report, 10, sigCount = 2)), 10L)
+    runStf(two, minimalState(testConfig)).swap.toOption should not be
+      Some(ReportErrorCode.InsufficientGuarantees)
+  }
+
+  test("GP: a rejected guarantee leaves the pre-state unchanged (atomicity)") {
+    val pre = minimalState(testConfig).copy(
+      coresStatistics = List(
+        CoreStatisticsRecord(daLoad = 7, gasUsed = 123),
+        CoreStatisticsRecord(daLoad = 9, gasUsed = 456)
+      )
+    )
+    val report = buildWorkReport(coreIndex = testConfig.coresCount) // out of range
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    val (postState, output) =
+      ReportTransition.stfInternal(input, pre, testConfig, skipAncestryValidation = true)
+    output.isLeft shouldBe true
+    postState shouldBe pre
+    postState.coresStatistics shouldBe pre.coresStatistics
+  }
+
+  test("GP: out-of-order guarantees are rejected (OutOfOrderGuarantee)") {
+    // GP: guarantees must be strictly ascending by core index. Two guarantees
+    // for cores [1, 0] violate the ordering.
+    val r0 = buildWorkReport(coreIndex = 0, packageHash = hashOf(0x21))
+    val r1 = buildWorkReport(coreIndex = 1, packageHash = hashOf(0x22))
+    val input = ReportInput(
+      List(buildGuarantee(r1, 10, 2), buildGuarantee(r0, 10, 2)),
+      slot = 10L
+    )
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.OutOfOrderGuarantee)
+  }
+
+  test("GP: core index >= cores count is rejected (BadCoreIndex)") {
+    // GP: core index must be < C. TINY has 2 cores, so core index 2 is invalid.
+    testConfig.coresCount shouldBe 2
+    val report = buildWorkReport(coreIndex = testConfig.coresCount)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.BadCoreIndex)
+  }
+
+  test("GP: guarantee slot in the future is rejected (FutureReportSlot)") {
+    // GP: a work report's guarantee slot must be <= the current block slot.
+    val report = buildWorkReport(coreIndex = 0)
+    val input = ReportInput(List(buildGuarantee(report, slot = 11, sigCount = 2)), slot = 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.FutureReportSlot)
+  }
+
+  test("GP: a report with no work results is rejected (MissingWorkResults)") {
+    // GP: a work report must carry at least one result.
+    val report = buildWorkReport(coreIndex = 0, results = List.empty)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.MissingWorkResults)
+  }
+
+  test("GP: a report on an engaged core is rejected (CoreEngaged)") {
+    // GP: no report may be placed on a core that already has a report pending
+    // availability. Occupy core 0 in the pre-state, then submit a report for it.
+    val base = minimalState(testConfig)
+    val occupant = io.forge.jam.core.types.workpackage.AvailabilityAssignment(
+      buildWorkReport(coreIndex = 0, packageHash = hashOf(0x99)),
+      timeout = 10L
+    )
+    val engaged = base.copy(availAssignments = Some(occupant) :: base.availAssignments.tail)
+    val report = buildWorkReport(coreIndex = 0)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, engaged).swap.toOption shouldBe Some(ReportErrorCode.CoreEngaged)
+  }
+
+  test("GP: a duplicate package hash is rejected (DuplicatePackage)") {
+    // GP: a work package hash already present in known-packages (the derived
+    // ρ/ξ/φ/recent union) must be rejected.
+    val pkg = hashOf(0x77)
+    val report = buildWorkReport(coreIndex = 0, packageHash = pkg)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), slot = 10L, knownPackages = List(pkg))
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.DuplicatePackage)
+  }
+
+  test("GP: an authorizer absent from the pool is rejected (CoreUnauthorized)") {
+    // GP: the report's authorizer hash must be present in the core's auth pool.
+    // Use a pre-state whose pools do NOT contain the report's authorizer.
+    val state = minimalState(testConfig).copy(
+      authPools = List.fill(testConfig.coresCount)(List(hashOf(0xCC)))
+    )
+    val report = buildWorkReport(coreIndex = 0) // authorizerHash = 0x08, not in pool
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, state).swap.toOption shouldBe Some(ReportErrorCode.CoreUnauthorized)
+  }
+
+  test("GP: a result below the service's min item gas is rejected (ServiceItemGasTooLow)") {
+    // GP: each result's accumulate gas must be >= the service's min item gas.
+    val highMinGasAccount = io.forge.jam.core.types.service.ServiceAccount(
+      id = reportServiceId,
+      data = io.forge.jam.core.types.service.ServiceData(
+        io.forge.jam.core.types.service.ServiceInfo(
+          codeHash = reportCodeHash,
+          balance = 0L,
+          minItemGas = 1_000_000L, // higher than the report's 1000
+          minMemoGas = 0L,
+          bytesUsed = 0L,
+          items = 0
+        )
+      )
+    )
+    val state = minimalState(testConfig).copy(accounts = List(highMinGasAccount))
+    val report = buildWorkReport(coreIndex = 0) // result accumulateGas = 1000
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, state).swap.toOption shouldBe Some(ReportErrorCode.ServiceItemGasTooLow)
+  }
+
+  test("GP: an unknown service id is rejected (BadServiceId)") {
+    // GP: every result's service id must exist in the accounts set.
+    val state = minimalState(testConfig).copy(accounts = List.empty)
+    val report = buildWorkReport(coreIndex = 0) // serviceId 42 not in empty accounts
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, state).swap.toOption shouldBe Some(ReportErrorCode.BadServiceId)
+  }
+
+  test("GP: a mismatched code hash is rejected (BadCodeHash)") {
+    // GP: a result's code hash must equal the service's stored code hash.
+    val wrongCodeHashAccount = io.forge.jam.core.types.service.ServiceAccount(
+      id = reportServiceId,
+      data = io.forge.jam.core.types.service.ServiceData(
+        io.forge.jam.core.types.service.ServiceInfo(
+          codeHash = hashOf(0xDD), // report uses hashOf(0x09)
+          balance = 0L,
+          minItemGas = 0L,
+          minMemoGas = 0L,
+          bytesUsed = 0L,
+          items = 0
+        )
+      )
+    )
+    val state = minimalState(testConfig).copy(accounts = List(wrongCodeHashAccount))
+    val report = buildWorkReport(coreIndex = 0)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+    runStf(input, state).swap.toOption shouldBe Some(ReportErrorCode.BadCodeHash)
+  }
+
+  test("GP: a report clears every structural check and reaches the assignment check (WrongAssignment)") {
+    val report = buildWorkReport(coreIndex = 0)
+    val input = ReportInput(List(buildGuarantee(report, 10, sigCount = 2)), 10L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.WrongAssignment)
+  }
+
+  test("GP: lookup anchor too old is rejected (LookupAnchorNotRecent)") {
+    // GP: lookup_anchor_slot >= current_slot - maxLookupAnchorage.
     val maxAnchorage = testConfig.maxLookupAnchorAge
     maxAnchorage should be > 0L
+    // currentSlot - lookupAnchorSlot = 100 - 1 = 99 > 24 -> rejected.
+    val report = buildWorkReport(coreIndex = 0, lookupAnchorSlot = 1)
+    val input = ReportInput(List(buildGuarantee(report, slot = 100, sigCount = 2)), slot = 100L)
+    runStf(input, minimalState(testConfig)).swap.toOption shouldBe
+      Some(ReportErrorCode.LookupAnchorNotRecent)
   }
