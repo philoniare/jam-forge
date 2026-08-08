@@ -76,7 +76,7 @@ object LiftedStfs:
           ctx.availableReports,
           ctx.block.header.slot.value.toLong
         ),
-      wrapError = (_: Nothing) => PipelineError.AccumulationErr("Accumulation failed")
+      wrapError = (n: Nothing) => n
     )
 
   def history(accumulateRoot: Hash): StfStep =

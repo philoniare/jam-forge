@@ -53,7 +53,6 @@ enum ImportError:
   case PreimageError
   case ReportError
   case StatisticsError
-  case AccumulationError
   case UnknownError
 
 /** BlockImporter handles importing blocks and applying all state transitions.
@@ -202,7 +201,6 @@ class BlockImporter(
     case PipelineError.AssuranceErr(_)          => ImportError.AssuranceError
     case PipelineError.ReportErr(_)             => ImportError.ReportError
     case PipelineError.PreimageErr(_)           => ImportError.PreimageError
-    case PipelineError.AccumulationErr(_)       => ImportError.AccumulationError
     case PipelineError.HeaderVerificationErr(_) => ImportError.InvalidHeader
     case PipelineError.InvalidEpochMark         => ImportError.InvalidHeader
     case PipelineError.InvalidTicketsMark       => ImportError.InvalidHeader

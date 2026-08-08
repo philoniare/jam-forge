@@ -16,7 +16,6 @@ enum PipelineError:
   case AssuranceErr(code: AssuranceErrorCode)
   case ReportErr(code: ReportErrorCode)
   case PreimageErr(code: PreimageErrorCode)
-  case AccumulationErr(msg: String)
   case HeaderVerificationErr(msg: String)
   case InvalidEpochMark
   case InvalidTicketsMark
@@ -29,7 +28,6 @@ enum PipelineError:
     case AssuranceErr(code) => s"Assurance: $code"
     case ReportErr(code) => s"Report: $code"
     case PreimageErr(code) => s"Preimage: $code"
-    case AccumulationErr(msg) => s"Accumulation: $msg"
     case HeaderVerificationErr(msg) => s"Header: $msg"
     case InvalidEpochMark => "Invalid epoch mark"
     case InvalidTicketsMark => "Invalid tickets mark"
