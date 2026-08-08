@@ -256,3 +256,10 @@ class PreimageTest extends AnyFunSuite with Matchers:
 
     expected.statistics.size shouldBe actual.statistics.size withClue
       s"Statistics size mismatch in test case: $testCaseName"
+
+    expected.statistics.zip(actual.statistics).zipWithIndex.foreach { case ((expS, actS), sIdx) =>
+      expS.id shouldBe actS.id withClue
+        s"Statistics id mismatch at index $sIdx in test case: $testCaseName"
+      expS.record shouldBe actS.record withClue
+        s"Statistics record mismatch for service ${expS.id} at index $sIdx in test case: $testCaseName"
+    }
