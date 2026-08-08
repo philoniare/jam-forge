@@ -142,8 +142,7 @@ object BandersnatchVrf:
         ringSize
       )
 
-      // If result is all zeros or null, verification failed
-      if result == null || result.length != 32 || result.forall(_ == 0) then
+      if result == null || result.length != 32 then
         None
       else
         // The result is the 32-byte ticket ID
@@ -173,7 +172,7 @@ object BandersnatchVrf:
         ringSize
       )
 
-      if result == null || result.length != 32 || result.forall(_ == 0) then
+      if result == null || result.length != 32 then
         None
       else
         Some(result)
@@ -208,7 +207,7 @@ object BandersnatchVrf:
     try
       JniBandersnatchWrapper.ensureLibraryLoaded()
       val result = JniBandersnatchWrapper.ietfVrfVerify(publicKey, vrfInput, auxData, signature)
-      if result == null || result.length != 32 || result.forall(_ == 0) then
+      if result == null || result.length != 32 then
         None
       else
         Some(result)
