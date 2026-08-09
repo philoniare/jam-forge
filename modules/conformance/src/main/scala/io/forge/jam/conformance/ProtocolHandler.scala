@@ -60,51 +60,15 @@ class ProtocolHandler(
             logger.logInfo(
               s"Received message of size $size bytes, processing..."
             ) *>
-              handleMessage(msg, size, socket).handleErrorWith { error =>
-                // Log error but try to send error response and continue processing
-                IO.println(
-                  s"[JAM-FORGE ERROR] Error handling message: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
-                ) *>
-                  logger.logError(
-                    s"Error handling message: ${error.getClass.getSimpleName}",
-                    error
-                  ) *>
-                  (for _ <- sendMessage(
-                      socket,
-                      ProtocolMessage.ErrorMsg(
-                        Error(
-                          s"Internal error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
-                        )
-                      )
-                    )
-                  yield ()).handleErrorWith { sendError =>
-                    // If we can't even send the error response, the socket is dead
-                    logger.logError(
-                      s"Failed to send error response, connection lost",
-                      sendError
-                    ) *>
-                      IO.raiseError(sendError)
-                  }
-              } *> connectionLoop(socket)
+              handleMessage(msg, size, socket) *> connectionLoop(socket)
 
           case ReadResult.DecodeFailed(reason, size) =>
             IO.println(
-              s"[JAM-FORGE WARN] Decode failure on $size-byte frame: $reason"
+              s"[JAM-FORGE WARN] Decode failure on $size-byte frame, terminating session: $reason"
             ) *>
               logger.logWarning(
-                s"Decode failure on $size-byte frame: $reason"
-              ) *>
-              sendMessage(
-                socket,
-                ProtocolMessage.ErrorMsg(
-                  Error(s"Decode failure: $reason")
-                )
-              ).handleErrorWith { sendError =>
-                logger.logError(
-                  "Failed to send decode-error response, connection lost",
-                  sendError
-                ) *> IO.raiseError(sendError)
-              } *> connectionLoop(socket)
+                s"Decode failure on $size-byte frame, terminating session: $reason"
+              )
 
           case ReadResult.Eof =>
             logger.logInfo("Connection closed by peer (read returned None)")
@@ -320,7 +284,12 @@ class ProtocolHandler(
 
       // Create RawState and store
       val rawState = RawState(stateRoot, init.keyvals)
-      stateStore.initialize(headerHash, rawState, init.ancestry)
+      stateStore.initialize(
+        headerHash,
+        rawState,
+        init.ancestry,
+        Some((init.header.parent, init.header.slot))
+      )
 
       stateRoot
     }.flatMap { stateRoot =>
@@ -339,16 +308,15 @@ class ProtocolHandler(
   ): IO[Unit] =
     (IO
       .blocking {
-        try
-          val block = importBlock.block
-          val parentHash = block.header.parent
+        val block = importBlock.block
+        val parentHash = block.header.parent
 
-          // Look up parent state
-          stateStore.get(parentHash) match
+        // Look up parent state
+        stateStore.get(parentHash) match
             case None =>
               Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
             case Some(parentState) =>
-              val ancestry = stateStore.getAncestry.map(a =>
+              val ancestry = stateStore.ancestryFor(parentHash).map(a =>
                 AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
               )
               // Import block using existing BlockImporter
@@ -361,22 +329,17 @@ class ProtocolHandler(
                   val postState = blockImporter.materializePostState(config)
 
                   val isOriginal = stateStore.isOriginalBlock(parentHash)
-                  stateStore.store(headerHash, postState, isOriginal)
-
-                  if isOriginal then
-                    stateStore.addToAncestry(
-                      AncestryItem(block.header.slot, headerHash)
-                    )
+                  stateStore.store(
+                    headerHash,
+                    postState,
+                    isOriginal,
+                    Some((parentHash, block.header.slot))
+                  )
 
                   Right(postStateRoot)
 
                 case ImportResult.Failure(error, message) =>
                   Left(s"Import failed: $error - $message")
-        catch
-          case e: Throwable =>
-            Left(
-              s"Import exception: ${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}"
-            )
       }
       .flatMap {
         case Right(stateRoot) =>
@@ -392,14 +355,12 @@ class ProtocolHandler(
             sendMessage(socket, response)
       })
       .handleErrorWith { error =>
-        // Catch-all: if anything escaped above (e.g. OOM, StackOverflow), still try to respond
         val msg =
           s"Fatal import error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
         IO.println(s"[JAM-FORGE ERROR] $msg") *>
           IO.blocking { error.printStackTrace(System.err) } *>
           logger.logError(msg, error) *>
-          sendMessage(socket, ProtocolMessage.ErrorMsg(Error(msg)))
-            .handleErrorWith(_ => IO.unit)
+          IO.raiseError(error)
       }
 
   /** Handle GetState message.

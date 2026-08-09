@@ -180,7 +180,7 @@ object SocketServer:
   def serverResource(config: ServerConfig): Resource[IO, Unit] =
     for
       logger <- FileLogger.resource(config.logPath)
-      stateStore = new StateStore()
+      stateStore = new StateStore(config.chainConfig)
       handler = new ProtocolHandler(stateStore, logger, config.chainConfig)
       _ <- acceptConnections(config.socketPath, handler, logger)
     yield ()

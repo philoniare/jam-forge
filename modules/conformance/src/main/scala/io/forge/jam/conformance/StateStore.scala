@@ -1,6 +1,7 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.protocol.traces.RawState
 
 import scala.collection.mutable
@@ -9,17 +10,25 @@ import scala.collection.mutable
   *
   * Implements a bounded storage strategy to prevent OOM during long fuzzing
   * sessions:
-  *   - Always retains states referenced by the current ancestry (up to 24
-  *     entries)
+  *   - Always retains states referenced by the current ancestry (up to
+  *     `maxAncestryLength` entries)
   *   - Keeps a sliding window of recently stored states for fork support
   *   - Prunes oldest non-ancestry states when the window is exceeded
+  *
+  * @param config
+  *   chain configuration; `maxLookupAnchorAge` (the lookup-anchor window L)
+  *   sizes the ancestry window (24 TINY / 14400 FULL).
   */
-class StateStore:
+class StateStore(config: ChainConfig = ChainConfig.TINY):
   // State indexed by header hash
   private val states: mutable.Map[Hash, RawState] = mutable.Map.empty
 
   // Track which header hashes are "original" blocks (not mutations/forks)
   private val originalBlocks: mutable.Set[Hash] = mutable.Set.empty
+
+  // Per-block parentage: headerHash -> (parentHash, slot)
+  private val parentage: mutable.Map[Hash, (Hash, Timeslot)] =
+    mutable.Map.empty
 
   // Insertion-ordered list of stored hashes for LRU-style pruning
   private val insertionOrder: mutable.ArrayBuffer[Hash] =
@@ -28,8 +37,8 @@ class StateStore:
   // Current ancestry list (from Initialize message)
   private var ancestry: List[AncestryItem] = List.empty
 
-  // Maximum ancestry length (L=24 for tiny spec)
-  val maxAncestryLength: Int = 24
+  // Maximum ancestry length = lookup-anchor window L (24 TINY / 14400 FULL).
+  val maxAncestryLength: Int = config.maxLookupAnchorAge.toInt
 
   // Maximum number of non-ancestry states to retain for fork support.
   private var maxExtraStates: Int = 4
@@ -51,12 +60,14 @@ class StateStore:
   def initialize(
       headerHash: Hash,
       state: RawState,
-      initialAncestry: List[AncestryItem]
+      initialAncestry: List[AncestryItem],
+      genesisParent: Option[(Hash, Timeslot)] = None
   ): Unit =
     synchronized {
       clear()
       states.put(headerHash, state)
       originalBlocks.add(headerHash)
+      genesisParent.foreach(p => parentage.put(headerHash, p))
       insertionOrder += headerHash
       ancestry = initialAncestry.take(maxAncestryLength)
     }
@@ -69,15 +80,20 @@ class StateStore:
     *   The RawState to store
     * @param isOriginal
     *   Whether this is an original block (true) or mutation/fork (false)
+    * @param parent
+    *   Optional `(parentHash, slot)` parentage for this block, used to derive a
+    *   per-chain ancestry via `ancestryFor`.
     */
   def store(
       headerHash: Hash,
       state: RawState,
-      isOriginal: Boolean = true
+      isOriginal: Boolean = true,
+      parent: Option[(Hash, Timeslot)] = None
   ): Unit =
     synchronized {
       states.put(headerHash, state)
       if isOriginal then originalBlocks.add(headerHash)
+      parent.foreach(p => parentage.put(headerHash, p))
       insertionOrder += headerHash
       pruneIfNeeded()
     }
@@ -106,6 +122,7 @@ class StateStore:
       for hash <- toRemoveHashes do
         states.remove(hash)
         originalBlocks.remove(hash)
+        parentage.remove(hash)
 
       // Compact insertion order: remove entries no longer in states
       val stateKeys = states.keySet
@@ -146,6 +163,31 @@ class StateStore:
       ancestry
     }
 
+  /** Derive the ancestry for a block whose parent is `parentHash`, per-chain */
+  def ancestryFor(parentHash: Hash): List[AncestryItem] =
+    synchronized {
+      val acc = mutable.ListBuffer[AncestryItem]()
+      val seen = mutable.Set[Hash]()
+      var current: Hash = parentHash
+      var continue = true
+      while continue do
+        parentage.get(current) match
+          case Some((nextParent, slot)) if !seen.contains(current) =>
+            acc += AncestryItem(slot, current)
+            seen += current
+            current = nextParent
+          case _ =>
+            continue = false
+      ancestry.foreach(item =>
+        if !seen.contains(item.headerHash) then
+          acc += item
+          seen += item.headerHash
+      )
+      acc.toList
+        .sortBy(item => -(item.slot.value.toLong & 0xffffffffL))
+        .take(maxAncestryLength)
+    }
+
   /** Update ancestry with a new block. Adds the new item at the front and trims
     * to max length.
     */
@@ -174,6 +216,7 @@ class StateStore:
     synchronized {
       states.clear()
       originalBlocks.clear()
+      parentage.clear()
       insertionOrder.clear()
       ancestry = List.empty
     }
