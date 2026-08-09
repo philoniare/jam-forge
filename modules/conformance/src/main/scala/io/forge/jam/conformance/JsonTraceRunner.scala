@@ -238,22 +238,6 @@ class JsonTraceRunner(
 object JsonTraceRunner:
 
   /**
-   * Lazily resolved path to the fuzz-reports traces directory.
-   * Handles running from both project root and module subdirectories.
-   */
-  def findTracesDir(version: String = "0.7.1"): Option[Path] =
-    val cwd = new File(System.getProperty("user.dir"))
-
-    // Try various locations
-    val candidates = List(
-      new File(cwd, s"jam-conformance/fuzz-reports/$version/traces"),
-      new File(cwd, s"../jam-conformance/fuzz-reports/$version/traces"),
-      new File(cwd.getParentFile, s"jam-conformance/fuzz-reports/$version/traces")
-    )
-
-    candidates.find(_.exists()).map(_.toPath)
-
-  /**
    * Get all trace directory IDs from the traces base directory.
    */
   def getTraceIds(tracesDir: Path): List[String] =
