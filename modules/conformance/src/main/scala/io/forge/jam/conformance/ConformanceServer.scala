@@ -43,11 +43,15 @@ object ServerConfig:
           return Left(
             """JAM Forge Conformance Testing Server
               |
-              |Usage: ConformanceServerApp [options]
+              |Usage:
+              |  ConformanceServerApp [options]
+              |  ConformanceServerApp fuzz <socket-path> [--spec tiny|full]
+              |  ConformanceServerApp warmup-and-serve --socket-path <path> [--spec tiny|full]
               |
               |Options:
               |  --socket-path <path>  Path to Unix domain socket (default: /tmp/jam_target.sock)
               |  --log-path <path>     Path to log file (default: /tmp/jam_conformance.log)
+              |  --spec tiny|full      Chain spec for fuzz/warmup-and-serve (default: tiny)
               |  --help                Show this help message
               |""".stripMargin
           )
@@ -61,8 +65,9 @@ object ServerConfig:
 /** Main entry point for the JAM Forge Conformance Testing Server.
   *
   * Commands: warmup [--iterations=N] - Run JVM warmup and trigger CRaC
-  * checkpoint fuzz <socket-path> - Start conformance server on Unix socket
-  * (default) - Start server with --socket-path/--log-path options
+  * checkpoint fuzz <socket-path> [--spec tiny|full] - Start conformance server
+  * on Unix socket (default: tiny) (default) - Start server with
+  * --socket-path/--log-path options
   */
 object ConformanceServerApp extends IOApp:
 
@@ -107,19 +112,24 @@ object ConformanceServerApp extends IOApp:
         }
 
       // CRaC warm-and-serve: warm on all traces, checkpoint, post-restore
-      // start fuzz server. Args: --socket-path <p>
+      // start fuzz server. Args: --socket-path <p> [--spec tiny|full]
       case "warmup-and-serve" :: rest =>
         val socketPath = rest
           .sliding(2)
           .collectFirst { case List("--socket-path", p) => Paths.get(p) }
           .getOrElse(Paths.get("/tmp/jam_target.sock"))
-        IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
-          runServer(ServerConfig(socketPath = socketPath, chainConfig = ChainConfig.TINY))
+        parseSpec(rest) match
+          case Left(msg) => IO.println(msg).as(ExitCode.Error)
+          case Right(chainConfig) =>
+            IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
+              runServer(ServerConfig(socketPath = socketPath, chainConfig = chainConfig))
 
-      // Fuzz command (used by conformance harness)
-      case "fuzz" :: socketPath :: _ =>
-        val config = ServerConfig(socketPath = Paths.get(socketPath), chainConfig = ChainConfig.TINY)
-        runServer(config)
+      // Fuzz command (used by conformance harness). Args: <socket-path> [--spec tiny|full]
+      case "fuzz" :: socketPath :: rest =>
+        parseSpec(rest) match
+          case Left(msg) => IO.println(msg).as(ExitCode.Error)
+          case Right(chainConfig) =>
+            runServer(ServerConfig(socketPath = Paths.get(socketPath), chainConfig = chainConfig))
 
       // Legacy/default: parse --socket-path, --log-path options
       case _ =>
@@ -133,13 +143,26 @@ object ConformanceServerApp extends IOApp:
           case Right(config) =>
             runServer(config)
 
+  /** Parse an optional `--spec tiny|full` flag, defaulting to TINY. */
+  private def parseSpec(args: List[String]): Either[String, ChainConfig] =
+    args.sliding(2).collectFirst { case List("--spec", v) => v } match
+      case None              => Right(ChainConfig.TINY)
+      case Some("tiny")      => Right(ChainConfig.TINY)
+      case Some("full")      => Right(ChainConfig.FULL)
+      case Some(other)       => Left(s"Unknown spec '$other' (expected tiny|full)")
+
+  /** Protocol version string derived from the wire-level Version.JAM_VERSION. */
+  private val jamVersionString: String =
+    val v = Version.JAM_VERSION
+    s"${v.major}.${v.minor}.${v.patch}"
+
   private def runServer(config: ServerConfig): IO[ExitCode] =
     val specName = config.chainConfig match
       case ChainConfig.TINY => "tiny"
       case ChainConfig.FULL => "full"
       case _                => "custom"
     for
-      _ <- IO.println(s"JAM Forge Conformance Testing Server v0.7.2")
+      _ <- IO.println(s"JAM Forge Conformance Testing Server v$jamVersionString")
       _ <- IO.println(s"Socket path: ${config.socketPath}")
       _ <- IO.println(s"Log path: ${config.logPath}")
       _ <- IO.println(s"Chain spec: $specName")
