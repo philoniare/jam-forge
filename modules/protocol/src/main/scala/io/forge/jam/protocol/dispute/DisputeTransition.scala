@@ -365,6 +365,23 @@ object DisputeTransition:
     DisputeBridge.apply(view, postState)
     output
 
+  def stfViewWithPriorState(
+      input: DisputeInput,
+      view: TrieBackedJamState,
+      priorTau: Long,
+      priorKappa: List[ValidatorKey],
+      priorLambda: List[ValidatorKey]
+  ): DisputeOutput =
+    val preStateBase = DisputeBridge.extract(view)
+    val preState = preStateBase.copy(
+      tau = priorTau,
+      kappa = priorKappa,
+      lambda = priorLambda
+    )
+    val (postState, output) = stfInternal(input, preState, view.config)
+    DisputeBridge.apply(view, postState)
+    output
+
   /** Internal Disputes STF implementation using DisputeState. Exposed for unit
     * testing with module-specific state types.
     *

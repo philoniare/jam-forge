@@ -18,6 +18,8 @@ final case class PipelineContext(
   block: Block,
   preTransitionTau: Long,
   preSafroleValidators: List[ValidatorKey] = List.empty,
+  preSafroleKappa: List[ValidatorKey] = List.empty,
+  preSafroleLambda: List[ValidatorKey] = List.empty,
   // Intermediate results passed between STFs
   safroleOutput: Option[SafroleOutputData] = None,
   disputeOffendersMark: List[Ed25519PublicKey] = List.empty,
@@ -32,7 +34,9 @@ object PipelineContext:
       config = config,
       block = block,
       preTransitionTau = view.timeslot,
-      preSafroleValidators = view.validators.current
+      preSafroleValidators = view.validators.current,
+      preSafroleKappa = view.validators.current,
+      preSafroleLambda = view.validators.previous
     )
 
 /**

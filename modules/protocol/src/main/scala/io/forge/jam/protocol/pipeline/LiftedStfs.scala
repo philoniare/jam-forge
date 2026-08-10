@@ -36,8 +36,15 @@ object LiftedStfs:
   )
 
   // 2. Disputes STF
-  val disputes: StfStepWith[DisputeOutputMarks] = liftStandard(
-    stf = (input, view) => DisputeTransition.stfView(input, view),
+  val disputes: StfStepWith[DisputeOutputMarks] = liftStandardCtx(
+    stf = (input: DisputeInput, view, ctx) =>
+      DisputeTransition.stfViewWithPriorState(
+        input,
+        view,
+        ctx.preTransitionTau,
+        ctx.preSafroleKappa,
+        ctx.preSafroleLambda
+      ),
     extractInput = ctx => InputExtractor.extractDisputeInput(ctx.block),
     wrapError = (e: DisputeErrorCode) => PipelineError.DisputeErr(e)
   )
