@@ -5,6 +5,9 @@ on:
         branches: [ '*' ]
     pull_request:
         branches: [ '*' ]
+    schedule:
+        -   cron: '17 3 * * *'
+    workflow_dispatch: {}
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,6 +15,7 @@ concurrency:
 
 jobs:
     test:
+        if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
 
         steps:
@@ -53,3 +57,43 @@ jobs:
                     flags: unittests
                     name: codecov-jam
                     fail_ci_if_error: false
+    full-corpus:
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@v4
+                with:
+                    submodules: recursive
+
+            -   name: Set up JDK
+                uses: actions/setup-java@v4
+                with:
+                    distribution: 'temurin'
+                    java-version: '21'
+
+            -   name: Set up sbt
+                uses: sbt/setup-sbt@v1
+
+            -   name: Cache sbt dependencies
+                uses: actions/cache@v4
+                with:
+                    path: |
+                        ~/.sbt
+                        ~/.ivy2/cache
+                        ~/.cache/coursier
+                    key: ${{ runner.os }}-sbt-${{ hashFiles('**/build.sbt', '**/project/**') }}
+                    restore-keys: |
+                        ${{ runner.os }}-sbt-
+
+            -   name: Report corpus availability
+                run: |
+                    if [ -d jam-conformance/fuzz-reports/0.7.2/traces ]; then
+                        echo "Conformance corpus present: $(ls jam-conformance/fuzz-reports/0.7.2/traces | wc -l) trace dirs"
+                    else
+                        echo "WARNING: conformance corpus NOT fetched (jam-conformance submodule uses an SSH URL; configure a deploy key to enable the full corpus run)."
+                    fi
+
+            -   name: Run full conformance corpus (no coverage)
+                run: sbt -Djam.fuzz.requireCorpus=true -Djam.fuzz.compareKeyvals=true "conformance/test"
