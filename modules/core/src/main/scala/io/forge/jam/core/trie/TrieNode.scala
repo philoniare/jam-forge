@@ -24,8 +24,8 @@ final case class TrieNode(nodeType: TrieNodeType, left: JamBytes, right: JamByte
   def encode: JamBytes =
     val out = new Array[Byte](65)
     out(0) = nodeType.tag
-    System.arraycopy(left.toArray, 0, out, 1, 32)
-    System.arraycopy(right.toArray, 0, out, 33, 32)
+    left.copyToArray(out, 1, 0, 32)
+    right.copyToArray(out, 33, 0, 32)
     JamBytes(out)
 
 object TrieNode:
@@ -35,46 +35,46 @@ object TrieNode:
     require(data.length == StorageBytes, s"expected $StorageBytes bytes, got ${data.length}")
     val t = TrieNodeType.fromTag(data(0))
       .getOrElse(throw new IllegalArgumentException(s"unknown trie node type tag ${data(0)}"))
-    val l = JamBytes(data.toArray.slice(1, 33))
-    val r = JamBytes(data.toArray.slice(33, 65))
+    val l = data.slice(1, 33)
+    val r = data.slice(33, 65)
     TrieNode(t, l, r)
 
   def branch(left: Hash, right: Hash): TrieNode =
-    TrieNode(TrieNodeType.Branch, JamBytes(left.bytes), JamBytes(right.bytes))
+    TrieNode(TrieNodeType.Branch, JamBytes.fromByteVector(left.toByteVector), JamBytes.fromByteVector(right.toByteVector))
 
   def leaf(key: JamBytes, value: JamBytes): TrieNode =
     require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
     if value.length <= 32 then
       val l = new Array[Byte](32)
       l(0) = value.length.toByte
-      System.arraycopy(key.toArray, 0, l, 1, 31)
+      key.copyToArray(l, 1, 0, 31)
       val r = new Array[Byte](32)
-      System.arraycopy(value.toArray, 0, r, 0, value.length)
+      value.copyToArray(r, 0, 0, value.length)
       TrieNode(TrieNodeType.EmbeddedLeaf, JamBytes(l), JamBytes(r))
     else
       val l = new Array[Byte](32)
       l(0) = 0
-      System.arraycopy(key.toArray, 0, l, 1, 31)
+      key.copyToArray(l, 1, 0, 31)
       TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), JamBytes.fromByteVector(Hashing.blake2b256(value).toByteVector))
 
   def leafKey(node: TrieNode): JamBytes =
     require(node.nodeType != TrieNodeType.Branch, "leafKey is only defined on leaf nodes")
-    JamBytes(node.left.toArray.slice(1, 32))
+    node.left.slice(1, 32)
 
   def embeddedValue(node: TrieNode): Option[JamBytes] =
     node.nodeType match
       case TrieNodeType.EmbeddedLeaf =>
         val len = node.left(0) & 0xff
         if len > 32 then None
-        else Some(JamBytes(node.right.toArray.slice(0, len)))
+        else Some(node.right.slice(0, len.toLong))
       case _ => None
 
   val emptyHash: Hash = Hash.zero
 
   private def computeHash(t: TrieNodeType, left: JamBytes, right: JamBytes): Hash =
     val preimage = new Array[Byte](64)
-    System.arraycopy(left.toArray, 0, preimage, 0, 32)
-    System.arraycopy(right.toArray, 0, preimage, 32, 32)
+    left.copyToArray(preimage, 0, 0, 32)
+    right.copyToArray(preimage, 32, 0, 32)
     t match
       case TrieNodeType.Branch =>
         preimage(0) = (preimage(0) & 0x7f).toByte
