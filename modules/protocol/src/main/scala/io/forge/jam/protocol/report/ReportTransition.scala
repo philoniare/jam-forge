@@ -143,6 +143,10 @@ object ReportTransition:
     config: ChainConfig
   ): Either[ReportErrorCode, (List[WorkReport], List[SegmentRootLookup], List[Hash])] =
     val offendersSet: Set[Hash] = preState.offenders.toSet
+    val accountsById: Map[Long, ServiceAccount] =
+      preState.accounts.foldLeft(Map.empty[Long, ServiceAccount]) { (m, a) =>
+        if m.contains(a.id) then m else m.updated(a.id, a)
+      }
     val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
 
     def cacheFor(ctx: RotationContext): RotationCache =
@@ -181,7 +185,7 @@ object ReportTransition:
         guarantee.report,
         guarantee.slot.value.toLong,
         input.slot,
-        preState.accounts,
+        accountsById,
         preState.authPools,
         preState.availAssignments,
         config
@@ -365,7 +369,7 @@ object ReportTransition:
     workReport: WorkReport,
     guaranteeSlot: Long,
     currentSlot: Long,
-    accounts: List[ServiceAccount],
+    accountsById: Map[Long, ServiceAccount],
     authPools: List[List[Hash]],
     availAssignments: List[Option[AvailabilityAssignment]],
     config: ChainConfig
@@ -385,7 +389,7 @@ object ReportTransition:
       }
       _ <- require(workReport.coreIndex.toInt < config.coresCount, ReportErrorCode.BadCoreIndex)
       _ <- validateAuthorizer(workReport, authPools)
-      _ <- validateWorkResults(workReport, accounts)
+      _ <- validateWorkResults(workReport, accountsById)
       _ <- require(
         workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
         ReportErrorCode.TooManyDependencies
@@ -409,10 +413,10 @@ object ReportTransition:
     val coreAuthPool = authPools.lift(workReport.coreIndex.toInt).getOrElse(List.empty)
     require(coreAuthPool.contains(workReport.authorizerHash), ReportErrorCode.CoreUnauthorized)
 
-  private def validateWorkResults(workReport: WorkReport, accounts: List[ServiceAccount]): ValidationResult =
+  private def validateWorkResults(workReport: WorkReport, accountsById: Map[Long, ServiceAccount]): ValidationResult =
     for result <- workReport.results do
       // Use toLong to preserve unsigned 32-bit service ID values
-      accounts.find(_.id == (result.serviceId.toInt.toLong & 0xffffffffL)) match
+      accountsById.get(result.serviceId.toInt.toLong & 0xffffffffL) match
         case None => return Left(ReportErrorCode.BadServiceId)
         case Some(account) =>
           if result.codeHash != account.data.service.codeHash then
