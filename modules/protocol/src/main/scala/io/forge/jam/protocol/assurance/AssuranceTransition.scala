@@ -114,12 +114,13 @@ object AssuranceTransition:
         else
           val assurances = input.assurances.toArray
           val n = assurances.length
+          val validators = state.currValidators.toIndexedSeq
           val allValid = java.util.stream.IntStream
             .range(0, n)
             .parallel()
             .allMatch { i =>
               val a = assurances(i)
-              verifyAssuranceSignature(a, state.currValidators(a.validatorIndex.toInt))
+              verifyAssuranceSignature(a, validators(a.validatorIndex.toInt))
             }
           if !allValid then Some(AssuranceErrorCode.BadSignature) else None
       }
@@ -133,14 +134,22 @@ object AssuranceTransition:
     config: ChainConfig
   ): Set[Int] =
     // For each core, count how many validators have assured it
-    val counts = scala.collection.mutable.Map[Int, Int]()
+    val coresCount = state.availAssignments.size
+    val counts = new Array[Int](coresCount)
     for assurance <- input.assurances do
       val bitfieldBytes = assurance.bitfield.toArray
-      for coreIndex <- state.availAssignments.indices do
+      var coreIndex = 0
+      while coreIndex < coresCount do
         if isBitSet(bitfieldBytes, coreIndex) then
-          counts(coreIndex) = counts.getOrElse(coreIndex, 0) + 1
+          counts(coreIndex) = counts(coreIndex) + 1
+        coreIndex += 1
 
-    counts.filter { case (_, count) => 3 * count > 2 * config.validatorCount }.keySet.toSet
+    val result = scala.collection.mutable.Set[Int]()
+    var coreIndex = 0
+    while coreIndex < coresCount do
+      if 3 * counts(coreIndex) > 2 * config.validatorCount then result += coreIndex
+      coreIndex += 1
+    result.toSet
 
   /**
    * Get work reports from available cores in sorted order.
