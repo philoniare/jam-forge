@@ -9,6 +9,8 @@ final class InMemoryTrieBackend extends StateTrieBackend:
   private val values = mutable.Map[Hash, JamBytes]()
   private val nodeRefs = mutable.Map[Hash, Long]().withDefaultValue(0L)
   private val valueRefs = mutable.Map[Hash, Long]().withDefaultValue(0L)
+  private val deadNodeCandidates = mutable.Set[Hash]()
+  private val deadValueCandidates = mutable.Set[Hash]()
 
   def readNode(hash: Hash): Option[TrieNode] = nodes.get(hash)
   def readRawValue(hash: Hash): Option[JamBytes] = values.get(hash)
@@ -20,26 +22,34 @@ final class InMemoryTrieBackend extends StateTrieBackend:
       case BackendOp.WriteRawValue(v) =>
         values.update(Hashing.blake2b256(v), v)
       case BackendOp.NodeRefDelta(h, d) =>
-        nodeRefs.update(h, nodeRefs(h) + d)
+        val c = nodeRefs(h) + d
+        nodeRefs.update(h, c)
+        if c <= 0 then deadNodeCandidates.add(h)
       case BackendOp.RawValueRefDelta(h, d) =>
-        valueRefs.update(h, valueRefs(h) + d)
+        val c = valueRefs(h) + d
+        valueRefs.update(h, c)
+        if c <= 0 then deadValueCandidates.add(h)
     }
 
   def gc(): Unit =
-    val deadNodes = nodeRefs.collect { case (h, c) if c <= 0 => h }.toList
-    deadNodes.foreach { h =>
-      nodes.remove(h).foreach { node =>
-        if node.nodeType == TrieNodeType.RegularLeaf then
-          val rawValueHash = Hash(node.right.toArray)
-          valueRefs.update(rawValueHash, valueRefs(rawValueHash) - 1)
-      }
-      nodeRefs.remove(h)
+    deadNodeCandidates.foreach { h =>
+      if nodeRefs(h) <= 0 then
+        nodes.remove(h).foreach { node =>
+          if node.nodeType == TrieNodeType.RegularLeaf then
+            val rawValueHash = Hash(node.right.toArray)
+            val c = valueRefs(rawValueHash) - 1
+            valueRefs.update(rawValueHash, c)
+            if c <= 0 then deadValueCandidates.add(rawValueHash)
+        }
+        nodeRefs.remove(h)
     }
-    val deadValues = valueRefs.collect { case (h, c) if c <= 0 => h }.toList
-    deadValues.foreach { h =>
-      values.remove(h)
-      valueRefs.remove(h)
+    deadNodeCandidates.clear()
+    deadValueCandidates.foreach { h =>
+      if valueRefs(h) <= 0 then
+        values.remove(h)
+        valueRefs.remove(h)
     }
+    deadValueCandidates.clear()
 
   def clear(): Unit =
     nodes.clear()
