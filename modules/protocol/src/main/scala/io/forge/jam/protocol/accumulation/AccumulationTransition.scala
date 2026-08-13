@@ -98,12 +98,14 @@ object AccumulationTransition:
       historicallyAccumulated += hash
     }
 
+    val accumulatedSnapshot: Set[JamBytes] = historicallyAccumulated.toSet
+
     // 4. Build working copy of ready queue with edited dependencies.
     val workingReadyQueue: Vector[List[AccumulationReadyRecord]] =
       preState.readyQueue.indices.iterator.map { slotIdx =>
         editReadyQueueRecords(
           preState.readyQueue(slotIdx),
-          historicallyAccumulated.toSet
+          accumulatedSnapshot
         )
       }.toVector
 
@@ -112,14 +114,14 @@ object AccumulationTransition:
       val prereqs = report.context.prerequisites
       val segmentDeps = report.segmentRootLookup.map(_.workPackageHash)
       val allDeps = (prereqs ++ segmentDeps).filter(h =>
-        !historicallyAccumulated.contains(JamBytes(h.bytes))
+        !accumulatedSnapshot.contains(JamBytes(h.bytes))
       )
       AccumulationReadyRecord(report, allDeps)
     }
 
     // Edit new records to remove already-accumulated dependencies
     val editedNewRecords =
-      editReadyQueueRecords(newRecords, historicallyAccumulated.toSet)
+      editReadyQueueRecords(newRecords, accumulatedSnapshot)
 
     // 5. Extract accumulatable reports from ready queue
     val epochLen = config.epochLength
@@ -134,7 +136,7 @@ object AccumulationTransition:
     val (readyToAccumulate, _) =
       extractAccumulatableWithSlots(
         allQueuedWithSlots,
-        historicallyAccumulated.toSet
+        accumulatedSnapshot
       )
 
     // 6. Add ready-to-accumulate reports to accumulated set
