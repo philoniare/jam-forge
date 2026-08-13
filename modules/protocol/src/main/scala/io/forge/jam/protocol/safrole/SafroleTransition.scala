@@ -242,7 +242,17 @@ object SafroleTransition:
     else if tickets.length > config.maxTicketsPerExtrinsic then
       Left(SafroleErrorCode.Reserved)
     else
-      processTickets(postState, tickets, verificationGammaZ, config, None, List.empty)
+      val accumulatorIds = scala.collection.mutable.HashSet.from(postState.gammaA.iterator.map(_.id))
+      processTickets(
+        postState,
+        tickets,
+        verificationGammaZ,
+        config,
+        None,
+        accumulatorIds,
+        scala.collection.mutable.HashSet.empty[JamBytes],
+        scala.collection.mutable.ListBuffer.empty[TicketMark]
+      )
 
   /**
    * Process tickets recursively using tail recursion.
@@ -254,7 +264,9 @@ object SafroleTransition:
     verificationGammaZ: JamBytes,
     config: ChainConfig,
     previousId: Option[JamBytes],
-    accumulatedTickets: List[TicketMark]
+    accumulatorIds: scala.collection.mutable.HashSet[JamBytes],
+    accumulatedIds: scala.collection.mutable.HashSet[JamBytes],
+    accumulatedTickets: scala.collection.mutable.ListBuffer[TicketMark]
   ): Either[SafroleErrorCode, SafroleState] =
     remainingTickets match
       case Nil =>
@@ -267,7 +279,7 @@ object SafroleTransition:
           if accumulatedTickets.exists(t => !survivingIds.contains(t.id)) then
             Left(SafroleErrorCode.Reserved)
           else
-            Right(postState.copy(gammaA = combinedTickets))
+            Right(postState.copy(gammaA = combinedTickets.toList))
         else
           Right(postState)
 
@@ -291,22 +303,26 @@ object SafroleTransition:
               val currentId = ticketBody.id
 
               // Check for duplicates in accumulator
-              if postState.gammaA.exists(t => t.id == currentId) then
+              if accumulatorIds.contains(currentId) then
                 Left(SafroleErrorCode.DuplicateTicket)
               // Check for duplicates in new tickets being added
-              else if accumulatedTickets.exists(t => t.id == currentId) then
+              else if accumulatedIds.contains(currentId) then
                 Left(SafroleErrorCode.DuplicateTicket)
               // Check ordering against previous ticket
               else if previousId.exists(_ >= currentId) then
                 Left(SafroleErrorCode.BadTicketOrder)
               else
+                accumulatedIds.add(currentId)
+                accumulatedTickets += ticketBody
                 processTickets(
                   postState,
                   rest,
                   verificationGammaZ,
                   config,
                   Some(currentId),
-                  accumulatedTickets :+ ticketBody
+                  accumulatorIds,
+                  accumulatedIds,
+                  accumulatedTickets
                 )
 
   /**
@@ -318,12 +334,13 @@ object SafroleTransition:
     validators: List[ValidatorKey],
     epochLength: Int
   ): List[BandersnatchPublicKey] =
-    val keys = validators.map(_.bandersnatch)
+    val keys: Array[BandersnatchPublicKey] = validators.iterator.map(_.bandersnatch).toArray
+    val validatorCount = validators.size
     (0 until epochLength).map { i =>
       val iEncoded = uint32L.encode(i.toLong & 0xffffffffL).require.toByteArray
       val slotEntropy = Hashing.blake2b256(entropy.bytes ++ iEncoded)
       val indexResult = uint32L.decode(BitVector(slotEntropy.bytes.take(4).toArray)).require
-      val index = ((indexResult.value & 0xffffffffL) % validators.size).toInt
+      val index = ((indexResult.value & 0xffffffffL) % validatorCount).toInt
       keys(index)
     }.toList
 
