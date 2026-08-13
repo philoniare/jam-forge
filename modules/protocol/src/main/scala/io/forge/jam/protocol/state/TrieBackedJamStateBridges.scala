@@ -200,14 +200,14 @@ object TrieBackedJamStateBridges:
         initAuthQueues: List[List[JamBytes]]
     ): Unit =
       val stagingChanged =
-        postStagingSet.map(_.toHex) != initStagingSet.map(_.toHex)
+        !(postStagingSet eq initStagingSet) && postStagingSet != initStagingSet
       if stagingChanged then
         val newQueue: List[ValidatorKey] =
           postStagingSet.map(ValidatorKey.fromJamBytes)
         view.validators.queue = newQueue
 
       val authChanged =
-        postAuthQueues.map(_.map(_.toHex)) != initAuthQueues.map(_.map(_.toHex))
+        !(postAuthQueues eq initAuthQueues) && postAuthQueues != initAuthQueues
       if authChanged then
         val newAuthQueues: List[List[Hash]] =
           postAuthQueues.map(_.map(jb => Hash(jb.toArray)))
