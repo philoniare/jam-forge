@@ -1391,15 +1391,21 @@ class AccumulationHostCalls(
 
     buffer.toByteArray
 
+  /** Cached encoding of the full operand list. Operands are immutable for the
+    * lifetime of this handler
+    */
+  private lazy val cachedOperandsList: Array[Byte] =
+    val buffer = new java.io.ByteArrayOutputStream()
+    // Gray Paper natural number encode the array length
+    buffer.write(JamCodecs.encodeCompactInteger(operands.size.toLong))
+    // Encode each operand using its existing encode() method (includes variant)
+    for operand <- operands do buffer.write(operand.encode())
+    buffer.toByteArray
+
   /** Encode the full array of inputs.
     */
   private def encodeOperandsList(): Array[Byte] =
-    val buffer = mutable.ListBuffer.empty[Byte]
-    // Gray Paper natural number encode the array length
-    buffer ++= JamCodecs.encodeCompactInteger(operands.size.toLong)
-    // Encode each operand using its existing encode() method (includes variant)
-    for operand <- operands do buffer ++= operand.encode()
-    buffer.toArray
+    cachedOperandsList
 
   /** Encode a single operand.
     */
