@@ -50,6 +50,16 @@ trait PvmInstance:
   def writeByte(address: Int, value: Byte): Boolean
 
   /**
+   * Bulk-read a contiguous range of bytes from memory
+   */
+  def readBytes(address: Int, length: Int): Option[Array[Byte]]
+
+  /**
+   * Bulk-write a contiguous range of bytes to memory
+   */
+  def writeBytes(address: Int, data: Array[Byte]): Boolean
+
+  /**
    * Check if memory is accessible at the given address and length.
    * @param address Starting address
    * @param length Number of bytes

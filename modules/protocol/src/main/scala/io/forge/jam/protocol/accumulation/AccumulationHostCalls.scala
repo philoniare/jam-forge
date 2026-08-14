@@ -1472,13 +1472,11 @@ class AccumulationHostCalls(
       address: Int,
       buffer: Array[Byte]
   ): Boolean =
-    var i = 0
-    while i < buffer.length do
-      instance.readByte(address + i) match
-        case Some(v) => buffer(i) = v
-        case None    => return false
-      i += 1
-    true
+    instance.readBytes(address, buffer.length) match
+      case Some(data) =>
+        System.arraycopy(data, 0, buffer, 0, buffer.length)
+        true
+      case None => false
 
   /** Write memory to PVM instance, returns true on success */
   private def writeMemory(
@@ -1486,8 +1484,11 @@ class AccumulationHostCalls(
       address: Int,
       data: Array[Byte]
   ): Boolean =
-    var i = 0
-    while i < data.length do
-      if !instance.writeByte(address + i, data(i)) then return false
-      i += 1
-    true
+    if instance.isMemoryWritable(address, data.length) then
+      instance.writeBytes(address, data)
+    else
+      var i = 0
+      while i < data.length do
+        if !instance.writeByte(address + i, data(i)) then return false
+        i += 1
+      true

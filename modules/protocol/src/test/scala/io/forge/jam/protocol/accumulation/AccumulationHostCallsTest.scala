@@ -55,9 +55,9 @@ class MockPvmInstance(
     isMemoryAccessible(address, length)
 
   /**
-   * Helper to write multiple bytes to memory.
+   * Bulk write to memory.
    */
-  def writeBytes(address: Int, data: Array[Byte]): Boolean =
+  override def writeBytes(address: Int, data: Array[Byte]): Boolean =
     if !isMemoryAccessible(address, data.length) then return false
     var i = 0
     while i < data.length do
@@ -66,9 +66,9 @@ class MockPvmInstance(
     true
 
   /**
-   * Helper to read multiple bytes from memory.
+   * Bulk read from memory.
    */
-  def readBytes(address: Int, length: Int): Option[Array[Byte]] =
+  override def readBytes(address: Int, length: Int): Option[Array[Byte]] =
     if !isMemoryAccessible(address, length) then return None
     val result = new Array[Byte](length)
     var i = 0

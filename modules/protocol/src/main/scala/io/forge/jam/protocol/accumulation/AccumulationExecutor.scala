@@ -467,6 +467,18 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
       case MemoryResult.Success(_) => true
       case _                       => false
 
+  override def readBytes(address: Int, length: Int): Option[Array[Byte]] =
+    if length < 0 then None
+    else
+      instance.basicMemory.getMemorySlice(UInt(address), length) match
+        case MemoryResult.Success(data) => Some(data)
+        case _                          => None
+
+  override def writeBytes(address: Int, data: Array[Byte]): Boolean =
+    instance.basicMemory.setMemorySlice(UInt(address), data) match
+      case MemoryResult.Success(_) => true
+      case _                       => false
+
   override def isMemoryAccessible(address: Int, length: Int): Boolean =
     instance.basicMemory.getMemorySlice(UInt(address), length) match
       case MemoryResult.Success(_) => true
