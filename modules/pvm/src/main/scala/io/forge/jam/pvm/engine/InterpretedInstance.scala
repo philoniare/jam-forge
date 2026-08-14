@@ -106,9 +106,8 @@ final class InterpretedInstance private (
   private var _nextProgramCounter: Option[ProgramCounter],
   private var _nextProgramCounterChanged: Boolean,
   private var _gas: Long,
-  private val compiledOffsetForBlock: FlatMap[PackedTarget],
+  private val compiledOffsetForBlock: Array[Int],
   private val compiledInstructions: ArrayBuffer[CompiledInstruction],
-  private var compiledOffset: UInt,
   private var _interrupt: InterruptKind,
   val stepTracing: Boolean,
   val gasMetering: Boolean
@@ -118,6 +117,15 @@ final class InterpretedInstance private (
   private val TargetOutOfRange: UInt = UInt(0)
   private val _is64Bit: Boolean = module.is64Bit
   private var _compiledOffsetInt: Int = 0
+
+  private inline val TargetAbsent: -1 = -1
+  private inline def packTarget(offset: Int, isJumpTargetValid: Boolean): Int =
+    val base = offset & 0x7fffffff
+    if isJumpTargetValid then base | 0x80000000 else base
+  private inline def targetAt(pcValue: UInt): Int =
+    val idx = pcValue.signed
+    if idx >= 0 && idx < compiledOffsetForBlock.length then compiledOffsetForBlock(idx)
+    else TargetAbsent
 
   // ============================================================================
   // Public API - Register Operations
@@ -205,18 +213,19 @@ final class InterpretedInstance private (
     _compiledOffsetInt + 1
 
   override def resolveJump(pc: ProgramCounter): Int =
-    val packed = compiledOffsetForBlock.getOrNull(pc.value)
-    if packed != null then
-      val (isValid, offset) = PackedTarget.unpack(packed)
-      if isValid then offset.signed else panic(pc)
+    val packed = targetAt(pc.value)
+    if packed != TargetAbsent then
+      val isValid = (packed >>> 31) == 1
+      val offset = packed & 0x7fffffff
+      if isValid then offset else panic(pc)
     else
       if !isJumpTargetValid(pc) then panic(pc)
       else compileBlock(pc)
 
   override def resolveFallthrough(pc: ProgramCounter): Int =
-    val packed = compiledOffsetForBlock.getOrNull(pc.value)
-    if packed != null then
-      PackedTarget.unpack(packed)._2.signed
+    val packed = targetAt(pc.value)
+    if packed != TargetAbsent then
+      packed & 0x7fffffff
     else
       compileBlock(pc)
 
@@ -462,8 +471,7 @@ final class InterpretedInstance private (
           _programCounter = pc
           _nextProgramCounter = None
           val resolved = resolveArbitraryJump(pc)
-          compiledOffset = resolved.getOrElse(TargetOutOfRange)
-          _compiledOffsetInt = compiledOffset.signed
+          _compiledOffsetInt = resolved.getOrElse(TargetOutOfRange).signed
           _nextProgramCounterChanged = false
 
     // Cache values locally for faster access in hot loop
@@ -481,7 +489,6 @@ final class InterpretedInstance private (
       if offset >= instructionsSize then
         _interrupt = InterruptKind.Panic
         _compiledOffsetInt = offset
-        compiledOffset = UInt(offset)
         return _interrupt
 
       // Get compiled instruction - ArrayBuffer.apply is O(1)
@@ -493,12 +500,10 @@ final class InterpretedInstance private (
         if _gas < 0 then
           outOfGas(compiled.pc)
           _compiledOffsetInt = offset
-          compiledOffset = UInt(offset)
           return _interrupt
 
       // Update state for instruction execution
       _compiledOffsetInt = offset
-      compiledOffset = UInt(offset)
       _programCounter = compiled.pc
       _programCounterValid = true
 
@@ -511,11 +516,10 @@ final class InterpretedInstance private (
         return _interrupt
       else
         offset = next
-        // Update instructionsSize in case compilation added new instructions
-        instructionsSize = instructions.size
+        if next >= instructionsSize then
+          instructionsSize = instructions.size
         if isStepTracing then
           _compiledOffsetInt = offset
-          compiledOffset = UInt(offset)
           _interrupt = InterruptKind.Step
           return _interrupt
 
@@ -523,16 +527,16 @@ final class InterpretedInstance private (
     _interrupt
 
   def resolveArbitraryJump(pc: ProgramCounter): Option[UInt] =
-    compiledOffsetForBlock.get(pc.value) match
-      case Some(packed) =>
-        val (_, offset) = PackedTarget.unpack(packed)
-        Some(offset)
-      case None =>
-        val blockStart = findStartOfBasicBlock(pc)
-        blockStart.flatMap { start =>
-          compileBlock(start)
-          compiledOffsetForBlock.get(pc.value).map(packed => PackedTarget.unpack(packed)._2)
-        }
+    val packed = targetAt(pc.value)
+    if packed != TargetAbsent then
+      Some(UInt(packed & 0x7fffffff))
+    else
+      val blockStart = findStartOfBasicBlock(pc)
+      blockStart.flatMap { start =>
+        compileBlock(start)
+        val p = targetAt(pc.value)
+        if p != TargetAbsent then Some(UInt(p & 0x7fffffff)) else None
+      }
 
   private def isJumpTargetValid(pc: ProgramCounter): Boolean =
     Program.isJumpTargetValid(module.blob.code, module.blob.bitmask, pc.toInt)
@@ -554,8 +558,10 @@ final class InterpretedInstance private (
     var done = false
 
     while !done && currentPc.value <= module.codeLen do
-      val packedTarget = PackedTarget.pack(UInt(compiledInstructions.size), isJumpTargetValid)
-      compiledOffsetForBlock.insert(currentPc.value, packedTarget)
+      val packedTarget = packTarget(compiledInstructions.size, isJumpTargetValid)
+      val insertIdx = currentPc.value.signed
+      if insertIdx >= 0 && insertIdx < compiledOffsetForBlock.length then
+        compiledOffsetForBlock(insertIdx) = packedTarget
       isJumpTargetValid = false
 
       val (instruction, nextPc) = parseInstructionAt(currentPc)
@@ -589,6 +595,11 @@ final class InterpretedInstance private (
     )
 
 object InterpretedInstance:
+  private def newTargetMap(capacity: Int): Array[Int] =
+    val arr = new Array[Int](capacity)
+    java.util.Arrays.fill(arr, -1)
+    arr
+
   /**
    * Creates an instance from a module with specific argument data.
    * This allows reusing a cached module with different input data per execution.
@@ -614,9 +625,8 @@ object InterpretedInstance:
       _nextProgramCounter = None,
       _nextProgramCounterChanged = true,
       _gas = 0L,
-      compiledOffsetForBlock = FlatMap.create[PackedTarget](module.codeLen + UInt(1)),
+      compiledOffsetForBlock = newTargetMap(module.codeLen.signed + 1),
       compiledInstructions = ArrayBuffer.empty,
-      compiledOffset = UInt(0),
       _interrupt = InterruptKind.Finished,
       stepTracing = forceStepTracing,
       gasMetering = module.gasMetering
