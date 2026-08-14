@@ -107,7 +107,7 @@ class AccumulationExecutor(val config: ChainConfig):
     )
 
     // Execute PVM
-    val execResult = executePvm(context, code.get, gasLimit, operands)
+    val execResult = executePvm(context, code.get, gasLimit, operands, JamBytes(codeHash.bytes.toArray))
 
     // Collapse state based on exit reason
     val finalState = context.collapse(execResult.exitReason)
@@ -139,7 +139,8 @@ class AccumulationExecutor(val config: ChainConfig):
       context: AccumulationContext,
       code: Array[Byte],
       gasLimit: Long,
-      operands: List[AccumulationOperand]
+      operands: List[AccumulationOperand],
+      codeHash: JamBytes
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
@@ -147,7 +148,7 @@ class AccumulationExecutor(val config: ChainConfig):
       JamCodecs.encodeCompactInteger(operands.size.toLong)
 
     // Get or compile module
-    val moduleOpt = getOrCompileModule(code)
+    val moduleOpt = getOrCompileModule(code, codeHash)
     if moduleOpt.isEmpty then
       return PvmExecResult(ExitReason.INVALID_CODE, 0L, None)
 
@@ -252,9 +253,7 @@ class AccumulationExecutor(val config: ChainConfig):
 
   /** Get or compile a module from code bytes.
     */
-  private def getOrCompileModule(code: Array[Byte]): Option[InterpretedModule] =
-    val codeHash = JamBytes(Hashing.blake2b256(code).bytes.toArray)
-
+  private def getOrCompileModule(code: Array[Byte], codeHash: JamBytes): Option[InterpretedModule] =
     val cached = moduleCache.get(codeHash)
     if cached != null then Some(cached)
     else
