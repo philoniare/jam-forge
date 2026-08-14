@@ -7,12 +7,13 @@ import io.forge.jam.pvm.types.*
 /** Executes PVM instructions using an indexed handler array for O(1) dispatch.
   */
 object InstructionExecutor:
-  private type Handler = (
-      Instruction,
-      ExecutionContext,
-      ProgramCounter,
-      ProgramCounter
-  ) => Int
+  private trait Handler:
+    def run(
+        instr: Instruction,
+        ctx: ExecutionContext,
+        pc: ProgramCounter,
+        nextPc: ProgramCounter
+    ): Int
   private inline def expect[I <: Instruction](instr: Instruction): I =
     instr.asInstanceOf[I]
 
@@ -898,6 +899,8 @@ object InstructionExecutor:
 
   /** Executes a single instruction.
     *
+    * @param opcodeValue
+    *   The cached opcode ordinal used to index the handler array
     * @param instruction
     *   The instruction to execute
     * @param ctx
@@ -910,9 +913,10 @@ object InstructionExecutor:
     *   the next compiled offset to continue execution, or a negative sentinel
     */
   def execute(
+      opcodeValue: Int,
       instruction: Instruction,
       ctx: ExecutionContext,
       pc: ProgramCounter,
       nextPc: ProgramCounter
   ): Int =
-    handlers(instruction.opcode.value)(instruction, ctx, pc, nextPc)
+    handlers(opcodeValue).run(instruction, ctx, pc, nextPc)

@@ -86,7 +86,8 @@ object PackedTarget:
 final case class CompiledInstruction(
   instruction: Instruction,
   pc: ProgramCounter,
-  nextPc: ProgramCounter
+  nextPc: ProgramCounter,
+  opcodeValue: Int
 )
 
 /**
@@ -509,7 +510,7 @@ final class InterpretedInstance private (
 
       // Execute instruction - returns next compiled offset, or a negative
       // sentinel (Step.Interrupt) meaning "interrupt occurred, read _interrupt"
-      val next = InstructionExecutor.execute(compiled.instruction, this, compiled.pc, compiled.nextPc)
+      val next = InstructionExecutor.execute(compiled.opcodeValue, compiled.instruction, this, compiled.pc, compiled.nextPc)
 
       if next < 0 then
         // Interrupt occurred - exit loop
@@ -565,7 +566,7 @@ final class InterpretedInstance private (
       isJumpTargetValid = false
 
       val (instruction, nextPc) = parseInstructionAt(currentPc)
-      compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc)
+      compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc, instruction.opcode.value)
 
       if instruction.opcode.startsNewBasicBlock then
         done = true
@@ -591,7 +592,8 @@ final class InterpretedInstance private (
     compiledInstructions += CompiledInstruction(
       Instruction.Panic,
       ProgramCounter(0),
-      ProgramCounter(1)
+      ProgramCounter(1),
+      Instruction.Panic.opcode.value
     )
 
 object InterpretedInstance:
