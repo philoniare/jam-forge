@@ -126,6 +126,70 @@ object InstructionDecoder:
     Opcode.StoreImmIndirectU64 -> ((r, o, v) => Instruction.StoreImmIndirectU64(r, o, v))
   )
 
+  private final val KindNone = 0
+  private final val KindArgless = 1
+  private final val KindRegs2 = 2
+  private final val KindRegs3 = 3
+  private final val KindRegImm = 4
+  private final val KindRegs2Imm = 5
+  private final val KindRegs2Offset = 6
+  private final val KindRegImmOffset = 7
+  private final val KindStoreImm = 8
+  private final val KindStoreImmIndirect = 9
+  private final val KindEcalli = 10
+  private final val KindJump = 11
+  private final val KindLoadImm64 = 12
+  private final val KindLoadImmAndJumpIndirect = 13
+
+  // 256-entry operand-kind table: opcode byte -> Kind* ordinal.
+  private val kindTable: Array[Int] = new Array[Int](256)
+  // Parallel 256-entry constructor tables (only the slot matching the kind is used).
+  private val arglessTable: Array[Instruction] = new Array[Instruction](256)
+  private val regs2Table: Array[(Int, Int) => Instruction] = new Array(256)
+  private val regs3Table: Array[(Int, Int, Int) => Instruction] = new Array(256)
+  private val regImmTable: Array[(Int, Long) => Instruction] = new Array(256)
+  private val regs2ImmTable: Array[(Int, Int, Long) => Instruction] = new Array(256)
+  private val regs2OffsetTable: Array[(Int, Int, Long) => Instruction] = new Array(256)
+  private val regImmOffsetTable: Array[(Int, Long, Long) => Instruction] = new Array(256)
+  private val storeImmTable: Array[(Long, Long) => Instruction] = new Array(256)
+  private val storeImmIndirectTable: Array[(Int, Long, Long) => Instruction] = new Array(256)
+
+  // Populate the tables from the SAME Map groupings used by the original chain.
+  // Iteration order mirrors the original guard chain's precedence; since each
+  // opcode appears in at most one group, order does not affect the result.
+  arglessOpcodes.foreach { (op, instr) =>
+    kindTable(op.value) = KindArgless; arglessTable(op.value) = instr
+  }
+  regs2Opcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegs2; regs2Table(op.value) = f
+  }
+  regs3Opcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegs3; regs3Table(op.value) = f
+  }
+  regImmOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegImm; regImmTable(op.value) = f
+  }
+  regs2ImmOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegs2Imm; regs2ImmTable(op.value) = f
+  }
+  regs2OffsetOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegs2Offset; regs2OffsetTable(op.value) = f
+  }
+  regImmOffsetOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindRegImmOffset; regImmOffsetTable(op.value) = f
+  }
+  storeImmOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindStoreImm; storeImmTable(op.value) = f
+  }
+  storeImmIndirectOpcodes.foreach { (op, f) =>
+    kindTable(op.value) = KindStoreImmIndirect; storeImmIndirectTable(op.value) = f
+  }
+  // Special-case opcodes (formerly the explicit `case Some(Opcode.X)` arms).
+  kindTable(Opcode.Ecalli.value) = KindEcalli
+  kindTable(Opcode.Jump.value) = KindJump
+  kindTable(Opcode.LoadImm64.value) = KindLoadImm64
+  kindTable(Opcode.LoadImmAndJumpIndirect.value) = KindLoadImmAndJumpIndirect
+
   // ============================================================================
   // Main Decode Function
   // ============================================================================
@@ -138,20 +202,20 @@ object InstructionDecoder:
     val chunk = readChunk(code, offset + 1, skip - 1)
     val len = skip - 1
 
-    val instruction = Opcode.fromByte(opcodeByte) match
-      case Some(op) if arglessOpcodes.contains(op) => arglessOpcodes(op)
-      case Some(op) if regs2Opcodes.contains(op) => val (a, b) = readRegs2(chunk); regs2Opcodes(op)(a, b)
-      case Some(op) if regs3Opcodes.contains(op) => val (a, b, c) = readRegs3(chunk); regs3Opcodes(op)(a, b, c)
-      case Some(op) if regImmOpcodes.contains(op) => val (r, i) = readRegImm(chunk, len); regImmOpcodes(op)(r, i)
-      case Some(op) if regs2ImmOpcodes.contains(op) => val (a, b, i) = readRegs2Imm(chunk, len); regs2ImmOpcodes(op)(a, b, i)
-      case Some(op) if regs2OffsetOpcodes.contains(op) => val (a, b, o) = readRegs2Offset(chunk, offset, len); regs2OffsetOpcodes(op)(a, b, o)
-      case Some(op) if regImmOffsetOpcodes.contains(op) => val (r, i, o) = readRegImmOffset(chunk, offset, len); regImmOffsetOpcodes(op)(r, i, o)
-      case Some(op) if storeImmOpcodes.contains(op) => val (a, v) = readImmImm(chunk, len); storeImmOpcodes(op)(a, v)
-      case Some(op) if storeImmIndirectOpcodes.contains(op) => val (r, o, v) = readRegImmImm(chunk, len); storeImmIndirectOpcodes(op)(r, o, v)
-      case Some(Opcode.Ecalli) => Instruction.Ecalli(signExtend(chunk, math.min(4, len) * 8))
-      case Some(Opcode.Jump) => Instruction.Jump((offset + signExtend(chunk, math.min(4, len) * 8).toInt).toLong & 0xFFFFFFFFL)
-      case Some(Opcode.LoadImm64) => Instruction.LoadImm64(clampReg(code(offset + 1) & 0xFF), readLong(code, offset + 2))
-      case Some(Opcode.LoadImmAndJumpIndirect) => val (a, b, i1, i2) = readRegs2Imm2(chunk, len); Instruction.LoadImmAndJumpIndirect(a, b, i1, i2)
+    val instruction = kindTable(opcodeByte) match
+      case KindArgless => arglessTable(opcodeByte)
+      case KindRegs2 => val (a, b) = readRegs2(chunk); regs2Table(opcodeByte)(a, b)
+      case KindRegs3 => val (a, b, c) = readRegs3(chunk); regs3Table(opcodeByte)(a, b, c)
+      case KindRegImm => val (r, i) = readRegImm(chunk, len); regImmTable(opcodeByte)(r, i)
+      case KindRegs2Imm => val (a, b, i) = readRegs2Imm(chunk, len); regs2ImmTable(opcodeByte)(a, b, i)
+      case KindRegs2Offset => val (a, b, o) = readRegs2Offset(chunk, offset, len); regs2OffsetTable(opcodeByte)(a, b, o)
+      case KindRegImmOffset => val (r, i, o) = readRegImmOffset(chunk, offset, len); regImmOffsetTable(opcodeByte)(r, i, o)
+      case KindStoreImm => val (a, v) = readImmImm(chunk, len); storeImmTable(opcodeByte)(a, v)
+      case KindStoreImmIndirect => val (r, o, v) = readRegImmImm(chunk, len); storeImmIndirectTable(opcodeByte)(r, o, v)
+      case KindEcalli => Instruction.Ecalli(signExtend(chunk, math.min(4, len) * 8))
+      case KindJump => Instruction.Jump((offset + signExtend(chunk, math.min(4, len) * 8).toInt).toLong & 0xFFFFFFFFL)
+      case KindLoadImm64 => Instruction.LoadImm64(clampReg(code(offset + 1) & 0xFF), readLong(code, offset + 2))
+      case KindLoadImmAndJumpIndirect => val (a, b, i1, i2) = readRegs2Imm2(chunk, len); Instruction.LoadImmAndJumpIndirect(a, b, i1, i2)
       case _ => Instruction.Panic
 
     (instruction, skip)
