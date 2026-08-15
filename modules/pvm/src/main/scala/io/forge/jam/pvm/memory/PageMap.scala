@@ -35,6 +35,8 @@ final class PageMap(val pageSize: UInt):
   private var readableBits: Array[Long] = Array.empty
   private var writableBits: Array[Long] = Array.empty
   private var maxPageIndex: UInt = UInt(0)
+  private var _lastFailPageIndex: Int = 0
+  def lastFailPageAddress: UInt = UInt(_lastFailPageIndex << pageSizeShift)
 
   /**
    * Calculates the number of pages needed to access a memory range.
@@ -195,6 +197,63 @@ final class PageMap(val pageSize: UInt):
    */
   def isWritablePages(pageStart: UInt, pages: Int): (Boolean, UInt) =
     checkPagesInRange(pageStart, pages, writableBits, isPageWritable)
+
+  /**
+   * Allocation-free readability check
+   */
+  def isReadableFast(address: UInt, length: Int): Boolean =
+    if length == 0 then true
+    else
+      val startPageIndex = address.signed >>> pageSizeShift
+      val pages = numberOfPagesToAccess(address, length)
+      checkPagesInRangeFast(startPageIndex, pages, readableBits)
+
+  /**
+   * Allocation-free writability check
+   */
+  def isWritableFast(address: UInt, length: Int): Boolean =
+    if length == 0 then true
+    else
+      val startPageIndex = address.signed >>> pageSizeShift
+      val pages = numberOfPagesToAccess(address, length)
+      checkPagesInRangeFast(startPageIndex, pages, writableBits)
+
+  /**
+   * Allocation-free analog of `checkPagesInRange`
+   */
+  private def checkPagesInRangeFast(pageStart: Int, pages: Int, bits: Array[Long]): Boolean =
+    if pages == 0 then return true
+
+    var currentPage = pageStart
+    val pageEnd = pageStart + pages
+
+    while currentPage < pageEnd do
+      val wordIndex = currentPage / 64
+      val bitIndex = currentPage % 64
+      val bitsInThisWord = math.min(BitsPerWord - bitIndex, pageEnd - currentPage)
+
+      val mask: Long =
+        if bitsInThisWord == BitsPerWord then -1L
+        else (1L << bitsInThisWord) - 1L
+      val shiftedMask = mask << bitIndex
+
+      val wordValue = if wordIndex >= 0 && wordIndex < bits.length then bits(wordIndex) else 0L
+      if (wordValue & shiftedMask) != shiftedMask then
+        var bit = 0
+        while bit < bitsInThisWord do
+          val pageIndex = currentPage + bit
+          val wIdx = pageIndex / 64
+          val bIdx = pageIndex % 64
+          val pageOk =
+            wIdx >= 0 && wIdx < bits.length && (bits(wIdx) & (1L << bIdx)) != 0L
+          if !pageOk then
+            _lastFailPageIndex = pageIndex
+            return false
+          bit += 1
+
+      currentPage += bitsInThisWord
+
+    true
 
   /**
    * Core function to check if all pages in a range have a certain property.

@@ -48,6 +48,91 @@ final class BasicMemory private (
   private var cachedRegionArray: Array[Byte] = null
   private var cachedRegionOffset: Int = 0
 
+  /** Loaded value for the most recent successful fast load. Holds any 64-bit pattern. */
+  private var _fastValue: Long = 0L
+
+  /** Faulting page address for the most recent fast op that returned FastSegfault. */
+  private var _fastFaultPage: UInt = UInt(0)
+
+  /** The value produced by the most recent successful fast load (any bit pattern). */
+  def fastValue: Long = _fastValue
+
+  /** The page-aligned faulting address for the most recent FastSegfault. */
+  def fastFaultPage: UInt = _fastFaultPage
+
+  /**
+   * Allocation-free unsigned load
+   */
+  def loadUnsignedFast(address: Int, width: Int): Int =
+    val ua = UInt(address)
+    if !_pageMap.isReadableFast(ua, width) then
+      _fastFaultPage = _pageMap.alignToPageStart(_pageMap.lastFailPageAddress)
+      return BasicMemory.FastSegfault
+
+    // Page check passed: read the bytes from the backing region.
+    findRegionBulk(address, width) match
+      case Some((arr, offset)) =>
+        val v: Long = width match
+          case 1 => (arr(offset) & 0xffL)
+          case 2 =>
+            val lo = arr(offset) & 0xff
+            val hi = arr(offset + 1) & 0xff
+            ((hi << 8) | lo).toLong & 0xffffL
+          case 4 =>
+            val b0 = arr(offset) & 0xff
+            val b1 = arr(offset + 1) & 0xff
+            val b2 = arr(offset + 2) & 0xff
+            val b3 = arr(offset + 3) & 0xff
+            ((b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).toLong) & 0xffffffffL
+          case _ =>
+            ByteBuffer.wrap(arr, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong()
+        _fastValue = v
+        BasicMemory.FastOk
+      case None =>
+        // Fall back to byte-by-byte (identical to the MemoryResult fallback).
+        readBytesInt(address, width) match
+          case Some(bytes) =>
+            var value = 0L
+            var i = 0
+            while i < width do
+              value |= (bytes(i) & 0xffL) << (i * 8)
+              i += 1
+            _fastValue = value
+            BasicMemory.FastOk
+          case None => BasicMemory.FastOutOfBounds
+
+  /**
+   * Allocation-free store of the low `width` bytes of `value` (little-endian)
+   */
+  def storeFast(address: Int, value: Long, width: Int): Int =
+    val ua = UInt(address)
+    if !_pageMap.isWritableFast(ua, width) then
+      _fastFaultPage = _pageMap.alignToPageStart(_pageMap.lastFailPageAddress)
+      return BasicMemory.FastSegfault
+
+    findWritableRegionBulk(address, width) match
+      case Some((arr, offset)) =>
+        var i = 0
+        while i < width do
+          arr(offset + i) = ((value >> (i * 8)) & 0xff).toByte
+          i += 1
+        isDirty = true
+        BasicMemory.FastOk
+      case None =>
+        // Fall back to byte-by-byte using a pooled scratch array.
+        val bytes =
+          if width <= 4 then BasicMemory.pool4.get()
+          else BasicMemory.pool8.get()
+        var i = 0
+        while i < width do
+          bytes(i) = ((value >> (i * 8)) & 0xff).toByte
+          i += 1
+        if writeBytesIntRange(address, bytes, width) then
+          isDirty = true
+          BasicMemory.FastOk
+        else
+          BasicMemory.FastOutOfBounds
+
   // ============================================================================
   // Load Operations
   // ============================================================================
@@ -637,6 +722,18 @@ final class BasicMemory private (
     true
 
   /**
+   * Writes the first `length` bytes of `data` to memory. Short-circuits on the first failing byte, matching
+   * `writeBytesInt`.
+   */
+  private def writeBytesIntRange(addr: Int, data: Array[Byte], length: Int): Boolean =
+    var i = 0
+    while i < length do
+      if !writeByteInt(addr + i, data(i)) then
+        return false
+      i += 1
+    true
+
+  /**
    * Writes multiple bytes to memory.
    */
   private def writeBytes(address: UInt, data: Array[Byte]): Boolean =
@@ -662,6 +759,11 @@ final class BasicMemory private (
       cachedRegionId = 0
 
 object BasicMemory:
+  // Status sentinels for the allocation-free fast-path load/store API.
+  final val FastOk: Int = 0
+  final val FastSegfault: Int = -1
+  final val FastOutOfBounds: Int = -2
+
   // Thread-local byte array pools to avoid per-operation allocations
   private val pool4: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](4))
   private val pool8: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](8))

@@ -342,108 +342,108 @@ final class InterpretedInstance private (
   // ============================================================================
 
   override def loadU8Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadU8(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong & 0xffL)
+    basicMemory.loadUnsignedFast(address, 1) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue & 0xffL)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadI8Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadI8(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong)
+    basicMemory.loadUnsignedFast(address, 1) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue.toByte.toLong)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadU16Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadU16(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong & 0xffffL)
+    basicMemory.loadUnsignedFast(address, 2) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue & 0xffffL)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadI16Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadI16(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong)
+    basicMemory.loadUnsignedFast(address, 2) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue.toShort.toLong)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadU32Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadU32(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong)
+    basicMemory.loadUnsignedFast(address, 4) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue & 0xffffffffL)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadI32Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadI32(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.toLong)
+    basicMemory.loadUnsignedFast(address, 4) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue.toInt.toLong)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def loadU64Int(pc: ProgramCounter, dst: Int, address: Int): Int =
-    basicMemory.loadU64(UInt(address)) match
-      case MemoryResult.Success(v) =>
-        setReg64(dst, v.signed)
+    basicMemory.loadUnsignedFast(address, 8) match
+      case BasicMemory.FastOk =>
+        setReg64(dst, basicMemory.fastValue)
         advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeU8Int(pc: ProgramCounter, src: Int, address: Int): Int =
-    basicMemory.storeU8(UInt(address), UByte(getReg(src).toByte)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, getReg(src), 1) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeU16Int(pc: ProgramCounter, src: Int, address: Int): Int =
-    basicMemory.storeU16(UInt(address), UShort(getReg(src).toShort)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, getReg(src), 2) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeU32Int(pc: ProgramCounter, src: Int, address: Int): Int =
-    basicMemory.storeU32(UInt(address), UInt(getReg(src).toInt)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, getReg(src), 4) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeU64Int(pc: ProgramCounter, src: Int, address: Int): Int =
-    basicMemory.storeU64(UInt(address), ULong(getReg(src))) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, getReg(src), 8) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeImmU8Int(pc: ProgramCounter, address: Int, value: Byte): Int =
-    basicMemory.storeU8(UInt(address), UByte(value)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, value.toLong, 1) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeImmU16Int(pc: ProgramCounter, address: Int, value: Short): Int =
-    basicMemory.storeU16(UInt(address), UShort(value)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, value.toLong, 2) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeImmU32Int(pc: ProgramCounter, address: Int, value: Int): Int =
-    basicMemory.storeU32(UInt(address), UInt(value)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, value.toLong, 4) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def storeImmU64Int(pc: ProgramCounter, address: Int, value: Long): Int =
-    basicMemory.storeU64(UInt(address), ULong(value)) match
-      case MemoryResult.Success(_) => advance()
-      case MemoryResult.Segfault(_, pageAddr) => segfault(pc, pageAddr)
-      case MemoryResult.OutOfBounds(_) => panic(pc)
+    basicMemory.storeFast(address, value, 8) match
+      case BasicMemory.FastOk => advance()
+      case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
+      case _ => panic(pc)
 
   override def sbrk(dst: Int, size: UInt): Int =
     basicMemory.sbrk(size) match
