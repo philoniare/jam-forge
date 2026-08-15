@@ -809,13 +809,20 @@ object BasicMemory:
     System.arraycopy(rwData, 0, rwBuffer, 0, math.min(rwData.length, rwBuffer.length))
 
     // Create aux buffer and copy argument data to the input region
-    val auxBuffer = new Array[Byte](memoryMap.auxDataSize.signed)
+    val inputStartAddress = PvmConstants.InputStartAddress.toLong
+    val auxStartAddress = memoryMap.auxDataAddress.toLong
+    val argOffset = (inputStartAddress - auxStartAddress).toInt
+    val alignedArgLen =
+      if argumentData.isEmpty then 0
+      else AlignmentOps.alignUp(UInt(argumentData.length), memoryMap.pageSize).signed
+    val auxBackingSize =
+      if argOffset >= 0 && alignedArgLen > 0 then
+        math.min(argOffset + alignedArgLen, memoryMap.auxDataSize.signed)
+      else 0
+    val auxBuffer = new Array[Byte](auxBackingSize)
     if argumentData.nonEmpty then
-      val inputStartAddress = PvmConstants.InputStartAddress.toLong
-      val auxStartAddress = memoryMap.auxDataAddress.toLong
-      val offset = (inputStartAddress - auxStartAddress).toInt
-      if offset >= 0 && offset + argumentData.length <= auxBuffer.length then
-        System.arraycopy(argumentData, 0, auxBuffer, offset, argumentData.length)
+      if argOffset >= 0 && argOffset + argumentData.length <= auxBuffer.length then
+        System.arraycopy(argumentData, 0, auxBuffer, argOffset, argumentData.length)
 
     new BasicMemory(
       _pageMap = pageMap,
