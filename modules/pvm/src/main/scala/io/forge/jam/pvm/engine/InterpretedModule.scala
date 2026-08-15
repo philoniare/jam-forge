@@ -1,7 +1,9 @@
 package io.forge.jam.pvm.engine
 
+import scala.collection.mutable.ArrayBuffer
 import spire.math.UInt
-import io.forge.jam.pvm.{MemoryMap, Abi}
+import io.forge.jam.pvm.{MemoryMap, Abi, Instruction}
+import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.pvm.program.ProgramBlob
 
 /**
@@ -43,6 +45,32 @@ final class InterpretedModule private (
    * For now, we use basic memory mode.
    */
   def isDynamicPaging: Boolean = false
+
+  private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
+  private var _compiledOffsetForBlock: Array[Int] = null
+
+  /**
+   * Returns the shared compiled-block buffers for this module
+   */
+  def compiledState(): (ArrayBuffer[CompiledInstruction], Array[Int]) =
+    val ci = _compiledInstructions
+    if ci != null then (ci, _compiledOffsetForBlock)
+    else
+      synchronized {
+        if _compiledInstructions == null then
+          val map = new Array[Int](codeLen.signed + 1)
+          java.util.Arrays.fill(map, -1) // -1 == ABSENT (not yet compiled)
+          val instructions = ArrayBuffer.empty[CompiledInstruction]
+          instructions += CompiledInstruction(
+            Instruction.Panic,
+            ProgramCounter(0),
+            ProgramCounter(1),
+            Instruction.Panic.opcode.value
+          )
+          _compiledOffsetForBlock = map
+          _compiledInstructions = instructions
+        (_compiledInstructions, _compiledOffsetForBlock)
+      }
 
   override def equals(other: Any): Boolean = other match
     case that: InterpretedModule =>

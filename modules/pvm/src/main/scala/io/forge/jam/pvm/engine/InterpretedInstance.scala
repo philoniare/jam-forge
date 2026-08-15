@@ -587,21 +587,7 @@ final class InterpretedInstance private (
     val (instruction, skip) = InstructionDecoder.decode(code, bitmask, offset)
     (instruction, ProgramCounter(offset + skip))
 
-  private def compileOutOfRangeStub(): Unit =
-    // Add a panic instruction at index 0 for out-of-range jumps
-    compiledInstructions += CompiledInstruction(
-      Instruction.Panic,
-      ProgramCounter(0),
-      ProgramCounter(1),
-      Instruction.Panic.opcode.value
-    )
-
 object InterpretedInstance:
-  private def newTargetMap(capacity: Int): Array[Int] =
-    val arr = new Array[Int](capacity)
-    java.util.Arrays.fill(arr, -1)
-    arr
-
   /**
    * Creates an instance from a module with specific argument data.
    * This allows reusing a cached module with different input data per execution.
@@ -617,6 +603,7 @@ object InterpretedInstance:
     val pageAlignedRwDataLen = ((actualRwDataLen + pageSize - 1) / pageSize * pageSize).toInt
     val heapEmptyPagesSize = module.heapEmptyPages.toLong * pageSize
     val initialHeapSize = UInt((pageAlignedRwDataLen + heapEmptyPagesSize).toInt)
+    val (sharedInstructions, sharedOffsetMap) = module.compiledState()
 
     val instance = new InterpretedInstance(
       module = module,
@@ -627,11 +614,10 @@ object InterpretedInstance:
       _nextProgramCounter = None,
       _nextProgramCounterChanged = true,
       _gas = 0L,
-      compiledOffsetForBlock = newTargetMap(module.codeLen.signed + 1),
-      compiledInstructions = ArrayBuffer.empty,
+      compiledOffsetForBlock = sharedOffsetMap,
+      compiledInstructions = sharedInstructions,
       _interrupt = InterruptKind.Finished,
       stepTracing = forceStepTracing,
       gasMetering = module.gasMetering
     )
-    instance.compileOutOfRangeStub()
     instance
