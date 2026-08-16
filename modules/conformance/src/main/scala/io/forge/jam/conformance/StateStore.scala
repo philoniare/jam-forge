@@ -96,6 +96,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       parent.foreach(p => parentage.put(headerHash, p))
       insertionOrder += headerHash
       pruneIfNeeded()
+      pruneParentageByAge()
     }
 
   /** Prune oldest non-ancestry states when storage exceeds the limit. Must be
@@ -122,13 +123,26 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       for hash <- toRemoveHashes do
         states.remove(hash)
         originalBlocks.remove(hash)
-        parentage.remove(hash)
-
+        
       // Compact insertion order: remove entries no longer in states
       val stateKeys = states.keySet
       val newOrder = insertionOrder.filter(stateKeys.contains)
       insertionOrder.clear()
       insertionOrder ++= newOrder
+
+  /** Prune parentage links older than the lookup-anchor window L, independently
+    * of state retention
+    */
+  private def pruneParentageByAge(): Unit =
+    if parentage.nonEmpty then
+      def slotOf(s: Timeslot): Long = s.value.toLong & 0xffffffffL
+      val newestSlot = parentage.valuesIterator.map(v => slotOf(v._2)).max
+      val minKeep = newestSlot - maxAncestryLength.toLong
+      if minKeep > 0 then
+        val stale = parentage.iterator.collect {
+          case (h, (_, slot)) if slotOf(slot) < minKeep => h
+        }.toList
+        stale.foreach(parentage.remove)
 
   /** Retrieve state by header hash.
     *
