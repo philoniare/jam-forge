@@ -146,6 +146,23 @@ class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
       case Left(err) =>
         fail(s"Unexpected error: $err")
   }
+  it should "load_imm_jump writes its register even when the jump panics (PVM-3)" in {
+    // load_imm_jump: reg7 = 1234 (0x04D2), target = 99 (not a valid block start).
+    // Encoding mirrors inst_load_imm_and_jump.json: opcode 80, operand byte 39
+    // (reg_A=7, imm length 2), imm bytes 0xD2 0x04, then the 1-byte jump target.
+    val code = Array[Byte](80.toByte, 39.toByte, 210.toByte, 4.toByte, 99.toByte)
+    val bitmask = Array[Byte](0x01.toByte) // single instruction boundary at offset 0
+    val instance = createTestInstanceWithCode(code, bitmask)
+    instance.setNextProgramCounter(ProgramCounter(0))
+    instance.setGas(10000L)
+
+    instance.run() match
+      case Right(interrupt) => interrupt shouldBe InterruptKind.Panic
+      case Left(err)        => fail(s"Unexpected error: $err")
+
+    // The destination register MUST hold immX despite the panicking jump.
+    instance.reg(7) shouldBe 1234L
+  }
 
   // Test 6: Simple instruction execution (add, load_imm)
   it should "correctly execute simple instructions" in {
