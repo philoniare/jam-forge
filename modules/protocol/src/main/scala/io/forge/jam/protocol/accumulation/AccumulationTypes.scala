@@ -320,7 +320,7 @@ enum ExitReason:
   */
 final class AccumulationContext(
     var x: PartialState,
-    var y: PartialState,
+    initialY: PartialState,
     val serviceIndex: Long,
     val timeslot: Long,
     val entropy: JamBytes,
@@ -338,6 +338,28 @@ final class AccumulationContext(
 ):
 
   storageView.foreach(_.savepoint())
+
+  private var _y: PartialState = initialY
+  private var ySnapshotPending: Boolean = initialY == null
+
+  /** Materialise the pending checkpoint snapshot from the current
+    */
+  def captureCheckpointIfPending(): Unit =
+    if ySnapshotPending then
+      _y = x.deepCopy()
+      ySnapshotPending = false
+
+  /** Checkpoint state y
+    */
+  def y: PartialState =
+    captureCheckpointIfPending()
+    _y
+
+  /** Replace the checkpoint snapshot wholesale
+    */
+  def y_=(value: PartialState): Unit =
+    _y = value
+    ySnapshotPending = false
 
 
   def readRawData(stateKey: JamBytes): Option[JamBytes] =
@@ -369,7 +391,8 @@ final class AccumulationContext(
     * provisions, and transfers.
     */
   def checkpoint(): Unit =
-    y = x.deepCopy()
+    _y = x.deepCopy()
+    ySnapshotPending = false
     yieldCheckpoint = yieldHash
     provisionsCheckpoint.clear()
     provisionsCheckpoint ++= provisions
@@ -442,7 +465,7 @@ object AccumulationContext:
   ): AccumulationContext =
     new AccumulationContext(
       x = initialState.deepCopy(),
-      y = initialState.deepCopy(),
+      initialY = initialState.deepCopy(),
       serviceIndex = serviceIndex,
       timeslot = timeslot,
       entropy = entropy,
