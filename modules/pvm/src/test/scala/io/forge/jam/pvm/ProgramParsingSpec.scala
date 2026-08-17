@@ -266,3 +266,35 @@ class ProgramParsingSpec extends AnyFlatSpec with Matchers:
     // From offset 7, previous instruction was at offset 3, skip = 3
     Program.getPreviousInstructionSkip(bitmask, 7) shouldBe Some(3)
   }
+
+  "InstructionDecoder (PVM-8)" should "clamp an over-padded reg+imm immediate to 4 bytes" in {
+    // LoadImm (opcode 51, reg+imm): code[0]=opcode, code[1]=reg nibble,
+    // code[2..5]=4-byte immediate 0x00000001, code[6]=0xFF (over-pad, must be ignored),
+    // code[7]=next instruction boundary.
+    val code = Array[Byte](51, 0x07, 0x01, 0x00, 0x00, 0x00, 0xFF.toByte, 0x00)
+    // Bitmask 0x81: instruction at offset 0, next boundary at offset 7 → skip=7, len=6.
+    val bitmask = Array[Byte](0x81.toByte)
+
+    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
+    skip shouldBe 7
+    instr shouldBe Instruction.LoadImm(7, 1L) // clamped to 32 bits; unclamped would be 0xFFFFFFFF00000001
+  }
+
+  it should "clamp an over-padded regs2+imm immediate to 4 bytes" in {
+    // AddImm64 (opcode 149, regs2+imm): code[1]=0x57 → dst=7, src=5; same over-padded immediate.
+    val code = Array[Byte](149.toByte, 0x57, 0x01, 0x00, 0x00, 0x00, 0xFF.toByte, 0x00)
+    val bitmask = Array[Byte](0x81.toByte)
+
+    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
+    skip shouldBe 7
+    instr shouldBe Instruction.AddImm64(7, 5, 1L)
+  }
+
+  it should "leave well-formed reg+imm immediates (≤4 bytes) unchanged" in {
+    // ℓ=5 (len=4): immediate is exactly the 3 bytes 0x010203 — the clamp is a no-op here.
+    val code = Array[Byte](51, 0x07, 0x03, 0x02, 0x01, 0x00)
+    val bitmask = Array[Byte](0x21.toByte) // offsets 0 and 5 set → skip=5, len=4
+    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
+    skip shouldBe 5
+    instr shouldBe Instruction.LoadImm(7, 0x010203L)
+  }

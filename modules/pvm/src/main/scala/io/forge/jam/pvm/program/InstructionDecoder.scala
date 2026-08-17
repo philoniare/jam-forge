@@ -250,13 +250,13 @@ object InstructionDecoder:
   private inline def clampReg(raw: Int): Int = math.min(12, raw)
 
   private def readRegImm(chunk: Long, len: Int): (Int, Long) =
-    (clampReg((chunk & 0xF).toInt), signExtend(chunk >>> 8, len * 8 - 8))
+    (clampReg((chunk & 0xF).toInt), signExtend(chunk >>> 8, math.max(0, math.min(4, len - 1)) * 8))
 
   private def readRegs2(chunk: Long): (Int, Int) =
     (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt))
 
   private def readRegs2Imm(chunk: Long, len: Int): (Int, Int, Long) =
-    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt), signExtend(chunk >>> 8, len * 8 - 8))
+    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt), signExtend(chunk >>> 8, math.max(0, math.min(4, len - 1)) * 8))
 
   private def readRegs2Offset(chunk: Long, instrOffset: Int, len: Int): (Int, Int, Long) =
     val (r1, r2, imm) = readRegs2Imm(chunk, len); (r1, r2, (instrOffset + imm.toInt).toLong & 0xFFFFFFFFL)
