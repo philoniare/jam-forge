@@ -210,8 +210,19 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       state.recentBlocks.copy(history = List(beta))
     )
 
+  /** A pre-state whose β recent-history holds a single block usable as a report anchor. */
+  private def stateWithAnchor(config: ChainConfig, anchor: Hash, stateRoot: Hash, beefyRoot: Hash): ReportState =
+    val beta = io.forge.jam.core.types.history.HistoricalBeta(
+      headerHash = anchor,
+      beefyRoot = beefyRoot,
+      stateRoot = stateRoot,
+      reported = List.empty
+    )
+    val s = minimalState(config)
+    s.copy(recentBlocks = s.recentBlocks.copy(history = List(beta)))
+
   private def runStf(input: ReportInput, state: ReportState): ReportOutput =
-    ReportTransition.stfInternal(input, state, testConfig, skipAncestryValidation = true)._2
+    ReportTransition.stfInternal(input, state, testConfig, skipAncestryValidation = true, skipAnchorContext = true)._2
 
   test("property: availAssignments size matches cores count") {
     forAll(genReportState(testConfig)) { state =>
@@ -553,10 +564,38 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     val report = buildWorkReport(coreIndex = testConfig.coresCount) // out of range
     val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
     val (postState, output) =
-      ReportTransition.stfInternal(input, pre, testConfig, skipAncestryValidation = true)
+      ReportTransition.stfInternal(input, pre, testConfig, skipAncestryValidation = true, skipAnchorContext = true)
     output.isLeft shouldBe true
     postState shouldBe pre
     postState.coresStatistics shouldBe pre.coresStatistics
+  }
+
+  test("WR-10: β anchor-context checks run even when the ancestry feature is off") {
+    val report = buildWorkReport(coreIndex = 0)
+    val input = ReportInput(List(buildGuarantee(report, 10, 2)), 10L)
+
+    def err(state: ReportState, skipCtx: Boolean): Option[ReportErrorCode] =
+      ReportTransition
+        .stfInternal(input, state, testConfig, skipAncestryValidation = true, skipAnchorContext = skipCtx)
+        ._2
+        .swap
+        .toOption
+
+    // (a) anchor absent from β -> AnchorNotRecent.
+    err(minimalState(testConfig), skipCtx = false) shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    // (b) anchor present, wrong state root -> BadStateRoot.
+    err(stateWithAnchor(testConfig, hashOf(0x04), hashOf(0xEE), hashOf(0x06)), skipCtx = false) shouldBe
+      Some(ReportErrorCode.BadStateRoot)
+    // (c) anchor present, wrong beefy root -> BadBeefyMmrRoot.
+    err(stateWithAnchor(testConfig, hashOf(0x04), hashOf(0x05), hashOf(0xEE)), skipCtx = false) shouldBe
+      Some(ReportErrorCode.BadBeefyMmrRoot)
+    // (d) a fully valid β anchor clears the anchor checks (fails later, never on anchor).
+    val good = err(stateWithAnchor(testConfig, hashOf(0x04), hashOf(0x05), hashOf(0x06)), skipCtx = false)
+    good should not be Some(ReportErrorCode.AnchorNotRecent)
+    good should not be Some(ReportErrorCode.BadStateRoot)
+    good should not be Some(ReportErrorCode.BadBeefyMmrRoot)
+    // (e) the test-only bypass still skips anchor-context entirely (guards runStf).
+    err(minimalState(testConfig), skipCtx = true) should not be Some(ReportErrorCode.AnchorNotRecent)
   }
 
   test("GP: out-of-order guarantees are rejected (OutOfOrderGuarantee)") {

@@ -101,15 +101,16 @@ object ReportTransition:
     preState: ReportState,
     config: ChainConfig,
     skipAncestryValidation: Boolean = false,
-    ancestry: List[AncestorHeader] = List.empty
+    ancestry: List[AncestorHeader] = List.empty,
+    skipAnchorContext: Boolean = false
   ): (ReportState, ReportOutput) =
     val result =
       for
         _ <- validateGuaranteesOrder(input.guarantees)
         _ <- validateNoDuplicatePackages(input.guarantees, preState, input)
         _ <- validateAnchorAge(input.guarantees, input.slot, config)
-        _ <- if skipAncestryValidation then Right(())
-        else validateAnchor(input.guarantees, preState.recentBlocks, ancestry, input.slot, config)
+        _ <- if skipAnchorContext then Right(())
+        else validateAnchor(input.guarantees, preState.recentBlocks, ancestry, input.slot, config, skipLookupAnchor = skipAncestryValidation)
         processedGuarantees <- processGuarantees(input, preState, config)
       yield processedGuarantees
 
@@ -314,7 +315,8 @@ object ReportTransition:
     recentBlocks: HistoricalBetaContainer,
     ancestry: List[AncestorHeader],
     currentSlot: Long,
-    config: ChainConfig
+    config: ChainConfig,
+    skipLookupAnchor: Boolean
   ): ValidationResult =
     val batchPackages = guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
     val historyReported: Map[Hash, Hash] =
@@ -323,14 +325,16 @@ object ReportTransition:
     for guarantee <- guarantees do
       val context = guarantee.report.context
 
-      val lookupAnchorSlot = context.lookupAnchorSlot.value.toLong
       val lookupAnchorPresent =
-        if ancestry.nonEmpty then
-          ancestry.exists(a => a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot)
-        else
-          recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
-            lookupAnchorSlot <= currentSlot &&
-            currentSlot - lookupAnchorSlot <= config.maxLookupAnchorAge
+        skipLookupAnchor || {
+          val lookupAnchorSlot = context.lookupAnchorSlot.value.toLong
+          if ancestry.nonEmpty then
+            ancestry.exists(a => a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot)
+          else
+            recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
+              lookupAnchorSlot <= currentSlot &&
+              currentSlot - lookupAnchorSlot <= config.maxLookupAnchorAge
+        }
       if !lookupAnchorPresent then
         return Left(ReportErrorCode.LookupAnchorNotRecent)
 
