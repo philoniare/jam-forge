@@ -782,17 +782,18 @@ object AccumulationTransition:
   ): AccountChanges =
     val changes = new AccountChanges()
 
+    def accountChanged(init: Option[ServiceAccount], post: ServiceAccount): Boolean =
+      init.isEmpty || (!(init.get eq post) && init.get != post)
+
     // Check for changes in the service's own account
     postState.accounts.get(serviceId).foreach { postAccount =>
-      val initAccount = initialState.accounts.get(serviceId)
-      if initAccount.isEmpty || initAccount.get != postAccount then
+      if accountChanged(initialState.accounts.get(serviceId), postAccount) then
         changes.accountUpdates(serviceId) = postAccount
     }
 
     // Check for changes in other accounts
     for (id, postAccount) <- postState.accounts if id != serviceId do
-      val initAccount = initialState.accounts.get(id)
-      if initAccount.isEmpty || initAccount.get != postAccount then
+      if accountChanged(initialState.accounts.get(id), postAccount) then
         if !changes.accountUpdates.contains(id) then
           changes.accountUpdates(id) = postAccount
 
@@ -800,7 +801,6 @@ object AccumulationTransition:
     for (id, _) <- initialState.accounts do
       if !postState.accounts.contains(id) then changes.removedAccounts += id
 
-    // Check for rawServiceData changes (added or updated keys)
     for (key, value) <- postState.rawServiceDataByStateKey do
       val initValue = initialState.rawServiceDataByStateKey.get(key)
       if initValue.isEmpty || initValue.get != value then
@@ -847,7 +847,7 @@ object AccumulationTransition:
           }
         request.foreach { info =>
           if info.requestedAt.isEmpty then
-            // Update preimage info with current timeslo
+            // Update preimage info with current timeslot
             state.accounts = state.accounts.updated(
               serviceId,
               account.copy(
@@ -1071,7 +1071,7 @@ class AccountChanges:
       val serviceAccountKey = StateKey.computeServiceAccountKey(id)
       state.rawServiceAccountsByStateKey =
         state.rawServiceAccountsByStateKey.removed(serviceAccountKey)
-    
+
     // Apply rawServiceData changes
     state.rawServiceDataByStateKey =
       state.rawServiceDataByStateKey.removedAll(rawServiceDataRemovals)
