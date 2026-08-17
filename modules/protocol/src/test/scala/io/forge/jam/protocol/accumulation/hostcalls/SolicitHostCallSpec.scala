@@ -40,7 +40,12 @@ class SolicitHostCallSpec extends HostCallTestBase:
     // Add existing request with count == 1 (available, can't re-solicit)
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(hash), 100)
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L)) // count == 1
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L))) // count == 1
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -79,7 +84,12 @@ class SolicitHostCallSpec extends HostCallTestBase:
     // Add existing request with count == 2 (previously available, can re-solicit)
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(hash), 100)
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L, 600L)) // count == 2
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L, 600L))) // count == 2
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -98,7 +108,7 @@ class SolicitHostCallSpec extends HostCallTestBase:
   test("SOLICIT: returns WHO when current service account not found") {
     // Create context where serviceIndex doesn't exist in accounts
     val state = PartialState(
-      accounts = mutable.Map.empty, // No accounts!
+      accounts = Map.empty, // No accounts!
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

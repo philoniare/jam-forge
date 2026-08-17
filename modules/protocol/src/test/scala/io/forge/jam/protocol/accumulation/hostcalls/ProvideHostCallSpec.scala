@@ -33,7 +33,7 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val targetId = 200L
     val context = createTestContext()
     // Add target service without any preimage requests
-    context.x.accounts(targetId) = createTestAccount(1000L)
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -59,11 +59,12 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val blobHash = io.forge.jam.core.Hashing.blake2b256(blob)
 
     // Add target service whose request has already been fulfilled
-    val targetAccount = createTestAccount(1000L)
     val key = PreimageKey(Hash(blobHash.bytes.toArray), blob.length)
-    targetAccount.preimageRequests(key) = PreimageRequest(List(42L))
-    targetAccount.preimages(Hash(blobHash.bytes.toArray)) = JamBytes(blob)
-    context.x.accounts(targetId) = targetAccount
+    val targetAccount = createTestAccount(1000L).copy(
+      preimageRequests = Map(key -> PreimageRequest(List(42L))),
+      preimages = Map(Hash(blobHash.bytes.toArray) -> JamBytes(blob))
+    )
+    context.x.accounts = context.x.accounts.updated(targetId, targetAccount)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -88,10 +89,11 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val blobHash = io.forge.jam.core.Hashing.blake2b256(blob)
 
     // Add target service with solicited preimage request
-    val targetAccount = createTestAccount(1000L)
     val key = PreimageKey(Hash(blobHash.bytes.toArray), blob.length)
-    targetAccount.preimageRequests(key) = PreimageRequest(List.empty)
-    context.x.accounts(targetId) = targetAccount
+    val targetAccount = createTestAccount(1000L).copy(
+      preimageRequests = Map(key -> PreimageRequest(List.empty))
+    )
+    context.x.accounts = context.x.accounts.updated(targetId, targetAccount)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -125,10 +127,11 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val blobHash = io.forge.jam.core.Hashing.blake2b256(blob)
 
     // Add target service with solicited preimage request
-    val targetAccount = createTestAccount(1000L)
     val key = PreimageKey(Hash(blobHash.bytes.toArray), blob.length)
-    targetAccount.preimageRequests(key) = PreimageRequest(List.empty)
-    context.x.accounts(targetId) = targetAccount
+    val targetAccount = createTestAccount(1000L).copy(
+      preimageRequests = Map(key -> PreimageRequest(List.empty))
+    )
+    context.x.accounts = context.x.accounts.updated(targetId, targetAccount)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -155,14 +158,16 @@ class ProvideHostCallSpec extends HostCallTestBase:
 
     // Target service exists but the solicited (empty) request lives ONLY in raw
     // state, not in the in-memory preimageRequests map (cross-block solicit).
-    context.x.accounts(targetId) = createTestAccount(1000L)
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
     val infoStateKey = StateKey.computePreimageInfoStateKey(
       targetId,
       blob.length,
       JamBytes(blobHash.bytes.toArray)
     )
-    context.x.rawServiceDataByStateKey(infoStateKey) =
+    context.x.rawServiceDataByStateKey = context.x.rawServiceDataByStateKey.updated(
+      infoStateKey,
       StateKey.encodePreimageInfoValue(List.empty)
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -188,14 +193,16 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val blobHash = io.forge.jam.core.Hashing.blake2b256(blob)
 
     // Request exists in raw state but is already provided (non-empty list).
-    context.x.accounts(targetId) = createTestAccount(1000L)
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
     val infoStateKey = StateKey.computePreimageInfoStateKey(
       targetId,
       blob.length,
       JamBytes(blobHash.bytes.toArray)
     )
-    context.x.rawServiceDataByStateKey(infoStateKey) =
+    context.x.rawServiceDataByStateKey = context.x.rawServiceDataByStateKey.updated(
+      infoStateKey,
       StateKey.encodePreimageInfoValue(List(42L))
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -221,7 +228,12 @@ class ProvideHostCallSpec extends HostCallTestBase:
 
     // Running service solicited the preimage for itself (empty request list).
     val key = PreimageKey(Hash(blobHash.bytes.toArray), blob.length)
-    context.x.accounts(selfId).preimageRequests(key) = PreimageRequest(List.empty)
+    context.x.accounts = context.x.accounts.updated(
+      selfId,
+      context.x.accounts(selfId).copy(
+        preimageRequests = context.x.accounts(selfId).preimageRequests.updated(key, PreimageRequest(List.empty))
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()

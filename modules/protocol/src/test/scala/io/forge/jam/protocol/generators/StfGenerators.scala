@@ -372,9 +372,9 @@ object StfGenerators:
       lastAccumulated <- Gen.choose(0L, 1000L)
     yield ServiceAccount(
       info = info,
-      storage = mutable.Map.from(storage),
-      preimages = mutable.Map.from(preimages),
-      preimageRequests = mutable.Map.from(preimageRequests),
+      storage = storage.toMap,
+      preimages = preimages.toMap,
+      preimageRequests = preimageRequests.toMap,
       lastAccumulated = lastAccumulated
     )
 
@@ -423,7 +423,7 @@ object StfGenerators:
         yield (serviceId, gas)
       )
     yield PartialState(
-      accounts = mutable.Map.from(accountList),
+      accounts = accountList.toMap,
       stagingSet = mutable.ListBuffer.from(stagingSet),
       authQueue = mutable.ListBuffer.from(authQueue.map(q => mutable.ListBuffer.from(q))),
       manager = manager,

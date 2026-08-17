@@ -43,16 +43,16 @@ trait HostCallTestBase extends AnyFunSuite with Matchers with ScalaCheckProperty
   protected def createTestAccount(balance: Long): ServiceAccount =
     ServiceAccount(
       info = createTestServiceInfo(balance),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
   protected def createTestContext(serviceIndex: Long = 100L, balance: Long = 100000L): AccumulationContext =
     val account = createTestAccount(balance)
     val state = PartialState(
-      accounts = mutable.Map(serviceIndex -> account),
+      accounts = Map(serviceIndex -> account),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

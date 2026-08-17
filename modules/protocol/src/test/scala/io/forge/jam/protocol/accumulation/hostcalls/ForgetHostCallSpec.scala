@@ -19,7 +19,12 @@ class ForgetHostCallSpec extends HostCallTestBase:
     // First solicit
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(hash), 100)
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List.empty)
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List.empty))
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -64,7 +69,12 @@ class ForgetHostCallSpec extends HostCallTestBase:
     // timeslots[1] must be < (context.timeslot - expungePeriod) to be expired
     // context.timeslot = 1000, expungePeriod = 28800 (TINY), so minHoldSlot = max(0, 1000-28800) = 0
     // Set timeslots[1] = 999 which is >= 0, so NOT expired
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L, 999L, 600L)) // count == 3
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L, 999L, 600L))) // count == 3
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -87,7 +97,12 @@ class ForgetHostCallSpec extends HostCallTestBase:
     // Add request with count == 1 (available)
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(hash), 100)
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L)) // count == 1
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L))) // count == 1
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -112,7 +127,7 @@ class ForgetHostCallSpec extends HostCallTestBase:
   test("FORGET: returns OK for expunge case (count == 2 and expired)") {
     // Create context with high timeslot so expunge period is satisfied
     val state = PartialState(
-      accounts = mutable.Map(100L -> createTestAccount(10000000L)),
+      accounts = Map(100L -> createTestAccount(10000000L)),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -128,7 +143,12 @@ class ForgetHostCallSpec extends HostCallTestBase:
     val key = PreimageKey(Hash(hash), 100)
     // minHoldSlot = max(0, 100000 - 28800) = 71200
     // timeslots(1) = 1000 < 71200, so expired
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L, 1000L)) // count == 2, expired
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L, 1000L))) // count == 2, expired
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -150,7 +170,7 @@ class ForgetHostCallSpec extends HostCallTestBase:
   test("FORGET: returns OK for available3 case (count == 3 and expired)") {
     // Create context with high timeslot for expiration
     val state = PartialState(
-      accounts = mutable.Map(100L -> createTestAccount(10000000L)),
+      accounts = Map(100L -> createTestAccount(10000000L)),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -166,7 +186,12 @@ class ForgetHostCallSpec extends HostCallTestBase:
     // timeslots(1) = 1000 < 71200, so expired
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(hash), 100)
-    context.x.accounts(100L).preimageRequests(key) = PreimageRequest(List(500L, 1000L, 2000L)) // count == 3, expired
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(
+        preimageRequests = context.x.accounts(100L).preimageRequests.updated(key, PreimageRequest(List(500L, 1000L, 2000L))) // count == 3, expired
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -192,7 +217,7 @@ class ForgetHostCallSpec extends HostCallTestBase:
   test("FORGET: returns WHO when current service account not found") {
     // Create context where serviceIndex doesn't exist in accounts
     val state = PartialState(
-      accounts = mutable.Map.empty, // No accounts!
+      accounts = Map.empty, // No accounts!
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

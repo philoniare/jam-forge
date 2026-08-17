@@ -57,7 +57,10 @@ class LookupHostCallSpec extends HostCallTestBase:
     // Add preimage to account
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val preimage = Array.fill[Byte](100)(0xab.toByte)
-    context.x.accounts(100L).preimages(Hash(hash)) = JamBytes(preimage)
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(preimages = context.x.accounts(100L).preimages.updated(Hash(hash), JamBytes(preimage)))
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()

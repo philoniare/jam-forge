@@ -133,6 +133,10 @@ object AccumulationTransition:
     val allQueuedWithSlots =
       existingQueuedWithSlots ++ editedNewRecords.map(r => (m, r))
 
+    // Only the extracted (topologically-accumulatable) reports are needed here;
+    // the post-extraction residue is not used — the final ready queue is rebuilt
+    // from the full pre-extraction record sets and the gas-bounded accumulated set
+    // (ACC-003), see step 9.
     val (readyToAccumulate, _) =
       extractAccumulatableWithSlots(
         allQueuedWithSlots,
@@ -146,6 +150,13 @@ object AccumulationTransition:
       historicallyAccumulated += hash
     }
 
+    // 7. The final ready-queue rebuild is deferred to step 9, after the
+    //    gas-bounded accumulated count n is known (ACC-003): per spec
+    //    (accumulation.tex:424-430) ready'/accumulated'[Cepochlen-1] must be
+    //    edited with only the hashes ACTUALLY accumulated within the gas budget,
+    //    not the optimistic pre-execution set. Extracted-but-unaccumulated
+    //    overflow reports therefore survive in their original slots, and a
+    //    dependency is pruned only when its work-report was actually accumulated.
 
     // 8. Execute PVM for accumulated reports (respecting gas budget)
     val allToAccumulate = immediateReports ++ readyToAccumulate
@@ -245,8 +256,11 @@ object AccumulationTransition:
     // 12. Update lastAccumulationSlot for all services in accumulationStats
     for (serviceId, _) <- accumulationStats do
       newPartialState.accounts.get(serviceId).foreach { account =>
-        newPartialState.accounts(serviceId) = account.copy(
-          info = account.info.copy(lastAccumulationSlot = input.slot)
+        newPartialState.accounts = newPartialState.accounts.updated(
+          serviceId,
+          account.copy(
+            info = account.info.copy(lastAccumulationSlot = input.slot)
+          )
         )
       }
 
@@ -786,7 +800,6 @@ object AccumulationTransition:
     for (id, _) <- initialState.accounts do
       if !postState.accounts.contains(id) then changes.removedAccounts += id
 
-    
     // Check for rawServiceData changes (added or updated keys)
     for (key, value) <- postState.rawServiceDataByStateKey do
       val initValue = initialState.rawServiceDataByStateKey.get(key)
@@ -834,10 +847,16 @@ object AccumulationTransition:
           }
         request.foreach { info =>
           if info.requestedAt.isEmpty then
-            // Update preimage info with current timeslot
-            account.preimageRequests(preimageKey) =
-              PreimageRequest(List(timeslot))
-            account.preimages(preimageHashAsHash) = preimage
+            // Update preimage info with current timeslo
+            state.accounts = state.accounts.updated(
+              serviceId,
+              account.copy(
+                preimageRequests = account.preimageRequests
+                  .updated(preimageKey, PreimageRequest(List(timeslot))),
+                preimages =
+                  account.preimages.updated(preimageHashAsHash, preimage)
+              )
+            )
 
             val infoValue =
               StateKey.encodePreimageInfoValue(List(timeslot))
@@ -851,8 +870,9 @@ object AccumulationTransition:
                 v.putByStateKey(infoStateKey, infoValue)
                 v.putByStateKey(blobStateKey, preimage)
               case None =>
-                state.rawServiceDataByStateKey(infoStateKey) = infoValue
-                state.rawServiceDataByStateKey(blobStateKey) = preimage
+                state.rawServiceDataByStateKey = state.rawServiceDataByStateKey
+                  .updated(infoStateKey, infoValue)
+                  .updated(blobStateKey, preimage)
         }
       }
     state
@@ -1007,11 +1027,12 @@ class AccountChanges:
 
   def applyTo(state: PartialState): Unit =
     // Apply account updates FIRST
-    for (id, account) <- accountUpdates do state.accounts(id) = account
+    for (id, account) <- accountUpdates do
+      state.accounts = state.accounts.updated(id, account)
 
     // THEN apply removals — removals take precedence
     for id <- removedAccounts do
-      state.accounts.remove(id)
+      state.accounts = state.accounts.removed(id)
 
       val serviceIdBytes = ByteBuffer
         .allocate(4)
@@ -1043,14 +1064,16 @@ class AccountChanges:
         !isChapterKey(arr) &&
         !isAccountRecordKey(arr)
       }.toList
-      keysToRemove.foreach(state.rawServiceDataByStateKey.remove)
+      state.rawServiceDataByStateKey =
+        state.rawServiceDataByStateKey.removedAll(keysToRemove)
 
       // Also remove the service account key from rawServiceAccountsByStateKey
       val serviceAccountKey = StateKey.computeServiceAccountKey(id)
-      state.rawServiceAccountsByStateKey.remove(serviceAccountKey)
+      state.rawServiceAccountsByStateKey =
+        state.rawServiceAccountsByStateKey.removed(serviceAccountKey)
     
     // Apply rawServiceData changes
-    for key <- rawServiceDataRemovals do
-      state.rawServiceDataByStateKey.remove(key)
-    for (key, value) <- rawServiceDataUpdates do
-      state.rawServiceDataByStateKey(key) = value
+    state.rawServiceDataByStateKey =
+      state.rawServiceDataByStateKey.removedAll(rawServiceDataRemovals)
+    state.rawServiceDataByStateKey =
+      state.rawServiceDataByStateKey ++ rawServiceDataUpdates

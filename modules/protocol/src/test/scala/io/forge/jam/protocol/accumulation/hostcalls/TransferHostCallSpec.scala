@@ -20,14 +20,14 @@ class TransferHostCallSpec extends HostCallTestBase:
     val sourceAccount = createTestAccount(10000L)
     val destAccount = ServiceAccount(
       info = createTestServiceInfo(1000L).copy(minMemoGas = 50L),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
     val state = PartialState(
-      accounts = mutable.Map(sourceId -> sourceAccount, destId -> destAccount),
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -59,13 +59,13 @@ class TransferHostCallSpec extends HostCallTestBase:
   test("TRANSFER: returns CASH for insufficient balance") {
     val context = createTestContext(balance = 50L) // Low balance
     // Add destination
-    context.x.accounts(200L) = ServiceAccount(
+    context.x.accounts = context.x.accounts.updated(200L, ServiceAccount(
       info = createTestServiceInfo(1000L).copy(minMemoGas = 10L),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
-    )
+    ))
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -90,14 +90,14 @@ class TransferHostCallSpec extends HostCallTestBase:
     val sourceAccount = createTestAccount(10000L)
     val destAccount = ServiceAccount(
       info = createTestServiceInfo(1000L).copy(minMemoGas = 1000L), // High minMemoGas
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
     val state = PartialState(
-      accounts = mutable.Map(sourceId -> sourceAccount, destId -> destAccount),
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

@@ -71,13 +71,12 @@ class AccumulationExecutor(val config: ChainConfig):
     }.sum
     val postTransferState = partialState.deepCopy()
     val deepCopiedAccount = postTransferState.accounts(serviceId)
-    postTransferState.accounts(serviceId) = ServiceAccount(
-      info = deepCopiedAccount.info
-        .copy(balance = deepCopiedAccount.info.balance + transferBalance),
-      storage = deepCopiedAccount.storage,
-      preimages = deepCopiedAccount.preimages,
-      preimageRequests = deepCopiedAccount.preimageRequests,
-      lastAccumulated = deepCopiedAccount.lastAccumulated
+    postTransferState.accounts = postTransferState.accounts.updated(
+      serviceId,
+      deepCopiedAccount.copy(
+        info = deepCopiedAccount.info
+          .copy(balance = deepCopiedAccount.info.balance + transferBalance)
+      )
     )
 
     // Calculate initial nextAccountIndex per Gray Paper:

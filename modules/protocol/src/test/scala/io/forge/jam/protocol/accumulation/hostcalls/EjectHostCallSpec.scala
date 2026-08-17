@@ -51,7 +51,7 @@ class EjectHostCallSpec extends HostCallTestBase:
     val context = createTestContext(serviceIndex = 100L)
     // Add target service with different code hash
     val targetService = createTestAccount(1000L)
-    context.x.accounts(200L) = targetService // Code hash is zeros, not 100L encoded
+    context.x.accounts = context.x.accounts.updated(200L, targetService)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -82,12 +82,12 @@ class EjectHostCallSpec extends HostCallTestBase:
     )
     val targetService = ServiceAccount(
       info = targetInfo,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
-    context.x.accounts(200L) = targetService
+    context.x.accounts = context.x.accounts.updated(200L, targetService)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -118,12 +118,12 @@ class EjectHostCallSpec extends HostCallTestBase:
     )
     val targetService = ServiceAccount(
       info = targetInfo,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty, // No preimage requests!
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty, // No preimage requests!
       lastAccumulated = 0L
     )
-    context.x.accounts(200L) = targetService
+    context.x.accounts = context.x.accounts.updated(200L, targetService)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -144,7 +144,7 @@ class EjectHostCallSpec extends HostCallTestBase:
     // Create context with timeslot
     // TINY config has preimageExpungePeriod = 32
     val state = PartialState(
-      accounts = mutable.Map(100L -> createTestAccount(10000000L)),
+      accounts = Map(100L -> createTestAccount(10000000L)),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -166,13 +166,6 @@ class EjectHostCallSpec extends HostCallTestBase:
       items = 2,
       bytesUsed = 81 // So derivedLength = max(81, 81) - 81 = 0
     )
-    val targetService = ServiceAccount(
-      info = targetInfo,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
-      lastAccumulated = 0L
-    )
 
     // Add preimage request with 2 timeslots but NOT expired
     // TINY: preimageExpungePeriod = 32
@@ -181,9 +174,15 @@ class EjectHostCallSpec extends HostCallTestBase:
     // timeslots(1) = 999 >= 968, so NOT expired (should return HUH)
     val preimageHash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(preimageHash), 0)
-    targetService.preimageRequests(key) = PreimageRequest(List(900L, 999L)) // 2 timeslots, not expired
+    val targetService = ServiceAccount(
+      info = targetInfo,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map(key -> PreimageRequest(List(900L, 999L))), // 2 timeslots, not expired
+      lastAccumulated = 0L
+    )
 
-    context.x.accounts(200L) = targetService
+    context.x.accounts = context.x.accounts.updated(200L, targetService)
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -202,7 +201,7 @@ class EjectHostCallSpec extends HostCallTestBase:
   test("EJECT: returns OK on successful ejection") {
     // Create context with high timeslot for expiration
     val state = PartialState(
-      accounts = mutable.Map(100L -> createTestAccount(10000000L)),
+      accounts = Map(100L -> createTestAccount(10000000L)),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -225,22 +224,21 @@ class EjectHostCallSpec extends HostCallTestBase:
       items = 2,
       bytesUsed = 81
     )
-    val targetService = ServiceAccount(
-      info = targetInfo,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
-      lastAccumulated = 0L
-    )
 
     // Add preimage request with 2 timeslots that IS expired
     // minHoldSlot = max(0, 100000 - 28800) = 71200
     // timeslots(1) = 1000 < 71200, so expired
     val preimageHash = Array.fill[Byte](32)(0x42.toByte)
     val key = PreimageKey(Hash(preimageHash), 0)
-    targetService.preimageRequests(key) = PreimageRequest(List(500L, 1000L))
+    val targetService = ServiceAccount(
+      info = targetInfo,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map(key -> PreimageRequest(List(500L, 1000L))),
+      lastAccumulated = 0L
+    )
 
-    context.x.accounts(200L) = targetService
+    context.x.accounts = context.x.accounts.updated(200L, targetService)
 
     val callerBalanceBefore = context.x.accounts(100L).info.balance
 

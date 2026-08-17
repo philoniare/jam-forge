@@ -126,38 +126,27 @@ final case class PreimageRequest(
     requestedAt: List[Long]
 )
 
-/** Service account combining service info with mutable storage and preimages.
+/** Service account combining service info with immutable storage and preimages.
   * Used during accumulation to track state changes.
   *
   * @param info
   *   Service info containing balance, code hash, gas limits, etc.
   * @param storage
-  *   Key-value storage (mutable)
+  *   Key-value storage (immutable, structurally shared)
   * @param preimages
-  *   Hash to blob mapping (mutable)
+  *   Hash to blob mapping (immutable, structurally shared)
   * @param preimageRequests
-  *   Requested preimages (mutable)
+  *   Requested preimages (immutable, structurally shared)
   * @param lastAccumulated
   *   Last accumulation timestamp
   */
 final case class ServiceAccount(
     info: ServiceInfo,
-    storage: mutable.Map[JamBytes, JamBytes],
-    preimages: mutable.Map[Hash, JamBytes],
-    preimageRequests: mutable.Map[PreimageKey, PreimageRequest],
-    var lastAccumulated: Long = 0
-):
-  /** Create a deep copy of this service account. All mutable collections are
-    * copied to ensure independence.
-    */
-  def copy(): ServiceAccount =
-    ServiceAccount(
-      info = info.copy(),
-      storage = mutable.Map.from(storage),
-      preimages = mutable.Map.from(preimages),
-      preimageRequests = mutable.Map.from(preimageRequests),
-      lastAccumulated = lastAccumulated
-    )
+    storage: Map[JamBytes, JamBytes],
+    preimages: Map[Hash, JamBytes],
+    preimageRequests: Map[PreimageKey, PreimageRequest],
+    lastAccumulated: Long = 0
+)
 
 object ServiceAccount:
   /** Create an empty service account with default values.
@@ -165,9 +154,9 @@ object ServiceAccount:
   def empty(info: ServiceInfo): ServiceAccount =
     ServiceAccount(
       info = info,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0
     )
 
@@ -196,7 +185,7 @@ object ServiceAccount:
   *   Raw account lookups
   */
 final case class PartialState(
-    accounts: mutable.Map[Long, ServiceAccount],
+    var accounts: Map[Long, ServiceAccount],
     stagingSet: mutable.ListBuffer[JamBytes],
     authQueue: mutable.ListBuffer[mutable.ListBuffer[JamBytes]],
     var manager: Long,
@@ -204,17 +193,14 @@ final case class PartialState(
     var delegator: Long,
     var registrar: Long,
     alwaysAccers: mutable.Map[Long, Long],
-    rawServiceDataByStateKey: mutable.Map[JamBytes, JamBytes] =
-      mutable.Map.empty,
-    rawServiceAccountsByStateKey: mutable.Map[JamBytes, JamBytes] =
-      mutable.Map.empty
+    var rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty,
+    var rawServiceAccountsByStateKey: Map[JamBytes, JamBytes] = Map.empty
 ):
-  /** Create a deep copy of this partial state. All mutable collections and
-    * contained objects are copied to ensure independence.
+  /** Create a copy-on-write snapshot of this partial state.
     */
   def deepCopy(): PartialState =
     PartialState(
-      accounts = mutable.Map.from(accounts.view.mapValues(_.copy())),
+      accounts = accounts,
       stagingSet =
         mutable.ListBuffer.from(stagingSet),
       authQueue = mutable.ListBuffer.from(
@@ -225,9 +211,8 @@ final case class PartialState(
       delegator = delegator,
       registrar = registrar,
       alwaysAccers = mutable.Map.from(alwaysAccers),
-      rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey),
-      rawServiceAccountsByStateKey =
-        mutable.Map.from(rawServiceAccountsByStateKey)
+      rawServiceDataByStateKey = rawServiceDataByStateKey,
+      rawServiceAccountsByStateKey = rawServiceAccountsByStateKey
     )
 
   /** Create a shallow copy that shares all collections except accounts
@@ -236,10 +221,8 @@ final case class PartialState(
       accountId: Long,
       updatedAccount: ServiceAccount
   ): PartialState =
-    val newAccounts = mutable.Map.from(accounts)
-    newAccounts(accountId) = updatedAccount
     PartialState(
-      accounts = newAccounts,
+      accounts = accounts.updated(accountId, updatedAccount),
       stagingSet = stagingSet,
       authQueue = authQueue,
       manager = manager,
@@ -256,7 +239,7 @@ object PartialState:
     */
   def empty: PartialState =
     PartialState(
-      accounts = mutable.Map.empty,
+      accounts = Map.empty,
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -380,12 +363,16 @@ final class AccumulationContext(
   def writeRawData(stateKey: JamBytes, value: JamBytes): Unit =
     storageView match
       case Some(v) => v.putByStateKey(stateKey, value)
-      case None    => x.rawServiceDataByStateKey.update(stateKey, value)
+      case None    =>
+        x.rawServiceDataByStateKey =
+          x.rawServiceDataByStateKey.updated(stateKey, value)
 
   def deleteRawData(stateKey: JamBytes): Unit =
     storageView match
       case Some(v) => v.deleteByStateKey(stateKey)
-      case None    => x.rawServiceDataByStateKey.remove(stateKey)
+      case None    =>
+        x.rawServiceDataByStateKey =
+          x.rawServiceDataByStateKey.removed(stateKey)
 
   /** Checkpoint: copy current state x to checkpoint y, including yield,
     * provisions, and transfers.

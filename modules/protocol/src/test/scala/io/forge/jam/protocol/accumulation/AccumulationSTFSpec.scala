@@ -40,14 +40,14 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
         lastAccumulationSlot = 0L,
         parentService = 0L
       ),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
     val state = PartialState(
-      accounts = mutable.Map(serviceId -> account),
+      accounts = Map(serviceId -> account),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -76,12 +76,12 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
 
       // Create a destination account
       val destId = serviceId + 1
-      ctx.x.accounts(destId) = createDestinationAccount()
+      ctx.x.accounts = ctx.x.accounts.updated(destId, createDestinationAccount())
 
       // Simulate a transfer by deducting balance
       val acc = ctx.x.accounts(serviceId)
       val updatedInfo = acc.info.copy(balance = acc.info.balance - transferAmount)
-      ctx.x.accounts(serviceId) = acc.copy(info = updatedInfo)
+      ctx.x.accounts = ctx.x.accounts.updated(serviceId, acc.copy(info = updatedInfo))
 
       // Queue the deferred transfer
       ctx.deferredTransfers += DeferredTransfer(
@@ -176,7 +176,10 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
       if ctx.x.accounts.nonEmpty then
         val someServiceId = ctx.x.accounts.keys.head
         ctx.x.accounts.get(someServiceId).foreach { acc =>
-          acc.storage(JamBytes(Array[Byte](1, 2, 3))) = JamBytes(Array[Byte](4, 5, 6))
+          ctx.x.accounts = ctx.x.accounts.updated(
+            someServiceId,
+            acc.copy(storage = acc.storage.updated(JamBytes(Array[Byte](1, 2, 3)), JamBytes(Array[Byte](4, 5, 6))))
+          )
         }
 
       // Property: privileges should remain unchanged
@@ -194,15 +197,15 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
       val account = ctx.x.accounts(serviceId)
 
       // Write to storage
-      account.storage(key) = value
+      ctx.x.accounts = ctx.x.accounts.updated(serviceId, account.copy(storage = account.storage.updated(key, value)))
 
       // Property: read should return the written value
-      account.storage.get(key) shouldBe Some(value)
+      ctx.x.accounts(serviceId).storage.get(key) shouldBe Some(value)
 
       // Property: different key should return None
       val otherKey = JamBytes(key.toArray.map(b => (b + 1).toByte))
-      if !account.storage.contains(otherKey) then
-        account.storage.get(otherKey) shouldBe None
+      if !ctx.x.accounts(serviceId).storage.contains(otherKey) then
+        ctx.x.accounts(serviceId).storage.get(otherKey) shouldBe None
     }
   }
 
@@ -249,8 +252,8 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
         lastAccumulationSlot = 0L,
         parentService = 0L
       ),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )

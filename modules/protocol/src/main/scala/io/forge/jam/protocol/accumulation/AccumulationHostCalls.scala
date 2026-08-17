@@ -381,27 +381,34 @@ class AccumulationHostCalls(
     val stateKey = StateKey.computeStorageStateKey(context.serviceIndex, key)
 
     val viewInstalled = context.storageView.isDefined
-    if valueLen == 0 then
-      // Delete key
-      if keyWasPresent then
-        acc.storage.remove(key)
-        if viewInstalled then
-          context.storageView.foreach(_.delete(context.serviceIndex, key))
-        else
-          context.x.rawServiceDataByStateKey.remove(stateKey)
-    else
-      acc.storage(key) = newValue.get
-      if viewInstalled then
-        context.storageView.foreach(_.put(context.serviceIndex, key, newValue.get))
+    val newStorage: Map[JamBytes, JamBytes] =
+      if valueLen == 0 then
+        // Delete key
+        if keyWasPresent then
+          if viewInstalled then
+            context.storageView.foreach(_.delete(context.serviceIndex, key))
+          else
+            context.x.rawServiceDataByStateKey =
+              context.x.rawServiceDataByStateKey.removed(stateKey)
+          acc.storage.removed(key)
+        else acc.storage
       else
-        context.x.rawServiceDataByStateKey(stateKey) = newValue.get
+        if viewInstalled then
+          context.storageView.foreach(_.put(context.serviceIndex, key, newValue.get))
+        else
+          context.x.rawServiceDataByStateKey =
+            context.x.rawServiceDataByStateKey.updated(stateKey, newValue.get)
+        acc.storage.updated(key, newValue.get)
 
     // Update account info with new bytes/items
     val updatedInfo = info.copy(
       bytesUsed = newBytes,
       items = newItems
     )
-    context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
+    context.x.accounts = context.x.accounts.updated(
+      context.serviceIndex,
+      acc.copy(info = updatedInfo, storage = newStorage)
+    )
 
     // Return old value length (or NONE if key didn't exist)
     val returnValue =
@@ -650,8 +657,10 @@ class AccumulationHostCalls(
       minItemGas = newMinAccumulateGas,
       minMemoGas = newMinMemoGas
     )
-    context.x.accounts(context.serviceIndex) =
+    context.x.accounts = context.x.accounts.updated(
+      context.serviceIndex,
       account.get.copy(info = updatedInfo)
+    )
 
     setReg(instance, 7, HostCallResult.OK)
 
@@ -739,9 +748,9 @@ class AccumulationHostCalls(
         lastAccumulationSlot = 0L,
         parentService = context.serviceIndex
       ),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map(
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map(
         // Initialize preimage info for code hash with empty requestedAt list
         PreimageKey(Hash(codeHashBuffer), codeHashLength) -> PreimageRequest(
           List.empty
@@ -749,7 +758,7 @@ class AccumulationHostCalls(
       )
     )
 
-    context.x.accounts(newServiceId) = newAccount
+    context.x.accounts = context.x.accounts.updated(newServiceId, newAccount)
 
     val preimageInfoStateKey =
       StateKey.computePreimageInfoStateKey(
@@ -764,8 +773,9 @@ class AccumulationHostCalls(
     val updatedCreatorInfo = acc.info.copy(
       balance = acc.info.balance - thresholdBalance
     )
-    context.x.accounts(context.serviceIndex) = acc.copy(
-      info = updatedCreatorInfo
+    context.x.accounts = context.x.accounts.updated(
+      context.serviceIndex,
+      acc.copy(info = updatedCreatorInfo)
     )
 
     // Update nextAccountIndex for next NEW call (ONLY if not using registrar privilege)
@@ -859,9 +869,9 @@ class AccumulationHostCalls(
     val updatedCallerInfo = callerAccount.info.copy(
       balance = callerAccount.info.balance + acc.info.balance
     )
-    context.x.accounts(context.serviceIndex) =
-      callerAccount.copy(info = updatedCallerInfo)
-    context.x.accounts.remove(ejectServiceId)
+    context.x.accounts = context.x.accounts
+      .updated(context.serviceIndex, callerAccount.copy(info = updatedCallerInfo))
+      .removed(ejectServiceId)
 
     val serviceIdBytes =
       java.nio.ByteBuffer
@@ -908,7 +918,8 @@ class AccumulationHostCalls(
 
     // Also remove the service account key from rawServiceAccountsByStateKey
     val serviceAccountKey = StateKey.computeServiceAccountKey(ejectServiceId)
-    context.x.rawServiceAccountsByStateKey.remove(serviceAccountKey)
+    context.x.rawServiceAccountsByStateKey =
+      context.x.rawServiceAccountsByStateKey.removed(serviceAccountKey)
 
     setReg(instance, 7, HostCallResult.OK)
 
@@ -967,7 +978,10 @@ class AccumulationHostCalls(
 
     // 6. Deduct balance and queue transfer
     val updatedInfo = acc.info.copy(balance = balanceAfterTransfer)
-    context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
+    context.x.accounts = context.x.accounts.updated(
+      context.serviceIndex,
+      acc.copy(info = updatedInfo)
+    )
 
     context.deferredTransfers += DeferredTransfer(
       source = context.serviceIndex,
@@ -1102,16 +1116,26 @@ class AccumulationHostCalls(
     if notRequestedYet then
       // New request: start with empty list (preimage not yet available)
       val newTimeslots = List.empty[Long]
-      acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
-      // Update footprint
       val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
-      context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
+      context.x.accounts = context.x.accounts.updated(
+        context.serviceIndex,
+        acc.copy(
+          info = updatedInfo,
+          preimageRequests =
+            acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+        )
+      )
     else if isPreviouslyAvailable then
       // Re-solicit: append current timeslot (requesting again)
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
-      acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
+      context.x.accounts = context.x.accounts.updated(
+        context.serviceIndex,
+        acc.copy(preimageRequests =
+          acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+        )
+      )
 
     setReg(instance, 7, HostCallResult.OK)
 
@@ -1189,11 +1213,9 @@ class AccumulationHostCalls(
     val info = acc.info
     if canExpunge then
       // Remove the preimage info entry
-      acc.preimageRequests.remove(key)
       context.deleteRawData(stateKey)
       // Also remove the preimage blob if it exists
       val preimageHash = Hash(hashBuffer)
-      acc.preimages.remove(preimageHash)
       val preimageStateKey =
         StateKey.computeServiceDataStateKey(
           context.serviceIndex,
@@ -1205,18 +1227,35 @@ class AccumulationHostCalls(
       val newItems = math.max(0, info.items - 2)
       val newBytes = math.max(0L, info.bytesUsed - 81 - length)
       val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
-      context.x.accounts(context.serviceIndex) = acc.copy(info = updatedInfo)
+      context.x.accounts = context.x.accounts.updated(
+        context.serviceIndex,
+        acc.copy(
+          info = updatedInfo,
+          preimageRequests = acc.preimageRequests.removed(key),
+          preimages = acc.preimages.removed(preimageHash)
+        )
+      )
     else if isAvailable1 then
       // Append current timeslot (marking as forgotten)
       val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
-      acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
+      context.x.accounts = context.x.accounts.updated(
+        context.serviceIndex,
+        acc.copy(preimageRequests =
+          acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+        )
+      )
     else if isAvailable3 then
       // Update to [requestedAt[2], timeslot]
       val newTimeslots =
         List(existingRequest.get.requestedAt(2), context.timeslot)
-      acc.preimageRequests(key) = PreimageRequest(newTimeslots)
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
+      context.x.accounts = context.x.accounts.updated(
+        context.serviceIndex,
+        acc.copy(preimageRequests =
+          acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+        )
+      )
 
     setReg(instance, 7, HostCallResult.OK)
 

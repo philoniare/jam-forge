@@ -64,7 +64,12 @@ class WriteHostCallSpec extends HostCallTestBase:
     // Store initial value
     val key = JamBytes(Array[Byte](1, 2, 3, 4))
     val oldValue = JamBytes(Array.fill[Byte](50)(0xaa.toByte))
-    context.x.accounts(100L).storage(key) = oldValue
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(storage =
+        context.x.accounts(100L).storage.updated(key, oldValue)
+      )
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()

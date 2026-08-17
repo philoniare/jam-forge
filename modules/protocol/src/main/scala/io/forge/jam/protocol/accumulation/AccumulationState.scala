@@ -351,10 +351,8 @@ final case class AccumulationState(
     privileges: Privileges,
     statistics: List[ServiceStatisticsEntry] = List.empty,
     accounts: List[AccumulationServiceItem],
-    rawServiceDataByStateKey: mutable.Map[JamBytes, JamBytes] =
-      mutable.Map.empty,
-    rawServiceAccountsByStateKey: mutable.Map[JamBytes, JamBytes] =
-      mutable.Map.empty
+    rawServiceDataByStateKey: Map[JamBytes, JamBytes] = Map.empty,
+    rawServiceAccountsByStateKey: Map[JamBytes, JamBytes] = Map.empty
 ):
   /** Deep copy of this state.
     */
@@ -374,9 +372,8 @@ final case class AccumulationState(
       privileges = privileges.copy(),
       statistics = statistics.map(_.copy()),
       accounts = accounts.map(_.copy()),
-      rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey),
-      rawServiceAccountsByStateKey =
-        mutable.Map.from(rawServiceAccountsByStateKey)
+      rawServiceDataByStateKey = rawServiceDataByStateKey,
+      rawServiceAccountsByStateKey = rawServiceAccountsByStateKey
     )
 
   /** Convert to PartialState for PVM execution.
@@ -391,9 +388,9 @@ final case class AccumulationState(
       initAuthQueues: List[List[JamBytes]] = List.empty
   ): PartialState =
     PartialState(
-      accounts = mutable.Map.from(accounts.map { item =>
-        val preimagesMap =
-          mutable.Map.from(item.data.preimages.map(p => p.hash -> p.blob))
+      accounts = accounts.map { item =>
+        var preimagesMap: Map[Hash, JamBytes] =
+          item.data.preimages.map(p => p.hash -> p.blob).toMap
         // Load code preimage from raw state if not already in the preimages map
         val codeHash = item.data.service.codeHash
         if !preimagesMap.contains(codeHash) then
@@ -403,23 +400,22 @@ final case class AccumulationState(
             JamBytes(codeHash.bytes.toArray)
           )
           rawServiceDataByStateKey.get(blobStateKey).foreach { blob =>
-            preimagesMap.put(codeHash, blob)
+            preimagesMap = preimagesMap.updated(codeHash, blob)
           }
         item.id -> ServiceAccount(
           info = item.data.service,
-          storage =
-            mutable.Map.from(item.data.storage.map(e => e.key -> e.value)),
+          storage = item.data.storage.map(e => e.key -> e.value).toMap,
           preimages = preimagesMap,
           preimageRequests =
-            mutable.Map.from(item.data.preimageRequests.flatMap { req =>
+            item.data.preimageRequests.flatMap { req =>
               // Look up the preimage blob to get its length
               preimagesMap.get(req.hash).map { blob =>
                 PreimageKey(req.hash, blob.length) -> PreimageRequest(req.value)
               }
-            }),
+            }.toMap,
           lastAccumulated = item.data.service.lastAccumulationSlot
         )
-      }),
+      }.toMap,
       stagingSet = mutable.ListBuffer.from(initStagingSet),
       authQueue = mutable.ListBuffer.from(
         initAuthQueues.map(q => mutable.ListBuffer.from(q))
@@ -430,9 +426,8 @@ final case class AccumulationState(
       registrar = privileges.register,
       alwaysAccers =
         mutable.Map.from(privileges.alwaysAcc.map(a => a.id -> a.gas)),
-      rawServiceDataByStateKey = mutable.Map.from(rawServiceDataByStateKey),
-      rawServiceAccountsByStateKey =
-        mutable.Map.from(rawServiceAccountsByStateKey)
+      rawServiceDataByStateKey = rawServiceDataByStateKey,
+      rawServiceAccountsByStateKey = rawServiceAccountsByStateKey
     )
 
 object AccumulationState:

@@ -84,7 +84,7 @@ class NewHostCallSpec extends HostCallTestBase:
     val context = createTestContext(balance = 10000000L)
     context.x.registrar = 100L // Caller IS the registrar
     // Add a service at ID 5 (below minPublicServiceIndex)
-    context.x.accounts(5L) = createTestAccount(1000L)
+    context.x.accounts = context.x.accounts.updated(5L, createTestAccount(1000L))
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()

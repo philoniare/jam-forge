@@ -187,7 +187,7 @@ object TrieBackedJamStateBridges:
         privileges = view.accumulation.privileges,
         statistics = List.empty,
         accounts = accounts,
-        rawServiceDataByStateKey = rawData
+        rawServiceDataByStateKey = rawData.toMap
       )
       AccumulationPreState(state, initStagingSet, initAuthQueues)
 

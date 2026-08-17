@@ -35,7 +35,7 @@ class FetchHostCallSpec extends HostCallTestBase:
   test("FETCH selector 1: returns 32-byte entropy") {
     val entropy = JamBytes(Array.fill[Byte](32)(0xab.toByte))
     val state = PartialState(
-      accounts = mutable.Map(100L -> createTestAccount(100000L)),
+      accounts = Map(100L -> createTestAccount(100000L)),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

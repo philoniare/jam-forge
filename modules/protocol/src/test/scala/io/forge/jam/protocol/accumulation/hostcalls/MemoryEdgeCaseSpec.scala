@@ -88,7 +88,10 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     // Add a preimage so lookup succeeds but write fails
     val hash = Array.fill[Byte](32)(0x42.toByte)
     val preimage = Array.fill[Byte](100)(0xab.toByte)
-    context.x.accounts(100L).preimages(Hash(hash)) = JamBytes(preimage)
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(preimages = context.x.accounts(100L).preimages.updated(Hash(hash), JamBytes(preimage)))
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createSmallMemoryInstance()
@@ -271,7 +274,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
   test("PROVIDE: throws PANIC when blob address is out of bounds") {
     val targetId = 200L
     val context = createTestContext()
-    context.x.accounts(targetId) = createTestAccount(1000L)
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createSmallMemoryInstance()
@@ -400,14 +403,14 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     val sourceAccount = createTestAccount(10000L)
     val destAccount = ServiceAccount(
       info = createTestServiceInfo(1000L).copy(minMemoGas = 50L),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
     val state = PartialState(
-      accounts = mutable.Map(sourceId -> sourceAccount, destId -> destAccount),
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

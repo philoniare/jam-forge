@@ -38,7 +38,7 @@ class UpgradeHostCallSpec extends HostCallTestBase:
   test("UPGRADE: returns WHO when current service account not found") {
     // Create context where serviceIndex doesn't exist in accounts
     val state = PartialState(
-      accounts = mutable.Map.empty, // No accounts!
+      accounts = Map.empty, // No accounts!
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,

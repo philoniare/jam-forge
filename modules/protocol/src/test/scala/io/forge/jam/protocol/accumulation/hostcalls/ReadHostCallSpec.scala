@@ -58,7 +58,10 @@ class ReadHostCallSpec extends HostCallTestBase:
     // Store a value first
     val key = JamBytes(Array[Byte](1, 2, 3, 4))
     val value = JamBytes(Array.tabulate[Byte](100)(i => i.toByte))
-    context.x.accounts(100L).storage(key) = value
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(storage = context.x.accounts(100L).storage.updated(key, value))
+    )
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()

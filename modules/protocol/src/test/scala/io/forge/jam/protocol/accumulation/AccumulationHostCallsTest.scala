@@ -113,16 +113,16 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
   private def createTestAccount(balance: Long): ServiceAccount =
     ServiceAccount(
       info = createTestServiceInfo(balance),
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
 
   private def createTestContext(serviceIndex: Long = 100L, balance: Long = 100000L): AccumulationContext =
     val account = createTestAccount(balance)
     val state = PartialState(
-      accounts = mutable.Map(serviceIndex -> account),
+      accounts = Map(serviceIndex -> account),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -248,13 +248,13 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     )
     val account = ServiceAccount(
       info = info,
-      storage = mutable.Map.empty,
-      preimages = mutable.Map.empty,
-      preimageRequests = mutable.Map.empty,
+      storage = Map.empty,
+      preimages = Map.empty,
+      preimageRequests = Map.empty,
       lastAccumulated = 0L
     )
     val state = PartialState(
-      accounts = mutable.Map(serviceIndex -> account),
+      accounts = Map(serviceIndex -> account),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -379,11 +379,11 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
       parentService = 0L
     )
 
-    val sourceAccount = ServiceAccount(sourceInfo, mutable.Map.empty, mutable.Map.empty, mutable.Map.empty)
-    val destAccount = ServiceAccount(destInfo, mutable.Map.empty, mutable.Map.empty, mutable.Map.empty)
+    val sourceAccount = ServiceAccount(sourceInfo, Map.empty, Map.empty, Map.empty)
+    val destAccount = ServiceAccount(destInfo, Map.empty, Map.empty, Map.empty)
 
     val state = PartialState(
-      accounts = mutable.Map(sourceId -> sourceAccount, destId -> destAccount),
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
@@ -473,10 +473,10 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
       lastAccumulationSlot = 0L,
       parentService = 0L
     )
-    val destAccount = ServiceAccount(destInfo, mutable.Map.empty, mutable.Map.empty, mutable.Map.empty)
+    val destAccount = ServiceAccount(destInfo, Map.empty, Map.empty, Map.empty)
 
     val state = PartialState(
-      accounts = mutable.Map(sourceId -> sourceAccount, destId -> destAccount),
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
       authQueue = mutable.ListBuffer.empty,
       manager = 0L,
