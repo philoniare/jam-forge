@@ -85,3 +85,29 @@ class LookupHostCallSpec extends HostCallTestBase:
     written shouldBe defined
     written.get shouldBe preimage
   }
+
+  test("LOOKUP: length >= 2^31 is clamped to the preimage, not truncated to empty (ACC-002)") {
+    val context = createTestContext()
+    val hash = Array.fill[Byte](32)(0x42.toByte)
+    val preimage = Array.tabulate[Byte](100)(i => i.toByte)
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(preimages = context.x.accounts(100L).preimages.updated(Hash(hash), JamBytes(preimage)))
+    )
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val hashAddr = 0x10000
+    val outputAddr = 0x20000
+    instance.writeBytes(hashAddr, hash)
+
+    instance.setReg(7, -1L)
+    instance.setReg(8, hashAddr)
+    instance.setReg(9, outputAddr)
+    instance.setReg(10, 0)
+    instance.setReg(11, 0x80000000L)
+
+    hostCalls.dispatch(HostCall.LOOKUP, instance)
+
+    instance.reg(7) shouldBe 100L
+    instance.readBytes(outputAddr, 100).get shouldBe preimage
+  }

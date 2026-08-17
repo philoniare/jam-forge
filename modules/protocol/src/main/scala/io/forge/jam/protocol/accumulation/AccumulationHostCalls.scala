@@ -200,8 +200,6 @@ class AccumulationHostCalls(
     val serviceId = getReg(instance, 7).toLong
     val hashAddr = getReg(instance, 8).toInt
     val outputAddr = getReg(instance, 9).toInt
-    val offset = getReg(instance, 10).toInt
-    val length = getReg(instance, 11).toInt
 
     // Read hash from memory - panic on OOB
     val hashBuffer = new Array[Byte](32)
@@ -235,8 +233,8 @@ class AccumulationHostCalls(
 
     // Calculate actual offset and length based on preimage data (or 0 if not found)
     val dataSize: Long = preimage.map(_.length.toLong).getOrElse(0L)
-    val actualOffset = math.min(offset.toLong, dataSize).toInt
-    val actualLength = math.min(length.toLong, dataSize - actualOffset).toInt
+    val actualOffset = argClampedLen(instance, 10, dataSize)
+    val actualLength = argClampedLen(instance, 11, dataSize - actualOffset)
 
     // Check if output address is writable - PANIC if not
     if !isMemoryWritable(instance, outputAddr, actualLength) then
@@ -268,8 +266,6 @@ class AccumulationHostCalls(
     val keyAddr = getReg(instance, 8).toInt
     val keyLen = getReg(instance, 9).toInt
     val outputAddr = getReg(instance, 10).toInt
-    val offset = getReg(instance, 11).toInt
-    val length = getReg(instance, 12).toInt
 
     // Read key from memory - PANIC on memory failure
     val keyBuffer = readGuestBytes(instance, keyAddr, keyLen, "Read")
@@ -296,8 +292,8 @@ class AccumulationHostCalls(
       return
 
     val data = value.get.toArray
-    val actualOffset = math.min(offset, data.length)
-    val actualLength = math.min(length, data.length - actualOffset)
+    val actualOffset = argClampedLen(instance, 11, data.length.toLong)
+    val actualLength = argClampedLen(instance, 12, data.length.toLong - actualOffset)
     val slice = data.slice(actualOffset, actualOffset + actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
@@ -423,8 +419,6 @@ class AccumulationHostCalls(
   private def handleInfo(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val outputAddr = getReg(instance, 8).toInt
-    val offset = getReg(instance, 9).toInt
-    val length = getReg(instance, 10).toInt
 
     val targetServiceId =
       if serviceId == -1L then context.serviceIndex else serviceId
@@ -451,8 +445,8 @@ class AccumulationHostCalls(
       encodeInt(info.parentService.toInt) // 4 bytes
 
     // Apply offset and length slicing
-    val first = math.min(offset, data.length)
-    val len = math.min(length, data.length - first)
+    val first = argClampedLen(instance, 9, data.length.toLong)
+    val len = argClampedLen(instance, 10, data.length.toLong - first)
     val slicedData = data.slice(first, first + len)
 
     if !writeMemory(instance, outputAddr, slicedData) then

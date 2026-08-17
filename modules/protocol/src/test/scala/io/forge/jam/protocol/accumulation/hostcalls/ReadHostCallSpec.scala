@@ -87,3 +87,59 @@ class ReadHostCallSpec extends HostCallTestBase:
     written shouldBe defined
     written.get shouldBe value.toArray.slice(10, 30)
   }
+
+  test("READ: length >= 2^31 is clamped to the value, not truncated to empty (ACC-002)") {
+    val context = createTestContext()
+    val key = JamBytes(Array[Byte](1, 2, 3, 4))
+    val value = JamBytes(Array.tabulate[Byte](100)(i => i.toByte))
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(storage = context.x.accounts(100L).storage.updated(key, value))
+    )
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val keyAddr = 0x10000
+    val outputAddr = 0x20000
+    instance.writeBytes(keyAddr, key.toArray)
+
+    instance.setReg(7, -1L)
+    instance.setReg(8, keyAddr)
+    instance.setReg(9, key.length)
+    instance.setReg(10, outputAddr)
+    instance.setReg(11, 0)
+    instance.setReg(12, 0x80000000L) // 2^31: pre-fix .toInt -> negative -> empty write
+
+    hostCalls.dispatch(HostCall.READ, instance)
+
+    instance.reg(7) shouldBe 100L
+    instance.readBytes(outputAddr, 100).get shouldBe value.toArray
+  }
+
+  test("READ: offset >= 2^31 clamps to end -> empty write, full length returned (ACC-002)") {
+    val context = createTestContext()
+    val key = JamBytes(Array[Byte](1, 2, 3, 4))
+    val value = JamBytes(Array.tabulate[Byte](100)(i => i.toByte))
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(storage = context.x.accounts(100L).storage.updated(key, value))
+    )
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val keyAddr = 0x10000
+    val outputAddr = 0x20000
+    instance.writeBytes(keyAddr, key.toArray)
+    instance.writeBytes(outputAddr, Array[Byte](0x7f)) // sentinel
+
+    instance.setReg(7, -1L)
+    instance.setReg(8, keyAddr)
+    instance.setReg(9, key.length)
+    instance.setReg(10, outputAddr)
+    instance.setReg(11, 0x80000000L) // 2^31 offset -> clamps to dataSize (100)
+    instance.setReg(12, 100)
+
+    hostCalls.dispatch(HostCall.READ, instance)
+
+    instance.reg(7) shouldBe 100L
+    // Empty slice: the sentinel is untouched.
+    instance.readBytes(outputAddr, 1).get shouldBe Array[Byte](0x7f)
+  }
