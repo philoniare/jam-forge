@@ -186,6 +186,8 @@ class BlockImporter(
 
           ImportResult.Success(trie.rootHash, Some(safrolePostState))
     catch
+      case e: Throwable if BlockImporter.isFatalCrash(e) =>
+        throw e
       case e: Throwable =>
         e.printStackTrace()
         ImportResult.Failure(
@@ -539,3 +541,7 @@ object StateEncoder:
       config: ChainConfig
   ): List[KeyValue] =
     state.toKeyvals(config)
+
+/** Companion for [[BlockImporter]]. */
+object BlockImporter:
+  def isFatalCrash(t: Throwable): Boolean = t.isInstanceOf[VirtualMachineError]

@@ -498,6 +498,14 @@ class TracesTest extends AnyFunSuite with Matchers:
           safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
+  test("BP-13: isFatalCrash routes JVM-fatal errors to session-termination, not block rejection") {
+    BlockImporter.isFatalCrash(new OutOfMemoryError("oom")) shouldBe true
+    BlockImporter.isFatalCrash(new StackOverflowError("soe")) shouldBe true
+    BlockImporter.isFatalCrash(new RuntimeException("conflict: block invalid")) shouldBe false
+    BlockImporter.isFatalCrash(new IllegalArgumentException("requirement failed")) shouldBe false
+    BlockImporter.isFatalCrash(new Exception("checked")) shouldBe false
+  }
+
   // ════════════════════════════════════════════════════════════════════════════
   // State Comparison Utilities
   // ════════════════════════════════════════════════════════════════════════════
