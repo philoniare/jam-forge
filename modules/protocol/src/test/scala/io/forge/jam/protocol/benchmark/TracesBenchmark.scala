@@ -6,7 +6,7 @@ import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.traces.{TraceStep, Genesis, InputExtractor, BlockImporter}
+import io.forge.jam.protocol.traces.{TraceStep, Genesis, InputExtractor, BlockImporter, ImportResult}
 import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrieStore}
 import io.circe.Decoder
 
@@ -78,6 +78,19 @@ object TracesBenchmark:
 
     println("=" * 70)
 
+    println("\nWarming up full import...")
+    benchmarkFullImport("storage", warmup = true)
+    val fullResults = traces.flatMap(t => benchmarkFullImport(t, warmup = false))
+
+    println("\n" + "=" * 70)
+    println("BENCHMARK RESULTS (full block import: all STFs incl. accumulation + PVM)")
+    println("=" * 70)
+    println(f"${"Trace"}%-15s ${"Steps"}%8s ${"Total(ms)"}%12s ${"Avg(ms)"}%12s ${"Steps/sec"}%12s")
+    println("-" * 70)
+    for result <- fullResults do
+      println(f"${result.traceName}%-15s ${result.totalSteps}%8d ${result.totalTimeMs}%12d ${result.avgTimePerStepMs}%12.2f ${result.stepsPerSecond}%12.2f")
+    println("=" * 70)
+
   def benchmarkTrace(traceName: String, warmup: Boolean = false): Option[BenchmarkResult] =
     val stepsResult = TestFileLoader.getTraceStepFilenames(traceName)
 
@@ -133,3 +146,43 @@ object TracesBenchmark:
           avgTimePerStepMs = avgTimeMs,
           stepsPerSecond = stepsPerSec
         ))
+
+  /** Benchmark the FULL block-import pipeline
+    */
+  def benchmarkFullImport(traceName: String, warmup: Boolean = false): Option[BenchmarkResult] =
+    TestFileLoader.getTraceStepFilenames(traceName) match
+      case Left(_) =>
+        if !warmup then println(s"SKIP: $traceName trace not available")
+        None
+      case Right(stepNames) if stepNames.isEmpty =>
+        if !warmup then println(s"SKIP: $traceName has no steps")
+        None
+      case Right(stepNames) =>
+        if !warmup then print(s"$traceName: ")
+        val fullImporter = new BlockImporter(config)
+        val startTime = System.nanoTime()
+        var processedSteps = 0
+        var errors = 0
+
+        for stepName <- stepNames do
+          TestFileLoader.loadJsonFromTestVectors[TraceStep](s"traces/$traceName", stepName) match
+            case Left(_) => errors += 1
+            case Right(step) =>
+              val ok =
+                try
+                  fullImporter.importBlock(step.block, step.preState) match
+                    case _: ImportResult.Success => true
+                    case _: ImportResult.Failure => false
+                catch case _: Throwable => false
+              if ok then processedSteps += 1 else errors += 1
+
+        val endTime = System.nanoTime()
+        val totalTimeMs = (endTime - startTime) / 1_000_000
+        val avgTimeMs = if processedSteps > 0 then totalTimeMs.toDouble / processedSteps else 0.0
+        val stepsPerSec = if totalTimeMs > 0 then processedSteps.toDouble * 1000 / totalTimeMs else 0.0
+
+        if !warmup then
+          if errors > 0 then println(s"${processedSteps} steps, ${errors} errors, ${totalTimeMs}ms")
+          else println(s"${processedSteps} steps, ${totalTimeMs}ms")
+
+        Some(BenchmarkResult(traceName, processedSteps, totalTimeMs, avgTimeMs, stepsPerSec))
