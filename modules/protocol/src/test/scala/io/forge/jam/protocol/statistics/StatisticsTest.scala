@@ -186,6 +186,55 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     postState.valsCurrStats(1).blocks shouldBe 1 // But is the author
   }
 
+  test("guarantee-stat update is index-guarded against an oversized validator set") {
+    // statsArr length = 3 (from valsCurrStats), but currValidators has 4 entries.
+    val preState = StatState(
+      valsCurrStats = List.fill(3)(StatCount.zero),
+      valsLastStats = List.fill(3)(StatCount.zero),
+      slot = 5,
+      currValidators = (0 until 4).map(validatorKeyFilled).toList,
+      prevValidators = List.empty
+    )
+
+    val workReport = WorkReport(
+      PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
+      Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+      CoreIndex(0), Hash.zero, Gas(0L), JamBytes.empty, List.empty, List.empty
+    )
+
+    // Reporter at in-range index 0 (counted) and out-of-range index 3 (must be skipped).
+    val guarantees = List(
+      GuaranteeExtrinsic(
+        workReport,
+        Timeslot(5),
+        List(
+          GuaranteeSignature(ValidatorIndex(0), Ed25519Signature(Array.fill(64)(0.toByte))),
+          GuaranteeSignature(ValidatorIndex(3), Ed25519Signature(Array.fill(64)(0.toByte)))
+        )
+      )
+    )
+
+    val input = StatInput(
+      slot = 6,
+      authorIndex = 1,
+      extrinsic = StatExtrinsic(
+        tickets = List.empty,
+        preimages = List.empty,
+        guarantees = guarantees,
+        assurances = List.empty,
+        disputes = Dispute(List.empty, List.empty, List.empty)
+      )
+    )
+
+    val config = ChainConfig.TINY.copy(validatorCount = 4)
+
+    // Before the guard this threw ArrayIndexOutOfBoundsException; it must not now.
+    val (postState, _) = StatisticsTransition.stfInternal(input, preState, config)
+
+    postState.valsCurrStats.size shouldBe 3
+    postState.valsCurrStats(0).guarantees shouldBe 1 // in-range reporter still counted
+  }
+
   test("assurance stats update") {
     val preState = initialState(validatorCount = 4, slot = 5)
 

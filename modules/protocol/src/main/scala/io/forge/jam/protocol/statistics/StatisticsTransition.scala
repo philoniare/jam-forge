@@ -91,7 +91,7 @@ object StatisticsTransition:
 
     // Update guarantees - for each validator v, check if their Ed25519 key is in reporters
     for ((validator, idx) <- preState.currValidators.zipWithIndex) do
-      if reporters.contains(validator.ed25519.toByteVector) then
+      if idx < statsArr.length && reporters.contains(validator.ed25519.toByteVector) then
         val s = statsArr(idx)
         statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
 
