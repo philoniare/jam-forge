@@ -32,6 +32,29 @@ class FetchHostCallSpec extends HostCallTestBase:
     result should be > 0L // Constants blob should have some length
   }
 
+  test("FETCH selector 0: constants blob carries the corrected Cmaxbundlesize (trace 386 regression)") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val outputAddr = 0x20000
+    instance.setReg(10, 0) // selector 0 = constants
+    instance.setReg(7, outputAddr)
+    instance.setReg(8, 0)
+    instance.setReg(9, 1000)
+
+    hostCalls.dispatch(HostCall.FETCH, instance)
+
+    val len = instance.reg(7).toInt
+    val blob = instance.readBytes(outputAddr, len).get
+
+    def containsLE32(v: Long): Boolean =
+      val le = Array((v & 0xff).toByte, ((v >> 8) & 0xff).toByte, ((v >> 16) & 0xff).toByte, ((v >> 24) & 0xff).toByte)
+      blob.sliding(4).exists(_.sameElements(le))
+
+    containsLE32(13_791_360L) shouldBe true
+    containsLE32(13_794_305L) shouldBe false
+  }
+
   test("FETCH selector 1: returns 32-byte entropy") {
     val entropy = JamBytes(Array.fill[Byte](32)(0xab.toByte))
     val state = PartialState(

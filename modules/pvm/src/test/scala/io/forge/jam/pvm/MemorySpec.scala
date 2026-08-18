@@ -138,6 +138,9 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     pageMap.numberOfPagesToAccess(UInt(100), 4000) shouldBe 2  // Crosses page boundary
     pageMap.numberOfPagesToAccess(UInt(4096), 4096) shouldBe 1
     pageMap.numberOfPagesToAccess(UInt(0), 0) shouldBe 0
+    pageMap.numberOfPagesToAccess(UInt(0xfffff926), 2016) shouldBe 1
+    pageMap.numberOfPagesToAccess(UInt(0xffffffff), 1) shouldBe 1
+    pageMap.numberOfPagesToAccess(UInt(0xfffff000), 8192) should be >= 1
   }
 
   // Test 6: Memory region validation (roData, rwData, stack, heap, aux)
