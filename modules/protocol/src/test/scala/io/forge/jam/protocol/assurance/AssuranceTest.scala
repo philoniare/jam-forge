@@ -289,3 +289,13 @@ class AssuranceTest extends AnyFunSuite with Matchers:
         exp.metadata shouldBe act.metadata withClue
           s"Metadata mismatch at validator $index in test case: $testCaseName"
     }
+
+  test("ADV-8: AssuranceErrorCode codec fails cleanly on an out-of-range ordinal") {
+    val codec = summon[Codec[AssuranceErrorCode]]
+    AssuranceErrorCode.values.foreach { e =>
+      val bits = codec.encode(e).require
+      codec.decode(bits).require.value shouldBe e
+    }
+    val invalid = _root_.scodec.bits.BitVector(Array[Byte](AssuranceErrorCode.values.length.toByte))
+    codec.decode(invalid).isFailure shouldBe true
+  }

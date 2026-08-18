@@ -90,9 +90,14 @@ object AssuranceTypes:
 
   object AssuranceErrorCode:
     given Codec[AssuranceErrorCode] =
-      ubyteCodec.xmap(
-        b => AssuranceErrorCode.fromOrdinal(b.toInt),
-        e => UByte(e.ordinal)
+      ubyteCodec.exmap(
+        b =>
+          val ordinal = b.toInt
+          if ordinal < AssuranceErrorCode.values.length then
+            _root_.scodec.Attempt.successful(AssuranceErrorCode.fromOrdinal(ordinal))
+          else
+            _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid AssuranceErrorCode ordinal: $ordinal")),
+        e => _root_.scodec.Attempt.successful(UByte(e.ordinal))
       )
 
     given Decoder[AssuranceErrorCode] =
