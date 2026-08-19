@@ -16,34 +16,13 @@ object StateMerklization:
   private val ZERO_HASH: Hash = Hash.zero
 
   /**
-   * Compute state root from key-value pairs.
+   * Compute the state root from key-value pairs.
    *
-   * @param kv Map of 31-byte keys to variable-length values
-   * @param bitIndex Current bit position for tree split (0-247)
+   * Uses in-place array-based splitting (no intermediate Map allocations) with
+   * shallow parallelism at the top tree levels.
+   *
+   * @param keyvals 31-byte keys with variable-length values
    * @return 32-byte state root hash
-   */
-  def stateMerklize(kv: Map[JamBytes, JamBytes], bitIndex: Int = 0): Hash =
-    // Empty case - return zero hash
-    if kv.isEmpty then
-      return ZERO_HASH
-
-    // Single leaf case
-    if kv.size == 1 then
-      val (key, value) = kv.head
-      return Hashing.blake2b256(leaf(key, value))
-
-    // Split keys based on bit at position bitIndex
-    val (left, right) = kv.partition { case (key, _) => !getBit(key.toArray, bitIndex) }
-
-    // Recurse and combine
-    val leftHash = stateMerklize(left, bitIndex + 1)
-    val rightHash = stateMerklize(right, bitIndex + 1)
-
-    Hashing.blake2b256(branch(leftHash, rightHash))
-
-  /**
-   * Convenience method that takes a List[KeyValue] instead of Map.
-   * Uses array-based splitting to avoid intermediate Map allocations.
    */
   private val PARALLEL_LEVELS: Int = 2
   private val PARALLEL_MIN_SIZE: Int = 64
@@ -147,18 +126,8 @@ object StateMerklization:
     JamBytes(data)
 
   /**
-   * Get bit at position i from data.
-   * Bit 0 is the MSB of byte 0, bit 7 is the LSB of byte 0, etc.
-   */
-  def getBit(data: Array[Byte], i: Int): Boolean =
-    val byteIndex = i / 8
-    if byteIndex >= data.length then
-      return false
-    val bitIndex = 7 - (i % 8) // MSB first
-    (data(byteIndex) & (1 << bitIndex)) != 0
-
-  /**
    * Get bit at position i directly from JamBytes without array copy.
+   * Bit 0 is the MSB of byte 0, bit 7 is the LSB of byte 0, etc.
    */
   private def getBitDirect(data: JamBytes, i: Int): Boolean =
     val byteIndex = i / 8

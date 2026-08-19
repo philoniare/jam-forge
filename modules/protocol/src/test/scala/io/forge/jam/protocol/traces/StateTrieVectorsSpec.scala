@@ -63,7 +63,7 @@ class StateTrieVectorsSpec extends AnyFlatSpec with Matchers:
     cases.size should be > 0
     cases.foreach { c =>
       withClue(s"StateMerklization case ${c.index} (${c.kv.size} keys), expected root ${c.expectedRoot.toHex}: ") {
-        StateMerklization.stateMerklize(c.kv) shouldBe c.expectedRoot
+        StateMerklization.stateMerklize(c.kv.toList.map((k, v) => KeyValue(k, v))) shouldBe c.expectedRoot
       }
     }
   }

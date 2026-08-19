@@ -27,17 +27,20 @@ class TriePropertySpec extends AnyFlatSpec with Matchers:
     trie.update(kv.toSeq.map((k, v) => (k, Some(v): Option[JamBytes])))
     trie.rootHash
 
+  private def kvList(m: Map[JamBytes, JamBytes]): List[KeyValue] =
+    m.toList.map((k, v) => KeyValue(k, v))
+
   "StateTrie" should "produce the same root as StateMerklization over random key/value sets" in {
     for _ <- 0 until 50 do
       val kv = randMap(rng.nextInt(40), 64) // values up to 64B straddle the 32B embedded boundary
-      trieRootOf(kv) shouldBe StateMerklization.stateMerklize(kv)
+      trieRootOf(kv) shouldBe StateMerklization.stateMerklize(kvList(kv))
   }
 
   it should "agree with StateMerklization across the 32/33-byte embedded-leaf boundary" in {
     for valLen <- Seq(0, 1, 31, 32, 33, 64, 200) do
       val kv = (0 until 16).map(_ => randKey() -> randVal(valLen)).toMap
       withClue(s"valLen=$valLen: ") {
-        trieRootOf(kv) shouldBe StateMerklization.stateMerklize(kv)
+        trieRootOf(kv) shouldBe StateMerklization.stateMerklize(kvList(kv))
       }
   }
 
@@ -72,5 +75,5 @@ class TriePropertySpec extends AnyFlatSpec with Matchers:
 
   it should "give the zero root for the empty trie" in {
     trieRootOf(Map.empty) shouldBe Hash.zero
-    StateMerklization.stateMerklize(Map.empty[JamBytes, JamBytes]) shouldBe Hash.zero
+    StateMerklization.stateMerklize(List.empty[KeyValue]) shouldBe Hash.zero
   }
