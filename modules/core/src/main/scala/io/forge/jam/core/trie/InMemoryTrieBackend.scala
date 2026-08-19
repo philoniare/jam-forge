@@ -56,8 +56,13 @@ final class InMemoryTrieBackend extends StateTrieBackend:
     values.clear()
     nodeRefs.clear()
     valueRefs.clear()
+    deadNodeCandidates.clear()
+    deadValueCandidates.clear()
 
   def nodeCount: Int = nodes.size
   def valueCount: Int = values.size
   def nodeRefcount(h: Hash): Long = nodeRefs.getOrElse(h, 0L)
   def valueRefcount(h: Hash): Long = valueRefs.getOrElse(h, 0L)
+
+  /** Number of pending dead-candidate hashes awaiting the next gc(). */
+  def pendingDeadCandidates: Int = deadNodeCandidates.size + deadValueCandidates.size
