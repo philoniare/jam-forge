@@ -457,10 +457,6 @@ final class InterpretedInstance private (
   // Internal Implementation
   // ============================================================================
 
-  private var _instructionCounter: Long = 0
-  def instructionCounter: Long = _instructionCounter
-  def resetInstructionCounter(): Unit = _instructionCounter = 0
-
   private def runImpl(): InterruptKind =
     basicMemory.markDirty()
 
@@ -484,8 +480,6 @@ final class InterpretedInstance private (
 
     // Main execution loop - optimized for JIT
     while true do
-      _instructionCounter += 1
-
       // Bounds check - use primitive comparison
       if offset >= instructionsSize then
         _interrupt = InterruptKind.Panic
