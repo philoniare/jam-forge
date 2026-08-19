@@ -222,6 +222,7 @@ final class PageMap(val pageSize: UInt):
    * Allocation-free analog of `checkPagesInRange`
    */
   private def checkPagesInRangeFast(pageStart: Int, pages: Int, bits: Array[Long]): Boolean =
+    if pages < 0 then return false
     if pages == 0 then return true
 
     var currentPage = pageStart
@@ -265,6 +266,7 @@ final class PageMap(val pageSize: UInt):
     bits: Array[Long],
     singlePageChecker: UInt => Boolean
   ): (Boolean, UInt) =
+    if pages < 0 then return (false, pageStart)
     if pages == 0 then return (true, pageStart)
 
     var currentPage = pageStart.signed

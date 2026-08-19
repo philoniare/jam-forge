@@ -49,6 +49,21 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     pageMap.isPageReadable(page1) shouldBe true
   }
 
+  "PageMap" should "reject a negative page count instead of reporting it accessible" in {
+    val pageMap = new PageMap(DefaultPageSize)
+    val page0 = UInt(0)
+    pageMap.setPageAccess(page0, PageAccess.ReadWrite)
+
+    // Sanity: empty and valid ranges behave as before.
+    pageMap.isReadablePages(page0, 0)._1 shouldBe true
+    pageMap.isReadablePages(page0, 1)._1 shouldBe true
+    pageMap.isWritablePages(page0, 1)._1 shouldBe true
+
+    // A negative count is invalid and must not be reported accessible.
+    pageMap.isReadablePages(page0, -1)._1 shouldBe false
+    pageMap.isWritablePages(page0, -1)._1 shouldBe false
+  }
+
   // Test 2: BasicMemory read/write within bounds
   "BasicMemory" should "support read/write operations within bounds" in {
     val memoryMap = createTestMemoryMap()
