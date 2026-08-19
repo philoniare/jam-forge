@@ -80,41 +80,6 @@ class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
     instance.gas < 0 shouldBe true
   }
 
-  // Test 4: Basic block compilation and caching via FlatMap
-  "FlatMap" should "support O(1) lookup for compiled handlers" in {
-    // Test FlatMap directly since it's used for handler caching
-    val flatMap = FlatMap.create[PackedTarget](UInt(100))
-
-    // Initially empty
-    flatMap.get(UInt(0)) shouldBe None
-    flatMap.get(UInt(50)) shouldBe None
-
-    // Insert some values
-    val packed1 = PackedTarget.pack(UInt(10), isJumpTargetValid = true)
-    val packed2 = PackedTarget.pack(UInt(20), isJumpTargetValid = false)
-
-    flatMap.insert(UInt(0), packed1)
-    flatMap.insert(UInt(50), packed2)
-
-    // Verify retrieval
-    flatMap.get(UInt(0)) shouldBe Some(packed1)
-    flatMap.get(UInt(50)) shouldBe Some(packed2)
-
-    // Unpack and verify
-    val (isValid1, offset1) = PackedTarget.unpack(packed1)
-    isValid1 shouldBe true
-    offset1 shouldBe UInt(10)
-
-    val (isValid2, offset2) = PackedTarget.unpack(packed2)
-    isValid2 shouldBe false
-    offset2 shouldBe UInt(20)
-
-    // Clear and verify
-    flatMap.clear()
-    flatMap.get(UInt(0)) shouldBe None
-    flatMap.get(UInt(50)) shouldBe None
-  }
-
   // Test 5: Interrupt handling (Panic, Segfault, OutOfGas)
   it should "correctly handle interrupts" in {
     // Test with a simple panic program (opcode 0)

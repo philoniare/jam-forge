@@ -58,26 +58,6 @@ object PvmTraceWriter extends StrictLogging:
       }
 
 /**
- * Packed target value combining jump validity and handler offset.
- *
- * The high bit indicates whether this is a valid jump target,
- * and the lower 31 bits contain the compiled instruction index.
- */
-final class PackedTarget private (val value: UInt) extends AnyRef:
-  override def toString: String = s"PackedTarget($value)"
-
-object PackedTarget:
-  def pack(index: UInt, isJumpTargetValid: Boolean): PackedTarget =
-    val base = index & UInt(0x7fffffff)
-    val packed = if isJumpTargetValid then base | UInt(0x80000000) else base
-    new PackedTarget(packed)
-
-  def unpack(packed: PackedTarget): (Boolean, UInt) =
-    val isValid = (packed.value.signed >>> 31) == 1
-    val offset = packed.value & UInt(0x7fffffff)
-    (isValid, offset)
-
-/**
  * Compiled instruction representation.
  *
  * Stores the parsed instruction along with its program counters
