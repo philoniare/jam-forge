@@ -188,6 +188,31 @@ class DisputeTest extends AnyFunSuite with Matchers:
     output.isLeft shouldBe true
   }
 
+  test("stfInternal re-sorts psi components to ascending order") {
+    val config = ChainConfig.TINY
+    def hh(b: Int): Hash = Hash(Array.fill(32)(b.toByte))
+    def ek(b: Int): Ed25519PublicKey = Ed25519PublicKey(Array.fill(32)(b.toByte))
+
+    // Pre-state psi deliberately stored in DESCENDING (unsorted) order.
+    val unsortedPsi = Psi(
+      good = List(hh(0xee), hh(0x22)),
+      bad = List(hh(0xcc), hh(0x11)),
+      wonky = List(hh(0xdd), hh(0x33)),
+      offenders = List(ek(0xff), ek(0x44))
+    )
+    val state = emptyDisputeState(6, 2).copy(psi = unsortedPsi)
+
+    // Empty disputes: nothing newly convicted, but the STF must still normalize order.
+    val (postState, output) =
+      DisputeTransition.stfInternal(DisputeInput(emptyDisputes), state, config)
+
+    output.isRight shouldBe true
+    postState.psi.good shouldBe List(hh(0x22), hh(0xee))
+    postState.psi.bad shouldBe List(hh(0x11), hh(0xcc))
+    postState.psi.wonky shouldBe List(hh(0x33), hh(0xdd))
+    postState.psi.offenders shouldBe List(ek(0x44), ek(0xff))
+  }
+
   test("tiny config state transition") {
     val folderPath = "stf/disputes/tiny"
     val testCaseNamesResult = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
