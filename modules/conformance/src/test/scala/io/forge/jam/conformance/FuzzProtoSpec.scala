@@ -26,7 +26,7 @@ class FuzzProtoSpec extends AnyFunSpec with Matchers:
       it("should pass all no_forks test cases"):
         assume(Files.exists(noForksDir), s"Test directory not found: $noForksDir")
 
-        val runner = new ConformanceTestRunner(ChainConfig.TINY, verbose = false)
+        val runner = new ConformanceTestRunner(ChainConfig.TINY)
         val results = runner.runTests(noForksDir)
 
         val failures = results.collect { case f: TestResult.Failure => f }
@@ -56,7 +56,7 @@ class FuzzProtoSpec extends AnyFunSpec with Matchers:
       it("should pass all forks test cases"):
         assume(Files.exists(forksDir), s"Test directory not found: $forksDir")
 
-        val runner = new ConformanceTestRunner(ChainConfig.TINY, verbose = false)
+        val runner = new ConformanceTestRunner(ChainConfig.TINY)
         val results = runner.runTests(forksDir)
 
         val failures = results.collect { case f: TestResult.Failure => f }

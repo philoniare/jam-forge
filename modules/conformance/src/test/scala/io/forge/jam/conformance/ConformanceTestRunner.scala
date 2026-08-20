@@ -28,8 +28,6 @@ object TestResult:
  */
 class ConformanceTestRunner(
   config: ChainConfig = ChainConfig.TINY,
-  verbose: Boolean = false,
-  debugBlockIndex: Int = Int.MaxValue, // Set to specific index to debug that block only (-1 to debug all)
   faultyMode: Boolean = false // When true, step 29 state root mismatch is expected
 ):
   private val stateStore = new StateStore()
@@ -248,20 +246,3 @@ class ConformanceTestRunner(
         s"Error(${error.message})"
       case other =>
         other.toString
-
-  /**
-   * Parse and print statistics field-by-field for debugging.
-   */
-  private def parseAndPrintStatistics(bytes: Array[Byte]): Unit =
-    import io.forge.jam.core.scodec.JamCodecs
-    var pos = 0
-
-    def readU32LE(): Long =
-      val v = JamCodecs.decodeU32LE(bytes, pos).toLong
-      pos += 4
-      v
-
-    def readCompact(): Long =
-      val (v, len) = JamCodecs.decodeCompactInteger(bytes, pos)
-      pos += len
-      v
