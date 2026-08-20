@@ -196,39 +196,38 @@ object FullJamStateCodecs:
   /** Use ServiceInfo codec from its companion object. */
   val serviceInfoCodec: Codec[ServiceInfo] = summon[Codec[ServiceInfo]]
 
-  def decodeAuthPools(bytes: Array[Byte], coresCount: Int): List[List[Hash]] =
-    authPoolsCodec(coresCount).decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(pools) => pools
+  /**
+   * Decode a state value and require it to be consumed exactly.
+   */
+  private def decodeExact[A](codec: Codec[A], bytes: Array[Byte], label: String): A =
+    codec.decode(BitVector(bytes)) match
+      case Attempt.Successful(result) =>
+        if result.remainder.nonEmpty then
+          throw new CodecDecodingException(
+            s"$label: ${result.remainder.bytes.size} trailing byte(s) after a valid value"
+          )
+        result.value
       case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeAuthPools: ${err.messageWithContext}")
+        throw new CodecDecodingException(s"$label: ${err.messageWithContext}")
+
+  def decodeAuthPools(bytes: Array[Byte], coresCount: Int): List[List[Hash]] =
+    decodeExact(authPoolsCodec(coresCount), bytes, "decodeAuthPools")
 
   def decodeAuthQueues(bytes: Array[Byte], coresCount: Int, queueSize: Int): List[List[Hash]] =
-    authQueuesCodec(coresCount, queueSize).decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(queues) => queues
-      case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeAuthQueues: ${err.messageWithContext}")
+    decodeExact(authQueuesCodec(coresCount, queueSize), bytes, "decodeAuthQueues")
 
   def decodeActivityStatistics(
     bytes: Array[Byte],
     validatorCount: Int,
     coresCount: Int
   ): ActivityStatisticsData =
-    activityStatisticsCodec(validatorCount, coresCount).decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(stats) => stats
-      case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeActivityStatistics: ${err.messageWithContext}")
+    decodeExact(activityStatisticsCodec(validatorCount, coresCount), bytes, "decodeActivityStatistics")
 
   def decodeAccumulationHistory(bytes: Array[Byte], epochLength: Int): List[List[ByteVector]] =
-    accumulationHistoryCodec(epochLength).decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(history) => history
-      case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeAccumulationHistory: ${err.messageWithContext}")
+    decodeExact(accumulationHistoryCodec(epochLength), bytes, "decodeAccumulationHistory")
 
   def decodeServiceInfo(bytes: Array[Byte]): ServiceInfo =
-    serviceInfoCodec.decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(v) => v
-      case Attempt.Failure(err)  =>
-        throw new CodecDecodingException(s"decodeServiceInfo: ${err.messageWithContext}")
+    decodeExact(serviceInfoCodec, bytes, "decodeServiceInfo")
 
   /** Codec for last accumulation outputs: compact list of (u32LE serviceId, 32-byte hash). */
   val lastAccumulationOutputsCodec: Codec[List[(Long, ByteVector)]] =
@@ -240,10 +239,7 @@ object FullJamStateCodecs:
     JamCodecs.compactPrefixedList(entryCodec)
 
   def decodeLastAccumulationOutputs(bytes: Array[Byte]): List[(Long, ByteVector)] =
-    lastAccumulationOutputsCodec.decodeValue(BitVector(bytes)) match
-      case Attempt.Successful(outputs) => outputs
-      case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeLastAccumulationOutputs: ${err.messageWithContext}")
+    decodeExact(lastAccumulationOutputsCodec, bytes, "decodeLastAccumulationOutputs")
 
   def encodeLastAccumulationOutputs(outputs: List[(Long, ByteVector)]): ByteVector =
     // Sort by service ID before encoding as per Gray Paper
