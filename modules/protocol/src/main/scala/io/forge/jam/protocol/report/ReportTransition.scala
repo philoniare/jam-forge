@@ -145,9 +145,9 @@ object ReportTransition:
   ): Either[ReportErrorCode, (List[WorkReport], List[SegmentRootLookup], List[Hash])] =
     val offendersSet: Set[Hash] = preState.offenders.toSet
     val accountsById: Map[Long, ServiceAccount] =
-      preState.accounts.foldLeft(Map.empty[Long, ServiceAccount]) { (m, a) =>
-        if m.contains(a.id) then m else m.updated(a.id, a)
-      }
+      val m = scala.collection.mutable.HashMap.empty[Long, ServiceAccount]
+      preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a))
+      m.toMap
     val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
 
     def cacheFor(ctx: RotationContext): RotationCache =
