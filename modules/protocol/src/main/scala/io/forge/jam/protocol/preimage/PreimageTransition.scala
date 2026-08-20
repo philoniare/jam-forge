@@ -116,7 +116,7 @@ object PreimageTransition:
           val infoStateKey =
             StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
           view.storage.readTrie(infoStateKey) match
-            case Some(value) => StateKey.decodePreimageInfoValue(value).isEmpty
+            case Some(value) => StateKey.isUnprovidedRequest(value)
             case None        => false
     )
 
@@ -131,7 +131,7 @@ object PreimageTransition:
       val infoStateKey =
         StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash))
       val stillRequested = view.storage.getByStateKey(infoStateKey) match
-        case Some(value) => StateKey.decodePreimageInfoValue(value).isEmpty
+        case Some(value) => StateKey.isUnprovidedRequest(value)
         case None        => false
 
       if stillRequested then

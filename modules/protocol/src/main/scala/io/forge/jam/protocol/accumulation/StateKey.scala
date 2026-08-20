@@ -162,3 +162,6 @@ object StateKey:
       i += 1
 
     timeslots.toList
+
+  def isUnprovidedRequest(data: JamBytes): Boolean =
+    scala.util.Try(decodePreimageInfoValue(data).isEmpty).getOrElse(false)
