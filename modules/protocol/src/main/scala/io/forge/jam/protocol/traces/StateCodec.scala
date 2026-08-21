@@ -11,6 +11,7 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.protocol.safrole.SafroleTypes.*
+import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import _root_.scodec.{Codec, Attempt, DecodeResult}
 import _root_.scodec.bits.BitVector
 import _root_.scodec.codecs.*
@@ -157,6 +158,11 @@ object StateCodec:
         i += 1
       true
 
+  private def decodeOffenders(value: Array[Byte]): List[Ed25519PublicKey] =
+    summon[Codec[Psi]].decode(BitVector(value)) match
+      case Attempt.Successful(DecodeResult(psi, _)) => psi.offenders
+      case Attempt.Failure(_)                       => List.empty
+
   /** Decodes SafroleState from keyvals.
     */
   def decodeSafroleState(
@@ -212,6 +218,8 @@ object StateCodec:
         gammaA = decoded.gammaA
         gammaS = decoded.gammaS
         gammaZ = decoded.gammaZ
+      else if isSimpleKey(key, StateKeys.JUDGEMENTS) then
+        postOffenders = decodeOffenders(value)
 
     SafroleState(
       tau,
@@ -244,7 +252,7 @@ object StateCodec:
         List.fill(config.epochLength)(BandersnatchPublicKey.zero)
       )
     var gammaZ: JamBytes = JamBytes.zeros(RING_COMMITMENT_SIZE)
-    val postOffenders: List[Ed25519PublicKey] = List.empty
+    var postOffenders: List[Ed25519PublicKey] = List.empty
 
     val tauKv = simpleByPrefix(StateKeys.TIMESLOT.toInt & 0xff)
     if tauKv != null then
@@ -280,6 +288,10 @@ object StateCodec:
       gammaA = decoded.gammaA
       gammaS = decoded.gammaS
       gammaZ = decoded.gammaZ
+
+    val judgementsKv = simpleByPrefix(StateKeys.JUDGEMENTS.toInt & 0xff)
+    if judgementsKv != null then
+      postOffenders = decodeOffenders(judgementsKv.value.toArray)
 
     SafroleState(
       tau,
