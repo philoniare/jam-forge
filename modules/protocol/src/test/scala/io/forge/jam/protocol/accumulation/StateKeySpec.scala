@@ -28,3 +28,11 @@ class StateKeySpec extends AnyFlatSpec with Matchers:
       enc.length shouldBe (1 + ts.size * 4)
       StateKey.decodePreimageInfoValue(enc) shouldBe ts
   }
+
+  it should "reject count>3 and a wrong body length" in {
+    // count = 4 (> 3) -> rejected on the count cap (checked before length).
+    a[RuntimeException] should be thrownBy StateKey.decodePreimageInfoValue(JamBytes(Array[Byte](4)))
+    // count = 2 but only 5 bytes (expected 1 + 2*4 = 9) -> rejected on length.
+    a[RuntimeException] should be thrownBy
+      StateKey.decodePreimageInfoValue(JamBytes(Array[Byte](2, 0, 0, 0, 0)))
+  }
