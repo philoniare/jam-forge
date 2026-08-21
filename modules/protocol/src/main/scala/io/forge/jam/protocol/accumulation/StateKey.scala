@@ -120,9 +120,7 @@ object StateKey:
       )
 
     val builder = JamBytes.newBuilder
-
-    // Compact length encoding (simple 1-byte count for 0-3 values)
-    builder += timeslots.size.toByte
+    builder ++= JamCodecs.encodeCompactInteger(timeslots.size.toLong)
 
     // 4-byte LE timeslot values using codec
     for ts <- timeslots do
@@ -141,14 +139,15 @@ object StateKey:
       return List.empty
 
     val bytes = data.toArray
-    val count = bytes(0).toInt & 0xFF
+    val (countLong, headerLen) = JamCodecs.decodeCompactInteger(bytes, 0)
+    val count = countLong.toInt
     if count > 3 then
       throw new RuntimeException(
         s"Preimage info decode error: at most 3 timeslot entries allowed, got count=$count"
       )
-    if bytes.length != 1 + count * 4 then
+    if bytes.length != headerLen + count * 4 then
       throw new RuntimeException(
-        s"Preimage info decode error: expected ${1 + count * 4} bytes for count=$count, got ${bytes.length}"
+        s"Preimage info decode error: expected ${headerLen + count * 4} bytes for count=$count, got ${bytes.length}"
       )
     if count == 0 then
       return List.empty
@@ -156,7 +155,7 @@ object StateKey:
     val timeslots = scala.collection.mutable.ListBuffer[Long]()
     var i = 0
     while i < count do
-      val offset = 1 + i * 4
+      val offset = headerLen + i * 4
       val ts = JamCodecs.decodeU32LE(bytes, offset).toLong
       timeslots += ts
       i += 1

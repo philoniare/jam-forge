@@ -20,3 +20,11 @@ class StateKeySpec extends AnyFlatSpec with Matchers:
     // count=2 but wrong length (5 bytes, expected 9) -> decode would throw
     StateKey.isUnprovidedRequest(JamBytes(Array[Byte](2, 0, 0, 0, 0))) shouldBe false
   }
+
+  "StateKey preimage-info value" should "round-trip and keep a single-byte count for 0-3 entries" in {
+    for ts <- Seq(List.empty[Long], List(7L), List(1L, 2L), List(10L, 20L, 30L)) do
+      val enc = StateKey.encodePreimageInfoValue(ts)
+      enc.toArray(0) shouldBe ts.size.toByte // compact(0..3) == single raw byte
+      enc.length shouldBe (1 + ts.size * 4)
+      StateKey.decodePreimageInfoValue(enc) shouldBe ts
+  }
