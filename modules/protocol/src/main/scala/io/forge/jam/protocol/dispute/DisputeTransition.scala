@@ -110,6 +110,8 @@ object DisputeTransition:
         _.target.bytes
       )
     then return Some(DisputeErrorCode.VerdictsNotSortedUnique)
+    val culpritCountByTarget = disputes.culprits.groupBy(_.target).view.mapValues(_.size).toMap
+    val faultsByTarget = disputes.faults.groupBy(_.target)
 
     // 2. Validate each verdict (must happen before culprit target validation)
     for (verdict, verdictIdx) <- disputes.verdicts.zipWithIndex do
@@ -169,17 +171,16 @@ object DisputeTransition:
 
       // For all-negative verdicts, require at least 2 culprits
       if negativeVotes == verdict.votes.size && positiveVotes == 0 then
-        val culpritsForTarget = disputes.culprits.count(_.target == verdict.target)
+        val culpritsForTarget = culpritCountByTarget.getOrElse(verdict.target, 0)
         if culpritsForTarget < 2 then
           return Some(DisputeErrorCode.NotEnoughCulprits)
 
       // For supermajority positive verdicts, require at least one fault
       if positiveVotes >= config.votesPerVerdict then
-        val hasFault = disputes.faults.exists(_.target == verdict.target)
-        if !hasFault then return Some(DisputeErrorCode.NotEnoughFaults)
+        val matchingFaults = faultsByTarget.getOrElse(verdict.target, Nil)
+        if matchingFaults.isEmpty then return Some(DisputeErrorCode.NotEnoughFaults)
 
         // Validate fault votes are opposite of verdict outcome
-        val matchingFaults = disputes.faults.filter(_.target == verdict.target)
         for fault <- matchingFaults do
           // For a good verdict (supermajority positive), faults must have voted false
           if fault.vote then return Some(DisputeErrorCode.FaultVerdictWrong)
