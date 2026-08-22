@@ -78,7 +78,13 @@ object constants:
   
   /** WP = 10^10: Work package gas limit */
   val WP: Long = 10_000_000_000L
-  
+
+  /** Csegmentsize = 4104: erasure-coded segment size in bytes */
+  val Csegmentsize: Long = 4104L
+
+  /** Number of erasure pieces a sequence of `n` original segments expands to */
+  def erasureExpandedPieces(n: Long): Long = (n * 65 + 63) / 64
+
   // ══════════════════════════════════════════════════════════════════════════
   // Service Constants
   // ══════════════════════════════════════════════════════════════════════════

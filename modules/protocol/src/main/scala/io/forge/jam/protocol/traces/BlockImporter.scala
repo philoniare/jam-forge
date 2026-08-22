@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.traces
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.vrfs.BandersnatchWrapper
 import io.forge.jam.core.types.block.Block
@@ -254,7 +254,6 @@ class BlockImporter(
           gasUsed = cur.gasUsed + gas
         )
 
-    val segmentSize = 4104L
     var ari = availableReports
     while ari.nonEmpty do
       val report = ari.head
@@ -263,7 +262,8 @@ class BlockImporter(
       if coreIndex >= 0 && coreIndex < maxCores then
         val packageLength = report.packageSpec.length.toLong
         val segmentCount = report.packageSpec.exportsCount.toLong
-        val segmentsSize = segmentSize * ((segmentCount * 65 + 63) / 64)
+        val segmentsSize =
+          constants.Csegmentsize * constants.erasureExpandedPieces(segmentCount)
         val cur = stats(coreIndex)
         stats(coreIndex) =
           cur.copy(daLoad = cur.daLoad + packageLength + segmentsSize)
