@@ -765,3 +765,16 @@ class ReportTest extends AnyFunSuite with Matchers:
         a.accumulateGasUsed shouldBe e.accumulateGasUsed withClue
           s"servicesStatistics.accumulateGasUsed mismatch at $where"
     }
+
+  test("ReportErrorCode codec fails cleanly on an out-of-range ordinal") {
+    val codec = summon[_root_.scodec.Codec[ReportErrorCode]]
+    // All valid ordinals round-trip through encode/decode.
+    ReportErrorCode.values.foreach { e =>
+      val bits = codec.encode(e).require
+      codec.decode(bits).require.value shouldBe e
+    }
+    // values.length (27) is out of range: decode must return a failed Attempt
+    // (no thrown exception).
+    val invalid = _root_.scodec.bits.BitVector(Array[Byte](ReportErrorCode.values.length.toByte))
+    codec.decode(invalid).isFailure shouldBe true
+  }

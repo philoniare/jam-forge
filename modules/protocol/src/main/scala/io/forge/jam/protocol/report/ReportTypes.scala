@@ -380,9 +380,14 @@ object ReportTypes:
     case DuplicateGuarantors
 
   object ReportErrorCode:
-    given Codec[ReportErrorCode] = byte.xmap(
-      b => ReportErrorCode.fromOrdinal(b.toInt & 0xff),
-      e => e.ordinal.toByte
+    given Codec[ReportErrorCode] = byte.exmap(
+      b =>
+        val ordinal = b.toInt & 0xff
+        if ordinal < ReportErrorCode.values.length then
+          _root_.scodec.Attempt.successful(ReportErrorCode.fromOrdinal(ordinal))
+        else
+          _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid ReportErrorCode ordinal: $ordinal")),
+      e => _root_.scodec.Attempt.successful(e.ordinal.toByte)
     )
 
     given Decoder[ReportErrorCode] =
