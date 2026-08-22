@@ -89,21 +89,44 @@ object AccumulationOperand:
 
       val authTraceLen =
         JamCodecs.encodeCompactInteger(op.authTrace.length.toLong)
-      variant ++
-        op.packageHash.toArray ++ op.segmentRoot.toArray ++ op.authorizerHash.toArray ++
-        op.payloadHash.toArray ++ gasLimitBytes ++ resultBytes ++ authTraceLen ++ op.authTrace.toArray
+      val authTrace = op.authTrace.toArray
+      val out = new java.io.ByteArrayOutputStream(
+        variant.length + 4 * 32 + gasLimitBytes.length + resultBytes.length +
+          authTraceLen.length + authTrace.length
+      )
+      out.write(variant, 0, variant.length)
+      out.write(op.packageHash.toArray)
+      out.write(op.segmentRoot.toArray)
+      out.write(op.authorizerHash.toArray)
+      out.write(op.payloadHash.toArray)
+      out.write(gasLimitBytes, 0, gasLimitBytes.length)
+      out.write(resultBytes, 0, resultBytes.length)
+      out.write(authTraceLen, 0, authTraceLen.length)
+      out.write(authTrace)
+      out.toByteArray
 
   /** Transfer operand containing a DeferredTransfer. Encoded as variant 1.
     */
   final case class Transfer(transfer: DeferredTransfer)
       extends AccumulationOperand:
     override def encode(): Array[Byte] =
-      JamCodecs.encodeCompactInteger(1) ++
-        JamCodecs.encodeU32LE(UInt(transfer.source.toInt)) ++
-        JamCodecs.encodeU32LE(UInt(transfer.destination.toInt)) ++
-        JamCodecs.encodeU64LE(ULong(transfer.amount)) ++
-        transfer.memo.toArray ++
-        JamCodecs.encodeU64LE(ULong(transfer.gasLimit))
+      val variant = JamCodecs.encodeCompactInteger(1)
+      val source = JamCodecs.encodeU32LE(UInt(transfer.source.toInt))
+      val destination = JamCodecs.encodeU32LE(UInt(transfer.destination.toInt))
+      val amount = JamCodecs.encodeU64LE(ULong(transfer.amount))
+      val memo = transfer.memo.toArray
+      val gasLimit = JamCodecs.encodeU64LE(ULong(transfer.gasLimit))
+      val out = new java.io.ByteArrayOutputStream(
+        variant.length + source.length + destination.length + amount.length +
+          memo.length + gasLimit.length
+      )
+      out.write(variant, 0, variant.length)
+      out.write(source, 0, source.length)
+      out.write(destination, 0, destination.length)
+      out.write(amount, 0, amount.length)
+      out.write(memo)
+      out.write(gasLimit, 0, gasLimit.length)
+      out.toByteArray
 
 /** Key for preimage requests (hash + length).
   *
