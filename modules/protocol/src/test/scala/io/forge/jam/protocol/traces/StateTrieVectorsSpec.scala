@@ -14,7 +14,9 @@ import scala.io.Source
  */
 class StateTrieVectorsSpec extends AnyFlatSpec with Matchers:
 
-  private val vectorsPath = "jamtestvectors/trie/trie.json"
+  private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
+  private val vectorsPath =
+    java.nio.file.Paths.get(baseDir, "jamtestvectors", "trie", "trie.json").toString
 
   private final case class TrieCase(index: Int, kv: Map[JamBytes, JamBytes], expectedRoot: Hash)
 
