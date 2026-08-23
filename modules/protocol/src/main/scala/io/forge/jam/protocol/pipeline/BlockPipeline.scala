@@ -31,15 +31,10 @@ object BlockPipeline:
     val initialContext = PipelineContext.from(block, view.config, view)
     val storageView: Option[ServiceStorageView] = Some(view.storage)
 
-    val priorOffenders = view.psi.offenders
-    val convictedThisBlock =
-      block.extrinsic.disputes.culprits.map(_.key) ++
-        block.extrinsic.disputes.faults.map(_.key)
-    view.postOffenders = (priorOffenders ++ convictedThisBlock).distinct
-
     val pipeline: StfStepWith[BlockPipelineResult] = for {
       // Step 0: Validate extrinsic hash
       _ <- validateExtrinsicHash
+      _ <- setPosteriorOffenders
 
       // Step 1: Safrole
       safroleOut <- safrole

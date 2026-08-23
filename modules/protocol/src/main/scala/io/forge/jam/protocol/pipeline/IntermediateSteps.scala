@@ -223,6 +223,10 @@ object IntermediateSteps:
     view.timeslot = ctx.preTransitionTau
   }
 
+  val setPosteriorOffenders: StfStep = modifyState { (view, ctx) =>
+    view.postOffenders = ctx.posteriorOffenders
+  }
+
   def restorePostTransitionTau(postTau: Long): StfStep = modifyState {
     (view, _) => view.timeslot = postTau
   }

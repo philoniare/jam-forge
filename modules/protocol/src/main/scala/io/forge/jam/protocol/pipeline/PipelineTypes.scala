@@ -25,7 +25,8 @@ final case class PipelineContext(
   disputeOffendersMark: List[Ed25519PublicKey] = List.empty,
   availableReports: List[WorkReport] = List.empty,
   accumulateRoot: Option[Hash] = None,
-  accumulationStats: Map[Long, (Long, Int)] = Map.empty
+  accumulationStats: Map[Long, (Long, Int)] = Map.empty,
+  posteriorOffenders: List[Ed25519PublicKey] = List.empty
 )
 
 object PipelineContext:
@@ -36,7 +37,11 @@ object PipelineContext:
       preTransitionTau = view.timeslot,
       preSafroleValidators = view.validators.current,
       preSafroleKappa = view.validators.current,
-      preSafroleLambda = view.validators.previous
+      preSafroleLambda = view.validators.previous,
+      posteriorOffenders =
+        (view.psi.offenders
+          ++ block.extrinsic.disputes.culprits.map(_.key)
+          ++ block.extrinsic.disputes.faults.map(_.key)).distinct
     )
 
 /**
