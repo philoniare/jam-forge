@@ -32,6 +32,26 @@ class FetchHostCallSpec extends HostCallTestBase:
     result should be > 0L // Constants blob should have some length
   }
 
+  test("FETCH PANICs when the output buffer is on a read-only page") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    val outputAddr = 0x20000
+    // The output region is readable but NOT writable (a read-only page).
+    instance.markReadOnly(outputAddr, 1000)
+    instance.isMemoryReadable(outputAddr, 1000) shouldBe true
+    instance.isMemoryWritable(outputAddr, 1000) shouldBe false
+
+    instance.setReg(10, 0) // selector 0 = constants
+    instance.setReg(7, outputAddr)
+    instance.setReg(8, 0) // offset
+    instance.setReg(9, 1000) // max length
+
+    // ACC-005: writing the output to a read-only page must PANIC, not silently write.
+    a[RuntimeException] should be thrownBy hostCalls.dispatch(HostCall.FETCH, instance)
+  }
+
   test("FETCH selector 0: constants blob carries the corrected Cmaxbundlesize (trace 386 regression)") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)

@@ -21,6 +21,14 @@ class MockPvmInstance(
   private val memory = new Array[Byte](memorySize)
   private var _gas: Long = initialGas
 
+  private val readOnlyRanges = scala.collection.mutable.ArrayBuffer.empty[(Int, Int)]
+  def markReadOnly(address: Int, length: Int): Unit =
+    readOnlyRanges += ((address, length))
+  private def overlapsReadOnly(address: Int, length: Int): Boolean =
+    readOnlyRanges.exists { case (start, len) =>
+      address < start + len && start < address + length
+    }
+
   override def reg(regIdx: Int): Long = registers(regIdx)
 
   override def setReg(regIdx: Int, value: Long): Unit =
@@ -39,7 +47,7 @@ class MockPvmInstance(
       None
 
   override def writeByte(address: Int, value: Byte): Boolean =
-    if address >= 0 && address < memory.length then
+    if address >= 0 && address < memory.length && !overlapsReadOnly(address, 1) then
       memory(address) = value
       true
     else
@@ -51,14 +59,15 @@ class MockPvmInstance(
   override def isMemoryReadable(address: Int, length: Int): Boolean =
     isMemoryAccessible(address, length)
 
+  // Writable iff accessible AND not within an explicitly marked read-only range.
   override def isMemoryWritable(address: Int, length: Int): Boolean =
-    isMemoryAccessible(address, length)
+    isMemoryAccessible(address, length) && !overlapsReadOnly(address, length)
 
   /**
    * Bulk write to memory.
    */
   override def writeBytes(address: Int, data: Array[Byte]): Boolean =
-    if !isMemoryAccessible(address, data.length) then return false
+    if !isMemoryWritable(address, data.length) then return false
     var i = 0
     while i < data.length do
       memory(address + i) = data(i)
