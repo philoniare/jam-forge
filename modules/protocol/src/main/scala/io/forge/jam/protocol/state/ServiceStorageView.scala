@@ -75,8 +75,9 @@ final class ServiceStorageView(trie: StateTrie):
     val merged = mutable.LinkedHashMap.empty[JamBytes, JamBytes]
     trieEntries.foreach { case (k, v) => merged.update(k, v) }
     pending.foreachEntry {
-      case (k, Some(v)) => merged.update(k, v)
-      case (k, None)    => merged.remove(k)
+      case (k, Some(v)) if trie.prefixMatches(k, prefix, bitsCount) => merged.update(k, v)
+      case (k, None) if trie.prefixMatches(k, prefix, bitsCount)    => merged.remove(k)
+      case _                                                        => ()
     }
     merged.iterator
 

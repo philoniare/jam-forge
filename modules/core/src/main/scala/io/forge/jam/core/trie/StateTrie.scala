@@ -191,7 +191,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
             if prefixMatches(leafKey, prefix, bitsCount) then Some(node) else None
     }
 
-  private def prefixMatches(key: JamBytes, prefix: JamBytes, bitsCount: Int): Boolean =
+  def prefixMatches(key: JamBytes, prefix: JamBytes, bitsCount: Int): Boolean =
     var i = 0
     while i < bitsCount do
       if bitAt(key, i) != bitAt(prefix, i) then return false
