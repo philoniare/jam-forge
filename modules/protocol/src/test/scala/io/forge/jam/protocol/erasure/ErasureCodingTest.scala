@@ -281,3 +281,47 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
     result.isLeft shouldBe true
     result.left.toOption.get shouldBe a[ErasureCoding.InvalidBasicSize]
   }
+
+  test("Chunk and reconstruct roundtrip (full config)") {
+    val basicSize = basicSizeForConfig(FullConfig) // 684
+    val validatorCount = FullConfig.validatorCount // 1023
+    val originalCount = basicSize / 2 // 342
+    val dataLength = 4104 // 342 * 12, divisible across the original shards
+
+    val originalData = (0 until dataLength).map(i => ((i * 15) % 256).toByte).toArray
+
+    val chunkResult = ErasureCoding.chunk(originalData, basicSize, validatorCount)
+    chunkResult.isRight shouldBe true
+    val chunks = chunkResult.toOption.get
+    chunks.length shouldBe validatorCount
+
+    // Reconstruct from a recovery-only shard set (indices originalCount onward).
+    val shards =
+      (originalCount until originalCount + originalCount).map(i => ErasureCoding.Shard(chunks(i), i)).toArray
+    val reconstructResult = ErasureCoding.reconstruct(shards, basicSize, validatorCount)
+    reconstructResult.isRight shouldBe true
+    reconstructResult.toOption.get shouldBe originalData
+  }
+
+  test("reconstruct with no shards fails (InvalidShardsCount)") {
+    val result = ErasureCoding.reconstruct(Array.empty[ErasureCoding.Shard], 4, 6)
+    result.isLeft shouldBe true
+    result.left.toOption.get shouldBe ErasureCoding.InvalidShardsCount
+  }
+
+  test("reconstruct with ragged shards fails (RaggedShards)") {
+    // >= originalCount(2) shards, but with mismatched lengths.
+    val shards = Array(
+      ErasureCoding.Shard(Array[Byte](1, 2, 3, 4), 0),
+      ErasureCoding.Shard(Array[Byte](1, 2), 1)
+    )
+    val result = ErasureCoding.reconstruct(shards, 4, 6)
+    result.isLeft shouldBe true
+    result.left.toOption.get shouldBe ErasureCoding.RaggedShards
+  }
+
+  test("chunk with too-small validator count fails (InvalidRecoveryCount)") {
+    val result = ErasureCoding.chunk(Array[Byte](1, 2, 3, 4), 6, 2) // 3 originals > 2 validators
+    result.isLeft shouldBe true
+    result.left.toOption.get shouldBe a[ErasureCoding.InvalidRecoveryCount]
+  }
