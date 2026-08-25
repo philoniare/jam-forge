@@ -115,7 +115,7 @@ object SafroleTransition:
     // Handle epoch transition if needed
     val (stateAfterEpoch, epochMark) =
       if ctx.crossingEpochBoundary then
-        val (newState, mark) = handleEpochTransition(preState, ctx, config)
+        val (newState, mark) = handleEpochTransition(preState, preState.postOffenders, ctx, config)
         (newState, Some(mark))
       else
         (preState, None)
@@ -150,6 +150,7 @@ object SafroleTransition:
    */
   private def handleEpochTransition(
     preState: SafroleState,
+    posteriorOffenders: List[Ed25519PublicKey],
     ctx: EpochContext,
     config: ChainConfig
   ): (SafroleState, EpochMark) =
@@ -168,7 +169,7 @@ object SafroleTransition:
     val newKappa = preState.gammaK
 
     // Load new pending validators with offender filtering
-    val offenderSet = preState.postOffenders.map(o => JamBytes(o.bytes)).toSet
+    val offenderSet = posteriorOffenders.map(o => JamBytes(o.bytes)).toSet
     val newGammaK = preState.iota.map { validator =>
       if offenderSet.contains(JamBytes(validator.ed25519.bytes)) then
         validator.copy(
