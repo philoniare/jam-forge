@@ -36,9 +36,10 @@ object InstructionExecutor:
     // ========================================================================
     // Jump Instructions
     // ========================================================================
-    arr(Opcode.Jump.value) = (instr, ctx, _, _) =>
+    arr(Opcode.Jump.value) = (instr, ctx, pc, _) =>
       val target = expect[Instruction.Jump](instr).target
-      ctx.resolveJump(ProgramCounter(target.toInt))
+      val r = ctx.resolveJump(ProgramCounter(target.toInt))
+      if r < 0 then ctx.panic(pc) else r
 
     arr(Opcode.JumpIndirect.value) = (instr, ctx, pc, _) =>
       val i = expect[Instruction.JumpIndirect](instr)
@@ -62,10 +63,11 @@ object InstructionExecutor:
       ctx.setReg64(i.reg, i.imm)
       ctx.advance()
 
-    arr(Opcode.LoadImmAndJump.value) = (instr, ctx, _, _) =>
+    arr(Opcode.LoadImmAndJump.value) = (instr, ctx, pc, _) =>
       val i = expect[Instruction.LoadImmAndJump](instr)
       ctx.setReg32Int(i.reg, i.imm.toInt)
-      ctx.resolveJump(ProgramCounter(i.target.toInt))
+      val r = ctx.resolveJump(ProgramCounter(i.target.toInt))
+      if r < 0 then ctx.panic(pc) else r
 
     arr(Opcode.LoadImmAndJumpIndirect.value) = (instr, ctx, pc, _) =>
       val i = expect[Instruction.LoadImmAndJumpIndirect](instr)

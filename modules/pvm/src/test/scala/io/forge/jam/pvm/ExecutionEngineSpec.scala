@@ -129,6 +129,23 @@ class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
     instance.reg(7) shouldBe 1234L
   }
 
+  it should "panic at the jump instruction's pc, not the target, on an invalid static jump" in {
+    // Same load_imm_jump-to-invalid-target program as the PVM-3 test: the single
+    // instruction sits at pc 0 and jumps to 99 (not a valid block start).
+    val code = Array[Byte](80.toByte, 39.toByte, 210.toByte, 4.toByte, 99.toByte)
+    val bitmask = Array[Byte](0x01.toByte)
+    val instance = createTestInstanceWithCode(code, bitmask)
+    instance.setNextProgramCounter(ProgramCounter(0))
+    instance.setGas(10000L)
+
+    instance.run() match
+      case Right(interrupt) => interrupt shouldBe InterruptKind.Panic
+      case Left(err)        => fail(s"Unexpected error: $err")
+
+    // The panic pc is the jump instruction (0), not the invalid target (99).
+    instance.programCounter.map(_.value.toInt) shouldBe Some(0)
+  }
+
   // Test 6: Simple instruction execution (add, load_imm)
   it should "correctly execute simple instructions" in {
     // Test LoadImm instruction
