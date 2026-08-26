@@ -48,14 +48,16 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
     describe("single trace validation"):
 
-      it("should successfully import first trace file"):
+      it("should successfully import the configured target trace file"):
         requireCorpusPath(tracesDir, "TINY traces directory")
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = true, compareKeyvals = compareKeyvals)
 
-        // Target a specific trace for debugging
-        val targetTraceId = "1767891325_4549"
-        val targetFileName = "00005961.json"
+        val defaultTarget = "1767891325_4549/00005961.json"
+        val target = sys.props.getOrElse("jam.fuzz.target", defaultTarget)
+        val (targetTraceId, targetFileName) = target.split("/", 2) match
+          case Array(t, f) if t.nonEmpty && f.nonEmpty => (t, f)
+          case _ => fail(s"Invalid -Djam.fuzz.target='$target' — expected <traceId>/<fileName>")
 
         val targetFile = tracesDir.resolve(targetTraceId).resolve(targetFileName)
         requireCorpusPath(targetFile, s"Target trace file $targetTraceId/$targetFileName")

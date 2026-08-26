@@ -178,6 +178,12 @@ class JsonTraceRunner(
       case e: Exception =>
         JsonTraceResult.Error(effectiveTraceId, fileName, s"Exception: ${e.getMessage}")
 
+  private def keyLabel(keyHex: String): String =
+    val bytes = keyHex.grouped(2).toArray
+    def b(i: Int): Long = if i < bytes.length then java.lang.Long.parseLong(bytes(i), 16) else 0L
+    val serviceId = b(0) | (b(2) << 8) | (b(4) << 16) | (b(6) << 24)
+    s"0x$keyHex (svc=$serviceId/0x${serviceId.toHexString})"
+
   /**
    * Compute differences between expected and actual keyvals.
    */
@@ -193,21 +199,20 @@ class JsonTraceRunner(
 
     if missingKeys.nonEmpty then
       sb.append(s"missing=${missingKeys.size}")
-      missingKeys.toList.sorted.take(5).foreach(k => sb.append(s"\n    MISSING: ${k.take(32)}..."))
+      missingKeys.toList.sorted.take(5).foreach(k => sb.append(s"\n    MISSING: ${keyLabel(k)}"))
 
     if extraKeys.nonEmpty then
       if sb.nonEmpty then sb.append(", ")
       sb.append(s"extra=${extraKeys.size}")
-      extraKeys.toList.sorted.take(5).foreach(k => sb.append(s"\n    EXTRA: ${k.take(32)}..."))
+      extraKeys.toList.sorted.take(5).foreach(k => sb.append(s"\n    EXTRA: ${keyLabel(k)}"))
 
     if changedKeys.nonEmpty then
       if sb.nonEmpty then sb.append(", ")
       sb.append(s"changed=${changedKeys.size}")
       changedKeys.toList.sorted.foreach { k =>
-        val prefix = k.take(2)
         val expLen = expectedMap(k).length / 2
         val actLen = actualMap(k).length / 2
-        sb.append(s"\n    CHANGED: 0x$prefix ${k.take(32)}... expLen=$expLen actLen=$actLen")
+        sb.append(s"\n    CHANGED: ${keyLabel(k)} expLen=$expLen actLen=$actLen")
         // Show first bytes that differ
         val expBytes = expectedMap(k)
         val actBytes = actualMap(k)
