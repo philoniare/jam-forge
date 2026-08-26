@@ -431,18 +431,19 @@ class AccumulationHostCalls(
     val info = account.get.info
     val thresholdBalance = calculateThreshold(info)
 
-    // Encode all 11 fields (96 bytes total)
-    val data = info.codeHash.bytes.toArray ++ // 32 bytes
-      encodeLong(info.balance) ++ // 8 bytes
-      encodeLong(thresholdBalance) ++ // 8 bytes
-      encodeLong(info.minItemGas) ++ // 8 bytes (minAccumulateGas)
-      encodeLong(info.minMemoGas) ++ // 8 bytes
-      encodeLong(info.bytesUsed) ++ // 8 bytes (totalByteLength)
-      encodeInt(info.items) ++ // 4 bytes (itemsCount)
-      encodeLong(info.depositOffset) ++ // 8 bytes (gratisStorage)
-      encodeInt(info.creationSlot.toInt) ++ // 4 bytes (createdAt)
-      encodeInt(info.lastAccumulationSlot.toInt) ++ // 4 bytes (lastAccAt)
-      encodeInt(info.parentService.toInt) // 4 bytes
+    // Encode all 11 fields (96 bytes total
+    val data = new Array[Byte](96)
+    System.arraycopy(info.codeHash.bytes.toArray, 0, data, 0, 32) // 32 bytes
+    putLE(data, 32, info.balance, 8) // 8 bytes
+    putLE(data, 40, thresholdBalance, 8) // 8 bytes
+    putLE(data, 48, info.minItemGas, 8) // 8 bytes (minAccumulateGas)
+    putLE(data, 56, info.minMemoGas, 8) // 8 bytes
+    putLE(data, 64, info.bytesUsed, 8) // 8 bytes (totalByteLength)
+    putLE(data, 72, info.items.toLong, 4) // 4 bytes (itemsCount)
+    putLE(data, 76, info.depositOffset, 8) // 8 bytes (gratisStorage)
+    putLE(data, 84, info.creationSlot.toInt.toLong, 4) // 4 bytes (createdAt)
+    putLE(data, 88, info.lastAccumulationSlot.toInt.toLong, 4) // 4 bytes (lastAccAt)
+    putLE(data, 92, info.parentService.toInt.toLong, 4) // 4 bytes
 
     // Apply offset and length slicing
     val first = argClampedLen(instance, 9, data.length.toLong)
@@ -1476,6 +1477,12 @@ class AccumulationHostCalls(
   /** Encode a value as little-endian bytes */
   private inline def encodeLE(value: Long, size: Int): Array[Byte] =
     Array.tabulate(size)(i => ((value >> (i * 8)) & 0xff).toByte)
+
+  private def putLE(buf: Array[Byte], offset: Int, value: Long, size: Int): Unit =
+    var i = 0
+    while i < size do
+      buf(offset + i) = ((value >> (i * 8)) & 0xff).toByte
+      i += 1
 
   private inline def encodeShort(value: Int): Array[Byte] = encodeLE(value, 2)
   private inline def encodeInt(value: Int): Array[Byte] = encodeLE(value, 4)
