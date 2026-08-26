@@ -1505,11 +1505,7 @@ class AccumulationHostCalls(
       address: Int,
       buffer: Array[Byte]
   ): Boolean =
-    instance.readBytes(address, buffer.length) match
-      case Some(data) =>
-        System.arraycopy(data, 0, buffer, 0, buffer.length)
-        true
-      case None => false
+    instance.readInto(address, buffer, 0, buffer.length)
 
   /** Write memory to PVM instance, returns true on success */
   private def writeMemory(

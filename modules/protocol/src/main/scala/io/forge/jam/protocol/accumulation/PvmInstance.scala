@@ -55,6 +55,16 @@ trait PvmInstance:
   def readBytes(address: Int, length: Int): Option[Array[Byte]]
 
   /**
+   * Bulk-read a contiguous range straight into the caller's buffer
+   */
+  def readInto(address: Int, dest: Array[Byte], destOffset: Int, length: Int): Boolean =
+    readBytes(address, length) match
+      case Some(data) =>
+        System.arraycopy(data, 0, dest, destOffset, length)
+        true
+      case None => false
+
+  /**
    * Bulk-write a contiguous range of bytes to memory
    */
   def writeBytes(address: Int, data: Array[Byte]): Boolean

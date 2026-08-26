@@ -473,6 +473,13 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
         case MemoryResult.Success(data) => Some(data)
         case _                          => None
 
+  override def readInto(address: Int, dest: Array[Byte], destOffset: Int, length: Int): Boolean =
+    if length < 0 || destOffset < 0 || destOffset + length > dest.length then false
+    else
+      instance.basicMemory.getMemorySliceInto(UInt(address), dest, destOffset, length) match
+        case MemoryResult.Success(_) => true
+        case _                       => false
+
   override def writeBytes(address: Int, data: Array[Byte]): Boolean =
     instance.basicMemory.setMemorySlice(UInt(address), data) match
       case MemoryResult.Success(_) => true

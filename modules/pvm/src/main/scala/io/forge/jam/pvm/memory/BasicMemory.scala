@@ -335,6 +335,26 @@ final class BasicMemory private (
               case Some(arr) => MemoryResult.Success(arr)
               case None => MemoryResult.OutOfBounds(address)
 
+  def getMemorySliceInto(address: UInt, dest: Array[Byte], destOffset: Int, length: Int): MemoryResult[Unit] =
+    if length == 0 then return MemoryResult.Success(())
+
+    checkReadable(address, length) match
+      case Some(err) => err
+      case None =>
+        val addr = address.signed
+        findRegionBulk(addr, length) match
+          case Some((arr, offset)) =>
+            System.arraycopy(arr, offset, dest, destOffset, length)
+            MemoryResult.Success(())
+          case None =>
+            var i = 0
+            while i < length do
+              readByteInt(addr + i) match
+                case Some(b) => dest(destOffset + i) = b
+                case None    => return MemoryResult.OutOfBounds(address)
+              i += 1
+            MemoryResult.Success(())
+
   override def setMemorySlice(address: UInt, data: Array[Byte]): MemoryResult[Unit] =
     if data.isEmpty then return MemoryResult.Success(())
 
