@@ -49,6 +49,20 @@ final class InterpretedModule private (
   private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
   private var _compiledOffsetForBlock: Array[Int] = null
 
+  private val debugConcurrency: Boolean =
+    sys.props.get("jam.pvm.debugConcurrency").exists(_.toBoolean)
+  private val _mutationGuard = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private[engine] def beginSharedMutation(): Unit =
+    if debugConcurrency && !_mutationGuard.compareAndSet(false, true) then
+      throw new IllegalStateException(
+        "InterpretedModule shared compiled-block buffers mutated concurrently — " +
+          "the strictly-sequential-execution precondition (see compiledState docs) is violated"
+      )
+
+  private[engine] def endSharedMutation(): Unit =
+    if debugConcurrency then _mutationGuard.set(false)
+
   /**
    * Returns the shared compiled-block buffers for this module
    */

@@ -527,28 +527,31 @@ final class InterpretedInstance private (
   private def compileBlock(pc: ProgramCounter): Int =
     if pc.value > module.codeLen then return Step.Interrupt
 
-    val origin = UInt(compiledInstructions.size)
-    var isJumpTargetValid = this.isJumpTargetValid(pc)
-    var currentPc = pc
-    var done = false
+    module.beginSharedMutation()
+    try
+      val origin = UInt(compiledInstructions.size)
+      var isJumpTargetValid = this.isJumpTargetValid(pc)
+      var currentPc = pc
+      var done = false
 
-    while !done && currentPc.value <= module.codeLen do
-      val packedTarget = packTarget(compiledInstructions.size, isJumpTargetValid)
-      val insertIdx = currentPc.value.signed
-      if insertIdx >= 0 && insertIdx < compiledOffsetForBlock.length then
-        compiledOffsetForBlock(insertIdx) = packedTarget
-      isJumpTargetValid = false
+      while !done && currentPc.value <= module.codeLen do
+        val packedTarget = packTarget(compiledInstructions.size, isJumpTargetValid)
+        val insertIdx = currentPc.value.signed
+        if insertIdx >= 0 && insertIdx < compiledOffsetForBlock.length then
+          compiledOffsetForBlock(insertIdx) = packedTarget
+        isJumpTargetValid = false
 
-      val (instruction, nextPc) = parseInstructionAt(currentPc)
-      compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc, instruction.opcode.value)
+        val (instruction, nextPc) = parseInstructionAt(currentPc)
+        compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc, instruction.opcode.value)
 
-      if instruction.opcode.startsNewBasicBlock then
-        done = true
-      else
-        currentPc = nextPc
+        if instruction.opcode.startsNewBasicBlock then
+          done = true
+        else
+          currentPc = nextPc
 
-    if compiledInstructions.size == origin.signed then Step.Interrupt
-    else origin.signed
+      if compiledInstructions.size == origin.signed then Step.Interrupt
+      else origin.signed
+    finally module.endSharedMutation()
 
   private def parseInstructionAt(pc: ProgramCounter): (Instruction, ProgramCounter) =
     val code = module.blob.code
