@@ -8,7 +8,7 @@ import scala.collection.mutable
 
 final class ServiceStorageView(trie: StateTrie):
 
-  private val pending = mutable.HashMap.empty[JamBytes, Option[JamBytes]]
+  private var pending = Map.empty[JamBytes, Option[JamBytes]]
 
   private val readCache = mutable.HashMap.empty[JamBytes, Option[JamBytes]]
 
@@ -34,12 +34,12 @@ final class ServiceStorageView(trie: StateTrie):
 
   def put(serviceId: Long, storageKey: JamBytes, value: JamBytes): Unit =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
-    pending.update(stateKey, Some(value))
+    pending = pending.updated(stateKey, Some(value))
     writes += 1
 
   def delete(serviceId: Long, storageKey: JamBytes): Unit =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
-    pending.update(stateKey, None)
+    pending = pending.updated(stateKey, None)
     writes += 1
 
 
@@ -60,11 +60,11 @@ final class ServiceStorageView(trie: StateTrie):
             v
 
   def putByStateKey(stateKey: JamBytes, value: JamBytes): Unit =
-    pending.update(stateKey, Some(value))
+    pending = pending.updated(stateKey, Some(value))
     writes += 1
 
   def deleteByStateKey(stateKey: JamBytes): Unit =
-    pending.update(stateKey, None)
+    pending = pending.updated(stateKey, None)
     writes += 1
 
   def enumerate(
@@ -74,7 +74,7 @@ final class ServiceStorageView(trie: StateTrie):
     val trieEntries = trie.getKeyValues(prefix, bitsCount).iterator
     val merged = mutable.LinkedHashMap.empty[JamBytes, JamBytes]
     trieEntries.foreach { case (k, v) => merged.update(k, v) }
-    pending.foreachEntry {
+    pending.foreach {
       case (k, Some(v)) if trie.prefixMatches(k, prefix, bitsCount) => merged.update(k, v)
       case (k, None) if trie.prefixMatches(k, prefix, bitsCount)    => merged.remove(k)
       case _                                                        => ()
@@ -88,13 +88,11 @@ final class ServiceStorageView(trie: StateTrie):
     mutable.ArrayBuffer.empty[Map[JamBytes, Option[JamBytes]]]
 
   def savepoint(): Unit =
-    savepoints += pending.toMap
+    savepoints += pending
 
   def restore(): Unit =
     if savepoints.isEmpty then return
-    val snap = savepoints.remove(savepoints.length - 1)
-    pending.clear()
-    pending ++= snap
+    pending = savepoints.remove(savepoints.length - 1)
 
   def discardCheckpoint(): Unit =
     if savepoints.nonEmpty then savepoints.remove(savepoints.length - 1)
