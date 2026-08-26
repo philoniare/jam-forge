@@ -83,4 +83,4 @@ object TrieNode:
         preimage(0) = (0x80 | len).toByte
       case TrieNodeType.RegularLeaf =>
         preimage(0) = 0xc0.toByte
-    Hashing.blake2b256(JamBytes(preimage))
+    Hashing.blake2b256(preimage, 0, 64)

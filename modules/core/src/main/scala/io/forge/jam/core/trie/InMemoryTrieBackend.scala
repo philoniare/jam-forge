@@ -36,7 +36,7 @@ final class InMemoryTrieBackend extends StateTrieBackend:
       if nodeRefs(h) <= 0 then
         nodes.remove(h).foreach { node =>
           if node.nodeType == TrieNodeType.RegularLeaf then
-            val rawValueHash = Hash(node.right.toArray)
+            val rawValueHash = Hash.fromByteVectorUnsafe(node.right.toByteVector)
             val c = valueRefs(rawValueHash) - 1
             valueRefs.update(rawValueHash, c)
             if c <= 0 then deadValueCandidates.add(rawValueHash)
