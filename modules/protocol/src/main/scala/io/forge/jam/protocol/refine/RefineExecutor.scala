@@ -4,13 +4,8 @@ import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
-import io.forge.jam.pvm.InterruptKind
-import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
-import io.forge.jam.pvm.types.ProgramCounter
-import io.forge.jam.protocol.accumulation.{
-  InterpretedInstanceWrapper,
-  ServiceCode
-}
+import io.forge.jam.pvm.engine.InterpretedModule
+import io.forge.jam.protocol.accumulation.ServiceCode
 
 /** Result of a refine invocation Psi_R: the execution result (Ok(output) or a
   * work error), the exported segments (empty unless successful) and the gas
@@ -124,120 +119,21 @@ class RefineExecutor(val config: ChainConfig):
     )
 
     val gasLimit = workItem.refineGasLimit.toLong
+    val hostCalls = new RefineHostCalls(context)
     val (exitReason, gasUsed, output) =
-      runPvm(moduleOpt.get, inputData, gasLimit, context)
+      PvmRunner.run(moduleOpt.get, inputData, gasLimit, entryPc = 0, hostCalls)
 
     exitReason match
-      case RefineExit.OutOfGas =>
+      case PvmRunner.PvmExit.OutOfGas =>
         RefineResult(ExecutionResult.OOG, Nil, gasUsed)
-      case RefineExit.Panic =>
+      case PvmRunner.PvmExit.Panic =>
         RefineResult(ExecutionResult.Panic, Nil, gasUsed)
-      case RefineExit.Halt =>
+      case PvmRunner.PvmExit.Halt =>
         RefineResult(
           ExecutionResult.Ok(JamBytes(output)),
           context.exports.toList,
           gasUsed
         )
-
-  private enum RefineExit:
-    case Halt, Panic, OutOfGas
-
-  /** Run the module from instruction counter 0 with the refine host calls.
-    * Mirrors the accumulate executor's run loop: 10 gas charged before each
-    * host call; RuntimeException from a handler → PANIC; page fault → PANIC
-    * (Psi_M maps fault to panic).
-    */
-  private def runPvm(
-      module: InterpretedModule,
-      inputData: Array[Byte],
-      gasLimit: Long,
-      context: RefineContext
-  ): (RefineExit, Long, Array[Byte]) =
-    val instance = InterpretedInstance.fromModule(
-      module,
-      inputData,
-      forceStepTracing = false
-    )
-
-    val pvmWrapper = new InterpretedInstanceWrapper(instance)
-    val hostCalls = new RefineHostCalls(context)
-
-    instance.setGas(gasLimit)
-    val initialGas = gasLimit
-
-    // Refine entry point is instruction counter 0 (Psi_M(c, 0, ...)).
-    instance.setNextProgramCounter(ProgramCounter(0))
-
-    // Standard PVM ABI register setup, matching the accumulate executor.
-    val RA_INIT = 0xffff0000L
-    val SP_INIT = 0xfefe0000L
-    val INPUT_ADDR = 0xfeff0000L
-
-    instance.setReg(0, RA_INIT)
-    instance.setReg(1, SP_INIT)
-    instance.setReg(7, INPUT_ADDR)
-    instance.setReg(8, inputData.length.toLong)
-    instance.setReg(9, 0L)
-    instance.setReg(10, 0L)
-    instance.setReg(11, 0L)
-    instance.setReg(12, 0L)
-
-    var exit = RefineExit.Halt
-    var continueExecution = true
-
-    while continueExecution do
-      instance.run() match
-        case Right(InterruptKind.Finished) =>
-          exit = RefineExit.Halt
-          continueExecution = false
-
-        case Right(InterruptKind.Panic) =>
-          exit = RefineExit.Panic
-          continueExecution = false
-
-        case Right(InterruptKind.OutOfGas) =>
-          exit = RefineExit.OutOfGas
-          continueExecution = false
-
-        case Right(InterruptKind.Ecalli(hostId)) =>
-          val gasCost = hostCalls.getGasCost(hostId.signed, pvmWrapper)
-          val newGas = instance.gas - gasCost
-          instance.setGas(newGas)
-          if newGas < 0 then
-            exit = RefineExit.OutOfGas
-            continueExecution = false
-          else
-            try hostCalls.dispatch(hostId.signed, pvmWrapper)
-            catch
-              case _: RuntimeException =>
-                exit = RefineExit.Panic
-                continueExecution = false
-
-        case Right(InterruptKind.Segfault(_)) =>
-          exit = RefineExit.Panic
-          continueExecution = false
-
-        case Right(InterruptKind.Step) =>
-        // step tracing only; continue
-
-        case Left(_) =>
-          exit = RefineExit.Panic
-          continueExecution = false
-
-    val finalGas = instance.gas
-    val gasUsed = if finalGas >= 0 then initialGas - finalGas else initialGas
-
-    // Psi_M halt output: mem[r7 .. r7+r8) when readable, else empty.
-    val output =
-      if exit == RefineExit.Halt then
-        val addr = instance.reg(7).toInt
-        val len = instance.reg(8).toInt
-        if len >= 0 && pvmWrapper.isMemoryReadable(addr, len) then
-          pvmWrapper.readBytes(addr, len).getOrElse(Array.empty[Byte])
-        else Array.empty[Byte]
-      else Array.empty[Byte]
-
-    (exit, gasUsed, output)
 
   private def getOrCompileModule(
       code: Array[Byte],

@@ -22,7 +22,7 @@ import spire.math.ULong
   */
 class RefineHostCalls(
     val context: RefineContext
-):
+) extends HostCallDispatcher:
   private val config: ChainConfig = context.config
 
   /** Cmaxpackageexports: maximum exported segments
