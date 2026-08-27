@@ -37,9 +37,16 @@ lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra librar
 lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
 lazy val benchmark = taskKey[Unit]("Run benchmark tests")
 lazy val stressTest = taskKey[Unit]("Run long-running stress test (100K blocks)")
+val nettyQuicVersion = "0.0.75.Final"
+val quicNativeClassifier = {
+  val arch = System.getProperty("os.arch").toLowerCase
+  val archName =
+    if (arch.contains("aarch64") || arch.contains("arm64")) "aarch_64" else "x86_64"
+  if (osName.contains("mac")) s"osx-$archName" else s"linux-$archName"
+}
 
 lazy val root = (project in file("."))
-  .aggregate(core, crypto, pvm, protocol, conformance)
+  .aggregate(core, crypto, pvm, protocol, conformance, network)
   .settings(
     name := "jam",
     publish / skip := true,
@@ -276,6 +283,36 @@ lazy val protocol = (project in file("modules/protocol"))
       s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
       "--enable-native-access=ALL-UNNAMED"
     )
+  )
+
+lazy val network = (project in file("modules/network"))
+  .dependsOn(core, crypto)
+  .settings(
+    name := "jam-network",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % catsVersion,
+      "org.typelevel" %% "cats-effect" % "3.5.4",
+      "org.typelevel" %% "spire" % "0.18.0",
+      // JAMNP-S transport: QUIC via the Netty incubator codec (BoringSSL),
+      // which supports TLS 1.3 mutual auth with Ed25519 certificates.
+      "io.netty.incubator" % "netty-incubator-codec-classes-quic" % nettyQuicVersion,
+      "io.netty.incubator" % "netty-incubator-codec-native-quic" % nettyQuicVersion classifier quicNativeClassifier,
+      // Ed25519 self-signed certificate generation
+      "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
+      "org.bouncycastle" % "bcpkix-jdk18on" % "1.77",
+      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
+      "ch.qos.logback" % "logback-classic" % "1.4.11",
+      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+    ),
+    scalacOptions ++= Seq(
+      "-deprecation",
+      "-feature",
+      "-unchecked",
+      "-language:implicitConversions",
+      "-language:higherKinds"
+    ),
+    Test / fork := true,
+    Test / baseDirectory := (ThisBuild / baseDirectory).value
   )
 
 lazy val conformance = (project in file("modules/conformance"))
