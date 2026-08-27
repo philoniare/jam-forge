@@ -8,7 +8,11 @@ import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.protocol.accumulation.{ConstantsBlob, HostCall, HostCallResult, PvmInstance}
+import io.forge.jam.pvm.InterruptKind
+import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
+import io.forge.jam.pvm.memory.GuestRam
 import io.forge.jam.pvm.program.ProgramBlob
+import io.forge.jam.pvm.types.ProgramCounter
 import scodec.Codec
 import spire.math.ULong
 
@@ -243,19 +247,23 @@ class RefineHostCalls(
 
     // deblob validation: the guest blob is the raw jumptable+bitmask+code
     // format (no SPI memory header).
-    val parsed = ProgramBlob.fromCodeAndJumpTable(
-      data = code,
-      roData = Array.empty,
-      rwData = Array.empty,
-      stackSize = 0,
-      is64Bit = true
-    )
+    val parsed = ProgramBlob
+      .fromCodeAndJumpTable(
+        data = code,
+        roData = Array.empty,
+        rwData = Array.empty,
+        stackSize = 0,
+        is64Bit = true
+      )
+      .flatMap(blob => InterpretedModule.create(blob).toOption)
 
-    if parsed.isEmpty then setReg(instance, 7, HostCallResult.HUH)
-    else
-      val n = context.nextMachineIndex
-      context.innerPvms.update(n, new InnerPvm(code, new GuestRam, pc))
-      setReg(instance, 7, ULong(n))
+    parsed match
+      case None =>
+        setReg(instance, 7, HostCallResult.HUH)
+      case Some(module) =>
+        val n = context.nextMachineIndex
+        context.innerPvms.update(n, new InnerPvm(code, module, new GuestRam, pc))
+        setReg(instance, 7, ULong(n))
 
   // ===========================================================================
   // peek (9) — Omega_P: outer[o..o+z) := guest[s..s+z)
@@ -341,14 +349,100 @@ class RefineHostCalls(
           setReg(instance, 7, HostCallResult.OK)
 
   // ===========================================================================
-  // invoke (12) — Omega_K (interpreter wiring pending; see task tracker)
+  // invoke (12) — Omega_K
   // ===========================================================================
 
   private def handleInvoke(instance: PvmInstance): Unit =
-    // TODO(refine/inner-pvm): execute the guest via the interpreter with
-    // GuestRam-backed memory; until then report WHAT so callers fail loudly
-    // rather than silently succeeding.
-    setReg(instance, 7, HostCallResult.WHAT)
+    val n = getReg(instance, 7)
+    val o = getReg(instance, 8).toInt
+
+    // The 112-byte block (encode8(gas) ++ 13 × encode8(reg)) must be WRITABLE
+    // (it is read now and written back after the run), else panic.
+    if !instance.isMemoryWritable(o, 112) then
+      panic(
+        s"Invoke PANIC: gas/register block not writable at 0x${o.toHexString}"
+      )
+
+    val block = new Array[Byte](112)
+    if !readMemory(instance, o, block) then
+      panic(s"Invoke PANIC: failed to read gas/register block")
+
+    context.innerPvms.get(n.toLong) match
+      case None =>
+        setReg(instance, 7, HostCallResult.WHO)
+      case Some(guest) =>
+        val guestGas = decodeLE8(block, 0)
+        val guestRegs = Array.tabulate(13)(i => decodeLE8(block, 8 + 8 * i))
+
+        val guestInstance = GuestInstance.create(
+          guest.module,
+          guest.ram,
+          guestRegs,
+          guestGas,
+          ProgramCounter(guest.pc.toInt)
+        )
+
+        var outcome: InterruptKind = InterruptKind.Panic
+        var running = true
+        while running do
+          guestInstance.run() match
+            case Right(InterruptKind.Step) => // step tracing only; continue
+            case Right(interrupt) =>
+              outcome = interrupt
+              running = false
+            case Left(_) =>
+              outcome = InterruptKind.Panic
+              running = false
+
+        // Write back gas' and registers' regardless of outcome (m* / mem* in
+        // Omega_K applies to every non-panic, non-WHO case).
+        putLE8(block, 0, guestInstance.gas)
+        var i = 0
+        while i < 13 do
+          putLE8(block, 8 + 8 * i, guestInstance.regs(i))
+          i += 1
+        writeMemory(instance, o, block)
+
+        // Guest pc: past the ecalli on HOST, at the faulting/halting
+        // instruction otherwise.
+        val pcNow: Long = outcome match
+          case InterruptKind.Ecalli(_) =>
+            guestInstance.nextProgramCounter
+              .map(_.value.toLong)
+              .getOrElse(guest.pc)
+          case _ =>
+            guestInstance.programCounter
+              .map(_.value.toLong)
+              .getOrElse(guest.pc)
+        guest.pc = pcNow
+
+        outcome match
+          case InterruptKind.Ecalli(hostId) =>
+            setReg(instance, 7, HostCallResult.HOST)
+            setReg(instance, 8, ULong(hostId.toLong))
+          case InterruptKind.Segfault(info) =>
+            setReg(instance, 7, HostCallResult.FAULT)
+            setReg(instance, 8, ULong(info.pageAddress.toLong))
+          case InterruptKind.OutOfGas =>
+            setReg(instance, 7, HostCallResult.OOG)
+          case InterruptKind.Panic =>
+            setReg(instance, 7, HostCallResult.PANIC)
+          case _ =>
+            setReg(instance, 7, HostCallResult.HALT)
+
+  private def decodeLE8(buf: Array[Byte], offset: Int): Long =
+    var v = 0L
+    var i = 0
+    while i < 8 do
+      v |= (buf(offset + i).toLong & 0xff) << (8 * i)
+      i += 1
+    v
+
+  private def putLE8(buf: Array[Byte], offset: Int, value: Long): Unit =
+    var i = 0
+    while i < 8 do
+      buf(offset + i) = ((value >> (8 * i)) & 0xff).toByte
+      i += 1
 
   // ===========================================================================
   // expunge (13) — Omega_X

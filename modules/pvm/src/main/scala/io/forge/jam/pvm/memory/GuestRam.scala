@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.refine
+package io.forge.jam.pvm.memory
 
 import scala.collection.mutable
 
@@ -47,6 +47,34 @@ final class GuestRam:
       if write && a != AccessWrite then return false
       p += 1
     true
+
+  /** Page-start address of the first byte in [address, address+length) that
+    * fails the access check, or None when the whole range is accessible. Used
+    * by the guest interpreter to report the faulting page for load/store
+    * segfaults. Ranges reaching past the 32-bit space report the page of the
+    * range start (the interpreter converts sub-MinValidAddress pages to
+    * panics).
+    */
+  def faultPage(address: Long, length: Long, write: Boolean): Option[Long] =
+    if length <= 0 then return None
+    if (address & ~0xffffffffL) != 0 then return Some(address & ~PageMask)
+    val end = address + length - 1
+    if end > 0xffffffffL then return Some(address & ~PageMask)
+    var p = address >>> PageShift
+    val lastPage = end >>> PageShift
+    while p <= lastPage do
+      val a = accessOf(p)
+      if a == AccessNone || (write && a != AccessWrite) then
+        return Some(p << PageShift)
+      p += 1
+    None
+
+  /** Copy `out.length` bytes out of the RAM starting at `address` without an
+    * access check (untouched pages read as zeros). Callers must have verified
+    * accessibility (e.g. via faultPage/isReadable).
+    */
+  def readUnchecked(address: Long, out: Array[Byte]): Unit =
+    copyOut(address, out)
 
   /** Read `length` bytes at `address`. Caller must have verified readability;
     * returns None when the range is not readable.

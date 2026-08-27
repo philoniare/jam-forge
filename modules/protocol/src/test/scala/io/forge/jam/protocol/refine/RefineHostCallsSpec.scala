@@ -509,6 +509,193 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     ULong(instance.reg(7)) shouldBe HostCallResult.OOB
   }
 
+  // =========================================================================
+  // invoke
+  // =========================================================================
+
+  /** Wrap raw (code, bitmask) into a deblob blob for MACHINE. */
+  private def guestBlob(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
+    Array[Byte](0, 0, code.length.toByte) ++ code ++ bitmask
+
+  private def createMachineWith(
+      hc: RefineHostCalls,
+      blob: Array[Byte],
+      pc: Long
+  ): Long =
+    val instance = newInstance()
+    instance.writeBytes(0x5000, blob) shouldBe true
+    instance.setReg(7, 0x5000L)
+    instance.setReg(8, blob.length.toLong)
+    instance.setReg(9, pc)
+    hc.dispatch(HostCall.MACHINE, instance)
+    instance.reg(7)
+
+  /** Write the 112-byte invoke block (gas + 13 registers) at `addr`. */
+  private def writeInvokeBlock(
+      instance: MockPvmInstance,
+      addr: Int,
+      gas: Long,
+      regs: Map[Int, Long] = Map.empty
+  ): Unit =
+    val block = new Array[Byte](112)
+    def putLE8(offset: Int, value: Long): Unit =
+      var i = 0
+      while i < 8 do
+        block(offset + i) = ((value >> (8 * i)) & 0xff).toByte
+        i += 1
+    putLE8(0, gas)
+    regs.foreach { case (r, v) => putLE8(8 + 8 * r, v) }
+    instance.writeBytes(addr, block) shouldBe true
+
+  private def readInvokeBlock(
+      instance: MockPvmInstance,
+      addr: Int
+  ): (Long, Array[Long]) =
+    val block = instance.readBytes(addr, 112).get
+    def getLE8(offset: Int): Long =
+      var v = 0L
+      var i = 0
+      while i < 8 do
+        v |= (block(offset + i).toLong & 0xff) << (8 * i)
+        i += 1
+      v
+    (getLE8(0), Array.tabulate(13)(i => getLE8(8 + 8 * i)))
+
+  test("INVOKE runs a guest to halt and writes back gas and registers") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // LoadImm r7 = 42; JumpIndirect r0 + 0 (r0 = 0xffff0000 → halt).
+    val code = Array[Byte](51, 7, 42, 50, 0)
+    val bitmask = Array[Byte](9) // instructions at offsets 0 and 3
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L) // machine index
+    instance.setReg(8, 0x8000L) // block address
+    hc.dispatch(HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
+    val (gasAfter, regsAfter) = readInvokeBlock(instance, 0x8000)
+    gasAfter shouldBe 98L // two instructions, 1 gas each
+    regsAfter(7) shouldBe 42L
+    regsAfter(0) shouldBe 0xffff0000L
+  }
+
+  test("INVOKE reports HOST on guest ecalli and resumes past it") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // ecalli 5; JumpIndirect r0 + 0.
+    val code = Array[Byte](10, 5, 50, 0)
+    val bitmask = Array[Byte](5) // instructions at offsets 0 and 2
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HOST
+    instance.reg(8) shouldBe 5L // guest host-call id
+    ctx.innerPvms(0L).pc shouldBe 2L // resumed past the ecalli
+
+    // Second invoke continues from pc 2 and halts.
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
+  }
+
+  test("INVOKE reports FAULT with the faulting page address") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // LoadU8 r7 ← mem[0x10000]; no guest pages granted → page fault.
+    val code = Array[Byte](52, 7, 0, 0, 1)
+    val bitmask = Array[Byte](1)
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L)
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.FAULT
+    instance.reg(8) shouldBe 0x10000L
+  }
+
+  test("INVOKE reads guest memory granted via PAGES and poked from the host") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // LoadU8 r7 ← mem[0x10000]; page granted and poked this time.
+    val code = Array[Byte](52, 7, 0, 0, 1)
+    val bitmask = Array[Byte](1)
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val setup = newInstance()
+    // pages(n=0, p=16, c=1, r=2): writable page at 0x10000
+    setup.setReg(7, 0L); setup.setReg(8, 16L)
+    setup.setReg(9, 1L); setup.setReg(10, 2L)
+    hc.dispatch(HostCall.PAGES, setup)
+    ULong(setup.reg(7)) shouldBe HostCallResult.OK
+    // poke guest[0x10000] = 0x5a
+    setup.writeBytes(0x1000, Array[Byte](0x5a)) shouldBe true
+    setup.setReg(7, 0L); setup.setReg(8, 0x1000L)
+    setup.setReg(9, 0x10000L); setup.setReg(10, 1L)
+    hc.dispatch(HostCall.POKE, setup)
+    ULong(setup.reg(7)) shouldBe HostCallResult.OK
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L)
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+
+    // Guest ran off the end of the single-instruction program → panic, but the
+    // load itself succeeded and r7 was written back as 0x5a.
+    val (_, regsAfter) = readInvokeBlock(instance, 0x8000)
+    regsAfter(7) shouldBe 0x5aL
+  }
+
+  test("INVOKE reports OOG when the guest runs out of gas") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val code = Array[Byte](51, 7, 42, 50, 0)
+    val bitmask = Array[Byte](9)
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 1L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.OOG
+  }
+
+  test("INVOKE reports WHO for an unknown machine and panics on unwritable block") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 10L)
+    instance.setReg(7, 9L) // no machine 9
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.WHO
+
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x100000L - 10L) // 112-byte block does not fit
+    intercept[RuntimeException] {
+      hc.dispatch(HostCall.INVOKE, instance)
+    }
+  }
+
   test("unknown host calls report WHAT") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)

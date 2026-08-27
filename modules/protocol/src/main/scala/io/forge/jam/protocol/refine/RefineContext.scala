@@ -3,11 +3,14 @@ package io.forge.jam.protocol.refine
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkPackage
+import io.forge.jam.pvm.engine.InterpretedModule
+import io.forge.jam.pvm.memory.GuestRam
 
 import scala.collection.mutable
 
 final class InnerPvm(
     val code: Array[Byte],
+    val module: InterpretedModule,
     val ram: GuestRam,
     var pc: Long
 )
