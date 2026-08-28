@@ -139,6 +139,16 @@ final class ChainManager(
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)
 
+  /** A read view over the current best state */
+  def stateView(): io.forge.jam.protocol.state.TrieBackedJamState =
+    val trie = trieStore.at(bestHead.stateRoot)
+    new io.forge.jam.protocol.state.TrieBackedJamState(
+      trie,
+      config,
+      new io.forge.jam.protocol.state.ServiceStorageView(trie),
+      Some(trieStore)
+    )
+
   /** Walk `max` blocks from `from` following parents (descending, inclusive).
     */
   def blocksDescending(from: Hash, max: Int): List[Array[Byte]] =

@@ -79,47 +79,14 @@ object IntermediateSteps:
   }
 
   val validateExtrinsicHash: StfStep = validate { (_, ctx) =>
-    import io.forge.jam.core.Hashing
-    import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute}
-    import io.forge.jam.core.types.tickets.TicketEnvelope
-    import io.forge.jam.core.types.extrinsic.Preimage
-    import io.forge.jam.core.scodec.JamCodecs.{compactPrefixedList, compactInt}
-
     val block = ctx.block
-    val config = ctx.config
-    val ex = block.extrinsic
-
     try
-      val ticketsEncoded = compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets).require.toByteArray
-      val preimagesEncoded = compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages).require.toByteArray
-      val assurancesEncoded =
-        compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)).encode(ex.assurances).require.toByteArray
-      val disputesEncoded = Dispute.codec(config.votesPerVerdict).encode(ex.disputes).require.toByteArray
-
-      val guaranteeItems = ex.guarantees.map { g =>
-        val reportEncoded =
-          summon[Codec[io.forge.jam.core.types.workpackage.WorkReport]].encode(g.report).require.toByteArray
-        val reportHash = Hashing.blake2b256(reportEncoded)
-        val timeslotEncoded = _root_.scodec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL).require.toByteArray
-
-        val credentialEncoded = compactPrefixedList(summon[Codec[io.forge.jam.core.types.dispute.GuaranteeSignature]])
-          .encode(g.signatures).require.toByteArray
-
-        reportHash.bytes ++ timeslotEncoded ++ credentialEncoded
-      }
-
-      val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length).require.toByteArray
-      val gEncoded = guaranteeListLenEncoded ++ guaranteeItems.foldLeft(Array.empty[Byte])(_ ++ _)
-
-      val hashes =
-        List(ticketsEncoded, preimagesEncoded, gEncoded, assurancesEncoded, disputesEncoded).map(Hashing.blake2b256)
-      val hashesEncoded = hashes.flatMap(_.bytes).toArray
-      val computedExtrinsicHash = Hashing.blake2b256(hashesEncoded)
-
+      // Shared with block authoring (ExtrinsicHashing) — logic unchanged.
+      val computedExtrinsicHash =
+        ExtrinsicHashing.computeExtrinsicHash(block.extrinsic, ctx.config)
       if computedExtrinsicHash != block.header.extrinsicHash then
         Left(PipelineError.HeaderVerificationErr("Invalid extrinsic hash"))
-      else
-        Right(())
+      else Right(())
     catch
       case e: Exception =>
         Left(PipelineError.HeaderVerificationErr(s"Extrinsic hash validation failed: ${e.getMessage}"))

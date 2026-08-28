@@ -51,9 +51,28 @@ final class JamNode(
 
   @volatile private var slotTicker: AutoCloseable = null
   @volatile private var slotCallback: Long => Unit = _ => ()
+  @volatile private var author: Option[BlockAuthor] = None
 
-  /** Hook invoked at every slot boundary (authoring plugs in here). */
+  /** Hook invoked at every slot boundary (after any authoring attempt). */
   def onSlot(f: Long => Unit): Unit = slotCallback = f
+
+  /** Enable block authoring with this node's validator keys. */
+  def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
+    author = Some(new BlockAuthor(chain, keys))
+
+  /** Attempt to author for `slot`; on success the block is imported and
+    * announced
+    */
+  def authorSlot(slot: Long): Option[ChainManager#Head] =
+    author.flatMap { a =>
+      a.tryAuthor(slot).flatMap { blockBytes =>
+        importAndAnnounce(blockBytes) match
+          case Right(head) => Some(head)
+          case Left(err) =>
+            logger.error(s"authored block failed to import: $err")
+            None
+      }
+    }
 
   def start(): JamNode =
     Files.createDirectories(nodeConfig.dataDir)
@@ -79,7 +98,9 @@ final class JamNode(
     }
 
     slotTicker = slotClock.scheduleSlotTicks { slot =>
-      try slotCallback(slot)
+      try
+        authorSlot(slot)
+        slotCallback(slot)
       catch case e: Exception => logger.error(s"slot $slot handler failed", e)
     }
     this
