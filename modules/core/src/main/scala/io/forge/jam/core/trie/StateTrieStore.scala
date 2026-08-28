@@ -4,7 +4,7 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import scala.collection.mutable
 
-final class StateTrieStore(val backend: InMemoryTrieBackend):
+final class StateTrieStore(val backend: StateTrieBackend):
 
   private var pinned: Hash = Hash.zero
   private val serviceInfoCache = mutable.HashMap.empty[Long, JamBytes]

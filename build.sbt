@@ -46,7 +46,7 @@ val quicNativeClassifier = {
 }
 
 lazy val root = (project in file("."))
-  .aggregate(core, crypto, pvm, protocol, conformance, network, db)
+  .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)
   .settings(
     name := "jam",
     publish / skip := true,
@@ -334,6 +334,36 @@ lazy val network = (project in file("modules/network"))
     ),
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value
+  )
+
+lazy val node = (project in file("modules/node"))
+  .dependsOn(core, crypto, protocol, network, db)
+  .settings(
+    name := "jam-node",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % catsVersion,
+      "org.typelevel" %% "spire" % "0.18.0",
+      "io.circe" %% "circe-core" % "0.14.6",
+      "io.circe" %% "circe-parser" % "0.14.6",
+      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
+      "ch.qos.logback" % "logback-classic" % "1.4.11",
+      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+    ),
+    scalacOptions ++= Seq(
+      "-deprecation",
+      "-feature",
+      "-unchecked",
+      "-language:implicitConversions",
+      "-language:higherKinds"
+    ),
+    Compile / mainClass := Some("io.forge.jam.node.Main"),
+    Test / fork := true,
+    Test / baseDirectory := (ThisBuild / baseDirectory).value,
+    Test / javaOptions ++= Seq(
+      s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
+      s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
+      "--enable-native-access=ALL-UNNAMED"
+    )
   )
 
 lazy val conformance = (project in file("modules/conformance"))

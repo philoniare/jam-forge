@@ -71,6 +71,33 @@ object NodeIdentity:
     val kpg = KeyPairGenerator.getInstance("Ed25519")
     fromKeyPair(kpg.generateKeyPair())
 
+  // RFC 8410 DER prefixes for Ed25519 key encodings.
+  private val Pkcs8Prefix: Array[Byte] =
+    Array(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65,
+      0x70, 0x04, 0x22, 0x04, 0x20).map(_.toByte)
+  private val SpkiPrefix: Array[Byte] =
+    Array(0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21,
+      0x00).map(_.toByte)
+
+  /** Deterministic identity from a 32-byte Ed25519 seed (the validator's
+    * signing key doubles as its network identity per JAMNP). Encodes the key
+    * pair through the JDK provider so the private key carries the v1 PKCS#8
+    * form BoringSSL expects.
+    */
+  def fromSeed(seed: Array[Byte]): NodeIdentity =
+    require(seed.length == 32, "Ed25519 seed must be 32 bytes")
+    val pub = new org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(seed, 0)
+      .generatePublicKey()
+      .getEncoded
+    val kf = java.security.KeyFactory.getInstance("Ed25519")
+    val priv = kf.generatePrivate(
+      new java.security.spec.PKCS8EncodedKeySpec(Pkcs8Prefix ++ seed)
+    )
+    val pubKey = kf.generatePublic(
+      new java.security.spec.X509EncodedKeySpec(SpkiPrefix ++ pub)
+    )
+    fromKeyPair(new KeyPair(pubKey, priv))
+
   /** Build the JAMNP self-signed certificate for an existing key pair. */
   def fromKeyPair(keyPair: KeyPair): NodeIdentity =
     val pub = rawEd25519PublicKey(keyPair.getPublic.getEncoded)
