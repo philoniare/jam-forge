@@ -46,7 +46,7 @@ val quicNativeClassifier = {
 }
 
 lazy val root = (project in file("."))
-  .aggregate(core, crypto, pvm, protocol, conformance, network)
+  .aggregate(core, crypto, pvm, protocol, conformance, network, db)
   .settings(
     name := "jam",
     publish / skip := true,
@@ -283,6 +283,27 @@ lazy val protocol = (project in file("modules/protocol"))
       s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
       "--enable-native-access=ALL-UNNAMED"
     )
+  )
+
+lazy val db = (project in file("modules/db"))
+  .dependsOn(core)
+  .settings(
+    name := "jam-db",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % catsVersion,
+      "org.rocksdb" % "rocksdbjni" % "10.10.1",
+      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
+      "ch.qos.logback" % "logback-classic" % "1.4.11",
+      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+    ),
+    scalacOptions ++= Seq(
+      "-deprecation",
+      "-feature",
+      "-unchecked",
+      "-language:implicitConversions"
+    ),
+    Test / fork := true,
+    Test / baseDirectory := (ThisBuild / baseDirectory).value
   )
 
 lazy val network = (project in file("modules/network"))
