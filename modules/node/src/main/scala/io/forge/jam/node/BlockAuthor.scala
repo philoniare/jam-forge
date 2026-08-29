@@ -23,16 +23,17 @@ import spire.math.UInt
   */
 final class BlockAuthor(
     chain: ChainManager,
-    validators: Seq[ValidatorKeySet]
+    validators: Seq[ValidatorKeySet],
+    pools: ExtrinsicPools = new ExtrinsicPools
 ) extends LazyLogging:
 
   private val ourBandersnatchKeys: Map[Seq[Byte], ValidatorKeySet] =
     validators.map(v => v.bandersnatchPublic.toSeq -> v).toMap
 
   /** Try to author a block for `slot` on top of the current best head.
-    * Returns the encoded block when one of our keys owns the slot.
+    * Returns the block when one of our keys owns the slot.
     */
-  def tryAuthor(slot: Long): Option[Array[Byte]] =
+  def tryAuthor(slot: Long): Option[Block] =
     val best = chain.best
     if slot <= best.slot then return None
 
@@ -76,12 +77,12 @@ final class BlockAuthor(
       logger.warn("sealing key not in the active validator set")
       return None
 
-    // Empty extrinsic until the pools land.
+    // Fill from the pools (tickets await the ring prover).
     val extrinsic = Extrinsic(
       tickets = List.empty,
-      preimages = List.empty,
-      guarantees = List.empty,
-      assurances = List.empty,
+      preimages = pools.takePreimages(),
+      guarantees = pools.takeGuarantees(),
+      assurances = pools.takeAssurances(best.hash),
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
     val extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config)
@@ -118,5 +119,8 @@ final class BlockAuthor(
       BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
     val block = Block(unsealed.copy(seal = JamBytes(seal)), extrinsic)
 
-    logger.info(s"authored block for slot $slot (author index $authorIndex)")
-    Some(chain.encodeBlock(block))
+    logger.info(
+      s"authored block for slot $slot (author index $authorIndex, " +
+        s"${extrinsic.guarantees.size} guarantees, ${extrinsic.assurances.size} assurances)"
+    )
+    Some(block)

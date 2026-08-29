@@ -38,6 +38,9 @@ final class JamNode(
 
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)
+  val pools = new ExtrinsicPools
+  val distribution = new DistributionService(pools)
+  distribution.coresCountForDecode = spec.config.coresCount
 
   val slotClock = new SlotClock(
     eraStartSeconds = nodeConfig.eraStartSeconds,
@@ -58,29 +61,56 @@ final class JamNode(
 
   /** Enable block authoring with this node's validator keys. */
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
-    author = Some(new BlockAuthor(chain, keys))
+    author = Some(new BlockAuthor(chain, keys, pools))
 
   /** Attempt to author for `slot`; on success the block is imported and
     * announced
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     author.flatMap { a =>
-      a.tryAuthor(slot).flatMap { blockBytes =>
-        importAndAnnounce(blockBytes) match
-          case Right(head) => Some(head)
-          case Left(err) =>
-            logger.error(s"authored block failed to import: $err")
-            None
+      a.tryAuthor(slot).flatMap { block =>
+        importAuthored(block) match
+          case Some(head) => Some(head)
+          case None if block.extrinsic.guarantees.nonEmpty ||
+              block.extrinsic.assurances.nonEmpty ||
+              block.extrinsic.preimages.nonEmpty =>
+            logger.warn("authored block rejected; dropping pools and retrying empty")
+            pools.clear()
+            a.tryAuthor(slot).flatMap(importAuthored)
+          case None => None
       }
     }
+
+  private def importAuthored(block: io.forge.jam.core.types.block.Block): Option[ChainManager#Head] =
+    importAndAnnounce(chain.encodeBlock(block)) match
+      case Right(head) =>
+        pools.pruneAfterImport(
+          block.extrinsic.guarantees,
+          block.extrinsic.assurances,
+          block.extrinsic.preimages,
+          head.hash
+        )
+        Some(head)
+      case Left(err) =>
+        logger.error(s"authored block failed to import: $err")
+        None
 
   def start(): JamNode =
     Files.createDirectories(nodeConfig.dataDir)
     chain.initializeOrRestore(spec)
 
+    // Track accepted peers for distribution when they open UP 0 to us.
+    val announceHandler = sync.blockAnnouncementHandler
     network
-      .registerHandler(StreamKind.BlockAnnouncement, sync.blockAnnouncementHandler)
+      .registerHandler(
+        StreamKind.BlockAnnouncement,
+        (conn, stream) =>
+          distribution.trackConnection(conn)
+          announceHandler.onStream(conn, stream)
+      )
       .registerHandler(StreamKind.BlockRequest, sync.blockRequestHandler)
+      .registerHandler(StreamKind.WorkReportDistribution, distribution.workReportHandler)
+      .registerHandler(StreamKind.AssuranceDistribution, distribution.assuranceHandler)
       .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
 
     logger.info(
@@ -111,6 +141,7 @@ final class JamNode(
   def connectPeer(address: InetSocketAddress): JamnpConnection =
     val conn = network.connect(address).get(15, java.util.concurrent.TimeUnit.SECONDS)
     sync.openAnnouncementStream(conn)
+    distribution.trackConnection(conn)
     conn
 
   /** Import a locally produced or externally obtained block and announce it. */
