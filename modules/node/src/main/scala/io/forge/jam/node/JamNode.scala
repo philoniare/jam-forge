@@ -15,7 +15,8 @@ final case class NodeConfig(
     /** 32-byte Ed25519 seed; random identity when absent. */
     ed25519Seed: Option[Array[Byte]] = None,
     /** JAM-common-era override for devnets whose genesis starts "now". */
-    eraStartSeconds: Long = SlotClock.JamCommonEraSeconds
+    eraStartSeconds: Long = SlotClock.JamCommonEraSeconds,
+    slotTicking: Boolean = true
 )
 
 /** A running JAM node: persistent chain (RocksDB), JAMNP-S networking with
@@ -55,6 +56,8 @@ final class JamNode(
   @volatile private var slotTicker: AutoCloseable = null
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
+  @volatile private var guarantor: Option[GuarantorService] = None
+  @volatile private var shuttingDown: Boolean = false
 
   /** Hook invoked at every slot boundary (after any authoring attempt). */
   def onSlot(f: Long => Unit): Unit = slotCallback = f
@@ -63,10 +66,22 @@ final class JamNode(
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
     author = Some(new BlockAuthor(chain, keys, pools))
 
+  /** Enable the guarantor role (CE 133 work-package intake → refine → sign →
+    * CE 135 distribution) with this node's validator keys.
+    */
+  def enableGuaranteeing(keys: Seq[ValidatorKeySet]): Unit =
+    val g = new GuarantorService(chain, distribution, pools, keys)
+    guarantor = Some(g)
+    network.registerHandler(
+      StreamKind.WorkPackageSubmission,
+      g.workPackageSubmissionHandler
+    )
+
   /** Attempt to author for `slot`; on success the block is imported and
     * announced
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
+    if shuttingDown then return None
     author.flatMap { a =>
       a.tryAuthor(slot).flatMap { block =>
         importAuthored(block) match
@@ -127,12 +142,13 @@ final class JamNode(
           logger.warn(s"bootnode ${bn.host}:${bn.port} unreachable: ${e.getMessage}")
     }
 
-    slotTicker = slotClock.scheduleSlotTicks { slot =>
-      try
-        authorSlot(slot)
-        slotCallback(slot)
-      catch case e: Exception => logger.error(s"slot $slot handler failed", e)
-    }
+    if nodeConfig.slotTicking then
+      slotTicker = slotClock.scheduleSlotTicks { slot =>
+        try
+          authorSlot(slot)
+          slotCallback(slot)
+        catch case e: Exception => logger.error(s"slot $slot handler failed", e)
+      }
     this
 
   def listenPort: Int = network.boundPort
@@ -154,8 +170,10 @@ final class JamNode(
     }
 
   def shutdown(): Unit =
-    if slotTicker != null then slotTicker.close()
+    shuttingDown = true
+    if slotTicker != null then slotTicker.close() // waits for in-flight tick
     network.shutdown()
+    sync.shutdown() // waits for an in-flight sync import
     shutdownStorageOnly()
 
   /** Close only the storage layers (for tests that never start networking). */

@@ -28,7 +28,9 @@ final class SlotClock(
     eraStartSeconds * 1000L + slot * slotMillis
 
   /** Fire `onSlot(slot)` at every slot boundary from the next slot onward.
-    * Returns a handle that stops the ticking when closed.
+    * Returns a handle that stops the ticking when closed; close() waits for
+    * an in-flight tick to finish so callers can safely tear down resources
+    * the tick may be using.
     */
   def scheduleSlotTicks(onSlot: Long => Unit): AutoCloseable =
     val executor: ScheduledExecutorService =
@@ -40,18 +42,23 @@ final class SlotClock(
 
     def scheduleNext(): Unit =
       val next = currentSlot + 1
-      executor.schedule(
-        new Runnable {
-          override def run(): Unit =
-            try onSlot(next)
-            finally scheduleNext()
-        },
-        millisUntilSlot(next),
-        TimeUnit.MILLISECONDS
-      )
+      try
+        executor.schedule(
+          new Runnable {
+            override def run(): Unit =
+              try onSlot(next)
+              finally scheduleNext()
+          },
+          millisUntilSlot(next),
+          TimeUnit.MILLISECONDS
+        )
+      catch case _: java.util.concurrent.RejectedExecutionException => ()
 
     scheduleNext()
-    () => executor.shutdownNow()
+    () =>
+      executor.shutdown() // let an in-flight tick finish
+      executor.awaitTermination(10, TimeUnit.SECONDS)
+      ()
 
 object SlotClock:
   /** 2025-01-01T12:00:00Z. */

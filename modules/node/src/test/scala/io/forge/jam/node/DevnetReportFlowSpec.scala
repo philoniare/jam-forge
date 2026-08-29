@@ -150,8 +150,8 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA)).start()
-      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB)).start()
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
       nodeA.enableAuthoring(devKeys)
 
       val connBtoA =

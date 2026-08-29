@@ -97,6 +97,15 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     t
   }
 
+  /** Stop the import pipeline and wait for an in-flight import to finish —
+    * must run before the chain's storage closes (a late import reading a
+    * closed RocksDB segfaults in JNI).
+    */
+  def shutdown(): Unit =
+    importExecutor.shutdownNow() // interrupts response waits
+    importExecutor.awaitTermination(15, TimeUnit.SECONDS)
+    ()
+
   private def ourFinal: HashSlot =
     val f = chain.finalized
     HashSlot(f.hash, f.slot)

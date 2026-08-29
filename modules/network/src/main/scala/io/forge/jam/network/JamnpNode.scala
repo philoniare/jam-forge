@@ -57,6 +57,7 @@ final class JamnpStream private[network] (
 ):
   @volatile private var receiver: Array[Byte] => Unit = _ => ()
   @volatile private var closeListener: () => Unit = () => ()
+  private val closedFired = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** Register the message receiver (called on the event loop). */
   def onMessage(f: Array[Byte] => Unit): JamnpStream =
@@ -69,7 +70,12 @@ final class JamnpStream private[network] (
     this
 
   private[network] def dispatch(message: Array[Byte]): Unit = receiver(message)
-  private[network] def dispatchClosed(): Unit = closeListener()
+
+  /** Fires the close listener exactly once (remote FIN and channel-inactive
+    * both signal closure; handlers must not run twice).
+    */
+  private[network] def dispatchClosed(): Unit =
+    if closedFired.compareAndSet(false, true) then closeListener()
 
   /** Send one framed message. */
   def send(message: Array[Byte]): Unit =

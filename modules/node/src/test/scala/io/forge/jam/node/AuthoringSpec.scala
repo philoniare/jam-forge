@@ -52,8 +52,8 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
     var nodeB: JamNode = null
     try
       val spec = specFor(genesis)
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA)).start()
-      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB)).start()
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
 
       // Node A holds all six tiny dev validators → it owns every slot.
       nodeA.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
@@ -94,7 +94,7 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
     val dir = tempDir("jam-author-nokeys")
     var node: JamNode = null
     try
-      node = new JamNode(specFor(genesis), NodeConfig(dataDir = dir))
+      node = new JamNode(specFor(genesis), NodeConfig(dataDir = dir, slotTicking = false))
       node.chain.initializeOrRestore(node.spec)
       // Keys from an index outside the tiny validator set.
       node.enableAuthoring(Seq(ValidatorKeySet.dev(17)))

@@ -73,8 +73,8 @@ class TwoNodeSyncSpec extends AnyFunSuite with Matchers:
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA)).start()
-      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB)).start()
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
 
       nodeA.chain.best.stateRoot shouldBe step.preState.stateRoot
       nodeB.chain.best.stateRoot shouldBe step.preState.stateRoot

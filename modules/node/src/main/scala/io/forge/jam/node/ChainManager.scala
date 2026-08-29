@@ -139,7 +139,13 @@ final class ChainManager(
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)
 
-  /** A read view over the current best state */
+  /** Raw read of a 31-byte state key from the current best state. */
+  def readRawState(stateKey: JamBytes): Option[JamBytes] =
+    trieStore.at(bestHead.stateRoot).read(stateKey)
+
+  /** A read view over the current best state (mutations are staged in the
+    * view and discarded; imports go through importBlock).
+    */
   def stateView(): io.forge.jam.protocol.state.TrieBackedJamState =
     val trie = trieStore.at(bestHead.stateRoot)
     new io.forge.jam.protocol.state.TrieBackedJamState(
