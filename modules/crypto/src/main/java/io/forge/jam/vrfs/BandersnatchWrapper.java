@@ -121,6 +121,27 @@ public class BandersnatchWrapper {
     );
 
     /**
+     * Create an anonymous ring VRF proof (Safrole ticket) for
+     * jam_ticket_seal ++ entropy ++ attempt with empty aux data.
+     *
+     * @param secret       serialized Bandersnatch secret (from secretFromSeed)
+     * @param ringKeys     ringSize * 32 bytes of compressed public keys
+     * @param proverIndex  this key's position in the ring
+     * @param ringSize     number of ring members
+     * @param entropy      32-byte epochal entropy (eta_2')
+     * @param attempt      ticket entry index
+     * @return the serialized ring VRF signature (output ++ ring proof)
+     */
+    public static native byte[] ringVrfSign(
+        byte[] secret,
+        byte[] ringKeys,
+        int proverIndex,
+        int ringSize,
+        byte[] entropy,
+        byte attempt
+    );
+
+    /**
      * Get the VRF output from an IETF VRF signature.
      */
     public static native byte[] getIetfVrfOutput(byte[] signature);

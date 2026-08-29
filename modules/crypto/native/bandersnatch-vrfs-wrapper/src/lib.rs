@@ -371,6 +371,99 @@ fn throw_exception(mut env: JNIEnv, message: &str) -> jbyteArray {
 //     }
 // }
 
+/// Ring VRF sign: create an anonymous Safrole ticket proof for
+/// `jam_ticket_seal ++ entropy ++ attempt`
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
+    mut env: JNIEnv,
+    _class: JClass,
+    secret_bytes: JByteArray,
+    ring_keys: JByteArray,
+    prover_index: jint,
+    ring_size: jint,
+    entropy: JByteArray,
+    attempt: jbyte,
+) -> jbyteArray {
+    use ark_ec_vrfs::ring::Prover as _;
+
+    let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        std::ptr::null_mut()
+    };
+
+    let secret_data = match env.convert_byte_array(&secret_bytes) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert secret data"),
+    };
+    let key_bytes = match env.convert_byte_array(&ring_keys) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert ring keys"),
+    };
+    let entropy_data = match env.convert_byte_array(&entropy) {
+        Ok(data) => data,
+        Err(_) => return return_error_local(&mut env, "Failed to convert entropy"),
+    };
+
+    const PUBLIC_KEY_SIZE: usize = 32;
+    let expected_length = (ring_size as usize) * PUBLIC_KEY_SIZE;
+    if key_bytes.len() != expected_length {
+        return return_error_local(
+            &mut env,
+            &format!(
+                "Invalid ring keys length: expected {}, got {}",
+                expected_length,
+                key_bytes.len()
+            ),
+        );
+    }
+    if prover_index < 0 || prover_index >= ring_size {
+        return return_error_local(&mut env, "Prover index out of range");
+    }
+
+    let secret = match BanderSecret::deserialize_compressed(&secret_data[..]) {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
+    };
+
+    // Parse the ring exactly like the verifier-commitment path (padding
+    // point for undecodable keys).
+    let mut ring = Vec::with_capacity(ring_size as usize);
+    for i in 0..ring_size as usize {
+        let key_slice = &key_bytes[i * PUBLIC_KEY_SIZE..(i + 1) * PUBLIC_KEY_SIZE];
+        match BanderPublic::deserialize_compressed_unchecked(&mut &key_slice[..]) {
+            Ok(public_key) => ring.push(public_key),
+            Err(_e) => ring.push(BanderPublic::from(RingParams::padding_point())),
+        }
+    }
+
+    let input_data = [b"jam_ticket_seal", &entropy_data[..], &[attempt as u8]].concat();
+    let input = vrf_input_point(&input_data);
+    let output = secret.output(input);
+
+    let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
+    let ring_ctx = ring_context(ring_size);
+    let prover_key = ring_ctx.prover_key(&pts);
+    let prover = ring_ctx.prover(prover_key, prover_index as usize);
+
+    let proof = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        secret.prove(input, output, &[], &prover)
+    })) {
+        Ok(p) => p,
+        Err(_) => return return_error_local(&mut env, "Panic during ring proof generation"),
+    };
+
+    let signature = RingVrfSignature { output, proof };
+    let mut buf = Vec::new();
+    if signature.serialize_compressed(&mut buf).is_err() {
+        return return_error_local(&mut env, "Failed to serialize ring signature");
+    }
+
+    match env.byte_array_from_slice(&buf) {
+        Ok(array) => array.into_raw(),
+        Err(_) => return_error_local(&mut env, "Failed to create output array"),
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVrfVerify(
     mut env: JNIEnv,

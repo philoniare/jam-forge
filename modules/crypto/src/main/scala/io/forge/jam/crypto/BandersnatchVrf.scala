@@ -114,6 +114,40 @@ object BandersnatchVrf:
       case _: RuntimeException => None
 
   /**
+   * Create an anonymous ring VRF proof (Safrole ticket envelope proof) for
+   * `jam_ticket_seal ++ entropy ++ attempt` with empty aux data.
+   *
+   * @param secret 32-byte serialized Bandersnatch secret (from secretFromSeed)
+   * @param ringKeys the ring's public keys in validator order
+   * @param proverIndex our key's position in the ring
+   * @param entropy the 32-byte epochal entropy (eta_2')
+   * @param attempt ticket entry index
+   * @return the serialized ring VRF signature, or None on failure
+   */
+  def createRingProof(
+    secret: Array[Byte],
+    ringKeys: List[BandersnatchPublicKey],
+    proverIndex: Int,
+    entropy: Hash,
+    attempt: UByte
+  ): Option[JamBytes] =
+    try
+      val ringSize = ringKeys.size
+      ensureInitialized(ringSize)
+      val concatenatedKeys = ringKeys.flatMap(_.bytes.toSeq).toArray
+      val signature = JniBandersnatchWrapper.ringVrfSign(
+        secret,
+        concatenatedKeys,
+        proverIndex,
+        ringSize,
+        entropy.bytes.toArray,
+        attempt.toByte
+      )
+      if signature == null || signature.isEmpty then None
+      else Some(JamBytes(signature))
+    catch case _: RuntimeException => None
+
+  /**
    * Verify a ring VRF proof and extract the ticket ID if valid.
    *
    * @param signature The 784-byte ring VRF signature from the ticket envelope

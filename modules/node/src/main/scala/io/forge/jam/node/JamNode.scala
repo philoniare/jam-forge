@@ -57,14 +57,19 @@ final class JamNode(
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
+  @volatile private var tickets: Option[TicketService] = None
   @volatile private var shuttingDown: Boolean = false
 
   /** Hook invoked at every slot boundary (after any authoring attempt). */
   def onSlot(f: Long => Unit): Unit = slotCallback = f
 
-  /** Enable block authoring with this node's validator keys. */
+  /** Enable block authoring with this node's validator keys, including
+    * Safrole ticket generation for ticketed sealing.
+    */
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
-    author = Some(new BlockAuthor(chain, keys, pools))
+    val ts = new TicketService(chain, pools, keys)
+    tickets = Some(ts)
+    author = Some(new BlockAuthor(chain, keys, pools, ts.ownTickets))
 
   /** Enable the guarantor role (CE 133 work-package intake → refine → sign →
     * CE 135 distribution) with this node's validator keys.
@@ -89,6 +94,7 @@ final class JamNode(
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     if shuttingDown then return None
+    tickets.foreach(_.maybeGenerate())
     author.flatMap { a =>
       a.tryAuthor(slot).flatMap { block =>
         importAuthored(block) match

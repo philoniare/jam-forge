@@ -1,9 +1,10 @@
 package io.forge.jam.node
 
-import io.forge.jam.core.Hashing
+import io.forge.jam.core.{Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
+import io.forge.jam.core.types.tickets.TicketEnvelope
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -27,6 +28,10 @@ final class ExtrinsicPools:
   private val preimages =
     new java.util.concurrent.ConcurrentHashMap[(Long, Hash), Preimage]()
 
+  /** Ticket envelopes keyed by their (verified) ticket id. */
+  private val tickets =
+    new java.util.concurrent.ConcurrentHashMap[Hash, TicketEnvelope]()
+
   def addGuarantee(g: GuaranteeExtrinsic): Unit =
     val reportHash = Hashing.blake2b256(g.report.encode.toArray)
     guarantees.putIfAbsent(reportHash, g)
@@ -39,6 +44,24 @@ final class ExtrinsicPools:
       (p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray)),
       p
     )
+
+  def addTicket(id: Hash, envelope: TicketEnvelope): Unit =
+    tickets.putIfAbsent(id, envelope)
+
+  /** Tickets for inclusion: ascending ticket-id order (extrinsic
+    * requirement), excluding ids already accumulated, at most `max`.
+    */
+  def takeTickets(exclude: Set[JamBytes], max: Int): List[(Hash, TicketEnvelope)] =
+    tickets.entrySet.asScala.toList
+      .filterNot(e => exclude.contains(JamBytes(e.getKey.bytes.toArray)))
+      .sortBy(e => e.getKey.toHex)
+      .take(max)
+      .map(e => (e.getKey, e.getValue))
+
+  def removeTickets(ids: Iterable[Hash]): Unit =
+    ids.foreach(tickets.remove)
+
+  def ticketCount: Int = tickets.size
 
   /** Guarantees for inclusion: sorted by core index (extrinsic ordering
     * requirement), at most one per core.

@@ -87,6 +87,52 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
+  test("ticket generation fills the accumulator and epoch 1 seals with tickets") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val dir = tempDir("jam-ticketed")
+    var node: JamNode = null
+    try
+      node = new JamNode(specFor(genesis), NodeConfig(dataDir = dir, slotTicking = false))
+      node.chain.initializeOrRestore(node.spec)
+      node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
+
+      val genesisSlot = genesis.header.slot.value.toLong
+      val epochLen = node.spec.config.epochLength // 12 (TINY)
+
+      // Author through epoch 0. Tickets (18 candidates, ≤3 per block) fill
+      // the 12-slot accumulator well before the cutoff at phase 10.
+      var ticketsIncluded = 0
+      for i <- 1 until epochLen do
+        val slot = genesisSlot + i
+        withClue(s"epoch-0 slot $slot:") {
+          node.authorSlot(slot).isDefined shouldBe true
+        }
+        val block = node.chain
+          .decodeBlock(node.chain.blockStore.getBlock(node.chain.best.hash).get)
+          .toOption
+          .get
+        ticketsIncluded += block.extrinsic.tickets.size
+      ticketsIncluded should be >= epochLen
+
+      // Epoch 1: the sealer sequence is now tickets; sealing must use our
+      // tracked ticket attempts.
+      import io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys
+      for i <- 0 until 4 do
+        val slot = genesisSlot + epochLen + i
+        withClue(s"epoch-1 slot $slot:") {
+          node.authorSlot(slot).isDefined shouldBe true
+        }
+        if i == 0 then
+          node.chain.stateView().gamma.st match
+            case TicketsOrKeys.Tickets(_) => () // ticketed epoch confirmed
+            case other                    => fail(s"expected ticketed sealer sequence, got Keys")
+    finally
+      if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
   test("a node without the sealing key does not author") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
