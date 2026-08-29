@@ -154,6 +154,105 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
+  test("fully autonomous pipeline: submit -> guarantee -> assure -> accumulate") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val nullAuthPreimage = genesis.state.keyvals
+      .map(_.value.toArray)
+      .find(_.length == 50)
+      .getOrElse(fail("NULL Authorizer preimage not found in genesis"))
+    val authCodeHash = Hashing.blake2b256(nullAuthPreimage)
+
+    val spec = ChainSpec(
+      id = "pipeline-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+
+    val dirA = tempDir("jam-pipe-a")
+    val dirB = tempDir("jam-pipe-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+      // A: author + assurer; B: guarantor. All roles run autonomously.
+      nodeA.enableAuthoring(devKeys)
+      nodeA.enableAssuring(devKeys)
+      nodeB.enableGuaranteeing(devKeys)
+
+      val connAtoB =
+        nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
+
+      nodeA.authorSlot(1).isDefined shouldBe true
+      nodeA.authorSlot(2).isDefined shouldBe true
+      awaitSync(nodeA, nodeB)
+
+      // Build + submit the work package (A acts as the builder).
+      val view = nodeB.chain.stateView()
+      val anchor = view.beta.history(view.beta.history.size - 2)
+      val serviceCodeHash = view.accumulation.serviceAccounts
+        .find(_.id == 0).map(_.data.service.codeHash).getOrElse(fail("no service 0"))
+      val wp = WorkPackage(
+        authCodeHost = ServiceId(0),
+        authCodeHash = authCodeHash,
+        context = Context(
+          anchor = anchor.headerHash,
+          stateRoot = anchor.stateRoot,
+          beefyRoot = anchor.beefyRoot,
+          lookupAnchor = anchor.headerHash,
+          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
+          prerequisites = List.empty
+        ),
+        authorization = JamBytes.empty,
+        authorizerConfig = JamBytes.empty,
+        items = List(
+          WorkItem(
+            service = ServiceId(0),
+            codeHash = serviceCodeHash,
+            payload = JamBytes("autonomous pipeline".getBytes("UTF-8")),
+            refineGasLimit = Gas(100_000_000L),
+            accumulateGasLimit = Gas(10_000_000L),
+            importSegments = List.empty,
+            extrinsic = List.empty,
+            exportCount = UShort(0)
+          )
+        )
+      )
+      val stream = connAtoB.openStream(StreamKind.WorkPackageSubmission).get(10, TimeUnit.SECONDS)
+      stream.send(Array[Byte](0, 0) ++ wp.encode.toArray)
+      stream.finish()
+
+      // Guarantee arrives at the author.
+      val poolDeadline = System.currentTimeMillis() + 30000
+      while nodeA.pools.guaranteeCount == 0 && System.currentTimeMillis() < poolDeadline do
+        Thread.sleep(50)
+
+      // Slot 3: guarantee on-chain → A's assurer reacts automatically.
+      nodeA.authorSlot(3).isDefined shouldBe true
+      nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
+      nodeA.pools.assuranceCount should be >= 5
+
+      // Slot 4: assurances on-chain → report available → accumulation runs.
+      nodeA.authorSlot(4).isDefined shouldBe true
+      val block4 =
+        nodeA.chain.decodeBlock(nodeA.chain.blockStore.getBlock(nodeA.chain.best.hash).get).toOption.get
+      block4.extrinsic.assurances.size should be >= 5
+      nodeA.chain.stateView().cores.reports(0).isDefined shouldBe false
+
+      awaitSync(nodeA, nodeB)
+      nodeB.chain.best.stateRoot shouldBe nodeA.chain.best.stateRoot
+    finally
+      if nodeA != null then nodeA.shutdown()
+      if nodeB != null then nodeB.shutdown()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   private def awaitSync(a: JamNode, b: JamNode): Unit =
     val deadline = System.currentTimeMillis() + 30000
     while b.chain.best.hash != a.chain.best.hash && System.currentTimeMillis() < deadline do

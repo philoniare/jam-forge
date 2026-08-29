@@ -77,6 +77,13 @@ final class JamNode(
       g.workPackageSubmissionHandler
     )
 
+  /** Enable the assurer role: after every imported block, pending cores are
+    * assured with each held validator key and distributed via CE 141.
+    */
+  def enableAssuring(keys: Seq[ValidatorKeySet]): Unit =
+    val a = new AssurerService(chain, distribution, pools, keys)
+    chain.onImported((head, block) => a.onImported(head, block))
+
   /** Attempt to author for `slot`; on success the block is imported and
     * announced
     */

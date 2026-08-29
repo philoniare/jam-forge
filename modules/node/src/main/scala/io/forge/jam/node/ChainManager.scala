@@ -36,6 +36,14 @@ final class ChainManager(
 
   @volatile private var bestHead: Head = Head(Hash.zero, 0L, Hash.zero)
 
+  /** Listeners invoked after every successful import (assurers, watchers). */
+  private val importListeners =
+    new java.util.concurrent.CopyOnWriteArrayList[(Head, Block) => Unit]()
+
+  def onImported(listener: (Head, Block) => Unit): Unit =
+    importListeners.add(listener)
+    ()
+
   def best: Head = bestHead
 
   /** For now finality is the genesis block (GRANDPA lands later). */
@@ -133,6 +141,10 @@ final class ChainManager(
               logger.info(
                 s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
               )
+              importListeners.forEach { l =>
+                try l(bestHead, block)
+                catch case e: Exception => logger.error("import listener failed", e)
+              }
               Right(bestHead)
       }
     }
