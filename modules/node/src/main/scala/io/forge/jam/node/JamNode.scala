@@ -16,7 +16,8 @@ final case class NodeConfig(
     ed25519Seed: Option[Array[Byte]] = None,
     /** JAM-common-era override for devnets whose genesis starts "now". */
     eraStartSeconds: Long = SlotClock.JamCommonEraSeconds,
-    slotTicking: Boolean = true
+    slotTicking: Boolean = true,
+    finalityDepth: Int = 8
 )
 
 /** A running JAM node: persistent chain (RocksDB), JAMNP-S networking with
@@ -126,6 +127,9 @@ final class JamNode(
   def start(): JamNode =
     Files.createDirectories(nodeConfig.dataDir)
     chain.initializeOrRestore(spec)
+
+    if nodeConfig.finalityDepth > 0 then
+      chain.onImported((_, _) => chain.finalizeAtDepth(nodeConfig.finalityDepth))
 
     // Track accepted peers for distribution when they open UP 0 to us.
     val announceHandler = sync.blockAnnouncementHandler

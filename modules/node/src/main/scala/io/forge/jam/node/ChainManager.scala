@@ -52,10 +52,54 @@ final class ChainManager(
 
   def best: Head = bestHead
 
-  /** For now finality is the genesis block (GRANDPA lands later). */
   def finalized: Head =
     val hash = blockStore.getHead(BlockStore.FinalizedHead).getOrElse(Hash.zero)
     Head(hash, metaLong("finalized_slot").getOrElse(0L), Hash.zero)
+
+  /** Mark a main-chain block as finalized: the finalized head advances and
+    * side branches forking at or below it are no longer adoptable
+    */
+  def finalize(hash: Hash): Either[String, Head] =
+    synchronized {
+      blockRoot(hash) match
+        case None => Left("cannot finalize a non-main-chain block")
+        case Some(_) =>
+          val slot = blockStore
+            .getBlock(hash)
+            .filter(_.nonEmpty)
+            .flatMap(b => decodeBlock(b).toOption)
+            .map(_.header.slot.value.toLong)
+            .getOrElse(0L)
+          val current = finalized
+          if metaLong(s"height:${hash.toHex}").getOrElse(0L) <
+            metaLong(s"height:${current.hash.toHex}").getOrElse(0L)
+          then Left("cannot finalize below the finalized head")
+          else
+            blockStore.setHead(BlockStore.FinalizedHead, hash)
+            putMetaLong("finalized_slot", slot)
+            logger.info(s"finalized ${hash.toHex.take(18)} slot=$slot")
+            Right(Head(hash, slot, Hash.zero))
+    }
+
+  /** Devnet finality rule: finalize the ancestor `depth` blocks behind the
+    * best head (a stand-in for GRANDPA supermajority votes; the finalized
+    * pointer feeds the UP 0 handshake). Returns the newly finalized head when
+    * it advanced.
+    */
+  def finalizeAtDepth(depth: Int): Option[Head] =
+    val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
+    val targetHeight = bestHeight - depth
+    if targetHeight <= metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L) then None
+    else
+      // Walk back from best to the target height.
+      var cursor = bestHead.hash
+      var h = bestHeight
+      while h > targetHeight do
+        decodeBlock(blockStore.getBlock(cursor).get) match
+          case Right(b) => cursor = b.header.parent
+          case Left(_)  => return None
+        h -= 1
+      finalize(cursor).toOption
 
   /** Leaves of the (currently linear) chain: the best head. */
   def leaves: List[Head] = List(bestHead)
@@ -209,6 +253,12 @@ final class ChainManager(
         case _ => return Left("reorg: branch block missing")
     val ancestor = cursor
     val ancestorRoot = blockRoot(ancestor).get
+
+    // Never rewind at or below finality.
+    val finalizedHeight =
+      metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
+    if blockHeight(ancestor).getOrElse(0L) < finalizedHeight then
+      return Left("reorg would revert finalized blocks")
 
     val previousBest = bestHead
     // Abandoned main-chain blocks (best back to ancestor) lose main status.

@@ -125,3 +125,36 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       cleanup(dirA)
       cleanup(dirB)
   }
+
+  test("depth finality advances the finalized head and blocks reorgs below it") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec(
+      id = "finality-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dir = tempDir("jam-finality")
+    var node: JamNode = null
+    try
+      node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
+      node.chain.initializeOrRestore(spec)
+      node.enableAuthoring(devKeys)
+      node.chain.onImported((_, _) => node.chain.finalizeAtDepth(2))
+
+      for slot <- 1L to 5L do node.authorSlot(slot).isDefined shouldBe true
+
+      // best height 5, depth 2 → finalized at height 3 (slot 3).
+      node.chain.finalized.slot shouldBe 3L
+
+      // Finalizing below the finalized head is rejected.
+      val genesisHash = spec.genesisHeaderHash
+      node.chain.finalize(genesisHash).isLeft shouldBe true
+    finally
+      if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
