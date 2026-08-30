@@ -208,12 +208,15 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_recover(
     // Indices >= original_count are recovery shards (need to subtract original_count)
     let mut original_shards_for_decode: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut recovery_shards: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut provided_originals: std::collections::HashMap<usize, Vec<u8>> =
+        std::collections::HashMap::new();
 
     for (i, &idx) in indices_vec.iter().enumerate() {
         let idx = idx as usize;
         if idx < original_count {
             // Original shard - index is in [0, original_count)
             original_shards_for_decode.push((idx, shard_data[i].clone()));
+            provided_originals.insert(idx, shard_data[i].clone());
         } else {
             // Recovery shard - need to map index from [original_count, total) to [0, recovery_count)
             let recovery_idx = idx - original_count;
@@ -250,7 +253,10 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_recover(
     for i in 0..original_count {
         let data = match restored.get(&i) {
             Some(d) => d,
-            None => return return_null(),
+            None => match provided_originals.get(&i) {
+                Some(d) => d,
+                None => return return_null(),
+            },
         };
 
         let java_shard = match env.byte_array_from_slice(data) {

@@ -67,6 +67,35 @@ object BinaryMerkle:
         else (values.slice(0, mid), values.slice(mid, values.length), index - mid)
       node(opposite, h) :: trace(into, nextIndex, h)
 
+  /** Verify a trace T(values, index) against a well-balanced root: recompute
+    * the root from `leaf` (the raw value at `index` among `leafCount` leaves)
+    * and the top-down sibling `path`, and compare
+    */
+  def verifyTrace(
+      root: Array[Byte],
+      leaf: Array[Byte],
+      index: Int,
+      leafCount: Int,
+      path: List[Array[Byte]],
+      h: Hasher = blake2b
+  ): Boolean =
+    if leafCount <= 1 || index < 0 || index >= leafCount then false
+    else
+      def recompute(idx: Int, count: Int, p: List[Array[Byte]]): Option[Array[Byte]] =
+        if count == 1 then if p.isEmpty then Some(leaf) else None
+        else
+          p match
+            case Nil => None
+            case sibling :: rest =>
+              val mid = (count + 1) / 2
+              if idx < mid then
+                recompute(idx, mid, rest).map(own => hashConcat(h, NodePrefix, own, sibling))
+              else
+                recompute(idx - mid, count - mid, rest).map(own =>
+                  hashConcat(h, NodePrefix, sibling, own)
+                )
+      recompute(index, leafCount, path).exists(java.util.Arrays.equals(_, root))
+
   /** Constancy preprocessor C: hash each item with the "leaf" prefix and pad
     * with zero hashes to the next power of two (minimum 1).
     */
