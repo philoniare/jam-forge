@@ -15,8 +15,9 @@ import scala.collection.mutable
 /** Owns the canonical chain: the persistent state trie, block storage and the
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
   *
-  * Fork handling is currently linear (a new block must extend the best head);
-  * fork-tree selection arrives with the GRANDPA work.
+  * Forks: blocks with a known non-best parent are stored unvalidated on a
+  * side branch; when a branch becomes strictly longer than the best chain it
+  * is adopted by rewinding to the common ancestor and replaying.
   */
 final class ChainManager(
     val config: ChainConfig,
@@ -26,7 +27,12 @@ final class ChainManager(
 
   private val trieStore = new StateTrieStore(trieBackend)
   private val importer =
-    new BlockImporter(config, skipAncestryValidation = false, externalTrieStore = Some(trieStore))
+    new BlockImporter(
+      config,
+      skipAncestryValidation = false,
+      externalTrieStore = Some(trieStore),
+      gcAfterImport = false
+    )
   private val blockCodec = Block.blockCodec(config)
 
   /** Recent ancestor headers (newest first) for lookup-anchor validation. */
@@ -60,6 +66,20 @@ final class ChainManager(
   private def putMetaLong(name: String, v: Long): Unit =
     blockStore.setMeta(name, java.nio.ByteBuffer.allocate(8).putLong(v).array())
 
+  // Per-block chain metadata. A stored post-state root marks a block as part
+  // of the (validated) main chain — side-branch blocks are stored unvalidated
+  // and only gain a root when a reorg replays them.
+  private def blockRoot(h: Hash): Option[Hash] =
+    blockStore.getMeta(s"blockroot:${h.toHex}").filter(_.length == 32).map(Hash(_))
+  private def putBlockRoot(h: Hash, root: Hash): Unit =
+    blockStore.setMeta(s"blockroot:${h.toHex}", root.bytes.toArray)
+  private def dropBlockRoot(h: Hash): Unit =
+    blockStore.setMeta(s"blockroot:${h.toHex}", Array.emptyByteArray)
+  private def blockHeight(h: Hash): Option[Long] =
+    metaLong(s"height:${h.toHex}")
+  private def putBlockHeight(h: Hash, height: Long): Unit =
+    putMetaLong(s"height:${h.toHex}", height)
+
   /** Initialize a fresh database from the chain spec, or restore heads from a
     * previous run. Returns true when genesis was (re-)initialized.
     */
@@ -90,6 +110,8 @@ final class ChainManager(
         blockStore.setHead(BlockStore.FinalizedHead, genesisHash)
         blockStore.setMeta("state_root", root.bytes.toArray)
         putMetaLong("best_slot", 0L)
+        putBlockRoot(genesisHash, root)
+        putBlockHeight(genesisHash, 0L)
         bestHead = Head(genesisHash, 0L, root)
         logger.info(
           s"initialized genesis ${genesisHash.toHex.take(18)} root=${root.toHex.take(18)}"
@@ -112,42 +134,122 @@ final class ChainManager(
   def headerHashOf(block: Block): Hash =
     Hashing.blake2b256(block.header.encode.toArray)
 
-  /** Import a block extending the best head, persist it and advance the head.
+  /** Import a block: extends the best head directly, or is stored as a side
+    * branch and adopted via reorg when its branch becomes strictly longer
     */
   def importBlock(blockBytes: Array[Byte]): Either[String, Head] =
     synchronized {
       decodeBlock(blockBytes).flatMap { block =>
+        val hash = headerHashOf(block)
         val parent = block.header.parent
-        if parent != bestHead.hash then
-          Left(
-            s"block parent ${parent.toHex.take(18)} does not extend best head ${bestHead.hash.toHex.take(18)}"
-          )
+        if blockRoot(hash).isDefined then Left("block already imported")
+        else if parent == bestHead.hash then importOnBest(block, blockBytes)
         else
-          val preState = RawState(bestHead.stateRoot, Nil)
-          importer.importBlock(block, preState) match
-            case ImportResult.Failure(error, message) =>
-              Left(s"$error: $message")
-            case ImportResult.Success(postRoot, _) =>
-              val hash = headerHashOf(block)
-              val slot = block.header.slot.value.toLong
+          (blockHeight(parent), blockStore.hasBlock(parent)) match
+            case (Some(parentHeight), true) =>
+              // Known parent on some branch: store and evaluate.
               blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
-              blockStore.setHead(BlockStore.BestHead, hash)
-              blockStore.setMeta("state_root", postRoot.bytes.toArray)
-              putMetaLong("best_slot", slot)
-              recentHeaders.prepend((slot, hash))
-              while recentHeaders.size > config.maxLookupAnchorAge.toInt + 1 do
-                recentHeaders.removeLast()
-              bestHead = Head(hash, slot, postRoot)
-              logger.info(
-                s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
-              )
-              importListeners.forEach { l =>
-                try l(bestHead, block)
-                catch case e: Exception => logger.error("import listener failed", e)
-              }
-              Right(bestHead)
+              val height = parentHeight + 1
+              putBlockHeight(hash, height)
+              val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
+              if height > bestHeight then reorgTo(hash)
+              else
+                Left(
+                  s"stored on side branch (height $height <= best $bestHeight)"
+                )
+            case _ =>
+              Left(s"unknown parent ${parent.toHex.take(18)}")
       }
     }
+
+  /** Validate and apply a block that extends the best head. */
+  private def importOnBest(block: Block, blockBytes: Array[Byte]): Either[String, Head] =
+    val parent = block.header.parent
+    val preState = RawState(bestHead.stateRoot, Nil)
+    importer.importBlock(block, preState) match
+      case ImportResult.Failure(error, message) =>
+        Left(s"$error: $message")
+      case ImportResult.Success(postRoot, _) =>
+        val hash = headerHashOf(block)
+        val slot = block.header.slot.value.toLong
+        blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
+        blockStore.setHead(BlockStore.BestHead, hash)
+        blockStore.setMeta("state_root", postRoot.bytes.toArray)
+        putMetaLong("best_slot", slot)
+        putBlockRoot(hash, postRoot)
+        putBlockHeight(hash, blockHeight(parent).getOrElse(0L) + 1)
+        recentHeaders.prepend((slot, hash))
+        while recentHeaders.size > config.maxLookupAnchorAge.toInt + 1 do
+          recentHeaders.removeLast()
+        bestHead = Head(hash, slot, postRoot)
+        logger.info(
+          s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
+        )
+        importListeners.forEach { l =>
+          try l(bestHead, block)
+          catch case e: Exception => logger.error("import listener failed", e)
+        }
+        Right(bestHead)
+
+  /** Adopt the branch ending at `tip`: rewind to the common ancestor (the
+    * nearest tip-ancestor with a validated post-state root) and replay the
+    * branch
+    */
+  private def reorgTo(tip: Hash): Either[String, Head] =
+    // Collect the unvalidated branch (tip backwards until a validated block).
+    val branch = mutable.ListBuffer.empty[Array[Byte]]
+    var cursor = tip
+    while blockRoot(cursor).isEmpty do
+      blockStore.getBlock(cursor) match
+        case Some(bytes) if bytes.nonEmpty =>
+          branch.prepend(bytes)
+          decodeBlock(bytes) match
+            case Right(b) => cursor = b.header.parent
+            case Left(e)  => return Left(s"reorg: undecodable branch block: $e")
+        case _ => return Left("reorg: branch block missing")
+    val ancestor = cursor
+    val ancestorRoot = blockRoot(ancestor).get
+
+    val previousBest = bestHead
+    // Abandoned main-chain blocks (best back to ancestor) lose main status.
+    val abandoned = mutable.ListBuffer.empty[Hash]
+    var back = previousBest.hash
+    while back != ancestor do
+      abandoned += back
+      decodeBlock(blockStore.getBlock(back).get) match
+        case Right(b) => back = b.header.parent
+        case Left(e)  => return Left(s"reorg: undecodable main block: $e")
+
+    logger.info(
+      s"reorg: rewinding ${abandoned.size} block(s) to ${ancestor.toHex.take(18)}, " +
+        s"replaying ${branch.size}"
+    )
+    trieStore.markCommitted(ancestorRoot)
+    val ancestorBlock = blockStore.getBlock(ancestor)
+    val ancestorSlot =
+      ancestorBlock.filter(_.nonEmpty).flatMap(b => decodeBlock(b).toOption)
+        .map(_.header.slot.value.toLong)
+        .getOrElse(0L)
+    bestHead = Head(ancestor, ancestorSlot, ancestorRoot)
+
+    val replayed = mutable.ListBuffer.empty[Hash]
+    branch.foreach { bytes =>
+      decodeBlock(bytes).flatMap(b => importOnBest(b, bytes)) match
+        case Right(head) =>
+          replayed += head.hash
+        case Left(err) =>
+          // Roll back: restore the previous chain and clear the roots the
+          // partial replay recorded.
+          replayed.foreach(dropBlockRoot)
+          trieStore.markCommitted(previousBest.stateRoot)
+          bestHead = previousBest
+          blockStore.setHead(BlockStore.BestHead, previousBest.hash)
+          blockStore.setMeta("state_root", previousBest.stateRoot.bytes.toArray)
+          putMetaLong("best_slot", previousBest.slot)
+          return Left(s"reorg replay failed: $err")
+    }
+    abandoned.foreach(dropBlockRoot)
+    Right(bestHead)
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)
 

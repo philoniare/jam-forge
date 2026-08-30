@@ -77,7 +77,8 @@ enum ImportError:
 class BlockImporter(
     config: ChainConfig,
     skipAncestryValidation: Boolean = false,
-    externalTrieStore: Option[StateTrieStore] = None
+    externalTrieStore: Option[StateTrieStore] = None,
+    gcAfterImport: Boolean = true
 ):
 
   // Shared PVM module cache across block imports to avoid recompiling same service code
@@ -169,7 +170,7 @@ class BlockImporter(
           storageView.commit(trie)
           trie.save()
           trieStore.markCommitted(trie.rootHash)
-          trieStore.gc()
+          if gcAfterImport then trieStore.gc()
 
           val safrolePostState = SafroleState(
             tau = view.timeslot,
