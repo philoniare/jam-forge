@@ -58,7 +58,8 @@ final class GuarantorService(
     chain: ChainManager,
     distribution: DistributionService,
     pools: ExtrinsicPools,
-    validatorKeys: Seq[ValidatorKeySet]
+    validatorKeys: Seq[ValidatorKeySet],
+    shardStore: Option[io.forge.jam.db.ShardStore] = None
 ) extends LazyLogging:
 
   private val computeReport = new ComputeReport(chain.config)
@@ -139,8 +140,27 @@ final class GuarantorService(
           case Left(err) =>
             logger.warn(s"work package refused: $err")
           case Right(computed) =>
+            storeShards(computed)
             val slot = chain.best.slot + 1
             signAndDistribute(computed.report, slot)
+
+  /** Build and custody every validator's DA shards so assurers can pull
+    * theirs via CE 137 (and auditors bundle shards via CE 138).
+    */
+  private def storeShards(computed: io.forge.jam.protocol.refine.ComputedReport): Unit =
+    shardStore.foreach { store =>
+      io.forge.jam.protocol.refine.DaShards.buildAll(
+        computed.bundleBytes,
+        computed.exportedSegments,
+        chain.config
+      ) match
+        case Right(all) =>
+          val root = computed.report.packageSpec.erasureRoot
+          all.foreach(s => store.put(root, s.validatorIndex, s.encode))
+          logger.debug(s"custodied ${all.size} shard sets for ${root.toHex.take(18)}")
+        case Left(err) =>
+          logger.error(s"shard construction failed (report still distributed): $err")
+    }
 
   private def signAndDistribute(
       report: io.forge.jam.core.types.workpackage.WorkReport,

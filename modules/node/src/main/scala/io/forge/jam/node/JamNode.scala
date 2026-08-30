@@ -5,7 +5,7 @@ import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.scodec.JamCodecs.encode
-import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
+import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
 
 /** Node runtime configuration. */
@@ -38,11 +38,14 @@ final class JamNode(
     RocksDbTrieBackend.open(nodeConfig.dataDir.resolve("state"))
   private val blockStore = BlockStore.open(nodeConfig.dataDir.resolve("blocks"))
 
+  val shardStore: ShardStore = ShardStore.open(nodeConfig.dataDir.resolve("shards"))
+
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)
   val pools = new ExtrinsicPools
   val distribution = new DistributionService(pools)
   distribution.coresCountForDecode = spec.config.coresCount
+  val shards = new ShardService(shardStore, spec.config)
 
   val slotClock = new SlotClock(
     eraStartSeconds = nodeConfig.eraStartSeconds,
@@ -76,7 +79,7 @@ final class JamNode(
     * CE 135 distribution) with this node's validator keys.
     */
   def enableGuaranteeing(keys: Seq[ValidatorKeySet]): Unit =
-    val g = new GuarantorService(chain, distribution, pools, keys)
+    val g = new GuarantorService(chain, distribution, pools, keys, Some(shardStore))
     guarantor = Some(g)
     network.registerHandler(
       StreamKind.WorkPackageSubmission,
@@ -87,7 +90,7 @@ final class JamNode(
     * assured with each held validator key and distributed via CE 141.
     */
   def enableAssuring(keys: Seq[ValidatorKeySet]): Unit =
-    val a = new AssurerService(chain, distribution, pools, keys)
+    val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore)
     chain.onImported((head, block) => a.onImported(head, block))
 
   /** Attempt to author for `slot`; on success the block is imported and
@@ -143,6 +146,10 @@ final class JamNode(
       .registerHandler(StreamKind.BlockRequest, sync.blockRequestHandler)
       .registerHandler(StreamKind.WorkReportDistribution, distribution.workReportHandler)
       .registerHandler(StreamKind.AssuranceDistribution, distribution.assuranceHandler)
+      .registerHandler(StreamKind.ShardDistribution, shards.custodyHandler)
+      .registerHandler(StreamKind.AuditShardRequest, shards.custodyHandler)
+      .registerHandler(StreamKind.SegmentShardRequest, shards.segmentShardHandler)
+      .registerHandler(StreamKind.SegmentShardRequestVerified, shards.custodyHandler)
       .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
 
     logger.info(
@@ -196,4 +203,5 @@ final class JamNode(
   /** Close only the storage layers (for tests that never start networking). */
   def shutdownStorageOnly(): Unit =
     blockStore.close()
+    shardStore.close()
     trieBackend.close()

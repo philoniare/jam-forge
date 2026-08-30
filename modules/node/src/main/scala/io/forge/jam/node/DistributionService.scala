@@ -29,6 +29,10 @@ final class DistributionService(pools: ExtrinsicPools) extends LazyLogging:
   def trackConnection(conn: JamnpConnection): Unit =
     connections.add(conn)
 
+  /** Currently tracked open peer connections. */
+  def peers: List[JamnpConnection] =
+    connections.asScala.filter(_.isOpen).toList
+
   // =========================================================================
   // CE 135 — guaranteed work-report distribution
   // =========================================================================
