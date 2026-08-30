@@ -9,6 +9,11 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wunused:all" // Warn on unused imports, privates, locals, params, etc.
 )
 
+// Run test suites of different modules serially: the network and node suites
+// exercise real QUIC sockets, slot timing and RocksDB and flake when run
+// concurrently with the heavy protocol/conformance suites.
+Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
+
 // Coverage settings
 ThisBuild / coverageEnabled := false
 ThisBuild / coverageMinimumStmtTotal := 70
