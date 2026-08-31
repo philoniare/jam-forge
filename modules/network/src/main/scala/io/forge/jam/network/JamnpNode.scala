@@ -171,6 +171,19 @@ final class JamnpNode(
     handlers.put(kind, handler)
     this
 
+  /** Tracks accepted connections */
+  @io.netty.channel.ChannelHandler.Sharable
+  private final class ConnectionTracker extends ChannelInboundHandlerAdapter:
+    override def channelActive(ctx: ChannelHandlerContext): Unit =
+      val conn = new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false)
+      ctx.channel().attr(ConnectionKey).set(conn)
+      connections.add(conn)
+      ctx.fireChannelActive()
+    override def channelInactive(ctx: ChannelHandlerContext): Unit =
+      val conn = ctx.channel().attr(ConnectionKey).get()
+      if conn != null then connections.remove(conn)
+      ctx.fireChannelInactive()
+
   def boundPort: Int =
     serverChannel.localAddress().asInstanceOf[InetSocketAddress].getPort
 
@@ -207,17 +220,7 @@ final class JamnpNode(
       .initialMaxStreamDataBidirectionalRemote(InitialMaxStreamData)
       .initialMaxStreamsBidirectional(MaxConcurrentStreams)
       .tokenHandler(InsecureQuicTokenHandler.INSTANCE)
-      .handler(new ChannelInboundHandlerAdapter() {
-        override def channelActive(ctx: ChannelHandlerContext): Unit =
-          val conn = new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false)
-          ctx.channel().attr(ConnectionKey).set(conn)
-          connections.add(conn)
-          ctx.fireChannelActive()
-        override def channelInactive(ctx: ChannelHandlerContext): Unit =
-          val conn = ctx.channel().attr(ConnectionKey).get()
-          if conn != null then connections.remove(conn)
-          ctx.fireChannelInactive()
-      })
+      .handler(new ConnectionTracker())
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =
           ch.pipeline().addLast(new IncomingStreamHandler(handlers, config.maxFrameBytes))
