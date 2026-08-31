@@ -32,6 +32,12 @@ final class ExtrinsicPools:
   private val tickets =
     new java.util.concurrent.ConcurrentHashMap[Hash, TicketEnvelope]()
 
+  /** Audit judgments (CE 145) keyed by (report hash, validator index):
+    * validity claim and its Ed25519 signature
+    */
+  private val judgments =
+    new java.util.concurrent.ConcurrentHashMap[(Hash, Int), (Boolean, Array[Byte])]()
+
   def addGuarantee(g: GuaranteeExtrinsic): Unit =
     val reportHash = Hashing.blake2b256(g.report.encode.toArray)
     guarantees.putIfAbsent(reportHash, g)
@@ -47,6 +53,16 @@ final class ExtrinsicPools:
 
   def addTicket(id: Hash, envelope: TicketEnvelope): Unit =
     tickets.putIfAbsent(id, envelope)
+
+  def addJudgment(reportHash: Hash, validatorIndex: Int, valid: Boolean, signature: Array[Byte]): Unit =
+    judgments.putIfAbsent((reportHash, validatorIndex), (valid, signature))
+
+  def judgmentsFor(reportHash: Hash): Map[Int, Boolean] =
+    judgments.asScala.collect {
+      case ((h, idx), (valid, _)) if h == reportHash => idx -> valid
+    }.toMap
+
+  def judgmentCount: Int = judgments.size
 
   /** Tickets for inclusion: ascending ticket-id order (extrinsic
     * requirement), excluding ids already accumulated, at most `max`.

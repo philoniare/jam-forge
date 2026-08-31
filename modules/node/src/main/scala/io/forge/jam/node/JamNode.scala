@@ -61,6 +61,7 @@ final class JamNode(
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
+  @volatile private var auditor: Option[AuditorService] = None
   @volatile private var tickets: Option[TicketService] = None
   @volatile private var shuttingDown: Boolean = false
 
@@ -92,6 +93,21 @@ final class JamNode(
   def enableAssuring(keys: Seq[ValidatorKeySet]): Unit =
     val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore)
     chain.onImported((head, block) => a.onImported(head, block))
+
+  /** Enable the auditor role: every included report is re-executed from its
+    * reconstructed bundle; outcomes are announced (CE 144) and mismatches
+    * judged (CE 145). Returns the service for verdict inspection.
+    */
+  def enableAuditing(keys: Seq[ValidatorKeySet]): AuditorService =
+    val a = new AuditorService(chain, distribution, shards, pools, keys)
+    auditor = Some(a)
+    network.registerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
+    network.registerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
+    chain.onImported((head, block) => a.onImported(head, block))
+    a
+
+  /** The auditor service when auditing is enabled (for verdict queries). */
+  def auditorService: Option[AuditorService] = auditor
 
   /** Attempt to author for `slot`; on success the block is imported and
     * announced
