@@ -17,11 +17,11 @@ State-transitioning conformance tests pass and can import blocks.
 
 **Status:** **COMPLETED** ✅
 
-#### 🚧 M2: AUTHORER (In Progress)
+#### ✅ M2: AUTHORER (Completed)
 
 Fully conformant and can produce blocks (including networking and off-chain components).
 
-**Status:** In Progress - completing network implementation
+**Status:** **COMPLETED** ✅
 
 #### 📋 M3: HALF-SPEED (Planned)
 
