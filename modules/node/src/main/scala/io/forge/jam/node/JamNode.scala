@@ -86,6 +86,10 @@ final class JamNode(
       StreamKind.WorkPackageSubmission,
       g.workPackageSubmissionHandler
     )
+    network.registerHandler(
+      StreamKind.WorkPackageSharing,
+      g.workPackageSharingHandler
+    )
 
   /** Enable the assurer role: after every imported block, pending cores are
     * assured with each held validator key and distributed via CE 141.
@@ -212,6 +216,7 @@ final class JamNode(
   def shutdown(): Unit =
     shuttingDown = true
     if slotTicker != null then slotTicker.close() // waits for in-flight tick
+    guarantor.foreach(_.shutdown()) // drains in-flight refine/co-sign work
     network.shutdown()
     sync.shutdown() // waits for an in-flight sync import
     shutdownStorageOnly()
