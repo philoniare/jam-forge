@@ -1,11 +1,10 @@
 package io.forge.jam.pvm.engine
 
 import scala.collection.mutable.ArrayBuffer
-import spire.math.{UInt, UByte, UShort, ULong}
+import spire.math.UInt
 import io.forge.jam.pvm.types.*
-import io.forge.jam.pvm.{InterruptKind, SegfaultInfo, Abi, PvmConstants, Instruction, MemoryResult}
+import io.forge.jam.pvm.{Instruction, InterruptKind}
 import io.forge.jam.pvm.memory.BasicMemory
-import io.forge.jam.pvm.program.{Program, InstructionDecoder}
 import java.io.{FileWriter, PrintWriter}
 import com.typesafe.scalalogging.StrictLogging
 
@@ -71,55 +70,50 @@ final case class CompiledInstruction(
 )
 
 /**
- * Interpreted VM instance using pattern-matching execution model.
+ * Interpreted VM instance for host-side execution over [[BasicMemory]].
  *
- * This implementation uses a more idiomatic Scala approach:
- * - Instructions are pattern-matched rather than using function handlers
- * - The Instruction ADT carries operands directly (no Args indirection)
- * - ExecutionContext trait abstracts VM state access
+ * All control-flow, block-compilation and run-loop logic lives in
+ * [[InterpreterCore]]; this class contributes the region-based memory
+ * operations (BasicMemory fast paths), `sbrk` heap growth, and the
+ * step-tracing / optional-gas-metering run-loop knobs.
  */
 final class InterpretedInstance private (
-  val module: InterpretedModule,
+  module: InterpretedModule,
   val basicMemory: BasicMemory,
-  val regs: Array[Long],
-  private var _programCounter: ProgramCounter,
-  private var _programCounterValid: Boolean,
-  private var _nextProgramCounter: Option[ProgramCounter],
-  private var _nextProgramCounterChanged: Boolean,
-  private var _gas: Long,
-  private val compiledOffsetForBlock: Array[Int],
-  private val compiledInstructions: ArrayBuffer[CompiledInstruction],
-  private var _interrupt: InterruptKind,
+  regs: Array[Long],
+  programCounter0: ProgramCounter,
+  programCounterValid0: Boolean,
+  nextProgramCounter0: Option[ProgramCounter],
+  nextProgramCounterChanged0: Boolean,
+  gas0: Long,
+  compiledOffsetForBlock0: Array[Int],
+  compiledInstructions0: ArrayBuffer[CompiledInstruction],
+  interrupt0: InterruptKind,
   val stepTracing: Boolean,
   val gasMetering: Boolean
-) extends ExecutionContext:
+) extends InterpreterCore(
+  module,
+  regs,
+  programCounter0,
+  programCounterValid0,
+  nextProgramCounter0,
+  nextProgramCounterChanged0,
+  gas0,
+  compiledOffsetForBlock0,
+  compiledInstructions0,
+  interrupt0
+):
 
   val pageSize: UInt = module.memoryMap.pageSize
-  private val TargetOutOfRange: UInt = UInt(0)
-  private val _is64Bit: Boolean = module.is64Bit
-  private var _compiledOffsetInt: Int = 0
 
-  private inline val TargetAbsent: -1 = -1
-  private inline def packTarget(offset: Int, isJumpTargetValid: Boolean): Int =
-    val base = offset & 0x7fffffff
-    if isJumpTargetValid then base | 0x80000000 else base
-  private inline def targetAt(pcValue: UInt): Int =
-    val idx = pcValue.signed
-    if idx >= 0 && idx < compiledOffsetForBlock.length then compiledOffsetForBlock(idx)
-    else TargetAbsent
+  override protected def segfaultPageSize: UInt = pageSize
+  override protected def onRunStart(): Unit = basicMemory.markDirty()
+  override protected def gasMeteringEnabled: Boolean = gasMetering
+  override protected def stepTracingEnabled: Boolean = stepTracing
 
   // ============================================================================
-  // Public API - Register Operations
+  // Host-side extras
   // ============================================================================
-
-  /**
-   * Get register value, applying 32-bit mask if in 32-bit mode.
-   * For 64-bit mode (common case), use getReg64Raw() for better performance.
-   */
-  inline def reg(regIdx: Int): Long =
-    var value = regs(regIdx)
-    if !_is64Bit then value = value & 0xffffffffL
-    value
 
   /**
    * Get raw 64-bit register value without mode check.
@@ -128,145 +122,15 @@ final class InterpretedInstance private (
   inline def getReg64Raw(regIdx: Int): Long = regs(regIdx)
 
   /**
-   * Set register value, applying appropriate masking based on mode.
-   */
-  def setReg(regIdx: Int, value: Long): Unit =
-    regs(regIdx) = if !_is64Bit then
-      (value & 0xffffffffL).toInt.toLong
-    else
-      value
-
-  /**
    * Set raw 64-bit register value without mode check.
    * Use when module.is64Bit is known to be true (majority of cases).
    */
   inline def setReg64Raw(regIdx: Int, value: Long): Unit =
     regs(regIdx) = value
 
-  def gas: Long = _gas
-  def setGas(value: Long): Unit = _gas = value
   def consumeGas(amount: Long): Unit = _gas -= amount
 
-  def programCounter: Option[ProgramCounter] =
-    if _programCounterValid then Some(_programCounter) else None
-
-  def nextProgramCounter: Option[ProgramCounter] = _nextProgramCounter
-
-  def setNextProgramCounter(pc: ProgramCounter): Unit =
-    _programCounterValid = false
-    _nextProgramCounter = Some(pc)
-    _nextProgramCounterChanged = true
-
   def heapSize: UInt = basicMemory.heapSize
-
-  def run(): Either[String, InterruptKind] =
-    try Right(runImpl())
-    catch case e: Exception => Left(e.getMessage)
-
-  // ============================================================================
-  // ExecutionContext Implementation
-  // ============================================================================
-
-  override inline def getReg(idx: Int): Long = reg(idx)
-
-  /**
-   * Set 32-bit register value with sign extension.
-   */
-  override def setReg32(idx: Int, value: UInt): Unit =
-    // Extract signed Int and sign-extend to Long directly
-    val signExtended = value.signed.toLong
-    setReg(idx, signExtended)
-
-  /**
-   * set 32-bit register from primitive Int without UInt wrapping.
-   * Int.toLong automatically sign-extends negative values.
-   */
-  override inline def setReg32Int(idx: Int, value: Int): Unit =
-    setReg(idx, value.toLong)
-
-  override inline def setReg64(idx: Int, value: Long): Unit =
-    setReg(idx, value)
-
-  /**
-   * advance using primitive Int offset.
-   */
-  override inline def advance(): Int =
-    _compiledOffsetInt + 1
-
-  override def resolveJump(pc: ProgramCounter): Int =
-    val packed = targetAt(pc.value)
-    if packed != TargetAbsent then
-      val isValid = (packed >>> 31) == 1
-      val offset = packed & 0x7fffffff
-      if isValid then offset else panic(pc)
-    else
-      if !isJumpTargetValid(pc) then panic(pc)
-      else compileBlock(pc)
-
-  override def resolveFallthrough(pc: ProgramCounter): Int =
-    val packed = targetAt(pc.value)
-    if packed != TargetAbsent then
-      packed & 0x7fffffff
-    else
-      compileBlock(pc)
-
-  override def jumpIndirect(pc: ProgramCounter, address: UInt): Int =
-    jumpIndirectInt(pc, address.signed)
-
-  override def jumpIndirectInt(pc: ProgramCounter, address: Int): Int =
-    if address == Abi.VmAddrReturnToHost.signed then
-      _programCounter = pc
-      _programCounterValid = true
-      finished()
-    else
-      module.blob.jumpTable.getByAddress(address) match
-        case Some(targetInt) => resolveJump(ProgramCounter(targetInt))
-        case None => panic(pc)
-
-  override def branch(condition: Boolean, pc: ProgramCounter, target: Int, nextPc: ProgramCounter): Int =
-    if condition then
-      val targetPc = ProgramCounter(target)
-      val r = resolveJump(targetPc)
-      if r < 0 then panic(pc) else r
-    else
-      resolveFallthrough(nextPc)
-
-  override def panic(pc: ProgramCounter): Int =
-    _programCounter = pc
-    _programCounterValid = true
-    _nextProgramCounter = None
-    _nextProgramCounterChanged = true
-    _interrupt = InterruptKind.Panic
-    Step.Interrupt
-
-  override def outOfGas(pc: ProgramCounter): Int =
-    _programCounter = pc
-    _programCounterValid = true
-    _interrupt = InterruptKind.OutOfGas
-    Step.Interrupt
-
-  override def ecalli(pc: ProgramCounter, nextPc: ProgramCounter, hostId: UInt): Int =
-    _programCounter = pc
-    _programCounterValid = true
-    _nextProgramCounter = Some(nextPc)
-    _nextProgramCounterChanged = true
-    _interrupt = InterruptKind.Ecalli(hostId)
-    Step.Interrupt
-
-  override def finished(): Int =
-    _programCounterValid = true
-    _nextProgramCounter = None
-    _nextProgramCounterChanged = false
-    _interrupt = InterruptKind.Finished
-    Step.Interrupt
-
-  override def segfault(pc: ProgramCounter, pageAddress: UInt): Int =
-    if pageAddress.toLong < PvmConstants.MinValidAddress.toLong then panic(pc)
-    else
-      _programCounter = pc
-      _programCounterValid = true
-      _interrupt = InterruptKind.Segfault(SegfaultInfo(pageAddress, pageSize))
-      Step.Interrupt
 
   // ============================================================================
   // Memory Operations (UInt address versions for API compatibility)
@@ -433,137 +297,6 @@ final class InterpretedInstance private (
       case None =>
         panic(_programCounter)
 
-  // ============================================================================
-  // Internal Implementation
-  // ============================================================================
-
-  private def runImpl(): InterruptKind =
-    basicMemory.markDirty()
-
-    if _nextProgramCounterChanged then
-      _nextProgramCounter match
-        case None =>
-          throw new IllegalStateException("Failed to run: next program counter is not set")
-        case Some(pc) =>
-          _programCounter = pc
-          _nextProgramCounter = None
-          val resolved = resolveArbitraryJump(pc)
-          _compiledOffsetInt = resolved.getOrElse(TargetOutOfRange).signed
-          _nextProgramCounterChanged = false
-
-    // Cache values locally for faster access in hot loop
-    var offset = _compiledOffsetInt
-    val instructions = compiledInstructions
-    var instructionsSize = instructions.size
-    val isGasMetered = gasMetering
-    val isStepTracing = stepTracing
-
-    // Main execution loop - optimized for JIT
-    while true do
-      // Bounds check - use primitive comparison
-      if offset >= instructionsSize then
-        _interrupt = InterruptKind.Panic
-        _compiledOffsetInt = offset
-        return _interrupt
-
-      // Get compiled instruction - ArrayBuffer.apply is O(1)
-      val compiled = instructions(offset)
-
-      // Gas metering check
-      if isGasMetered then
-        _gas -= 1
-        if _gas < 0 then
-          outOfGas(compiled.pc)
-          _compiledOffsetInt = offset
-          return _interrupt
-
-      // Update state for instruction execution
-      _compiledOffsetInt = offset
-      _programCounter = compiled.pc
-      _programCounterValid = true
-
-      // Execute instruction - returns next compiled offset, or a negative
-      // sentinel (Step.Interrupt) meaning "interrupt occurred, read _interrupt"
-      val next = InstructionExecutor.execute(compiled.opcodeValue, compiled.instruction, this, compiled.pc, compiled.nextPc)
-
-      if next < 0 then
-        // Interrupt occurred - exit loop
-        return _interrupt
-      else
-        offset = next
-        if next >= instructionsSize then
-          instructionsSize = instructions.size
-        if isStepTracing then
-          _compiledOffsetInt = offset
-          _interrupt = InterruptKind.Step
-          return _interrupt
-
-    // This should never be reached, but required for type checking
-    _interrupt
-
-  def resolveArbitraryJump(pc: ProgramCounter): Option[UInt] =
-    val packed = targetAt(pc.value)
-    if packed != TargetAbsent then
-      Some(UInt(packed & 0x7fffffff))
-    else
-      val blockStart = findStartOfBasicBlock(pc)
-      blockStart.flatMap { start =>
-        compileBlock(start)
-        val p = targetAt(pc.value)
-        if p != TargetAbsent then Some(UInt(p & 0x7fffffff)) else None
-      }
-
-  private def isJumpTargetValid(pc: ProgramCounter): Boolean =
-    Program.isJumpTargetValid(module.blob.code, module.blob.bitmask, pc.toInt)
-
-  private def findStartOfBasicBlock(pc: ProgramCounter): Option[ProgramCounter] =
-    Program.findStartOfBasicBlock(module.blob.code, module.blob.bitmask, pc.toInt)
-      .map(offset => ProgramCounter(offset))
-
-  // ============================================================================
-  // Block Compilation
-  // ============================================================================
-
-  private def compileBlock(pc: ProgramCounter): Int =
-    if pc.value > module.codeLen then return Step.Interrupt
-
-    module.beginSharedMutation()
-    try
-      val origin = UInt(compiledInstructions.size)
-      var isJumpTargetValid = this.isJumpTargetValid(pc)
-      var currentPc = pc
-      var done = false
-
-      while !done && currentPc.value <= module.codeLen do
-        val packedTarget = packTarget(compiledInstructions.size, isJumpTargetValid)
-        val insertIdx = currentPc.value.signed
-        if insertIdx >= 0 && insertIdx < compiledOffsetForBlock.length then
-          compiledOffsetForBlock(insertIdx) = packedTarget
-        isJumpTargetValid = false
-
-        val (instruction, nextPc) = parseInstructionAt(currentPc)
-        compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc, instruction.opcode.value)
-
-        if instruction.opcode.startsNewBasicBlock then
-          done = true
-        else
-          currentPc = nextPc
-
-      if compiledInstructions.size == origin.signed then Step.Interrupt
-      else origin.signed
-    finally module.endSharedMutation()
-
-  private def parseInstructionAt(pc: ProgramCounter): (Instruction, ProgramCounter) =
-    val code = module.blob.code
-    val bitmask = module.blob.bitmask
-    val offset = pc.toInt
-
-    if offset >= code.length then
-      return (Instruction.Panic, ProgramCounter(offset + 1))
-
-    val (instruction, skip) = InstructionDecoder.decode(code, bitmask, offset)
-    (instruction, ProgramCounter(offset + skip))
-
 object InterpretedInstance:
   /**
    * Creates an instance from a module with specific argument data.
@@ -582,19 +315,18 @@ object InterpretedInstance:
     val initialHeapSize = UInt((pageAlignedRwDataLen + heapEmptyPagesSize).toInt)
     val (sharedInstructions, sharedOffsetMap) = module.compiledState()
 
-    val instance = new InterpretedInstance(
+    new InterpretedInstance(
       module = module,
       basicMemory = BasicMemory.create(module.memoryMap, module.roData, module.rwData, initialHeapSize, argumentData),
       regs = new Array[Long](Reg.Count),
-      _programCounter = ProgramCounter.MaxValue,
-      _programCounterValid = false,
-      _nextProgramCounter = None,
-      _nextProgramCounterChanged = true,
-      _gas = 0L,
-      compiledOffsetForBlock = sharedOffsetMap,
-      compiledInstructions = sharedInstructions,
-      _interrupt = InterruptKind.Finished,
+      programCounter0 = ProgramCounter.MaxValue,
+      programCounterValid0 = false,
+      nextProgramCounter0 = None,
+      nextProgramCounterChanged0 = true,
+      gas0 = 0L,
+      compiledOffsetForBlock0 = sharedOffsetMap,
+      compiledInstructions0 = sharedInstructions,
+      interrupt0 = InterruptKind.Finished,
       stepTracing = forceStepTracing,
       gasMetering = module.gasMetering
     )
-    instance
