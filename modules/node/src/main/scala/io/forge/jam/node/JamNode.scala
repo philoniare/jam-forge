@@ -43,8 +43,7 @@ final class JamNode(
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)
   val pools = new ExtrinsicPools
-  val distribution = new DistributionService(pools)
-  distribution.coresCountForDecode = spec.config.coresCount
+  val distribution = new DistributionService(pools, spec.config.coresCount)
   val shards = new ShardService(shardStore, spec.config)
 
   val slotClock = new SlotClock(

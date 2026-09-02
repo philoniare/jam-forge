@@ -27,7 +27,12 @@ final case class WorkPackageBundle(
 ):
   /** Serialize the bundle */
   def encode: Array[Byte] =
-    val out = new java.io.ByteArrayOutputStream()
+    val estimatedSize =
+      64 +
+        extrinsicData.iterator.flatten.map(_.length).sum +
+        importSegments.iterator.flatten.map(_.length).sum +
+        justifications.iterator.flatten.map(path => 4 + path.length * 32).sum
+    val out = new java.io.ByteArrayOutputStream(estimatedSize)
     out.write(RefineFetch.encodeWorkPackage(workPackage))
     extrinsicData.foreach(_.foreach(out.write))
     importSegments.foreach(_.foreach(out.write))

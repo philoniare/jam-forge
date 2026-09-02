@@ -9,6 +9,24 @@ import scala.math.Ordering.Implicits.infixOrderingOps
 object ValidationHelpers:
 
   /**
+   * Check that every adjacent pair in `items` satisfies `holds`, without
+   * allocating a 2-element List per pair (as `items.sliding(2)` would).
+   */
+  private def adjacentPairsHold[A](items: List[A])(holds: (A, A) => Boolean): Boolean =
+    items match
+      case Nil => true
+      case head :: tail =>
+        var prev = head
+        var rest = tail
+        var ok = true
+        while ok && rest.nonEmpty do
+          val curr = rest.head
+          ok = holds(prev, curr)
+          prev = curr
+          rest = rest.tail
+        ok
+
+  /**
    * Check if a list is sorted in strictly ascending order with no duplicates.
    * Uses a custom comparison function.
    *
@@ -17,10 +35,7 @@ object ValidationHelpers:
    * @return true if sorted and unique, false otherwise
    */
   def isSortedUnique[A](items: List[A])(cmp: (A, A) => Int): Boolean =
-    items.sliding(2).forall {
-      case List(curr, next) => cmp(curr, next) < 0
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => cmp(curr, next) < 0)
 
   /**
    * Check if a list is sorted in strictly ascending order with no duplicates.
@@ -31,10 +46,7 @@ object ValidationHelpers:
    */
   def isSortedUniqueBy[A, B: Ordering](items: List[A])(f: A => B): Boolean =
     val ordering = summon[Ordering[B]]
-    items.sliding(2).forall {
-      case List(curr, next) => ordering.lt(f(curr), f(next))
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => ordering.lt(f(curr), f(next)))
 
   /**
    * Check if a list is sorted in strictly ascending order by integer key.
@@ -44,10 +56,7 @@ object ValidationHelpers:
    * @return true if sorted and unique by key, false otherwise
    */
   def isSortedUniqueByInt[A](items: List[A])(key: A => Int): Boolean =
-    items.sliding(2).forall {
-      case List(curr, next) => key(curr) < key(next)
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => key(curr) < key(next))
 
   /**
    * Check if a list is sorted in strictly ascending order by long key.
@@ -57,10 +66,7 @@ object ValidationHelpers:
    * @return true if sorted and unique by key, false otherwise
    */
   def isSortedUniqueByLong[A](items: List[A])(key: A => Long): Boolean =
-    items.sliding(2).forall {
-      case List(curr, next) => key(curr) < key(next)
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => key(curr) < key(next))
 
   /**
    * Check if a list is sorted in strictly ascending order by byte array key.
@@ -71,10 +77,7 @@ object ValidationHelpers:
    * @return true if sorted and unique by key, false otherwise
    */
   def isSortedUniqueByBytes[A](items: List[A])(key: A => Array[Byte]): Boolean =
-    items.sliding(2).forall {
-      case List(curr, next) => compareUnsigned(key(curr), key(next)) < 0
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => compareUnsigned(key(curr), key(next)) < 0)
 
   /**
    * Check if a list is sorted in strictly ascending order by JamBytes key.
@@ -85,10 +88,7 @@ object ValidationHelpers:
    * @return true if sorted and unique by key, false otherwise
    */
   def isSortedUniqueByJamBytes[A](items: List[A])(key: A => JamBytes): Boolean =
-    items.sliding(2).forall {
-      case List(curr, next) => key(curr) < key(next)
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => key(curr) < key(next))
 
   /**
    * Check if a list is sorted (non-strictly, allows duplicates) by a key.
@@ -99,7 +99,4 @@ object ValidationHelpers:
    */
   def isSortedBy[A, B: Ordering](items: List[A])(key: A => B): Boolean =
     val ordering = summon[Ordering[B]]
-    items.sliding(2).forall {
-      case List(curr, next) => ordering.lteq(key(curr), key(next))
-      case _ => true
-    }
+    adjacentPairsHold(items)((curr, next) => ordering.lteq(key(curr), key(next)))

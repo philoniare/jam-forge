@@ -145,13 +145,6 @@ trait ExecutionContext
   // Helper Operations (with default implementations)
   // ============================================================================
 
-  /** Three-register 32-bit operation */
-  inline def op3_32(d: Int, s1: Int, s2: Int)(f: (Int, Int) => Int): Int =
-    val v1 = getReg(s1).toInt
-    val v2 = getReg(s2).toInt
-    setReg32Int(d, f(v1, v2))
-    advance()
-
   /** Three-register 64-bit operation */
   inline def op3_64(d: Int, s1: Int, s2: Int)(f: (Long, Long) => Long): Int =
     val v1 = getReg(s1)

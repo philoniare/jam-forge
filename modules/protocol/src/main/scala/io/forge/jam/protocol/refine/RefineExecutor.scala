@@ -30,17 +30,11 @@ class RefineExecutor(val config: ChainConfig):
   // LRU-bounded module cache keyed by the work item's code hash, mirroring the
   // accumulate executor's cache.
   private val MAX_MODULE_CACHE_SIZE = 64
-  private val moduleCache: java.util.LinkedHashMap[JamBytes, InterpretedModule] =
-    new java.util.LinkedHashMap[JamBytes, InterpretedModule](
-      MAX_MODULE_CACHE_SIZE,
-      0.75f,
-      true
-    ) {
-      override def removeEldestEntry(
-          eldest: java.util.Map.Entry[JamBytes, InterpretedModule]
-      ): Boolean =
-        size() > MAX_MODULE_CACHE_SIZE
-    }
+  private val moduleCache = new BoundedModuleCache(MAX_MODULE_CACHE_SIZE)
+  private val MAX_MACHINE_MODULE_CACHE_SIZE = 32
+  private val machineModuleCache = new BoundedModuleCache(
+    MAX_MACHINE_MODULE_CACHE_SIZE
+  )
 
   /** Run refine for work item `workItemIndex` of `workPackage`.
     *
@@ -74,18 +68,20 @@ class RefineExecutor(val config: ChainConfig):
       serviceId,
       lookupAnchorTimeslot,
       workItem.codeHash
-    )
-    if preimage.isEmpty then
-      return RefineResult(ExecutionResult.BadCode, Nil, 0L)
-
-    // BIG: oversized code.
-    if preimage.get.length > MAX_SERVICE_CODE_SIZE then
-      return RefineResult(ExecutionResult.CodeTooLarge, Nil, 0L)
+    ) match
+      case None =>
+        return RefineResult(ExecutionResult.BadCode, Nil, 0L)
+      case Some(bytes) =>
+        // BIG: oversized code.
+        if bytes.length > MAX_SERVICE_CODE_SIZE then
+          return RefineResult(ExecutionResult.CodeTooLarge, Nil, 0L)
+        bytes
 
     // The preimage is encode(var(metadata), code); extract the code part.
-    val code = ServiceCode.extractCodeBlob(preimage.get)
-    if code.isEmpty || code.get.isEmpty then
-      return RefineResult(ExecutionResult.BadCode, Nil, 0L)
+    val code = ServiceCode.extractCodeBlob(preimage) match
+      case Some(bytes) if bytes.nonEmpty => bytes
+      case _ =>
+        return RefineResult(ExecutionResult.BadCode, Nil, 0L)
 
     // a = encode(c, i, s, var(payload), blake(p))
     val payload = workItem.payload.toArray
@@ -98,13 +94,14 @@ class RefineExecutor(val config: ChainConfig):
     argsBuffer.write(RefineFetch.workPackageHash(workPackage).bytes.toArray)
     val inputData = argsBuffer.toByteArray
 
-    val moduleOpt = getOrCompileModule(
-      code.get,
+    val module = getOrCompileModule(
+      code,
       JamBytes(workItem.codeHash.bytes.toArray)
-    )
-    if moduleOpt.isEmpty then
-      // Psi_M: Y(p, a) = none → panic with zero gas used.
-      return RefineResult(ExecutionResult.Panic, Nil, 0L)
+    ) match
+      case None =>
+        // Psi_M: Y(p, a) = none → panic with zero gas used.
+        return RefineResult(ExecutionResult.Panic, Nil, 0L)
+      case Some(m) => m
 
     val context = new RefineContext(
       config = config,
@@ -115,13 +112,14 @@ class RefineExecutor(val config: ChainConfig):
       importSegments = importSegments,
       extrinsicData = extrinsicData,
       exportSegmentOffset = exportSegmentOffset,
-      accounts = accounts
+      accounts = accounts,
+      machineModuleCache = Some(machineModuleCache)
     )
 
     val gasLimit = workItem.refineGasLimit.toLong
     val hostCalls = new RefineHostCalls(context)
     val (exitReason, gasUsed, output) =
-      PvmRunner.run(moduleOpt.get, inputData, gasLimit, entryPc = 0, hostCalls)
+      PvmRunner.run(module, inputData, gasLimit, entryPc = 0, hostCalls)
 
     exitReason match
       case PvmRunner.PvmExit.OutOfGas =>
@@ -139,13 +137,8 @@ class RefineExecutor(val config: ChainConfig):
       code: Array[Byte],
       codeHash: JamBytes
   ): Option[InterpretedModule] =
-    val cached = moduleCache.get(codeHash)
-    if cached != null then Some(cached)
-    else
+    moduleCache.getOrCompile(codeHash) {
       ServiceCode.parseBlob(code).flatMap { blob =>
-        InterpretedModule.create(blob) match
-          case Right(module) =>
-            moduleCache.put(codeHash, module)
-            Some(module)
-          case Left(_) => None
+        InterpretedModule.create(blob).toOption
       }
+    }

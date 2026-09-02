@@ -3,14 +3,21 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, constants}
 import io.forge.jam.core.primitives.{Ed25519Signature, Hash, Timeslot, ValidatorIndex}
+import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.workpackage.WorkPackage
-import io.forge.jam.crypto.Ed25519ZebraWrapper
+import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream}
 import io.forge.jam.protocol.accumulation.StateKey
-import io.forge.jam.protocol.refine.{ComputeReport, HistoricalLookupService}
+import io.forge.jam.protocol.refine.{
+  ComputedReport,
+  ComputeReport,
+  DaShards,
+  HistoricalLookupService,
+  WorkPackageBundle
+}
 import scodec.Codec
 import scodec.bits.ByteVector
 import spire.math.UInt
@@ -159,9 +166,9 @@ final class GuarantorService(
   /** Build and custody every validator's DA shards so assurers can pull
     * theirs via CE 137 (and auditors bundle shards via CE 138).
     */
-  private def storeShards(computed: io.forge.jam.protocol.refine.ComputedReport): Unit =
+  private def storeShards(computed: ComputedReport): Unit =
     shardStore.foreach { store =>
-      io.forge.jam.protocol.refine.DaShards.buildAll(
+      DaShards.buildAll(
         computed.bundleBytes,
         computed.exportedSegments,
         chain.config
@@ -187,7 +194,7 @@ final class GuarantorService(
     }
 
   private def signAndDistribute(
-      computed: io.forge.jam.protocol.refine.ComputedReport,
+      computed: ComputedReport,
       slot: Long
   ): Unit =
     val report = computed.report
@@ -243,7 +250,7 @@ final class GuarantorService(
       ((msg(2) & 0xffL) << 16) | ((msg(3) & 0xffL) << 24)
     val coreIndex = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)
     var offset = 6
-    val (n, c) = io.forge.jam.core.scodec.JamCodecs.decodeCompactInteger(msg, offset)
+    val (n, c) = JamCodecs.decodeCompactInteger(msg, offset)
     offset += c
     val lookup = (0 until n.toInt).map { _ =>
       val wpHash = Hash(java.util.Arrays.copyOfRange(msg, offset, offset + 32))
@@ -260,7 +267,7 @@ final class GuarantorService(
       return
 
     val result = for
-      bundle <- io.forge.jam.protocol.refine.WorkPackageBundle.decode(bundleBytes)
+      bundle <- WorkPackageBundle.decode(bundleBytes)
       computed <- computeReport
         .compute(
           workPackage = bundle.workPackage,
@@ -285,7 +292,7 @@ final class GuarantorService(
         val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
         val out = new java.io.ByteArrayOutputStream()
         out.write(reportHash.bytes.toArray)
-        out.write(io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(held.length.toLong))
+        out.write(JamCodecs.encodeCompactInteger(held.length.toLong))
         held.foreach { (idx, keys) =>
           out.write(idx & 0xff)
           out.write((idx >> 8) & 0xff)
@@ -299,7 +306,7 @@ final class GuarantorService(
     * from core-assigned validators over our own report hash.
     */
   private def requestCoSignatures(
-      computed: io.forge.jam.protocol.refine.ComputedReport,
+      computed: ComputedReport,
       slot: Long,
       reportHash: Hash,
       alreadyHave: Set[Int]
@@ -315,7 +322,7 @@ final class GuarantorService(
     request.write(((slot >> 16) & 0xff).toInt); request.write(((slot >> 24) & 0xff).toInt)
     request.write(report.coreIndex.toInt & 0xff)
     request.write((report.coreIndex.toInt >> 8) & 0xff)
-    request.write(io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(report.segmentRootLookup.length.toLong))
+    request.write(JamCodecs.encodeCompactInteger(report.segmentRootLookup.length.toLong))
     report.segmentRootLookup.foreach { l =>
       request.write(l.workPackageHash.bytes.toArray)
       request.write(l.segmentTreeRoot.bytes.toArray)
@@ -331,7 +338,7 @@ final class GuarantorService(
           val theirHash = Hash(java.util.Arrays.copyOfRange(response, 0, 32))
           if theirHash == reportHash then
             var off = 32
-            val (n, c) = io.forge.jam.core.scodec.JamCodecs.decodeCompactInteger(response, off)
+            val (n, c) = JamCodecs.decodeCompactInteger(response, off)
             off += c
             (0 until n.toInt).foreach { _ =>
               val idx = (response(off) & 0xff) | ((response(off + 1) & 0xff) << 8)
@@ -340,7 +347,7 @@ final class GuarantorService(
               val valid = !seen.contains(idx) &&
                 assignments.lift(idx).contains(report.coreIndex.toInt) &&
                 activeSet.lift(idx).exists(vk =>
-                  io.forge.jam.crypto.Ed25519.verify(vk.ed25519.bytes.toArray, message, sig)
+                  Ed25519.verify(vk.ed25519.bytes.toArray, message, sig)
                 )
               if valid then
                 seen += idx

@@ -10,6 +10,7 @@ import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.SafroleBridge
 import scala.math.Ordering.Implicits.infixOrderingOps
+import com.typesafe.scalalogging.StrictLogging
 
 /**
  * Safrole State Transition Function.
@@ -26,7 +27,7 @@ import scala.math.Ordering.Implicits.infixOrderingOps
  * - Generate tickets marks when accumulator is full at cutoff
  * - Implement fallback sequence generation when insufficient tickets
  */
-object SafroleTransition:
+object SafroleTransition extends StrictLogging:
 
   /**
    * Signals an unrecoverable native-crypto fault
@@ -74,7 +75,7 @@ object SafroleTransition:
     catch
       case e: SafroleCryptoFailure => throw e
       case e: Exception =>
-        System.err.println(s"[SafroleTransition] swallowed exception, reporting Reserved: $e")
+        logger.error(s"swallowed exception, reporting Reserved: $e", e)
         (preState, StfResult.error(SafroleErrorCode.Reserved))
 
   /** Epoch timing context extracted from slot values */
@@ -144,6 +145,7 @@ object SafroleTransition:
    * Handle epoch transition.
    *
    * @param preState The pre-transition state
+   * @param posteriorOffenders The list of posterior offenders for the epoch transition
    * @param ctx The epoch timing context
    * @param config The chain configuration
    * @return Tuple of (updated state, epoch mark)

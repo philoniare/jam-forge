@@ -3,9 +3,8 @@ package io.forge.jam.core.types
 import scodec.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
-import io.forge.jam.core.scodec.JamCodecs.compactInteger
+import io.forge.jam.core.scodec.JamCodecs.{compactInteger, hashCodec}
 import io.forge.jam.core.types.work.ExecutionResult
-import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 import spire.math.{UShort, UInt}
 
@@ -13,12 +12,6 @@ import spire.math.{UShort, UInt}
  * Work result related types
  */
 object workresult:
-
-  // Helper codec for Hash (32 bytes)
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
 
   /**
    * Refine load statistics for a work result.
@@ -95,15 +88,15 @@ object workresult:
     given Decoder[WorkResult] = Decoder.instance { cursor =>
       for
         serviceId <- cursor.get[Long]("service_id")
-        codeHash <- cursor.get[String]("code_hash")
-        payloadHash <- cursor.get[String]("payload_hash")
+        codeHash <- cursor.get[Hash]("code_hash")
+        payloadHash <- cursor.get[Hash]("payload_hash")
         accumulateGas <- cursor.get[BigInt]("accumulate_gas")  // u64 values can exceed Long.MaxValue
         result <- cursor.get[ExecutionResult]("result")
         refineLoad <- cursor.get[RefineLoad]("refine_load")
       yield WorkResult(
         ServiceId(UInt(serviceId.toInt)),
-        Hash(parseHex(codeHash)),
-        Hash(parseHex(payloadHash)),
+        codeHash,
+        payloadHash,
         Gas(spire.math.ULong.fromBigInt(accumulateGas)),  // Convert BigInt -> ULong
         result,
         refineLoad

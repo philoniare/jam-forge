@@ -39,6 +39,7 @@ trait HistoricalLookupService:
   *   work-item index
   * @param exportSegmentOffset number of segments assumed already exported by
   *   preceding work items (ς)
+  * @param machineModuleCache LRU cache of compiled inner-PVM modules
   */
 final class RefineContext(
     val config: ChainConfig,
@@ -49,7 +50,8 @@ final class RefineContext(
     val importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
     val extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
     val exportSegmentOffset: Long,
-    val accounts: HistoricalLookupService
+    val accounts: HistoricalLookupService,
+    val machineModuleCache: Option[BoundedModuleCache] = None
 ):
   /** m: integrated inner-PVM instances, keyed by machine index. */
   val innerPvms: mutable.LongMap[InnerPvm] = mutable.LongMap.empty

@@ -107,7 +107,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
 
         // Print failures
         failures.take(5).foreach { f =>
-          println(s"\nFAILED [$f.fileName] slot=${f.slot}:")
+          println(s"\nFAILED [${f.fileName}] slot=${f.slot}:")
           println(s"  Expected: ${f.expectedRoot.take(32)}...")
           println(s"  Actual:   ${f.actualRoot.take(32)}...")
           f.keyvalDiffs.foreach(d => println(s"  Diffs: $d"))

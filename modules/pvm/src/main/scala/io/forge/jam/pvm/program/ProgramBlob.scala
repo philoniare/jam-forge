@@ -68,7 +68,7 @@ object ProgramBlob:
     var offset = 0
 
     // Read jump table entry count (varint)
-    val jumpTableEntryCount = readTestVarint(data, offset) match
+    val jumpTableEntryCount = readJamFormatVarint(data, offset) match
       case Some((count, newOffset)) =>
         offset = newOffset
         count.toInt
@@ -81,7 +81,7 @@ object ProgramBlob:
     offset += 1
 
     // Read code length (varint)
-    val codeLength = readTestVarint(data, offset) match
+    val codeLength = readJamFormatVarint(data, offset) match
       case Some((len, newOffset)) =>
         offset = newOffset
         len.toInt
@@ -128,10 +128,10 @@ object ProgramBlob:
     ))
 
   /**
-   * Read a varint from data at offset. Used for test vectors.
+   * Read a varint from data at offset
    * Returns (value, newOffset) or None on failure.
    */
-  private def readTestVarint(data: Array[Byte], offset: Int): Option[(Long, Int)] =
+  private def readJamFormatVarint(data: Array[Byte], offset: Int): Option[(Long, Int)] =
     if offset >= data.length then return None
 
     val firstByte = data(offset) & 0xFF

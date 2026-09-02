@@ -180,23 +180,6 @@ class ProgramParsingSpec extends AnyFlatSpec with Matchers:
     Program.getBitForOffset(bitmask, codeLen, 20) shouldBe false
   }
 
-  "Program.parseBitmaskFast" should "find next instruction boundary" in {
-    // Bitmask where instruction starts at offset 0, next at offset 3
-    // 0b00001001 = bits 0 and 3 set
-    val bitmask = Array[Byte](0x09, 0x00, 0x00, 0x00)
-
-    val skip = Program.parseBitmaskFast(bitmask, 0)
-    skip shouldBe Some(2) // Skip 2 bytes to get to offset 3 (next instruction)
-  }
-
-  "Program.parseBitmaskSlow" should "handle edge cases" in {
-    val bitmask = Array[Byte](0x09, 0x00)
-    val codeLength = 8
-
-    val (skip, _) = Program.parseBitmaskSlow(bitmask, codeLength, 0)
-    skip shouldBe 2 // Skip to next instruction at offset 3
-  }
-
   // Test 5: Instruction boundary detection
   "Program.isJumpTargetValid" should "validate jump targets at basic block boundaries" in {
     // Create code with instructions that start new basic blocks

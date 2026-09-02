@@ -255,12 +255,14 @@ object DisputeTransition:
       preState: DisputeState,
       config: ChainConfig
   ): (DisputeState, List[Ed25519PublicKey]) =
+    val preOffendersSet: Set[Ed25519PublicKey] = preState.psi.offenders.toSet
+
     // Intermediate state for tracking processed results
     case class ProcessState(
         good: List[Hash],
         bad: List[Hash],
         wonky: List[Hash],
-        offendersMark: List[Ed25519PublicKey],
+        offendersMarkRev: List[Ed25519PublicKey],
         newOffendersSet: Set[Ed25519PublicKey]
     )
 
@@ -287,12 +289,12 @@ object DisputeTransition:
     // Process culprits using foldLeft
     val afterCulprits = disputes.culprits.foldLeft(afterVerdicts) {
       (state, culprit) =>
-        val keyInOffenders = preState.psi.offenders.contains(culprit.key)
+        val keyInOffenders = preOffendersSet.contains(culprit.key)
         val keyAlreadyAdded = state.newOffendersSet.contains(culprit.key)
 
         if !keyInOffenders && !keyAlreadyAdded then
           state.copy(
-            offendersMark = state.offendersMark :+ culprit.key,
+            offendersMarkRev = culprit.key :: state.offendersMarkRev,
             newOffendersSet = state.newOffendersSet + culprit.key
           )
         else state
@@ -301,12 +303,12 @@ object DisputeTransition:
     // Process faults using foldLeft
     val afterFaults = disputes.faults.foldLeft(afterCulprits) {
       (state, fault) =>
-        val keyInOffenders = preState.psi.offenders.contains(fault.key)
+        val keyInOffenders = preOffendersSet.contains(fault.key)
         val keyAlreadyAdded = state.newOffendersSet.contains(fault.key)
 
         if !keyInOffenders && !keyAlreadyAdded then
           state.copy(
-            offendersMark = state.offendersMark :+ fault.key,
+            offendersMarkRev = fault.key :: state.offendersMarkRev,
             newOffendersSet = state.newOffendersSet + fault.key
           )
         else state
@@ -355,7 +357,7 @@ object DisputeTransition:
     val newState = preState.copy(psi = newPsi, rho = newRho)
 
     // Return the unsorted offendersMark for the output
-    (newState, afterFaults.offendersMark)
+    (newState, afterFaults.offendersMarkRev.reverse)
 
   def stfView(
       input: DisputeInput,

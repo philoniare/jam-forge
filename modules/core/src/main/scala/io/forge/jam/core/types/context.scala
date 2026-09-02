@@ -4,7 +4,6 @@ import scodec.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
-import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 
 /**
@@ -52,18 +51,18 @@ object context:
 
     given Decoder[Context] = Decoder.instance { cursor =>
       for
-        anchor <- cursor.get[String]("anchor")
-        stateRoot <- cursor.get[String]("state_root")
-        beefyRoot <- cursor.get[String]("beefy_root")
-        lookupAnchor <- cursor.get[String]("lookup_anchor")
+        anchor <- cursor.get[Hash]("anchor")
+        stateRoot <- cursor.get[Hash]("state_root")
+        beefyRoot <- cursor.get[Hash]("beefy_root")
+        lookupAnchor <- cursor.get[Hash]("lookup_anchor")
         lookupAnchorSlot <- cursor.get[Long]("lookup_anchor_slot")
-        prerequisites <- cursor.get[List[String]]("prerequisites")
+        prerequisites <- cursor.get[List[Hash]]("prerequisites")
       yield Context(
-        Hash(parseHex(anchor)),
-        Hash(parseHex(stateRoot)),
-        Hash(parseHex(beefyRoot)),
-        Hash(parseHex(lookupAnchor)),
+        anchor,
+        stateRoot,
+        beefyRoot,
+        lookupAnchor,
         Timeslot(lookupAnchorSlot.toInt),
-        prerequisites.map(h => Hash(parseHex(h)))
+        prerequisites
       )
     }

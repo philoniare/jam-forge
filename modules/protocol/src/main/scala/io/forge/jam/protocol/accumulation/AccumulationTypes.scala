@@ -323,6 +323,8 @@ enum ExitReason:
   *   Next available service account index
   * @param minPublicServiceIndex
   *   Minimum public service index (S_S from Gray Paper, 2^16)
+  * @param storageView
+  *   Optional storage view for handling raw data operations
   */
 final class AccumulationContext(
     var x: PartialState,

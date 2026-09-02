@@ -202,7 +202,7 @@ class AccumulationHostCalls(
     val outputAddr = getReg(instance, 9).toInt
 
     // Read hash from memory - panic on OOB
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
       throw new RuntimeException(
         s"Lookup PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
@@ -431,7 +431,7 @@ class AccumulationHostCalls(
     val info = account.get.info
     val thresholdBalance = calculateThreshold(info)
 
-    // Encode all 11 fields (96 bytes total
+    // Encode all 11 fields (96 bytes total)
     val data = new Array[Byte](96)
     System.arraycopy(info.codeHash.bytes.toArray, 0, data, 0, 32) // 32 bytes
     putLE(data, 32, info.balance, 8) // 8 bytes
@@ -641,7 +641,7 @@ class AccumulationHostCalls(
       return
 
     // Read new code hash from memory
-    val codeHashBuffer = new Array[Byte](32)
+    val codeHashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, codeHashAddr, codeHashBuffer) then
       throw new RuntimeException(
         s"Upgrade PANIC: Failed to read code hash from memory at address $codeHashAddr (0x${codeHashAddr.toHexString})"
@@ -679,7 +679,7 @@ class AccumulationHostCalls(
     val requestedServiceId = getReg(instance, 12).toLong
 
     // Read code hash from memory - PANIC if not readable
-    val codeHashBuffer = new Array[Byte](32)
+    val codeHashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, codeHashAddr, codeHashBuffer) then
       throw new RuntimeException(
         s"New PANIC: Failed to read code hash from memory at $codeHashAddr"
@@ -793,7 +793,7 @@ class AccumulationHostCalls(
     val ejectServiceId = getReg(instance, 7).toLong
     val preimageHashAddr = getReg(instance, 8).toInt
 
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, preimageHashAddr, hashBuffer) then
       throw new RuntimeException(
         "Eject PANIC: Failed to read preimage hash from memory"
@@ -874,21 +874,6 @@ class AccumulationHostCalls(
         .order(java.nio.ByteOrder.LITTLE_ENDIAN)
         .putInt(ejectServiceId.toInt)
         .array()
-    def isChapterKey(arr: Array[Byte]): Boolean =
-      var i = 1
-      while i < arr.length do
-        if arr(i) != 0 then return false
-        i += 1
-      true
-    def isAccountRecordKey(arr: Array[Byte]): Boolean =
-      if (arr(0) & 0xff) != 0xff then false
-      else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
-      else
-        var i = 8
-        while i < arr.length do
-          if arr(i) != 0 then return false
-          i += 1
-        true
     val matchesEjectedService = (key: JamBytes) =>
       val arr = key.toArray
       arr.length >= 8 &&
@@ -896,8 +881,8 @@ class AccumulationHostCalls(
         arr(2) == serviceIdBytes(1) &&
         arr(4) == serviceIdBytes(2) &&
         arr(6) == serviceIdBytes(3) &&
-        !isChapterKey(arr) &&
-        !isAccountRecordKey(arr)
+        !StateKey.isChapterKey(arr) &&
+        !StateKey.isAccountRecordKey(arr)
     val byteOnePrefix = JamBytes(Array(serviceIdBytes(0)))
     val keysToRemove: List[JamBytes] = context.storageView match
       case Some(v) =>
@@ -1000,7 +985,7 @@ class AccumulationHostCalls(
       return
 
     // Read hash from memory
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
       throw new RuntimeException(
         s"Query PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
@@ -1059,7 +1044,7 @@ class AccumulationHostCalls(
     val acc = account.get
 
     // Read hash from memory - PANIC if fails
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
       throw new RuntimeException(
         "Solicit PANIC: Failed to read hash from memory"
@@ -1157,7 +1142,7 @@ class AccumulationHostCalls(
     val acc = account.get
 
     // Read hash from memory - PANIC if fails
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
       throw new RuntimeException(
         "Forget PANIC: Failed to read hash from memory"
@@ -1313,7 +1298,7 @@ class AccumulationHostCalls(
     val hashAddr = getReg(instance, 7).toInt
 
     // Read hash from memory
-    val hashBuffer = new Array[Byte](32)
+    val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
       throw new RuntimeException(
         s"Yield PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
@@ -1370,7 +1355,7 @@ class AccumulationHostCalls(
     * encoding). Used for parent-child relationship verification in eject.
     */
   private def encodeServiceIdAsCodeHash(serviceId: Long): JamBytes =
-    val bytes = new Array[Byte](32)
+    val bytes = new Array[Byte](Hash.Size)
     // Little-endian encoding of service ID in first 4 bytes
     bytes(0) = (serviceId & 0xff).toByte
     bytes(1) = ((serviceId >> 8) & 0xff).toByte
@@ -1394,20 +1379,11 @@ class AccumulationHostCalls(
       i = s + (left % right)
     i
 
-  /** Encode a value as little-endian bytes */
-  private inline def encodeLE(value: Long, size: Int): Array[Byte] =
-    Array.tabulate(size)(i => ((value >> (i * 8)) & 0xff).toByte)
-
   private def putLE(buf: Array[Byte], offset: Int, value: Long, size: Int): Unit =
     var i = 0
     while i < size do
       buf(offset + i) = ((value >> (i * 8)) & 0xff).toByte
       i += 1
-
-  private inline def encodeShort(value: Int): Array[Byte] = encodeLE(value, 2)
-  private inline def encodeInt(value: Int): Array[Byte] = encodeLE(value, 4)
-  private inline def encodeIntLE(value: Int): Array[Byte] = encodeLE(value, 4)
-  private inline def encodeLong(value: Long): Array[Byte] = encodeLE(value, 8)
 
   /** Decode a little-endian integer from a byte array */
   private def decodeLE(bytes: Array[Byte], offset: Int, size: Int): Long =

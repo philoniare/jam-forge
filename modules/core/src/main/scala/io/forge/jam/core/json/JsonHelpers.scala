@@ -16,7 +16,15 @@ object JsonHelpers:
   def parseHex(hex: String): Array[Byte] =
     val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
     if cleanHex.isEmpty then Array.emptyByteArray
-    else cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+    else
+      val out = new Array[Byte]((cleanHex.length + 1) / 2)
+      var i = 0
+      while i < out.length do
+        val start = i * 2
+        val end = math.min(start + 2, cleanHex.length)
+        out(i) = Integer.parseInt(cleanHex, start, end, 16).toByte
+        i += 1
+      out
 
   /**
    * Parse a hex string to a byte array, returning Either for error handling.

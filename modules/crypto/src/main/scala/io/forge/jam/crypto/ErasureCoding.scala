@@ -11,10 +11,11 @@ object ErasureCoding:
   private var libraryInitialized = false
 
   /** Ensure the native library is loaded */
-  private def ensureInitialized(): Unit =
+  private def ensureInitialized(): Unit = synchronized {
     if !libraryInitialized then
       ErasureCodingWrapper.ensureLibraryLoaded()
       libraryInitialized = true
+  }
 
   /** Check if the native library is available */
   def isAvailable: Boolean =

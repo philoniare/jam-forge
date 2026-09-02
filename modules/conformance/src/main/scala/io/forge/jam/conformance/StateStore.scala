@@ -32,6 +32,8 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
   private val parentage: mutable.Map[Hash, (Hash, Timeslot)] =
     mutable.Map.empty
 
+  private var newestParentageSlot: Long = Long.MinValue
+
   // Insertion-ordered list of stored hashes for LRU-style pruning
   private val insertionOrder: mutable.ArrayBuffer[Hash] =
     mutable.ArrayBuffer.empty
@@ -70,7 +72,10 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       clear()
       states.put(headerHash, state)
       originalBlocks.add(headerHash)
-      genesisParent.foreach(p => parentage.put(headerHash, p))
+      genesisParent.foreach { p =>
+        parentage.put(headerHash, p)
+        newestParentageSlot = math.max(newestParentageSlot, p._2.value.toLong & 0xffffffffL)
+      }
       insertionOrder += headerHash
       ancestry = initialAncestry.take(maxAncestryLength)
     }
@@ -96,7 +101,10 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
     synchronized {
       states.put(headerHash, state)
       if isOriginal then originalBlocks.add(headerHash)
-      parent.foreach(p => parentage.put(headerHash, p))
+      parent.foreach { p =>
+        parentage.put(headerHash, p)
+        newestParentageSlot = math.max(newestParentageSlot, p._2.value.toLong & 0xffffffffL)
+      }
       insertionOrder += headerHash
       pruneIfNeeded()
       pruneParentageByAge()
@@ -139,8 +147,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
   private def pruneParentageByAge(): Unit =
     if parentage.nonEmpty then
       def slotOf(s: Timeslot): Long = s.value.toLong & 0xffffffffL
-      val newestSlot = parentage.valuesIterator.map(v => slotOf(v._2)).max
-      val minKeep = newestSlot - maxAncestryLength.toLong
+      val minKeep = newestParentageSlot - maxAncestryLength.toLong
       if minKeep > 0 then
         val stale = parentage.iterator.collect {
           case (h, (_, slot)) if slotOf(slot) < minKeep => h
@@ -221,6 +228,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       states.clear()
       originalBlocks.clear()
       parentage.clear()
+      newestParentageSlot = Long.MinValue
       insertionOrder.clear()
       ancestry = List.empty
     }

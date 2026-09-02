@@ -284,7 +284,7 @@ final class PageMap(val pageSize: UInt):
       val shiftedMask = mask << bitIndex
 
       // Check if all required bits are set
-      val wordValue = if wordIndex < bits.length then bits(wordIndex) else 0L
+      val wordValue = if wordIndex >= 0 && wordIndex < bits.length then bits(wordIndex) else 0L
       if (wordValue & shiftedMask) != shiftedMask then
         // Some bits aren't set - find which page failed
         var bit = 0

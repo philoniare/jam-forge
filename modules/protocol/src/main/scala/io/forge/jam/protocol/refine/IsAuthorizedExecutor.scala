@@ -52,40 +52,20 @@ private final class IsAuthorizedHostCalls(
 
     // Omega_Y with only p present: n, r, i, ī, x̄ and the operand list are all
     // none in the is-authorized context.
-    val data: Option[Array[Byte]] =
-      RefineFetch.fetchValue(
-        selector,
-        r11,
-        r12,
-        config,
-        Some(workPackage),
-        None,
-        None,
-        None,
-        None,
-        None
-      )
-
-    data match
-      case None =>
-        setReg(instance, 7, HostCallResult.NONE)
-      case Some(bytes) =>
-        val offCap = ULong(bytes.length.toLong)
-        val f = ULong(instance.reg(8))
-        val actualOffset = (if f < offCap then f else offCap).toLong.toInt
-        val lenCap = ULong((bytes.length - actualOffset).toLong)
-        val z = ULong(instance.reg(9))
-        val actualLength = (if z < lenCap then z else lenCap).toLong.toInt
-        val slice = bytes.slice(actualOffset, actualOffset + actualLength)
-
-        if !instance.isMemoryWritable(outputAddr, actualLength) then
-          throw new RuntimeException(
-            s"Fetch PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
-          )
-
-        if !instance.writeBytes(outputAddr, slice) then
-          setReg(instance, 7, HostCallResult.OOB)
-        else setReg(instance, 7, ULong(bytes.length))
+    RefineFetch.resolveFetch(
+      instance,
+      selector,
+      outputAddr,
+      r11,
+      r12,
+      config,
+      Some(workPackage),
+      None,
+      None,
+      None,
+      None,
+      None
+    )(value => setReg(instance, 7, value))
 
 /** Executes the Is-Authorized invocation Psi_I : resolves the work package's
   * authorization code via historical lookup of `authCodeHash` from
@@ -101,17 +81,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
   private val PACKAGE_AUTH_GAS: Long = 50_000_000L
 
   private val MAX_MODULE_CACHE_SIZE = 16
-  private val moduleCache: java.util.LinkedHashMap[JamBytes, InterpretedModule] =
-    new java.util.LinkedHashMap[JamBytes, InterpretedModule](
-      MAX_MODULE_CACHE_SIZE,
-      0.75f,
-      true
-    ) {
-      override def removeEldestEntry(
-          eldest: java.util.Map.Entry[JamBytes, InterpretedModule]
-      ): Boolean =
-        size() > MAX_MODULE_CACHE_SIZE
-    }
+  private val moduleCache = new BoundedModuleCache(MAX_MODULE_CACHE_SIZE)
 
   /** The work-package's implied authorizer hash:
     * blake(authCodeHash ++ authorizerConfig).
@@ -131,7 +101,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       workPackage.context.lookupAnchorSlot.value.toLong
 
     // p_authcode: encode(var(metadata), code) = histlookup(δ[authCodeHost], t, authCodeHash)
-    val preimage =
+    val preimageOpt =
       if accounts.serviceExists(hostService) then
         accounts.historicalLookup(
           hostService,
@@ -140,22 +110,26 @@ class IsAuthorizedExecutor(val config: ChainConfig):
         )
       else None
 
-    if preimage.isEmpty then
-      return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+    val preimage = preimageOpt match
+      case None =>
+        return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+      case Some(bytes) => bytes
 
-    val code = ServiceCode.extractCodeBlob(preimage.get)
-    if code.isEmpty || code.get.isEmpty then
-      return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+    val code = ServiceCode.extractCodeBlob(preimage) match
+      case Some(bytes) if bytes.nonEmpty => bytes
+      case _ =>
+        return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
 
-    if code.get.length > MAX_AUTH_CODE_SIZE then
+    if code.length > MAX_AUTH_CODE_SIZE then
       return IsAuthorizedResult(ExecutionResult.CodeTooLarge, 0L)
 
-    val moduleOpt = getOrCompileModule(
-      code.get,
+    val module = getOrCompileModule(
+      code,
       JamBytes(workPackage.authCodeHash.bytes.toArray)
-    )
-    if moduleOpt.isEmpty then
-      return IsAuthorizedResult(ExecutionResult.Panic, 0L)
+    ) match
+      case None =>
+        return IsAuthorizedResult(ExecutionResult.Panic, 0L)
+      case Some(m) => m
 
     // a = encode[2](c)
     val args = Array[Byte](
@@ -165,7 +139,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
 
     val hostCalls = new IsAuthorizedHostCalls(config, workPackage)
     val (exit, gasUsed, output) =
-      PvmRunner.run(moduleOpt.get, args, PACKAGE_AUTH_GAS, entryPc = 0, hostCalls)
+      PvmRunner.run(module, args, PACKAGE_AUTH_GAS, entryPc = 0, hostCalls)
 
     exit match
       case PvmRunner.PvmExit.OutOfGas =>
@@ -179,13 +153,8 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       code: Array[Byte],
       codeHash: JamBytes
   ): Option[InterpretedModule] =
-    val cached = moduleCache.get(codeHash)
-    if cached != null then Some(cached)
-    else
+    moduleCache.getOrCompile(codeHash) {
       ServiceCode.parseBlob(code).flatMap { blob =>
-        InterpretedModule.create(blob) match
-          case Right(module) =>
-            moduleCache.put(codeHash, module)
-            Some(module)
-          case Left(_) => None
+        InterpretedModule.create(blob).toOption
       }
+    }

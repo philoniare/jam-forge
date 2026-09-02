@@ -44,7 +44,7 @@ object ExtrinsicHashing:
     }
 
     val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length).require.toByteArray
-    val gEncoded = guaranteeListLenEncoded ++ guaranteeItems.foldLeft(Array.empty[Byte])(_ ++ _)
+    val gEncoded = Array.concat(guaranteeListLenEncoded +: guaranteeItems*)
 
     val hashes =
       List(ticketsEncoded, preimagesEncoded, gEncoded, assurancesEncoded, disputesEncoded)

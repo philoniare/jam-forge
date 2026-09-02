@@ -16,7 +16,7 @@ import io.forge.jam.pvm.types.ProgramCounter
 import scodec.Codec
 import spire.math.ULong
 
-/** Host-call dispatcher for the refine invocation. 
+/** Host-call dispatcher for the refine invocation
   * INVOKE (12) is not yet wired to the interpreter and currently reports WHAT;
   * every other refine host call is implemented per the spec.
   */
@@ -25,7 +25,7 @@ class RefineHostCalls(
 ) extends HostCallDispatcher:
   private val config: ChainConfig = context.config
 
-  /** Cmaxpackageexports: maximum exported segments
+  /** Cmaxpackageexports (gp 0.7.2 definitions.tex): maximum exported segments
     * per work package.
     */
   private val MaxPackageExports: Long = 3072L
@@ -44,9 +44,7 @@ class RefineHostCalls(
       reg: Int,
       available: Long
   ): Int =
-    val v = getReg(instance, reg)
-    val cap = ULong(available)
-    (if v < cap then v else cap).toLong.toInt
+    RefineFetch.argClampedLen(instance, reg, available)
 
   private def panic(message: String): Nothing =
     throw new RuntimeException(message)
@@ -63,9 +61,7 @@ class RefineHostCalls(
       address: Int,
       data: Array[Byte]
   ): Boolean =
-    if instance.isMemoryWritable(address, data.length) then
-      instance.writeBytes(address, data)
-    else false
+    RefineFetch.writeMemory(instance, address, data)
 
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
@@ -104,38 +100,20 @@ class RefineHostCalls(
     val r11 = getReg(instance, 11)
     val r12 = getReg(instance, 12)
 
-    val data: Option[Array[Byte]] =
-      RefineFetch.fetchValue(
-        selector,
-        r11,
-        r12,
-        config,
-        Some(context.workPackage),
-        Some(zeroEntropy),
-        Some(context.authorizerTrace),
-        Some(context.workItemIndex),
-        Some(context.importSegments),
-        Some(context.extrinsicData)
-      )
-
-    data match
-      case None =>
-        // Zero-length writable check is trivially true; just report NONE.
-        setReg(instance, 7, HostCallResult.NONE)
-      case Some(bytes) =>
-        val actualOffset = argClampedLen(instance, 8, bytes.length.toLong)
-        val actualLength =
-          argClampedLen(instance, 9, (bytes.length - actualOffset).toLong)
-        val slice = bytes.slice(actualOffset, actualOffset + actualLength)
-
-        if !instance.isMemoryWritable(outputAddr, actualLength) then
-          panic(
-            s"Fetch PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
-          )
-
-        if !writeMemory(instance, outputAddr, slice) then
-          setReg(instance, 7, HostCallResult.OOB)
-        else setReg(instance, 7, ULong(bytes.length))
+    RefineFetch.resolveFetch(
+      instance,
+      selector,
+      outputAddr,
+      r11,
+      r12,
+      config,
+      Some(context.workPackage),
+      Some(zeroEntropy),
+      Some(context.authorizerTrace),
+      Some(context.workItemIndex),
+      Some(context.importSegments),
+      Some(context.extrinsicData)
+    )(value => setReg(instance, 7, value))
 
   // ===========================================================================
   // historical_lookup (6) — Omega_H
@@ -247,15 +225,7 @@ class RefineHostCalls(
 
     // deblob validation: the guest blob is the raw jumptable+bitmask+code
     // format (no SPI memory header).
-    val parsed = ProgramBlob
-      .fromCodeAndJumpTable(
-        data = code,
-        roData = Array.empty,
-        rwData = Array.empty,
-        stackSize = 0,
-        is64Bit = true
-      )
-      .flatMap(blob => InterpretedModule.create(blob).toOption)
+    val parsed = getOrCompileMachineModule(code)
 
     parsed match
       case None =>
@@ -264,6 +234,30 @@ class RefineHostCalls(
         val n = context.nextMachineIndex
         context.innerPvms.update(n, new InnerPvm(code, module, new GuestRam, pc))
         setReg(instance, 7, ULong(n))
+
+  private def getOrCompileMachineModule(
+      code: Array[Byte]
+  ): Option[InterpretedModule] =
+    context.machineModuleCache match
+      case None =>
+        // No cache configured (e.g. a bare test context) — compile directly.
+        compileMachineModule(code)
+      case Some(cache) =>
+        val key = JamBytes(Hashing.blake2b256(code).bytes.toArray)
+        cache.getOrCompile(key)(compileMachineModule(code))
+
+  private def compileMachineModule(
+      code: Array[Byte]
+  ): Option[InterpretedModule] =
+    ProgramBlob
+      .fromCodeAndJumpTable(
+        data = code,
+        roData = Array.empty,
+        rwData = Array.empty,
+        stackSize = 0,
+        is64Bit = true
+      )
+      .flatMap(blob => InterpretedModule.create(blob).toOption)
 
   // ===========================================================================
   // peek (9) — Omega_P: outer[o..o+z) := guest[s..s+z)
@@ -463,6 +457,84 @@ class RefineHostCalls(
   * is-authorized context (only the work package present) restricts fetch.
   */
 object RefineFetch:
+
+  /** min(register, available) in unsigned-64 arithmetic, narrowed only after
+    * the clamp
+    */
+  def argClampedLen(
+      instance: PvmInstance,
+      reg: Int,
+      available: Long
+  ): Int =
+    val v = ULong(instance.reg(reg))
+    val cap = ULong(available)
+    (if v < cap then v else cap).toLong.toInt
+
+  /** Writes `data` to guest memory at `address`, first checking writability.
+    * Returns false (OOB) on either a failed writability check or a failed
+    * write; callers panic separately when the *initial* Omega_Y writability
+    * check (against the full requested length) fails.
+    */
+  def writeMemory(
+      instance: PvmInstance,
+      address: Int,
+      data: Array[Byte]
+  ): Boolean =
+    if instance.isMemoryWritable(address, data.length) then
+      instance.writeBytes(address, data)
+    else false
+
+  /** Shared fetch-result shell: resolves the selector via [[fetchValue]],
+    * then applies the common Omega_Y clamp/panic/write/OOB sequence used by
+    * both the refine and is-authorized dispatchers. `setReg7` is the
+    * caller's register-set hook (kept generic so this stays PvmInstance-only
+    * and free of per-dispatcher setReg boilerplate).
+    */
+  def resolveFetch(
+      instance: PvmInstance,
+      selector: ULong,
+      outputAddr: Int,
+      r11: ULong,
+      r12: ULong,
+      config: ChainConfig,
+      workPackage: Option[WorkPackage],
+      entropy: Option[Array[Byte]],
+      authorizerTrace: Option[Array[Byte]],
+      workItemIndex: Option[Int],
+      importSegments: Option[IndexedSeq[IndexedSeq[Array[Byte]]]],
+      extrinsicData: Option[IndexedSeq[IndexedSeq[Array[Byte]]]]
+  )(setReg7: ULong => Unit): Unit =
+    val data: Option[Array[Byte]] =
+      fetchValue(
+        selector,
+        r11,
+        r12,
+        config,
+        workPackage,
+        entropy,
+        authorizerTrace,
+        workItemIndex,
+        importSegments,
+        extrinsicData
+      )
+
+    data match
+      case None =>
+        setReg7(HostCallResult.NONE)
+      case Some(bytes) =>
+        val actualOffset = argClampedLen(instance, 8, bytes.length.toLong)
+        val actualLength =
+          argClampedLen(instance, 9, (bytes.length - actualOffset).toLong)
+        val slice = bytes.slice(actualOffset, actualOffset + actualLength)
+
+        if !instance.isMemoryWritable(outputAddr, actualLength) then
+          throw new RuntimeException(
+            s"Fetch PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
+          )
+
+        if !writeMemory(instance, outputAddr, slice) then
+          setReg7(HostCallResult.OOB)
+        else setReg7(ULong(bytes.length))
 
   def fetchValue(
       selector: ULong,

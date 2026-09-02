@@ -3,8 +3,8 @@ package io.forge.jam.core.types
 import scodec.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.JamCodecs.hashCodec
 import io.circe.Decoder
 
 /**
@@ -15,11 +15,6 @@ object history:
   // ============================================================================
   // Private Codec Helpers
   // ============================================================================
-
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
 
   private def optionCodec[A](codec: Codec[A]): Codec[Option[A]] =
     discriminated[Option[A]].by(byte)
@@ -52,9 +47,9 @@ object history:
     given Decoder[ReportedWorkPackage] =
       Decoder.instance { cursor =>
         for
-          hashHex <- cursor.get[String]("hash")
-          exportsRootHex <- cursor.get[String]("exports_root")
-        yield ReportedWorkPackage(Hash(parseHex(hashHex)), Hash(parseHex(exportsRootHex)))
+          hash <- cursor.get[Hash]("hash")
+          exportsRoot <- cursor.get[Hash]("exports_root")
+        yield ReportedWorkPackage(hash, exportsRoot)
       }
 
   /**
@@ -80,9 +75,9 @@ object history:
     given Decoder[HistoricalBeta] =
       Decoder.instance { cursor =>
         for
-          headerHash <- cursor.get[String]("header_hash").map(h => Hash(parseHex(h)))
-          beefyRoot <- cursor.get[String]("beefy_root").map(h => Hash(parseHex(h)))
-          stateRoot <- cursor.get[String]("state_root").map(h => Hash(parseHex(h)))
+          headerHash <- cursor.get[Hash]("header_hash")
+          beefyRoot <- cursor.get[Hash]("beefy_root")
+          stateRoot <- cursor.get[Hash]("state_root")
           reported <- cursor.get[List[ReportedWorkPackage]]("reported")
         yield HistoricalBeta(headerHash, beefyRoot, stateRoot, reported)
       }
@@ -106,9 +101,7 @@ object history:
 
     given Decoder[HistoricalMmr] =
       Decoder.instance { cursor =>
-        cursor.get[List[Option[String]]]("peaks").map { peaks =>
-          HistoricalMmr(peaks.map(_.map(h => Hash(parseHex(h)))))
-        }
+        cursor.get[List[Option[Hash]]]("peaks").map(HistoricalMmr.apply)
       }
 
   /**

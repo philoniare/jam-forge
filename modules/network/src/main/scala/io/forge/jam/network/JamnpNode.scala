@@ -200,7 +200,7 @@ final class JamnpNode(
       .option(BoringSSLContextOption.SIGNATURE_ALGORITHMS, Array("ed25519"))
       .build()
 
-  private def sslClient(): QuicSslContext =
+  private lazy val sslClient: QuicSslContext =
     QuicSslContextBuilder
       .forClient()
       .keyManager(new IdentityKeyManagerFactory(identity), null)
@@ -241,7 +241,7 @@ final class JamnpNode(
     */
   def connect(remote: InetSocketAddress): CompletableFuture[JamnpConnection] =
     val codec = new QuicClientCodecBuilder()
-      .sslContext(sslClient())
+      .sslContext(sslClient)
       .maxIdleTimeout(config.maxIdleTimeoutMillis, TimeUnit.MILLISECONDS)
       .initialMaxData(InitialMaxData)
       .initialMaxStreamDataBidirectionalLocal(InitialMaxStreamData)

@@ -6,19 +6,6 @@ package io.forge.jam.core
 object constants:
   
   // ══════════════════════════════════════════════════════════════════════════
-  // Validator and Core Counts
-  // ══════════════════════════════════════════════════════════════════════════
-  
-  /** V = 1023: Total number of validators */
-  val V: Int = 1023
-  
-  /** C = 341: Number of cores */
-  val C: Int = 341
-  
-  /** Validators per core: V / C = 3 */
-  val ValidatorsPerCore: Int = V / C
-  
-  // ══════════════════════════════════════════════════════════════════════════
   // Time Constants
   // ══════════════════════════════════════════════════════════════════════════
   

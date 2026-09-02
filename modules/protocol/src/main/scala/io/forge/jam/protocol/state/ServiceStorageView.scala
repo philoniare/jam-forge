@@ -100,6 +100,7 @@ final class ServiceStorageView(trie: StateTrie):
   def savepointDepth: Int = savepoints.length
 
   def commit(target: StateTrie): Unit =
+    readCache.clear()
     if pending.isEmpty then return
     val updates = pending.iterator.toSeq
     target.update(updates)

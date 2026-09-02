@@ -787,7 +787,6 @@ object BasicMemory:
   // Thread-local byte array pools to avoid per-operation allocations
   private val pool4: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](4))
   private val pool8: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](8))
-  private val pool16: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](16))
 
   /**
    * Creates a new BasicMemory instance from a MemoryMap.

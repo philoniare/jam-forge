@@ -7,6 +7,7 @@ import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.trie.StateTrieStore
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
+import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
 import scodec.bits.ByteVector
 
@@ -118,7 +119,7 @@ final class ChainManager(
   private def putBlockRoot(h: Hash, root: Hash): Unit =
     blockStore.setMeta(s"blockroot:${h.toHex}", root.bytes.toArray)
   private def dropBlockRoot(h: Hash): Unit =
-    blockStore.setMeta(s"blockroot:${h.toHex}", Array.emptyByteArray)
+    blockStore.deleteMeta(s"blockroot:${h.toHex}")
   private def blockHeight(h: Hash): Option[Long] =
     metaLong(s"height:${h.toHex}")
   private def putBlockHeight(h: Hash, height: Long): Unit =
@@ -310,12 +311,12 @@ final class ChainManager(
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */
-  def stateView(): io.forge.jam.protocol.state.TrieBackedJamState =
+  def stateView(): TrieBackedJamState =
     val trie = trieStore.at(bestHead.stateRoot)
-    new io.forge.jam.protocol.state.TrieBackedJamState(
+    new TrieBackedJamState(
       trie,
       config,
-      new io.forge.jam.protocol.state.ServiceStorageView(trie),
+      new ServiceStorageView(trie),
       Some(trieStore)
     )
 

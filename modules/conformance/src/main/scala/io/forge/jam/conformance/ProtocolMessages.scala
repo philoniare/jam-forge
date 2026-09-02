@@ -112,13 +112,17 @@ final case class Initialize(
 
 object Initialize:
   val DISCRIMINANT: Int = 0x01
+  private val codecCache = _root_.scala.collection.concurrent.TrieMap.empty[ChainConfig, Codec[Initialize]]
 
   def codec(config: ChainConfig): Codec[Initialize] =
-    (Header.headerCodec(config) ::
-      JamCodecs.compactPrefixedList(summon[Codec[KeyValue]]) ::
-      JamCodecs.compactPrefixedList(summon[Codec[AncestryItem]])).xmap(
-      { case (header, keyvals, ancestry) => Initialize(header, keyvals, ancestry) },
-      i => (i.header, i.keyvals, i.ancestry)
+    codecCache.getOrElseUpdate(
+      config,
+      (Header.headerCodec(config) ::
+        JamCodecs.compactPrefixedList(summon[Codec[KeyValue]]) ::
+        JamCodecs.compactPrefixedList(summon[Codec[AncestryItem]])).xmap(
+        { case (header, keyvals, ancestry) => Initialize(header, keyvals, ancestry) },
+        i => (i.header, i.keyvals, i.ancestry)
+      )
     )
 
 /**
@@ -142,11 +146,15 @@ final case class ImportBlock(block: Block)
 
 object ImportBlock:
   val DISCRIMINANT: Int = 0x03
+  private val codecCache = _root_.scala.collection.concurrent.TrieMap.empty[ChainConfig, Codec[ImportBlock]]
 
   def codec(config: ChainConfig): Codec[ImportBlock] =
-    Block.blockCodec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict).xmap(
-      block => ImportBlock(block),
-      ib => ib.block
+    codecCache.getOrElseUpdate(
+      config,
+      Block.blockCodec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict).xmap(
+        block => ImportBlock(block),
+        ib => ib.block
+      )
     )
 
 /**

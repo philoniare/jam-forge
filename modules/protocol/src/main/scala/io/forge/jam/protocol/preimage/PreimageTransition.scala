@@ -176,37 +176,40 @@ object PreimageTransition:
     // Track statistics updates by service ID
     val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)
 
+    val submissionsByAccount: Map[Long, List[Preimage]] =
+      input.preimages.groupBy(_.requester.value.toLong)
+
     // Process preimages and update state
     val updatedAccounts = preState.accounts.map { account =>
-      val submissionsForAccount = input.preimages.filter(_.requester.value.toLong == account.id)
+      val submissionsForAccount = submissionsByAccount.getOrElse(account.id, Nil)
       if submissionsForAccount.isEmpty then
         account
       else
-        var currentPreimages = account.data.preimages
-        var currentLookupMeta = account.data.lookupMeta
-
-        for submission <- submissionsForAccount do
+        val hashesAndLengths = submissionsForAccount.map { submission =>
           val hash = Hashing.blake2b256(submission.blob).bytes
-          val hashObj = Hash(hash)
-          val length = submission.blob.length.toLong
+          (hash, submission.blob.length.toLong, submission)
+        }
 
-          // Update preimages list - add new preimage
-          val newPreimage = PreimageHash(hashObj, submission.blob)
-          currentPreimages = (currentPreimages :+ newPreimage).sortWith { (a, b) =>
-            compareUnsigned(a.hash.bytes, b.hash.bytes) < 0
+        val newPreimages = hashesAndLengths.map { case (hash, _, submission) =>
+          PreimageHash(Hash(hash), submission.blob)
+        }
+        val currentPreimages = (account.data.preimages ++ newPreimages).sortWith { (a, b) =>
+          compareUnsigned(a.hash.bytes, b.hash.bytes) < 0
+        }
+
+        val submittedKeys = hashesAndLengths.map { case (hash, length, _) => (hash, length) }
+        val currentLookupMeta = account.data.lookupMeta.map { historyItem =>
+          val matched = submittedKeys.exists { case (hash, length) =>
+            java.util.Arrays.equals(historyItem.key.hash.bytes, hash) && historyItem.key.length == length
           }
+          if matched then historyItem.copy(value = List(input.slot)) else historyItem
+        }.sortWith((a, b) => compareUnsigned(a.key.hash.bytes, b.key.hash.bytes) < 0)
 
-          // Update lookup metadata - set timestamp to current slot
-          currentLookupMeta = currentLookupMeta.map { historyItem =>
-            if java.util.Arrays.equals(historyItem.key.hash.bytes, hash) && historyItem.key.length == length then
-              historyItem.copy(value = List(input.slot))
-            else
-              historyItem
-          }.sortWith((a, b) => compareUnsigned(a.key.hash.bytes, b.key.hash.bytes) < 0)
-
-          // Track statistics update
-          val (currentCount, currentSize) = statsUpdates.getOrElse(account.id, (0, 0L))
-          statsUpdates(account.id) = (currentCount + 1, currentSize + submission.blob.length.toLong)
+        // Track statistics update
+        val (currentCount, currentSize) = statsUpdates.getOrElse(account.id, (0, 0L))
+        val addedCount = submissionsForAccount.size
+        val addedSize = submissionsForAccount.map(_.blob.length.toLong).sum
+        statsUpdates(account.id) = (currentCount + addedCount, currentSize + addedSize)
 
         account.copy(data = AccountInfo(currentPreimages, currentLookupMeta))
     }
