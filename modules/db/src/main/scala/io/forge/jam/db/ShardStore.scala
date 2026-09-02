@@ -16,7 +16,6 @@ final class ShardStore private (
     shardsCf: ColumnFamilyHandle,
     ownedHandles: Seq[ColumnFamilyHandle]
 ) extends AutoCloseable:
-
   private def key(erasureRoot: Hash, validatorIndex: Int): Array[Byte] =
     val out = new Array[Byte](34)
     System.arraycopy(erasureRoot.bytes.toArray, 0, out, 0, 32)

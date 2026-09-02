@@ -27,6 +27,10 @@ object BandersnatchVrf:
   /** Flag to track if context has been initialized for a given ring size */
   private var initializedRingSizes: Set[Int] = Set.empty
 
+  /** Memoization for the last ring root generated, to avoid redundant native calls */
+  private var lastRingRootKey: (List[BandersnatchPublicKey], Int) = _
+  private var lastRingRootResult: Option[JamBytes] = _
+
   /**
    * Result of a successful ring VRF proof verification.
    * Contains the 32-byte ticket ID and the attempt index.
@@ -97,21 +101,31 @@ object BandersnatchVrf:
   def generateRingRoot(
     keys: List[BandersnatchPublicKey],
     ringSize: Int
-  ): Option[JamBytes] =
-    try
-      ensureInitialized(ringSize)
+  ): Option[JamBytes] = synchronized {
+    val cacheKey = (keys, ringSize)
+    if lastRingRootKey != null && lastRingRootKey == cacheKey then
+      lastRingRootResult
+    else
+      val result =
+        try
+          ensureInitialized(ringSize)
 
-      // Concatenate all public keys into a single byte array
-      val concatenatedKeys = keys.flatMap(_.bytes.toSeq).toArray
+          // Concatenate all public keys into a single byte array
+          val concatenatedKeys = keys.flatMap(_.bytes.toSeq).toArray
 
-      val commitment = JniBandersnatchWrapper.getVerifierCommitment(ringSize, concatenatedKeys)
+          val commitment = JniBandersnatchWrapper.getVerifierCommitment(ringSize, concatenatedKeys)
 
-      if commitment == null || commitment.isEmpty then
-        None
-      else
-        Some(JamBytes(commitment))
-    catch
-      case _: RuntimeException => None
+          if commitment == null || commitment.isEmpty then
+            None
+          else
+            Some(JamBytes(commitment))
+        catch
+          case _: RuntimeException => None
+      if result.isDefined then
+        lastRingRootKey = cacheKey
+        lastRingRootResult = result
+      result
+  }
 
   /**
    * Create an anonymous ring VRF proof (Safrole ticket envelope proof) for

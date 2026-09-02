@@ -237,8 +237,6 @@ object AccumulationTransition:
 
     // 10. Update statistics
     val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
-    val transferStatsPerService: Map[Long, (Long, Long)] =
-      Map.empty // TODO: compute from accumulation results
     val newStatistics = updateStatistics(
       gasUsedPerService,
       workItemsPerService,
@@ -921,13 +919,13 @@ object AccumulationTransition:
   /** Compute the Keccak Merkle root of service commitments.
     */
   private def computeCommitmentRoot(commitments: Set[Commitment]): JamBytes =
-    if commitments.isEmpty then return JamBytes(new Array[Byte](32))
+    if commitments.isEmpty then return JamBytes(new Array[Byte](Hash.Size))
 
     // Sort by service index, then by hash for deterministic ordering
     val sortedCommitments =
       commitments.toList.sortBy(c => (c.serviceIndex, c.hash))
     val nodes = sortedCommitments.map { commitment =>
-      val buffer = ByteBuffer.allocate(4 + 32).order(ByteOrder.LITTLE_ENDIAN)
+      val buffer = ByteBuffer.allocate(4 + Hash.Size).order(ByteOrder.LITTLE_ENDIAN)
       buffer.putInt(commitment.serviceIndex.toInt)
       buffer.put(commitment.hash.toArray)
       buffer.array()
@@ -940,7 +938,7 @@ object AccumulationTransition:
     */
   private def binaryMerklize(leaves: List[Array[Byte]]): Array[Byte] =
     leaves match
-      case Nil         => new Array[Byte](32)
+      case Nil         => new Array[Byte](Hash.Size)
       case head :: Nil => keccak256(head)
       case _           =>
         binaryMerklizeHelper(leaves) match
@@ -961,7 +959,7 @@ object AccumulationTransition:
     */
   private def binaryMerklizeHelper(nodes: List[Array[Byte]]): MerklizeResult =
     nodes match
-      case Nil         => MerklizeResult.Hash(new Array[Byte](32))
+      case Nil         => MerklizeResult.Hash(new Array[Byte](Hash.Size))
       case head :: Nil => MerklizeResult.Leaf(head)
       case _           =>
         val mid = (nodes.size + 1) / 2 // roundup of half
@@ -1039,21 +1037,6 @@ class AccountChanges:
         .order(ByteOrder.LITTLE_ENDIAN)
         .putInt(id.toInt)
         .array()
-      def isChapterKey(arr: Array[Byte]): Boolean =
-        var i = 1
-        while i < arr.length do
-          if arr(i) != 0 then return false
-          i += 1
-        true
-      def isAccountRecordKey(arr: Array[Byte]): Boolean =
-        if (arr(0) & 0xff) != 0xff then false
-        else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
-        else
-          var i = 8
-          while i < arr.length do
-            if arr(i) != 0 then return false
-            i += 1
-          true
       val keysToRemove = state.rawServiceDataByStateKey.keys.filter { key =>
         val arr = key.toArray
         arr.length >= 8 &&
@@ -1061,8 +1044,8 @@ class AccountChanges:
         arr(2) == serviceIdBytes(1) &&
         arr(4) == serviceIdBytes(2) &&
         arr(6) == serviceIdBytes(3) &&
-        !isChapterKey(arr) &&
-        !isAccountRecordKey(arr)
+        !StateKey.isChapterKey(arr) &&
+        !StateKey.isAccountRecordKey(arr)
       }.toList
       state.rawServiceDataByStateKey =
         state.rawServiceDataByStateKey.removedAll(keysToRemove)

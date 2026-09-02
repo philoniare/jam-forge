@@ -5,21 +5,15 @@ import _root_.scodec.bits.*
 import _root_.scodec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519Signature}
-import io.forge.jam.core.scodec.JamCodecs.compactInteger
+import io.forge.jam.core.scodec.JamCodecs.{compactInteger, hashCodec}
 import io.forge.jam.core.json.JsonHelpers.parseHex
-import io.circe.Decoder
+import io.circe.{Decoder, DecodingFailure}
 import spire.math.{UShort, UInt}
 
 /**
  * Work-related simple types
  */
 object work:
-
-  // Helper codec for Hash (32 bytes)
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
 
   // Helper codec for Ed25519Signature (64 bytes)
   private val ed25519SigCodec: Codec[Ed25519Signature] =
@@ -54,16 +48,16 @@ object work:
 
     given Decoder[PackageSpec] = Decoder.instance { cursor =>
       for
-        hash <- cursor.get[String]("hash")
+        hash <- cursor.get[Hash]("hash")
         length <- cursor.get[Long]("length")
-        erasureRoot <- cursor.get[String]("erasure_root")
-        exportsRoot <- cursor.get[String]("exports_root")
+        erasureRoot <- cursor.get[Hash]("erasure_root")
+        exportsRoot <- cursor.get[Hash]("exports_root")
         exportsCount <- cursor.get[Int]("exports_count")
       yield PackageSpec(
-        Hash(parseHex(hash)),
+        hash,
         UInt(length.toInt),
-        Hash(parseHex(erasureRoot)),
-        Hash(parseHex(exportsRoot)),
+        erasureRoot,
+        exportsRoot,
         UShort(exportsCount)
       )
     }
@@ -150,25 +144,27 @@ object work:
       val hasBadCode = cursor.downField("bad_code").succeeded
       val hasCodeTooLarge = cursor.downField("code_too_large").succeeded
 
-      Right(ok match
-        case Some(data) => ExecutionResult.Ok(JamBytes(parseHex(data)))
+      ok match
+        case Some(data) => Right(ExecutionResult.Ok(JamBytes(parseHex(data))))
         case None => err match
-            case Some(1) => ExecutionResult.OOG
-            case Some(2) => ExecutionResult.Panic
-            case Some(3) => ExecutionResult.BadExports
-            case Some(4) => ExecutionResult.Oversize
-            case Some(5) => ExecutionResult.BadCode
-            case Some(6) => ExecutionResult.CodeTooLarge
-            case Some(_) => ExecutionResult.Panic
+            case Some(1) => Right(ExecutionResult.OOG)
+            case Some(2) => Right(ExecutionResult.Panic)
+            case Some(3) => Right(ExecutionResult.BadExports)
+            case Some(4) => Right(ExecutionResult.Oversize)
+            case Some(5) => Right(ExecutionResult.BadCode)
+            case Some(6) => Right(ExecutionResult.CodeTooLarge)
+            case Some(_) => Right(ExecutionResult.Panic)
             case None =>
-              if hasOutOfGas then ExecutionResult.OOG
-              else if hasPanic then ExecutionResult.Panic
-              else if hasBadExports then ExecutionResult.BadExports
-              else if hasOutputOversize then ExecutionResult.Oversize
-              else if hasBadCode then ExecutionResult.BadCode
-              else if hasCodeTooLarge then ExecutionResult.CodeTooLarge
-              else ExecutionResult.Ok(JamBytes.empty)
-      )
+              if hasOutOfGas then Right(ExecutionResult.OOG)
+              else if hasPanic then Right(ExecutionResult.Panic)
+              else if hasBadExports then Right(ExecutionResult.BadExports)
+              else if hasOutputOversize then Right(ExecutionResult.Oversize)
+              else if hasBadCode then Right(ExecutionResult.BadCode)
+              else if hasCodeTooLarge then Right(ExecutionResult.CodeTooLarge)
+              else Left(DecodingFailure(
+                "ExecutionResult: no recognized field (expected one of ok/err/out_of_gas/panic/bad_exports/output_oversize/bad_code/code_too_large)",
+                cursor.history
+              ))
     }
 
   /**
@@ -197,6 +193,6 @@ object work:
       for
         vote <- cursor.get[Boolean]("vote")
         validatorIndex <- cursor.get[Int]("index")
-        signature <- cursor.get[String]("signature")
-      yield Vote(vote, ValidatorIndex(validatorIndex), Ed25519Signature(parseHex(signature)))
+        signature <- cursor.get[Ed25519Signature]("signature")
+      yield Vote(vote, ValidatorIndex(validatorIndex), signature)
     }

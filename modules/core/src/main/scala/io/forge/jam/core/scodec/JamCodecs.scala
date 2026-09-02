@@ -196,28 +196,6 @@ object JamCodecs:
   def fixedSizeByteVector(size: Long): Codec[ByteVector] =
     fixedSizeBytes(size, bytes)
 
-  sealed trait TicketsOrKeys
-
-  object TicketsOrKeys:
-    final case class Tickets(tickets: List[TicketMark]) extends TicketsOrKeys
-    final case class Keys(keys: List[BandersnatchPublicKey])
-        extends TicketsOrKeys
-
-  def ticketsOrKeysCodec(epochLength: Int): Codec[TicketsOrKeys] =
-    val ticketsListCodec: Codec[List[TicketMark]] =
-      fixedSizeList(ticketMarkCodec, epochLength)
-    val keysListCodec: Codec[List[BandersnatchPublicKey]] =
-      fixedSizeList(bandersnatchPublicKeyCodec, epochLength)
-
-    discriminated[TicketsOrKeys]
-      .by(byte)
-      .subcaseP(0) { case t: TicketsOrKeys.Tickets => t }(
-        ticketsListCodec.xmap(TicketsOrKeys.Tickets.apply, _.tickets)
-      )
-      .subcaseP(1) { case k: TicketsOrKeys.Keys => k }(
-        keysListCodec.xmap(TicketsOrKeys.Keys.apply, _.keys)
-      )
-
   def stfResultCodec[A, E](using
       okCodec: Codec[A],
       errCodec: Codec[E]

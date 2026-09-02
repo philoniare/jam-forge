@@ -62,6 +62,9 @@ object primitives:
       require(bv.size == Size, s"Hash must be $Size bytes, got ${bv.size}")
       new Hash(bv)
 
+    def fromByteVectorUnchecked(bv: ByteVector): Hash =
+      new Hash(bv)
+
     def fromHex(hex: String): Either[String, Hash] =
       if hex.length != Size * 2 then
         Left(s"Hex string must be ${Size * 2} characters")

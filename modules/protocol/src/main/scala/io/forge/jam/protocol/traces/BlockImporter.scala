@@ -24,6 +24,7 @@ import io.forge.jam.protocol.dispute.DisputeTypes.*
 import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.core.trie.{StateTrieStore, InMemoryTrieBackend}
+import org.slf4j.LoggerFactory
 
 sealed trait ImportResult
 
@@ -80,10 +81,14 @@ class BlockImporter(
     externalTrieStore: Option[StateTrieStore] = None,
     gcAfterImport: Boolean = true
 ):
+  private val logger = LoggerFactory.getLogger(getClass)
 
-  // Shared PVM module cache across block imports to avoid recompiling same service code
+  // Shared PVM module cache across block imports to avoid recompiling same service code.
   private val sharedExecutor =
     new io.forge.jam.protocol.accumulation.AccumulationExecutor(config)
+
+  // Re-entrancy guard for the single-threaded-per-instance contract on importBlock.
+  private val importInFlight = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   private val trieStore: StateTrieStore =
     externalTrieStore.getOrElse(new StateTrieStore(new InMemoryTrieBackend))
@@ -110,6 +115,19 @@ class BlockImporter(
       block: Block,
       preState: RawState,
       ancestry: List[AncestorHeader] = List.empty
+  ): ImportResult =
+    if !importInFlight.compareAndSet(false, true) then
+      throw new IllegalStateException(
+        "BlockImporter.importBlock invoked concurrently on the same instance; " +
+          "callers must serialize imports per instance (e.g. via synchronized)"
+      )
+    try importBlockUnguarded(block, preState, ancestry)
+    finally importInFlight.set(false)
+
+  private def importBlockUnguarded(
+      block: Block,
+      preState: RawState,
+      ancestry: List[AncestorHeader]
   ): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
@@ -190,7 +208,7 @@ class BlockImporter(
       case e: Throwable if BlockImporter.isFatalCrash(e) =>
         throw e
       case e: Throwable =>
-        e.printStackTrace()
+        logger.error("Unexpected error during block import", e)
         ImportResult.Failure(
           ImportError.UnknownError,
           Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
@@ -531,17 +549,6 @@ object InputExtractor:
       )
     )
 
-/** Encoder for converting typed state structures back to raw keyvals.
-  */
-object StateEncoder:
-  /** Encode the full FullJamState back to keyvals. This encodes all state
-    * components according to the Gray Paper state layout.
-    */
-  def encodeFullState(
-      state: FullJamState,
-      config: ChainConfig
-  ): List[KeyValue] =
-    state.toKeyvals(config)
 
 /** Companion for [[BlockImporter]]. */
 object BlockImporter:

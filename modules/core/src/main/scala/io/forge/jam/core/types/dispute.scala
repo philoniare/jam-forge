@@ -4,7 +4,6 @@ import scodec.*
 import scodec.bits.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519PublicKey, Ed25519Signature}
-import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ed25519PublicKeyCodec}
 import io.circe.Decoder
 
@@ -37,10 +36,10 @@ object dispute:
 
     given Decoder[Culprit] = Decoder.instance { cursor =>
       for
-        target <- cursor.get[String]("target")
-        key <- cursor.get[String]("key")
-        signature <- cursor.get[String]("signature")
-      yield Culprit(Hash(parseHex(target)), Ed25519PublicKey(parseHex(key)), Ed25519Signature(parseHex(signature)))
+        target <- cursor.get[Hash]("target")
+        key <- cursor.get[Ed25519PublicKey]("key")
+        signature <- cursor.get[Ed25519Signature]("signature")
+      yield Culprit(target, key, signature)
     }
 
   /**
@@ -67,11 +66,11 @@ object dispute:
 
     given Decoder[Fault] = Decoder.instance { cursor =>
       for
-        target <- cursor.get[String]("target")
+        target <- cursor.get[Hash]("target")
         vote <- cursor.get[Boolean]("vote")
-        key <- cursor.get[String]("key")
-        signature <- cursor.get[String]("signature")
-      yield Fault(Hash(parseHex(target)), vote, Ed25519PublicKey(parseHex(key)), Ed25519Signature(parseHex(signature)))
+        key <- cursor.get[Ed25519PublicKey]("key")
+        signature <- cursor.get[Ed25519Signature]("signature")
+      yield Fault(target, vote, key, signature)
     }
 
   /**
@@ -95,6 +94,6 @@ object dispute:
     given Decoder[GuaranteeSignature] = Decoder.instance { cursor =>
       for
         validatorIndex <- cursor.get[Int]("validator_index")
-        signature <- cursor.get[String]("signature")
-      yield GuaranteeSignature(ValidatorIndex(validatorIndex), Ed25519Signature(parseHex(signature)))
+        signature <- cursor.get[Ed25519Signature]("signature")
+      yield GuaranteeSignature(ValidatorIndex(validatorIndex), signature)
     }

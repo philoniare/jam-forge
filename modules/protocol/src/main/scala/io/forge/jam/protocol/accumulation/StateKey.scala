@@ -164,3 +164,28 @@ object StateKey:
 
   def isUnprovidedRequest(data: JamBytes): Boolean =
     scala.util.Try(decodePreimageInfoValue(data).isEmpty).getOrElse(false)
+
+  /**
+   * True iff `arr` is a simple chapter key C(i) = [i, 0, 0, ..., 0] — every byte
+   * after byte 0 is zero.
+   */
+  def isChapterKey(arr: Array[Byte]): Boolean =
+    var i = 1
+    while i < arr.length do
+      if arr(i) != 0 then return false
+      i += 1
+    true
+
+  /**
+   * True iff `arr` is a service-account record key C(255, t) — byte0 == 0xFF
+   * with the zero-interleave shape (bytes 2/4/6 and 8..30 all zero).
+   */
+  def isAccountRecordKey(arr: Array[Byte]): Boolean =
+    if (arr(0) & 0xff) != 0xff then false
+    else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
+    else
+      var i = 8
+      while i < arr.length do
+        if arr(i) != 0 then return false
+        i += 1
+      true

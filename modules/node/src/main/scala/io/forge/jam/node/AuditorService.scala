@@ -9,7 +9,7 @@ import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.crypto.Ed25519ZebraWrapper
+import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 import io.forge.jam.protocol.refine.{ComputeReport, WorkPackageBundle}
 import io.forge.jam.vrfs.BandersnatchWrapper
@@ -177,7 +177,7 @@ final class AuditorService(
           val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
           val signer = chain.stateView().validators.current.lift(idx)
           val genuine = signer.exists(vk =>
-            io.forge.jam.crypto.Ed25519.verify(
+            Ed25519.verify(
               vk.ed25519.bytes.toArray,
               context ++ reportHash.bytes,
               signature

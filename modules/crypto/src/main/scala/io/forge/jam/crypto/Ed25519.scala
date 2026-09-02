@@ -19,10 +19,11 @@ object Ed25519:
   // Ensure native library is loaded on first use
   private var libraryInitialized = false
 
-  private def ensureLibraryLoaded(): Unit =
+  private def ensureLibraryLoaded(): Unit = synchronized {
     if !libraryInitialized then
       Ed25519ZebraWrapper.ensureLibraryLoaded()
       libraryInitialized = true
+  }
 
   /** Size of an Ed25519 public key in bytes */
   val PublicKeySize: Int = 32

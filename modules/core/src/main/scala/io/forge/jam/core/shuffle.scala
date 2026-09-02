@@ -82,12 +82,6 @@ object Shuffle:
     result
 
   /**
-   * Compute the Q function for generating random numbers from entropy.
-   */
-  private def computeQ(entropy: Hash, length: Int): List[Int] =
-    computeQArray(entropy, length).toList
-
-  /**
    * Convert an integer to 4 bytes in little-endian format.
    */
   private def intToLeBytes(value: Int): Array[Byte] =

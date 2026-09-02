@@ -36,7 +36,7 @@ object preimage:
     given Decoder[PreimageHash] =
       Decoder.instance { cursor =>
         for
-          hash <- cursor.get[String]("hash").map(h => Hash(parseHex(h)))
+          hash <- cursor.get[Hash]("hash")
           blob <- cursor.get[String]("blob").map(b => JamBytes(parseHex(b)))
         yield PreimageHash(hash, blob)
       }

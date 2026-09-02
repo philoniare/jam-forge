@@ -112,45 +112,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_initializeCont
     }
 }
 
-// Prover actor.
-struct Prover {
-    pub prover_idx: usize,
-    pub secret: BanderSecret,
-    pub ring: Vec<BanderPublic>,
-}
-
-impl Prover {
-    pub fn new(ring: Vec<BanderPublic>, prover_idx: usize) -> Self {
-        Self {
-            prover_idx,
-            secret: BanderSecret::from_seed(&prover_idx.to_le_bytes()),
-            ring,
-        }
-    }
-
-    // pub fn ring_vrf_sign(&self, vrf_input_data: &[u8], aux_data: &[u8]) -> Vec<u8> {
-    //     use ark_ec_vrfs::ring::Prover as _;
-    //
-    //     let input = vrf_input_point(vrf_input_data);
-    //     let output = self.secret.output(input);
-    //
-    //     // Backend currently requires the wrapped type (plain affine points)
-    //     let pts: Vec<_> = self.ring.iter().map(|pk| pk.0).collect();
-    //
-    //     // Proof construction
-    //     let ring_ctx = ring_context();
-    //     let prover_key = ring_ctx.prover_key(&pts);
-    //     let prover = ring_ctx.prover(prover_key, self.prover_idx);
-    //     let proof = self.secret.prove(input, output, aux_data, &prover);
-    //
-    //     // Output and Ring Proof bundled together (as per section 2.2)
-    //     let signature = RingVrfSignature { output, proof };
-    //     let mut buf = Vec::new();
-    //     signature.serialize_compressed(&mut buf).unwrap();
-    //     buf
-    // }
-}
-
 // Verifier actor.
 struct Verifier {
     pub commitment: RingCommitment,
@@ -199,41 +160,6 @@ impl Verifier {
         output.hash()[..32]
             .try_into()
             .map_err(|_| VrfError::ConversionError)
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_createProver(
-    _env: JNIEnv,
-    _class: JClass,
-    ring_size: jint,
-    prover_key_index: jint,
-) -> jlong {
-    let ring_size = ring_size as usize;
-    let prover_key_index = prover_key_index as usize;
-
-    // Initialize the ring
-    let ring: Vec<_> = (0..ring_size)
-        .map(|i| BanderSecret::from_seed(&i.to_le_bytes()).public())
-        .collect();
-
-    // Create the Prover
-    let prover = Prover::new(ring, prover_key_index);
-
-    // Return a raw pointer to the Prover
-    Box::into_raw(Box::new(prover)) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_destroyProver(
-    _env: JNIEnv,
-    _class: JClass,
-    prover_ptr: jlong,
-) {
-    if !prover_ptr != 0 {
-        unsafe {
-            let _ = Box::from_raw(prover_ptr as *mut Prover);
-        }
     }
 }
 
@@ -331,45 +257,6 @@ fn throw_exception(mut env: JNIEnv, message: &str) -> jbyteArray {
     let _ = env.throw_new("java/lang/RuntimeException", message);
     std::ptr::null_mut()
 }
-
-// #[no_mangle]
-// pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_proverRingVrfSign(
-//     env: JNIEnv,
-//     _class: JClass,
-//     prover_ptr: jlong,
-//     vrf_input_data: JByteArray,
-//     aux_data: JByteArray,
-// ) -> jbyteArray {
-//     if prover_ptr == 0 {
-//         return throw_exception(env, "Null prover pointer");
-//     }
-//
-//     unsafe {
-//         let prover = &*(prover_ptr as *mut Prover);
-//
-//         let vrf_input_data = match env.convert_byte_array(vrf_input_data) {
-//             Ok(data) => data,
-//             Err(e) => return throw_exception(env, &format!("Failed to convert input data: {}", e)),
-//         };
-//
-//         let aux_data = match env.convert_byte_array(aux_data) {
-//             Ok(data) => data,
-//             Err(e) => return throw_exception(env, &format!("Failed to convert aux data: {}", e)),
-//         };
-//
-//         let signature = match std::panic::catch_unwind(|| {
-//             prover.ring_vrf_sign(&vrf_input_data, &aux_data)
-//         }) {
-//             Ok(sig) => sig,
-//             Err(_) => return throw_exception(env, "Panic during signature generation"),
-//         };
-//
-//         match env.byte_array_from_slice(&signature) {
-//             Ok(array) => array.into_raw(),
-//             Err(e) => throw_exception(env, &format!("Failed to create output array: {}", e)),
-//         }
-//     }
-// }
 
 /// Ring VRF sign: create an anonymous Safrole ticket proof for
 /// `jam_ticket_seal ++ entropy ++ attempt`

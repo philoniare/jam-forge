@@ -20,7 +20,7 @@ import scala.jdk.CollectionConverters.*
   *
   * Wire content uses the corresponding graypaper extrinsic-item encodings.
   */
-final class DistributionService(pools: ExtrinsicPools) extends LazyLogging:
+final class DistributionService(pools: ExtrinsicPools, coresCount: Int) extends LazyLogging:
 
   private val connections =
     java.util.concurrent.ConcurrentHashMap.newKeySet[JamnpConnection]()
@@ -65,7 +65,7 @@ final class DistributionService(pools: ExtrinsicPools) extends LazyLogging:
     (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         decodeItem[AssuranceExtrinsic](msg)(using
-          AssuranceExtrinsic.codec(coresCountForDecode)
+          AssuranceExtrinsic.codec(coresCount)
         ) match
           case Right(a) =>
             logger.debug(s"pooled assurance from validator ${a.validatorIndex.value}")
@@ -80,14 +80,11 @@ final class DistributionService(pools: ExtrinsicPools) extends LazyLogging:
     sendItem(
       conn,
       StreamKind.AssuranceDistribution,
-      AssuranceExtrinsic.codec(coresCountForDecode).encode(a).require.toByteArray
+      AssuranceExtrinsic.codec(coresCount).encode(a).require.toByteArray
     )
 
   def distributeAssuranceToAll(a: AssuranceExtrinsic): Unit =
     connections.forEach(c => if c.isOpen then distributeAssurance(c, a))
-
-  /** Cores count for the assurance bitfield codec; set at wiring time. */
-  @volatile var coresCountForDecode: Int = 2
 
   // =========================================================================
   // helpers

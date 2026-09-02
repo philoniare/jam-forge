@@ -3,19 +3,13 @@ package io.forge.jam.core.types
 import scodec.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.json.JsonHelpers.parseHex
+import io.forge.jam.core.scodec.JamCodecs.hashCodec
 import io.circe.Decoder
 
 /**
  * Service-related types.
  */
 object service:
-
-  // Helper codec for Hash (32 bytes)
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
 
   /**
    * Service info for validation.
@@ -83,7 +77,7 @@ object service:
       Decoder.instance { cursor =>
         for
           version <- cursor.getOrElse[Int]("version")(0)
-          codeHash <- cursor.get[String]("code_hash").map(h => Hash(parseHex(h)))
+          codeHash <- cursor.get[Hash]("code_hash")
           balance <- cursor.get[Long]("balance")
           minItemGas <- cursor.get[Long]("min_item_gas")
           minMemoGas <- cursor.get[Long]("min_memo_gas")

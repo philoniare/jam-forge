@@ -163,7 +163,7 @@ object StateCodec:
       case Attempt.Successful(DecodeResult(psi, _)) => psi.offenders
       case Attempt.Failure(_)                       => List.empty
 
-  /** Decodes SafroleState from keyvals.
+  /** Decodes SafroleState from keyvals
     */
   def decodeSafroleState(
       keyvals: List[KeyValue],

@@ -114,15 +114,15 @@ object extrinsic:
 
     given Decoder[AssuranceExtrinsic] = Decoder.instance { cursor =>
       for
-        anchor <- cursor.get[String]("anchor")
+        anchor <- cursor.get[Hash]("anchor")
         bitfield <- cursor.get[String]("bitfield")
         validatorIndex <- cursor.get[Int]("validator_index")
-        signature <- cursor.get[String]("signature")
+        signature <- cursor.get[Ed25519Signature]("signature")
       yield AssuranceExtrinsic(
-        Hash(parseHex(anchor)),
+        anchor,
         JamBytes(parseHex(bitfield)),
         ValidatorIndex(validatorIndex),
-        Ed25519Signature(parseHex(signature))
+        signature
       )
     }
 
@@ -157,10 +157,10 @@ object extrinsic:
 
     given Decoder[Verdict] = Decoder.instance { cursor =>
       for
-        target <- cursor.get[String]("target")
+        target <- cursor.get[Hash]("target")
         age <- cursor.get[Long]("age")
         votes <- cursor.get[List[Vote]]("votes")
-      yield Verdict(Hash(parseHex(target)), Timeslot(age.toInt), votes)
+      yield Verdict(target, Timeslot(age.toInt), votes)
     }
 
   // ============================================================================

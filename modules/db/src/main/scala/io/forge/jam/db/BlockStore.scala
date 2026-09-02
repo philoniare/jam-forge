@@ -79,6 +79,9 @@ final class BlockStore private (
   def getMeta(name: String): Option[Array[Byte]] =
     Option(db.get(metaCf, name.getBytes("UTF-8")))
 
+  def deleteMeta(name: String): Unit =
+    db.delete(metaCf, name.getBytes("UTF-8"))
+
   def setHead(name: String, hash: Hash): Unit = setMeta(name, hash.bytes.toArray)
 
   def getHead(name: String): Option[Hash] = getMeta(name).map(Hash(_))

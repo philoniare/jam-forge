@@ -257,9 +257,8 @@ class ProtocolHandler(
     val hasAncestry = (sessionFeatures & Features.ANCESTRY) != 0
     val hasForks = (sessionFeatures & Features.FORKS) != 0
 
-    // Remember negotiated flags so we can rebuild the BlockImporter on every Initialize.
+    // Remember negotiated flags so handleInitialize can build the BlockImporter
     skipAncestryValidation = !hasAncestry
-    blockImporter = new BlockImporter(config, skipAncestryValidation)
     stateStore.setForksEnabled(hasForks)
 
     val response =

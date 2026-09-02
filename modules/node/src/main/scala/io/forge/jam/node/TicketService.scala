@@ -29,6 +29,11 @@ final class TicketService(
     */
   val ownTickets = new ConcurrentHashMap[Seq[Byte], (ValidatorKeySet, UByte)]()
 
+  /** Epoch each ticket id was generated in, so stale entries can be pruned
+    * once their ticketed-sealing window has passed.
+    */
+  private val ticketEpoch = new ConcurrentHashMap[Seq[Byte], Long]()
+
   private val bsByPublic: Map[Seq[Byte], ValidatorKeySet] =
     validatorKeys.map(k => k.bandersnatchPublic.toSeq -> k).toMap
 
@@ -42,8 +47,21 @@ final class TicketService(
     synchronized {
       if epoch == generatedForEpoch then return
       generatedForEpoch = epoch
+      pruneStale(epoch)
       generate(view)
     }
+
+  /** Drop tickets generated more than one epoch ago: a ticket from epoch E is
+    * consulted for ticketed sealing in epoch E+1, so it is safe to forget by
+    * the time epoch E+2 starts
+    */
+  private def pruneStale(currentEpoch: Long): Unit =
+    val it = ticketEpoch.entrySet().iterator()
+    while it.hasNext do
+      val entry = it.next()
+      if entry.getValue < currentEpoch - 1 then
+        ownTickets.remove(entry.getKey)
+        it.remove()
 
   private def generate(view: io.forge.jam.protocol.state.TrieBackedJamState): Unit =
     val pending = view.validators.nextEpoch // γ_k: the ring for next epoch's contest
@@ -83,7 +101,9 @@ final class TicketService(
                 case Some(result) =>
                   val id = Hash(result.ticketId.toArray)
                   pools.addTicket(id, TicketEnvelope(attempt, proof))
-                  ownTickets.put(result.ticketId.toArray.toSeq, (keys, attempt))
+                  val idSeq = result.ticketId.toArray.toSeq
+                  ownTickets.put(idSeq, (keys, attempt))
+                  ticketEpoch.put(idSeq, epoch)
                   produced += 1
       }
     }

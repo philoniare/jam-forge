@@ -92,14 +92,10 @@ final class RocksDbTrieBackend private (
     deadValueCandidates.clear()
 
   def clear(): Unit =
+    val begin = new Array[Byte](32)
+    val end = Array.fill[Byte](33)(0xff.toByte)
     Seq(nodesCf, valuesCf, nodeRefsCf, valueRefsCf).foreach { cf =>
-      val it = db.newIterator(cf)
-      try
-        it.seekToFirst()
-        while it.isValid do
-          db.delete(cf, it.key())
-          it.next()
-      finally it.close()
+      db.deleteRange(cf, begin, end)
     }
     deadNodeCandidates.clear()
     deadValueCandidates.clear()

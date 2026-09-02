@@ -9,10 +9,11 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wunused:all" // Warn on unused imports, privates, locals, params, etc.
 )
 
-// Run test suites of different modules serially: the network and node suites
-// exercise real QUIC sockets, slot timing and RocksDB and flake when run
-// concurrently with the heavy protocol/conformance suites.
-Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
+val SerialIOTest = Tags.Tag("serial-io-test")
+Global / concurrentRestrictions += Tags.limit(SerialIOTest, 1)
+def serialTestSettings = Seq(
+  Test / tags := Seq(SerialIOTest -> 1)
+)
 
 // Coverage settings
 ThisBuild / coverageEnabled := false
@@ -37,6 +38,26 @@ else if (osName.contains("linux")) "so"
 else if (osName.contains("win")) "dll"
 else "dylib"
 
+val commonScalacOptions = Seq(
+  "-deprecation",
+  "-feature",
+  "-unchecked",
+  "-language:implicitConversions"
+)
+
+val commonScalacOptionsHK = commonScalacOptions :+ "-language:higherKinds"
+
+def commonSettings = Seq(
+  publish / skip := true
+)
+
+def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[String] =
+  Seq(
+    s"-Djava.library.path=$baseDir/modules/crypto/native/build/$osDirName:$baseDir/modules/crypto/src/main/resources",
+    s"-Djam.base.dir=$baseDir",
+    "--enable-native-access=ALL-UNNAMED"
+  ) ++ extra
+
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
 lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
@@ -53,14 +74,15 @@ val quicNativeClassifier = {
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)
   .settings(
+    commonSettings,
     name := "jam",
-    publish / skip := true,
     benchmark := (protocol / Test / runMain).toTask(" io.forge.jam.protocol.benchmark.TracesBenchmark").value,
     stressTest := (protocol / Test / runMain).toTask(" io.forge.jam.protocol.benchmark.StressTestApp --blocks=100000 --window=1000 --force-gc=10").value
   )
 
 lazy val core = (project in file("modules/core"))
   .settings(
+    commonSettings,
     name := "jam-core",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -73,17 +95,13 @@ lazy val core = (project in file("modules/core"))
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions"
-    )
+    scalacOptions ++= commonScalacOptions
   )
 
 lazy val crypto = (project in file("modules/crypto"))
   .dependsOn(core)
   .settings(
+    commonSettings,
     name := "jam-crypto",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -92,12 +110,7 @@ lazy val crypto = (project in file("modules/crypto"))
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions"
-    ),
+    scalacOptions ++= commonScalacOptions,
     buildNativeLib := {
       val baseDir = (ThisBuild / baseDirectory).value
       val rustProjectDir = baseDir / "modules" / "crypto" / "native" / "bandersnatch-vrfs-wrapper"
@@ -221,18 +234,16 @@ lazy val crypto = (project in file("modules/crypto"))
     Compile / compile := (Compile / compile).dependsOn(buildNativeLib, buildEd25519ZebraLib, buildErasureCodingLib).value,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
-    Test / javaOptions ++= Seq(
-      s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
-      s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
-      "--enable-native-access=ALL-UNNAMED",
-      "-Xmx4g",
-      "-XX:+HeapDumpOnOutOfMemoryError"
+    Test / javaOptions ++= nativeLibJavaOptions(
+      (ThisBuild / baseDirectory).value,
+      extra = Seq("-Xmx4g", "-XX:+HeapDumpOnOutOfMemoryError")
     )
   )
 
 lazy val pvm = (project in file("modules/pvm"))
   .dependsOn(core)
   .settings(
+    commonSettings,
     name := "jam-pvm",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -246,18 +257,13 @@ lazy val pvm = (project in file("modules/pvm"))
       "io.circe" %% "circe-generic" % "0.14.6" % Test,
       "io.circe" %% "circe-parser" % "0.14.6" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions",
-      "-language:higherKinds"
-    )
+    scalacOptions ++= commonScalacOptionsHK
   )
 
 lazy val protocol = (project in file("modules/protocol"))
   .dependsOn(core, crypto, pvm)
   .settings(
+    commonSettings,
     name := "jam-protocol",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -274,25 +280,17 @@ lazy val protocol = (project in file("modules/protocol"))
       "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
       "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions",
-      "-language:higherKinds"
-    ),
+    scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
-    Test / javaOptions ++= Seq(
-      s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
-      s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
-      "--enable-native-access=ALL-UNNAMED"
-    )
+    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value)
   )
 
 lazy val db = (project in file("modules/db"))
   .dependsOn(core)
   .settings(
+    commonSettings,
+    serialTestSettings,
     name := "jam-db",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -301,12 +299,7 @@ lazy val db = (project in file("modules/db"))
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions"
-    ),
+    scalacOptions ++= commonScalacOptions,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value
   )
@@ -314,6 +307,8 @@ lazy val db = (project in file("modules/db"))
 lazy val network = (project in file("modules/network"))
   .dependsOn(core, crypto)
   .settings(
+    commonSettings,
+    serialTestSettings,
     name := "jam-network",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -330,13 +325,7 @@ lazy val network = (project in file("modules/network"))
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions",
-      "-language:higherKinds"
-    ),
+    scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value
   )
@@ -344,6 +333,8 @@ lazy val network = (project in file("modules/network"))
 lazy val node = (project in file("modules/node"))
   .dependsOn(core, crypto, protocol, network, db)
   .settings(
+    commonSettings,
+    serialTestSettings,
     name := "jam-node",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -354,26 +345,31 @@ lazy val node = (project in file("modules/node"))
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions",
-      "-language:higherKinds"
-    ),
+    scalacOptions ++= commonScalacOptionsHK,
     Compile / mainClass := Some("io.forge.jam.node.Main"),
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
-    Test / javaOptions ++= Seq(
-      s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
-      s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
-      "--enable-native-access=ALL-UNNAMED"
-    )
+    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value),
+    assembly / mainClass := Some("io.forge.jam.node.Main"),
+    assembly / assemblyJarName := "jam-node.jar",
+    assembly / assemblyMergeStrategy := {
+      // Discard signature files from signed JARs (e.g., Bouncy Castle)
+      case x if x.endsWith(".SF") => MergeStrategy.discard
+      case x if x.endsWith(".DSA") => MergeStrategy.discard
+      case x if x.endsWith(".RSA") => MergeStrategy.discard
+      case PathList("META-INF", "versions", _*) => MergeStrategy.first
+      case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
+      case PathList("META-INF", _*) => MergeStrategy.first
+      case "module-info.class" => MergeStrategy.discard
+      case x if x.endsWith(".class") => MergeStrategy.first
+      case _ => MergeStrategy.first
+    }
   )
 
 lazy val conformance = (project in file("modules/conformance"))
   .dependsOn(core, crypto, protocol)
   .settings(
+    commonSettings,
     name := "jam-conformance",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
@@ -391,21 +387,11 @@ lazy val conformance = (project in file("modules/conformance"))
       "org.crac" % "crac" % "1.4.0",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test
     ),
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-unchecked",
-      "-language:implicitConversions",
-      "-language:higherKinds"
-    ),
+    scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
     Test / envVars ++= sys.env.get("LOG_LEVEL").map("LOG_LEVEL" -> _).toMap,
-    Test / javaOptions ++= Seq(
-      s"-Djava.library.path=${(ThisBuild / baseDirectory).value}/modules/crypto/native/build/$osDirName:${(ThisBuild / baseDirectory).value}/modules/crypto/src/main/resources",
-      s"-Djam.base.dir=${(ThisBuild / baseDirectory).value}",
-      "--enable-native-access=ALL-UNNAMED"
-    ),
+    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value),
     // Assembly settings for creating fat JAR
     assembly / mainClass := Some("io.forge.jam.conformance.ConformanceServerApp"),
     assembly / assemblyJarName := "jam-conformance.jar",
