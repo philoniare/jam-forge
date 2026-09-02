@@ -26,7 +26,9 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
   // Track which header hashes are "original" blocks (not mutations/forks)
   private val originalBlocks: mutable.Set[Hash] = mutable.Set.empty
 
-  // Per-block parentage: headerHash -> (parentHash, slot)
+  // Per-block parentage: headerHash -> (parentHash, slot). Used to derive a
+  // per-chain ancestry by walking parent links, instead of a single global
+  // ancestry list that fork mutations would pollute.
   private val parentage: mutable.Map[Hash, (Hash, Timeslot)] =
     mutable.Map.empty
 
@@ -34,7 +36,8 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
   private val insertionOrder: mutable.ArrayBuffer[Hash] =
     mutable.ArrayBuffer.empty
 
-  // Current ancestry list (from Initialize message)
+  // Current ancestry list (from Initialize message). Seeds the pre-session
+  // segment that predates any block imported into this store.
   private var ancestry: List[AncestryItem] = List.empty
 
   // Maximum ancestry length = lookup-anchor window L (24 TINY / 14400 FULL).
@@ -123,7 +126,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       for hash <- toRemoveHashes do
         states.remove(hash)
         originalBlocks.remove(hash)
-        
+
       // Compact insertion order: remove entries no longer in states
       val stateKeys = states.keySet
       val newOrder = insertionOrder.filter(stateKeys.contains)
@@ -170,14 +173,13 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       originalBlocks.contains(headerHash)
     }
 
-  /** Get the current ancestry list.
+  /** Derive the ancestry for a block whose parent is `parentHash`, per-chain.
+    *
+    * Walks the recorded parent links from `parentHash` toward genesis,
+    * collecting `(headerHash, slot)` for every known imported ancestor, then
+    * appends the Initialize-supplied ancestry for the pre-session segment. The
+    * result is sorted newest-first by slot and trimmed to `maxAncestryLength`.
     */
-  def getAncestry: List[AncestryItem] =
-    synchronized {
-      ancestry
-    }
-
-  /** Derive the ancestry for a block whose parent is `parentHash`, per-chain */
   def ancestryFor(parentHash: Hash): List[AncestryItem] =
     synchronized {
       val acc = mutable.ListBuffer[AncestryItem]()
@@ -192,6 +194,8 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
             current = nextParent
           case _ =>
             continue = false
+      // Append the Initialize-supplied pre-session ancestry, skipping any
+      // header already captured by walking parent links.
       ancestry.foreach(item =>
         if !seen.contains(item.headerHash) then
           acc += item
@@ -202,20 +206,6 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
         .take(maxAncestryLength)
     }
 
-  /** Update ancestry with a new block. Adds the new item at the front and trims
-    * to max length.
-    */
-  def addToAncestry(item: AncestryItem): Unit =
-    synchronized {
-      ancestry = (item :: ancestry).take(maxAncestryLength)
-    }
-
-  /** Check if a header hash is in the current ancestry.
-    */
-  def isInAncestry(headerHash: Hash): Boolean =
-    synchronized {
-      ancestry.exists(_.headerHash == headerHash)
-    }
 
   /** Get the number of stored states.
     */

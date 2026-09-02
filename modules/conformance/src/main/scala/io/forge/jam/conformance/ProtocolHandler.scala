@@ -308,38 +308,7 @@ class ProtocolHandler(
   ): IO[Unit] =
     (IO
       .blocking {
-        val block = importBlock.block
-        val parentHash = block.header.parent
-
-        // Look up parent state
-        stateStore.get(parentHash) match
-            case None =>
-              Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
-            case Some(parentState) =>
-              val ancestry = stateStore.ancestryFor(parentHash).map(a =>
-                AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
-              )
-              // Import block using existing BlockImporter
-              blockImporter.importBlock(block, parentState, ancestry) match
-                case ImportResult.Success(postStateRoot, _) =>
-                  // Compute header hash for this block
-                  val headerBytes = block.header.encode
-                  val headerHash = Hashing.blake2b256(headerBytes)
-
-                  val postState = blockImporter.materializePostState(config)
-
-                  val isOriginal = stateStore.isOriginalBlock(parentHash)
-                  stateStore.store(
-                    headerHash,
-                    postState,
-                    isOriginal,
-                    Some((parentHash, block.header.slot))
-                  )
-
-                  Right(postStateRoot)
-
-                case ImportResult.Failure(error, message) =>
-                  Left(s"Import failed: $error - $message")
+        ImportBlockStep(stateStore, blockImporter, config, importBlock.block)
       }
       .flatMap {
         case Right(stateRoot) =>
