@@ -47,6 +47,79 @@ final class BasicMemory private (
   private var cachedRegionEnd: Int = 0
   private var cachedRegionArray: Array[Byte] = null
   private var cachedRegionOffset: Int = 0
+  private val pageShift: Int = java.lang.Integer.numberOfTrailingZeros(memoryMap.pageSize.signed)
+  private var rdWinStart: Long = Long.MaxValue
+  private var rdWinEnd: Long = 0L
+  private var rdWinArr: Array[Byte] = null
+  private var rdWinOff: Int = 0
+  private var rdWinVer: Int = Int.MinValue
+  private var rdWin2Start: Long = Long.MaxValue
+  private var rdWin2End: Long = 0L
+  private var rdWin2Arr: Array[Byte] = null
+  private var rdWin2Off: Int = 0
+  private var rdWin2Ver: Int = Int.MinValue
+
+  private var wrWinStart: Long = Long.MaxValue
+  private var wrWinEnd: Long = 0L
+  private var wrWinArr: Array[Byte] = null
+  private var wrWinOff: Int = 0
+  private var wrWinVer: Int = Int.MinValue
+  private var wrWin2Start: Long = Long.MaxValue
+  private var wrWin2End: Long = 0L
+  private var wrWin2Arr: Array[Byte] = null
+  private var wrWin2Off: Int = 0
+  private var wrWin2Ver: Int = Int.MinValue
+
+  private def invalidateWindows(): Unit =
+    rdWinStart = Long.MaxValue; rdWinEnd = 0L; rdWinArr = null; rdWinVer = Int.MinValue
+    rdWin2Start = Long.MaxValue; rdWin2End = 0L; rdWin2Arr = null; rdWin2Ver = Int.MinValue
+    wrWinStart = Long.MaxValue; wrWinEnd = 0L; wrWinArr = null; wrWinVer = Int.MinValue
+    wrWin2Start = Long.MaxValue; wrWin2End = 0L; wrWin2Arr = null; wrWin2Ver = Int.MinValue
+
+  /** Swap primary and secondary read windows (secondary hit -> promote). */
+  private def swapReadWindows(): Unit =
+    val s0 = rdWinStart; val e0 = rdWinEnd; val a0 = rdWinArr; val o0 = rdWinOff; val v0 = rdWinVer
+    rdWinStart = rdWin2Start; rdWinEnd = rdWin2End; rdWinArr = rdWin2Arr; rdWinOff = rdWin2Off; rdWinVer = rdWin2Ver
+    rdWin2Start = s0; rdWin2End = e0; rdWin2Arr = a0; rdWin2Off = o0; rdWin2Ver = v0
+
+  /** Swap primary and secondary write windows (secondary hit -> promote). */
+  private def swapWriteWindows(): Unit =
+    val s0 = wrWinStart; val e0 = wrWinEnd; val a0 = wrWinArr; val o0 = wrWinOff; val v0 = wrWinVer
+    wrWinStart = wrWin2Start; wrWinEnd = wrWin2End; wrWinArr = wrWin2Arr; wrWinOff = wrWin2Off; wrWinVer = wrWin2Ver
+    wrWin2Start = s0; wrWin2End = e0; wrWin2Arr = a0; wrWin2Off = o0; wrWin2Ver = v0
+
+  /** Fill the read or write window around `addr`. Preconditions: the permission
+    * check for [addr, addr+width) just passed AND findRegionBulk /
+    * findWritableRegionBulk just succeeded (so the cachedRegion* fields describe
+    * the containing region). Never widens beyond what those checks guarantee.
+    */
+  private def fillWindow(addr: Int, writable: Boolean): Unit =
+    if cachedRegionId == 0 then return
+    val run = _pageMap.accessibleRun(addr >>> pageShift, writable)
+    val runStartAddr = (run >>> 32) << pageShift
+    val runEndAddr = (run & 0xffffffffL) << pageShift
+    if runEndAddr <= runStartAddr then return
+
+    val regStart = cachedRegionStart.toLong & 0xffffffffL
+    val regEnd = cachedRegionEnd.toLong & 0xffffffffL
+    // Address just past the last byte the backing array can serve for this region
+    val arrEnd = regStart - cachedRegionOffset + cachedRegionArray.length
+    val s = math.max(regStart, runStartAddr)
+    val e = math.min(math.min(regEnd, arrEnd), runEndAddr)
+    if e <= s then return
+
+    if writable then
+      swapWriteWindows() // demote old primary to slot 2
+      wrWinStart = s; wrWinEnd = e
+      wrWinArr = cachedRegionArray
+      wrWinOff = (s - regStart).toInt + cachedRegionOffset
+      wrWinVer = _pageMap.version
+    else
+      swapReadWindows() // demote old primary to slot 2
+      rdWinStart = s; rdWinEnd = e
+      rdWinArr = cachedRegionArray
+      rdWinOff = (s - regStart).toInt + cachedRegionOffset
+      rdWinVer = _pageMap.version
 
   /** Loaded value for the most recent successful fast load. Holds any 64-bit pattern. */
   private var _fastValue: Long = 0L
@@ -64,14 +137,43 @@ final class BasicMemory private (
    * Allocation-free unsigned load
    */
   def loadUnsignedFast(address: Int, width: Int): Int =
+    val ua64 = address.toLong & 0xffffffffL
+    val pmVer = _pageMap.version
+    var winHit = rdWinVer == pmVer && ua64 >= rdWinStart && ua64 + width <= rdWinEnd
+    if !winHit && rdWin2Ver == pmVer && ua64 >= rdWin2Start && ua64 + width <= rdWin2End then
+      swapReadWindows()
+      winHit = true
+    if winHit then
+      val arr = rdWinArr
+      val offset = (ua64 - rdWinStart).toInt + rdWinOff
+      val v: Long = width match
+        case 1 => arr(offset) & 0xffL
+        case 2 =>
+          val lo = arr(offset) & 0xff
+          val hi = arr(offset + 1) & 0xff
+          ((hi << 8) | lo).toLong & 0xffffL
+        case 4 =>
+          val b0 = arr(offset) & 0xff
+          val b1 = arr(offset + 1) & 0xff
+          val b2 = arr(offset + 2) & 0xff
+          val b3 = arr(offset + 3) & 0xff
+          ((b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).toLong) & 0xffffffffL
+        case _ =>
+          ByteBuffer.wrap(arr, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong()
+      _fastValue = v
+      return BasicMemory.FastOk
+
     val ua = UInt(address)
     if !_pageMap.isReadableFast(ua, width) then
       _fastFaultPage = _pageMap.alignToPageStart(_pageMap.lastFailPageAddress)
       return BasicMemory.FastSegfault
 
     // Page check passed: read the bytes from the backing region.
-    findRegionBulk(address, width) match
-      case Some((arr, offset)) =>
+    val bulkOffset = findRegionBulk(address, width)
+    if bulkOffset >= 0 then
+        val arr = _bulkArr
+        val offset = bulkOffset
+        fillWindow(address, writable = false)
         val v: Long = width match
           case 1 => (arr(offset) & 0xffL)
           case 2 =>
@@ -88,7 +190,7 @@ final class BasicMemory private (
             ByteBuffer.wrap(arr, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong()
         _fastValue = v
         BasicMemory.FastOk
-      case None =>
+    else
         // Fall back to byte-by-byte (identical to the MemoryResult fallback).
         readBytesInt(address, width) match
           case Some(bytes) =>
@@ -105,20 +207,39 @@ final class BasicMemory private (
    * Allocation-free store of the low `width` bytes of `value` (little-endian)
    */
   def storeFast(address: Int, value: Long, width: Int): Int =
+    val ua64 = address.toLong & 0xffffffffL
+    val pmVer = _pageMap.version
+    var winHit = wrWinVer == pmVer && ua64 >= wrWinStart && ua64 + width <= wrWinEnd
+    if !winHit && wrWin2Ver == pmVer && ua64 >= wrWin2Start && ua64 + width <= wrWin2End then
+      swapWriteWindows()
+      winHit = true
+    if winHit then
+      val arr = wrWinArr
+      val offset = (ua64 - wrWinStart).toInt + wrWinOff
+      var i = 0
+      while i < width do
+        arr(offset + i) = ((value >> (i * 8)) & 0xff).toByte
+        i += 1
+      isDirty = true
+      return BasicMemory.FastOk
+
     val ua = UInt(address)
     if !_pageMap.isWritableFast(ua, width) then
       _fastFaultPage = _pageMap.alignToPageStart(_pageMap.lastFailPageAddress)
       return BasicMemory.FastSegfault
 
-    findWritableRegionBulk(address, width) match
-      case Some((arr, offset)) =>
+    val bulkOffset = findWritableRegionBulk(address, width)
+    if bulkOffset >= 0 then
+        val arr = _bulkArr
+        val offset = bulkOffset
+        fillWindow(address, writable = true)
         var i = 0
         while i < width do
           arr(offset + i) = ((value >> (i * 8)) & 0xff).toByte
           i += 1
         isDirty = true
         BasicMemory.FastOk
-      case None =>
+    else
         // Fall back to byte-by-byte using a pooled scratch array.
         val bytes =
           if width <= 4 then BasicMemory.pool4.get()
@@ -151,12 +272,14 @@ final class BasicMemory private (
       case None =>
         val addr = address.signed
         // Try optimized bulk read if within single region
-        findRegionBulk(addr, 2) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findRegionBulk(addr, 2)
+        if bulkOffset >= 0 then
+            val arr = _bulkArr
+            val offset = bulkOffset
             val lo = arr(offset) & 0xff
             val hi = arr(offset + 1) & 0xff
             MemoryResult.Success(UShort(((hi << 8) | lo).toShort))
-          case None =>
+        else
             // Fall back to byte-by-byte
             val b0 = readByteInt(addr)
             val b1 = readByteInt(addr + 1)
@@ -172,8 +295,10 @@ final class BasicMemory private (
       case None =>
         val addr = address.signed
         // Try optimized bulk read if within single region
-        findRegionBulk(addr, 4) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findRegionBulk(addr, 4)
+        if bulkOffset >= 0 then
+            val arr = _bulkArr
+            val offset = bulkOffset
             // Direct byte extraction (little-endian)
             val b0 = arr(offset) & 0xff
             val b1 = arr(offset + 1) & 0xff
@@ -181,7 +306,7 @@ final class BasicMemory private (
             val b3 = arr(offset + 3) & 0xff
             val value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
             MemoryResult.Success(UInt(value))
-          case None =>
+        else
             // Fall back to byte-by-byte
             readBytesInt(addr, 4) match
               case Some(arr) =>
@@ -198,14 +323,14 @@ final class BasicMemory private (
       case None =>
         val addr = address.signed
         // Try optimized bulk read if within single region
-        findRegionBulk(addr, 8) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findRegionBulk(addr, 8)
+        if bulkOffset >= 0 then
             // Use ByteBuffer for efficient little-endian long read
-            val value = ByteBuffer.wrap(arr, offset, 8)
+            val value = ByteBuffer.wrap(_bulkArr, bulkOffset, 8)
               .order(ByteOrder.LITTLE_ENDIAN)
               .getLong()
             MemoryResult.Success(ULong(value))
-          case None =>
+        else
             // Fall back to byte-by-byte
             readBytesInt(addr, 8) match
               case Some(arr) =>
@@ -238,13 +363,15 @@ final class BasicMemory private (
         val addr = address.signed
         val v = value.toInt
         // Try optimized bulk write if within single region
-        findWritableRegionBulk(addr, 2) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findWritableRegionBulk(addr, 2)
+        if bulkOffset >= 0 then
+            val arr = _bulkArr
+            val offset = bulkOffset
             arr(offset) = (v & 0xff).toByte
             arr(offset + 1) = ((v >> 8) & 0xff).toByte
             isDirty = true
             MemoryResult.Success(())
-          case None =>
+        else
             // Fall back to byte-by-byte
             val ok1 = writeByteInt(addr, (v & 0xff).toByte)
             val ok2 = writeByteInt(addr + 1, ((v >> 8) & 0xff).toByte)
@@ -261,8 +388,10 @@ final class BasicMemory private (
         val addr = address.signed
         val v = value.signed
         // Try optimized bulk write if within single region
-        findWritableRegionBulk(addr, 4) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findWritableRegionBulk(addr, 4)
+        if bulkOffset >= 0 then
+            val arr = _bulkArr
+            val offset = bulkOffset
             // Direct byte write (little-endian)
             arr(offset) = (v & 0xff).toByte
             arr(offset + 1) = ((v >> 8) & 0xff).toByte
@@ -270,7 +399,7 @@ final class BasicMemory private (
             arr(offset + 3) = ((v >> 24) & 0xff).toByte
             isDirty = true
             MemoryResult.Success(())
-          case None =>
+        else
             // Fall back to byte-by-byte using pooled array
             val bytes = BasicMemory.pool4.get()
             bytes(0) = (v & 0xff).toByte
@@ -290,15 +419,15 @@ final class BasicMemory private (
         val addr = address.signed
         val v = value.signed
         // Try optimized bulk write if within single region
-        findWritableRegionBulk(addr, 8) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findWritableRegionBulk(addr, 8)
+        if bulkOffset >= 0 then
             // Use ByteBuffer for efficient little-endian long write
-            ByteBuffer.wrap(arr, offset, 8)
+            ByteBuffer.wrap(_bulkArr, bulkOffset, 8)
               .order(ByteOrder.LITTLE_ENDIAN)
               .putLong(v)
             isDirty = true
             MemoryResult.Success(())
-          case None =>
+        else
             // Fall back to byte-by-byte using pooled array
             val bytes = BasicMemory.pool8.get()
             var i = 0
@@ -323,13 +452,13 @@ final class BasicMemory private (
       case None =>
         val addr = address.signed
         // Try optimized bulk read if within single region
-        findRegionBulk(addr, length) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findRegionBulk(addr, length)
+        if bulkOffset >= 0 then
             // Direct array copy
             val result = new Array[Byte](length)
-            System.arraycopy(arr, offset, result, 0, length)
+            System.arraycopy(_bulkArr, bulkOffset, result, 0, length)
             MemoryResult.Success(result)
-          case None =>
+        else
             // Fall back to byte-by-byte
             readBytesInt(addr, length) match
               case Some(arr) => MemoryResult.Success(arr)
@@ -342,11 +471,11 @@ final class BasicMemory private (
       case Some(err) => err
       case None =>
         val addr = address.signed
-        findRegionBulk(addr, length) match
-          case Some((arr, offset)) =>
-            System.arraycopy(arr, offset, dest, destOffset, length)
+        val bulkOffset = findRegionBulk(addr, length)
+        if bulkOffset >= 0 then
+            System.arraycopy(_bulkArr, bulkOffset, dest, destOffset, length)
             MemoryResult.Success(())
-          case None =>
+        else
             var i = 0
             while i < length do
               readByteInt(addr + i) match
@@ -363,13 +492,13 @@ final class BasicMemory private (
       case None =>
         val addr = address.signed
         // Try optimized bulk write if within single region
-        findWritableRegionBulk(addr, data.length) match
-          case Some((arr, offset)) =>
+        val bulkOffset = findWritableRegionBulk(addr, data.length)
+        if bulkOffset >= 0 then
             // Direct array copy
-            System.arraycopy(data, 0, arr, offset, data.length)
+            System.arraycopy(data, 0, _bulkArr, bulkOffset, data.length)
             isDirty = true
             MemoryResult.Success(())
-          case None =>
+        else
             // Fall back to byte-by-byte
             if writeBytesInt(addr, data) then
               isDirty = true
@@ -402,6 +531,7 @@ final class BasicMemory private (
     // Invalidate region cache when heap size changes
     if cachedRegionId == 2 then
       cachedRegionId = 0
+    invalidateWindows()
 
     // Ensure rwData buffer is large enough for the new heap size
     // The heap lives in the rwData buffer starting at heapBase relative to rwDataAddress
@@ -426,35 +556,40 @@ final class BasicMemory private (
   // ============================================================================
   // Internal Helpers - Optimized with region caching
   // ============================================================================
+  private var _bulkArr: Array[Byte] = null
 
   /**
    * Finds the backing array and offset for a bulk read operation.
-   * Returns None if the range spans multiple regions or is out of bounds.
+   * Returns the offset into `_bulkArr`, or -1 if the range spans multiple
+   * regions or is out of bounds.
    */
-  private def findRegionBulk(addr: Int, length: Int): Option[(Array[Byte], Int)] =
+  private def findRegionBulk(addr: Int, length: Int): Int =
     val endAddr = addr + length - 1
 
     // Fast path: check cached region first
     if cachedRegionId != 0 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
       val offset = addr - cachedRegionStart + cachedRegionOffset
       if offset >= 0 && offset + length <= cachedRegionArray.length then
-        return Some((cachedRegionArray, offset))
+        _bulkArr = cachedRegionArray
+        return offset
 
     // Slow path: find and cache the region
     findAndCacheRegion(addr, endAddr)
 
   /**
    * Finds the backing array and offset for a bulk write operation.
-   * Returns None if the range spans multiple regions, is out of bounds, or is read-only.
+   * Returns the offset into `_bulkArr`, or -1 if the range spans multiple
+   * regions, is out of bounds, or is read-only.
    */
-  private def findWritableRegionBulk(addr: Int, length: Int): Option[(Array[Byte], Int)] =
+  private def findWritableRegionBulk(addr: Int, length: Int): Int =
     val endAddr = addr + length - 1
 
     // Fast path: check cached region first (excluding RO region)
     if cachedRegionId > 1 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
       val offset = addr - cachedRegionStart + cachedRegionOffset
       if offset >= 0 && offset + length <= cachedRegionArray.length then
-        return Some((cachedRegionArray, offset))
+        _bulkArr = cachedRegionArray
+        return offset
 
     // Slow path: find writable region
     findAndCacheWritableRegion(addr, endAddr)
@@ -462,7 +597,7 @@ final class BasicMemory private (
   /**
    * Finds a region containing the address range and caches it.
    */
-  private def findAndCacheRegion(addr: Int, endAddr: Int): Option[(Array[Byte], Int)] =
+  private def findAndCacheRegion(addr: Int, endAddr: Int): Int =
     // Check RO data region
     val roEnd = roStart + roData.length
     if addr >= roStart && endAddr < roEnd then
@@ -472,10 +607,11 @@ final class BasicMemory private (
       cachedRegionEnd = roEnd
       cachedRegionArray = roData
       cachedRegionOffset = 0
-      return Some((roData, offset))
+      _bulkArr = roData
+      return offset
     else if addr >= roStart && addr < (roStart + roRegionSize) then
       // Within RO region but may extend past actual data - can't use bulk
-      return None
+      return -1
 
     // Check RW data + heap region
     val heapEndAddr = heapBaseInt + _heapSize.signed
@@ -488,9 +624,10 @@ final class BasicMemory private (
         cachedRegionEnd = rwEnd
         cachedRegionArray = rwData
         cachedRegionOffset = 0
-        return Some((rwData, offset))
+        _bulkArr = rwData
+      return offset
       else
-        return None // Beyond buffer
+        return -1 // Beyond buffer
 
     // Check stack region
     if addr >= stackLow && endAddr < stackHigh then
@@ -501,9 +638,10 @@ final class BasicMemory private (
         cachedRegionEnd = stackHigh
         cachedRegionArray = stack
         cachedRegionOffset = 0
-        return Some((stack, offset))
+        _bulkArr = stack
+      return offset
       else
-        return None
+        return -1
 
     // Check aux data region
     val auxEnd = auxStart + aux.length
@@ -514,14 +652,15 @@ final class BasicMemory private (
       cachedRegionEnd = auxEnd
       cachedRegionArray = aux
       cachedRegionOffset = 0
-      return Some((aux, offset))
+      _bulkArr = aux
+      return offset
 
-    None
+    -1
 
   /**
    * Finds a writable region containing the address range.
    */
-  private def findAndCacheWritableRegion(addr: Int, endAddr: Int): Option[(Array[Byte], Int)] =
+  private def findAndCacheWritableRegion(addr: Int, endAddr: Int): Int =
     // Check RW data + heap region
     val heapEndAddr = heapBaseInt + _heapSize.signed
     val rwEnd = math.max(rwStart + rwRegionSize, heapEndAddr)
@@ -533,9 +672,10 @@ final class BasicMemory private (
         cachedRegionEnd = rwEnd
         cachedRegionArray = rwData
         cachedRegionOffset = 0
-        return Some((rwData, offset))
+        _bulkArr = rwData
+      return offset
       else
-        return None
+        return -1
 
     // Check stack region
     if addr >= stackLow && endAddr < stackHigh then
@@ -546,9 +686,10 @@ final class BasicMemory private (
         cachedRegionEnd = stackHigh
         cachedRegionArray = stack
         cachedRegionOffset = 0
-        return Some((stack, offset))
+        _bulkArr = stack
+      return offset
       else
-        return None
+        return -1
 
     // Check aux data region (GP stack portion only)
     if addr >= gpStackLowInt && endAddr < gpStackBaseInt then
@@ -559,9 +700,10 @@ final class BasicMemory private (
         cachedRegionEnd = gpStackBaseInt
         cachedRegionArray = aux
         cachedRegionOffset = gpStackLowInt - auxStart
-        return Some((aux, offset))
+        _bulkArr = aux
+      return offset
 
-    None
+    -1
 
   /**
    * Reads a single byte from the appropriate region.
@@ -742,7 +884,8 @@ final class BasicMemory private (
     true
 
   /**
-   * Writes the first `length` bytes of `data` to memory. Short-circuits on the first failing byte, matching
+   * Writes the first `length` bytes of `data` to memory. 
+   * Short-circuits on the first failing byte, matching
    * `writeBytesInt`.
    */
   private def writeBytesIntRange(addr: Int, data: Array[Byte], length: Int): Boolean =
@@ -777,6 +920,7 @@ final class BasicMemory private (
     // Invalidate cache if it was pointing to roData
     if cachedRegionId == 1 then
       cachedRegionId = 0
+    invalidateWindows()
 
 object BasicMemory:
   // Status sentinels for the allocation-free fast-path load/store API.

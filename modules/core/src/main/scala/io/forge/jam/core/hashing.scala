@@ -26,7 +26,8 @@ object Hashing:
    * @return The 32-byte hash as Hash type
    */
   def blake2b256(data: JamBytes): Hash =
-    blake2b256(data.toArray)
+    val arr = data.toArrayUnsafe
+    blake2b256(arr, 0, arr.length)
 
   /**
    * Compute Blake2b-256 hash of the given data.
@@ -61,7 +62,7 @@ object Hashing:
    */
   @targetName("blake2b256ByteVector")
   def blake2b256(data: ByteVector): Hash =
-    val arr = data.toArray
+    val arr = data.toArrayUnsafe // PERF-B2: digest only reads
     val digest = blake2bLocal.get()
     digest.reset()
     digest.update(arr, 0, arr.length)
@@ -76,7 +77,8 @@ object Hashing:
    * @return The 32-byte hash as Hash type
    */
   def keccak256(data: JamBytes): Hash =
-    keccak256(data.toArray)
+    val arr = data.toArrayUnsafe // PERF-B2: digest only reads
+    keccak256(arr)
 
   /**
    * Compute Keccak-256 hash of the given data.
