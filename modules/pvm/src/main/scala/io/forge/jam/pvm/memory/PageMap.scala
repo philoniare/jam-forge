@@ -36,6 +36,9 @@ final class PageMap(val pageSize: UInt):
   private var writableBits: Array[Long] = Array.empty
   private var maxPageIndex: UInt = UInt(0)
   private var _lastFailPageIndex: Int = 0
+  private var _version: Int = 0
+  def version: Int = _version
+
   def lastFailPageAddress: UInt = UInt(_lastFailPageIndex << pageSizeShift)
 
   /**
@@ -97,6 +100,7 @@ final class PageMap(val pageSize: UInt):
    * Sets access for a single page.
    */
   def setPageAccess(pageIndex: UInt, access: PageAccess): Unit =
+    _version += 1
     ensureCapacity(pageIndex)
     val wordIndex = pageIndex.signed / 64
     val bitIndex = pageIndex.signed % 64
@@ -114,6 +118,7 @@ final class PageMap(val pageSize: UInt):
    * Removes all access from a single page.
    */
   def removePageAccess(pageIndex: UInt): Unit =
+    _version += 1
     val wordIndex = pageIndex.signed / 64
     if wordIndex < readableBits.length then
       val bitIndex = pageIndex.signed % 64
@@ -126,6 +131,7 @@ final class PageMap(val pageSize: UInt):
    */
   def setPageAccessRange(startIndex: UInt, pages: Int, access: PageAccess): Unit =
     if pages <= 0 then return
+    _version += 1
 
     val endPage = UInt(startIndex.signed + pages - 1)
     ensureCapacity(endPage)
@@ -209,7 +215,7 @@ final class PageMap(val pageSize: UInt):
       checkPagesInRangeFast(startPageIndex, pages, readableBits)
 
   /**
-   * Allocation-free writability check
+   * Allocation-free writability check. See `isReadableFast`.
    */
   def isWritableFast(address: UInt, length: Int): Boolean =
     if length == 0 then true
@@ -327,12 +333,34 @@ final class PageMap(val pageSize: UInt):
    */
   def removeAccessPages(pageIndex: UInt, pages: Int): Unit =
     if pages <= 0 then return
+    _version += 1
 
     modifyBitsInRangeImpl(pageIndex, pages) { (wordIndex, shiftedMask) =>
       if wordIndex < readableBits.length then
         readableBits(wordIndex) = readableBits(wordIndex) & ~shiftedMask
         writableBits(wordIndex) = writableBits(wordIndex) & ~shiftedMask
     }
+
+  def accessibleRun(pageIndex: Int, writable: Boolean): Long =
+    val bits = if writable then writableBits else readableBits
+    inline def isSet(p: Int): Boolean =
+      val w = p >>> 6
+      w < bits.length && (bits(w) & (1L << (p & 63))) != 0L
+
+    if pageIndex < 0 || !isSet(pageIndex) then
+      return (pageIndex.toLong << 32) | (pageIndex.toLong & 0xffffffffL)
+
+    val MaxRunScanPages = 1 << 16 // 64Ki pages = 256 MiB window cap
+    var lo = pageIndex
+    var scanned = 0
+    while lo > 0 && scanned < MaxRunScanPages && isSet(lo - 1) do
+      lo -= 1; scanned += 1
+    var hi = pageIndex + 1
+    val pageLimit = bits.length << 6
+    scanned = 0
+    while hi < pageLimit && scanned < MaxRunScanPages && isSet(hi) do
+      hi += 1; scanned += 1
+    (lo.toLong << 32) | (hi.toLong & 0xffffffffL)
 
   /**
    * Aligns an address to the start of its containing page.

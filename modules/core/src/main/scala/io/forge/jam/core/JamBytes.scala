@@ -20,6 +20,9 @@ final class JamBytes private (private val underlying: ByteVector)
 
   // Conversion methods
   def toArray: Array[Byte] = underlying.toArray
+
+  def toArrayUnsafe: Array[Byte] = underlying.toArrayUnsafe
+
   def toByteVector: ByteVector = underlying
   def toSeq: Seq[Byte] = underlying.toSeq
   def toHex: String = underlying.toHex
