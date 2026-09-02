@@ -153,10 +153,10 @@ object FileLogger:
   val maxLogBytes: Long = 16L * 1024 * 1024
 
   /**
-   * Check if verbose logging is enabled via environment variable.
+   * Check if verbose logging is enabled
    */
-  private def isVerbose: Boolean =
-    sys.env.get("LOG_LEVEL").exists(level =>
+  private[conformance] def isVerbose: Boolean =
+    sys.props.get("LOG_LEVEL").orElse(sys.env.get("LOG_LEVEL")).exists(level =>
       level.equalsIgnoreCase("DEBUG") || level.equalsIgnoreCase("INFO") || level.equalsIgnoreCase("TRACE")
     )
 

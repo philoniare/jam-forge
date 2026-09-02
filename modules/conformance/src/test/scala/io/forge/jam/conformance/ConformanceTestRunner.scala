@@ -156,32 +156,11 @@ class ConformanceTestRunner(
     ProtocolMessage.StateRootMsg(StateRoot(stateRoot))
 
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
-    val block = importBlock.block
-    val parentHash = block.header.parent
-
-    stateStore.get(parentHash) match
-      case None =>
-        ProtocolMessage.ErrorMsg(Error(s"Parent state not found: ${parentHash.toHex.take(16)}..."))
-
-      case Some(parentState) =>
-        val ancestry = stateStore.getAncestry.map(a =>
-          AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
-        )
-        blockImporter.importBlock(block, parentState, ancestry) match
-          case ImportResult.Success(postStateRoot, _) =>
-            val headerBytes = block.header.encode
-            val headerHash = Hashing.blake2b256(headerBytes)
-            val isOriginal = stateStore.isOriginalBlock(parentHash)
-            val postState = blockImporter.materializePostState(config)
-            stateStore.store(headerHash, postState, isOriginal)
-
-            if isOriginal then
-              stateStore.addToAncestry(AncestryItem(block.header.slot, headerHash))
-
-            ProtocolMessage.StateRootMsg(StateRoot(postStateRoot))
-
-          case ImportResult.Failure(error, message) =>
-            ProtocolMessage.ErrorMsg(Error(s"Import failed: $error - $message"))
+    ImportBlockStep(stateStore, blockImporter, config, importBlock.block) match
+      case Right(postStateRoot) =>
+        ProtocolMessage.StateRootMsg(StateRoot(postStateRoot))
+      case Left(errorMsg) =>
+        ProtocolMessage.ErrorMsg(Error(errorMsg))
 
   private def handleGetState(getState: GetState): ProtocolMessage =
     stateStore.get(getState.headerHash) match
