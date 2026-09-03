@@ -21,6 +21,9 @@ pub const OP_SUB: u32 = 4; // reg[dst] = reg[src] - reg[src2]      (wrapping)
 pub const OP_MUL: u32 = 5; // reg[dst] = reg[src] * reg[src2]      (wrapping)
 pub const OP_LOAD_U64: u32 = 6; // reg[dst] = mem_u64[(reg[src]+imm) & 0xFFFFFFFF]
 pub const OP_STORE_U64: u32 = 7; // mem_u64[(reg[src]+imm) & 0xFFFFFFFF] = reg[dst]
+pub const OP_JUMP: u32 = 8; // pc = imm (instruction index)
+pub const OP_BRANCH_EQ: u32 = 9; // if reg[src] == reg[src2] then pc = imm
+pub const OP_BRANCH_NE: u32 = 10; // if reg[src] != reg[src2] then pc = imm
 
 // Exit codes returned by execute. Must match the Scala differential mapping.
 pub const EXIT_HALT: u32 = 0;
@@ -46,23 +49,48 @@ pub enum Op {
     LoadU64 { dst: u8, src: u8, imm: u64 },
     /// mem_u64[ (reg[src] + imm) & 0xFFFFFFFF ] = reg[dst]; fault if OOB.
     StoreU64 { dst: u8, src: u8, imm: u64 },
+    /// Basic-block terminator: end execution with EXIT_PANIC.
+    Trap,
+    /// Unconditional jump to instruction index `target`.
+    Jump { target: u32 },
+    /// if reg[src] == reg[src2] then jump to `target`, else fall through.
+    BranchEq { src: u8, src2: u8, target: u32 },
+    /// if reg[src] != reg[src2] then jump to `target`, else fall through.
+    BranchNe { src: u8, src2: u8, target: u32 },
+}
+
+impl Op {
+    /// True if this op ends a basic block (control leaves sequentially here).
+    pub fn is_terminator(&self) -> bool {
+        matches!(self, Op::Trap | Op::Jump { .. } | Op::BranchEq { .. } | Op::BranchNe { .. })
+    }
+    /// The branch/jump target instruction index, if any.
+    pub fn target(&self) -> Option<u32> {
+        match self {
+            Op::Jump { target } | Op::BranchEq { target, .. } | Op::BranchNe { target, .. } => Some(*target),
+            _ => None,
+        }
+    }
 }
 
 /// A code-emitting backend for one host ISA. Registers are addressed as byte
 /// offsets into the caller's `[u64; 13]` register file (skeleton ABI).
 pub trait Backend {
-    /// Emit machine code for `ops` as one basic block terminated by a trap that
-    /// returns `EXIT_PANIC`. `gas_cost` is subtracted from the caller's gas cell
-    /// at block entry; if the result is negative the block returns `EXIT_OOG`
-    /// without touching the register file. Returns the raw machine-code bytes.
-    fn emit_block(&self, ops: &[Op], gas_cost: i64) -> Vec<u8>;
+    /// Emit machine code for a whole program: a sequence of ops decomposed into
+    /// basic blocks, with per-block gas charged at each block's entry (returning
+    /// `EXIT_OOG` when insufficient), static jumps/branches resolved to code
+    /// offsets, `Trap` returning `EXIT_PANIC`, and memory faults `EXIT_FAULT`.
+    /// The op index is the instruction "pc" that jumps/branches target.
+    fn emit_program(&self, ops: &[Op]) -> Vec<u8>;
 }
 
-fn decode(instrs: &[RawInstr]) -> Option<(Vec<Op>, i64)> {
+/// Decode the FFI instruction array 1:1 into ops (targets are instruction
+/// indices). Returns None on an unsupported opcode (caller deopts).
+fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
     let mut ops = Vec::with_capacity(instrs.len());
     for ins in instrs {
         match ins.opcode {
-            OP_TRAP => break, // terminator; stop collecting body ops
+            OP_TRAP => ops.push(Op::Trap),
             OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.dst as u8, imm: ins.imm }),
             OP_ADD_IMM64 => ops.push(Op::AddImm64 {
                 dst: ins.dst as u8,
@@ -74,13 +102,13 @@ fn decode(instrs: &[RawInstr]) -> Option<(Vec<Op>, i64)> {
             OP_MUL => ops.push(Op::Mul { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
             OP_LOAD_U64 => ops.push(Op::LoadU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
             OP_STORE_U64 => ops.push(Op::StoreU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
+            OP_JUMP => ops.push(Op::Jump { target: ins.imm as u32 }),
+            OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
+            OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
-    // Block cost = every instruction INCLUDING the terminator, matching the
-    // interpreter which charges 1 gas per compiled instruction in the block.
-    let gas_cost = instrs.len() as i64;
-    Some((ops, gas_cost))
+    Some(ops)
 }
 
 /// Compile a pre-decoded single-basic-block program. Returns a heap-owned
@@ -95,12 +123,12 @@ pub unsafe extern "C" fn pvm_compile(instrs: *const RawInstr, n: usize) -> *mut 
         return std::ptr::null_mut();
     }
     let slice = std::slice::from_raw_parts(instrs, n);
-    let (ops, gas_cost) = match decode(slice) {
+    let ops = match decode(slice) {
         Some(x) => x,
         None => return std::ptr::null_mut(),
     };
     let backend = aarch64::Aarch64Backend;
-    let code = backend.emit_block(&ops, gas_cost);
+    let code = backend.emit_program(&ops);
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
@@ -257,6 +285,61 @@ mod tests {
         let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 0x7f);
+    }
+
+    #[test]
+    fn countdown_loop_runs_to_trap() {
+        // r1=3; r2=1; r3=0; loop: r1-=r2; if r1!=r3 goto loop; trap
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 }, // 0  B0
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 1 }, // 1  B0
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 3, src: 0, src2: 0, imm: 0 }, // 2  B0
+            RawInstr { opcode: OP_SUB, dst: 1, src: 1, src2: 2, imm: 0 },        // 3  B1
+            RawInstr { opcode: OP_BRANCH_NE, dst: 0, src: 1, src2: 3, imm: 3 },  // 4  B1 -> 3
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 5  B2
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0);
+        // B0 cost 3, B1 cost 2 run 3x, B2 cost 1 => 3 + 6 + 1 = 10
+        assert_eq!(gas, 90);
+    }
+
+    #[test]
+    fn oog_mid_loop_freezes_state() {
+        // Same loop, gas only enough for B0 + one B1 pass.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 },
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 1 },
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 3, src: 0, src2: 0, imm: 0 },
+            RawInstr { opcode: OP_SUB, dst: 1, src: 1, src2: 2, imm: 0 },
+            RawInstr { opcode: OP_BRANCH_NE, dst: 0, src: 1, src2: 3, imm: 3 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 6i64; // B0(3) + B1(2) = 5 ok; next B1 entry 1-2<0 -> OOG
+        let exit = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_OOG);
+        assert_eq!(regs[1], 2); // one decrement applied, then frozen
+        assert_eq!(gas, -1);
+    }
+
+    #[test]
+    fn unconditional_jump_skips() {
+        // r1=5; jump over the overwrite; trap. r1 must stay 5.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 5 }, // 0
+            RawInstr { opcode: OP_JUMP, dst: 0, src: 0, src2: 0, imm: 3 },       // 1 -> 3
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 99 },// 2 (skipped)
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 3
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 5);
     }
 
     #[test]

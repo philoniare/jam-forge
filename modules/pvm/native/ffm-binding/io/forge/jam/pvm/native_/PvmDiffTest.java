@@ -4,52 +4,91 @@ import java.nio.file.Path;
 import java.util.Random;
 
 /**
- * Differential harness.
+ * Differential harness
  */
 public final class PvmDiffTest {
 
     static final long DEFAULT_SEED = 0x6A414D5F53454544L; // "JAM_SEED"
 
-    /** Independent reference model of the skeleton subset. */
+    /**
+     * Independent reference model of the skeleton subset
+     */
     static final class Ref {
-        final int exit;
-        final long gasRemaining;
+        int exit;
+        long gasRemaining;
         final long[] regs;
         final byte[] mem;
 
         Ref(int[] op, int[] dst, int[] src, int[] src2, long[] imm, long gas, long[] init, byte[] mem0) {
-            long g = gas - op.length; // 1 gas/instr incl. terminator
+            int n = op.length;
             this.regs = init.clone();
             this.mem = mem0.clone();
-            this.gasRemaining = g;
-            if (g < 0) {
-                this.exit = PvmRecompiler.EXIT_OOG; // regs + mem left at init
-                return;
-            }
-            int ex = PvmRecompiler.EXIT_PANIC;
-            for (int i = 0; i < op.length; i++) {
-                if (op[i] == PvmRecompiler.OP_TRAP) break;
-                switch (op[i]) {
-                    case PvmRecompiler.OP_LOAD_IMM64 -> regs[dst[i]] = imm[i];
-                    case PvmRecompiler.OP_ADD_IMM64 -> regs[dst[i]] = regs[src[i]] + imm[i];
-                    case PvmRecompiler.OP_ADD -> regs[dst[i]] = regs[src[i]] + regs[src2[i]];
-                    case PvmRecompiler.OP_SUB -> regs[dst[i]] = regs[src[i]] - regs[src2[i]];
-                    case PvmRecompiler.OP_MUL -> regs[dst[i]] = regs[src[i]] * regs[src2[i]];
-                    case PvmRecompiler.OP_LOAD_U64 -> {
-                        long addr = (regs[src[i]] + imm[i]) & 0xFFFFFFFFL;
-                        if (addr + 8 > mem.length) { ex = PvmRecompiler.EXIT_FAULT; i = op.length; break; }
-                        regs[dst[i]] = readLE(mem, (int) addr);
-                    }
-                    case PvmRecompiler.OP_STORE_U64 -> {
-                        long addr = (regs[src[i]] + imm[i]) & 0xFFFFFFFFL;
-                        if (addr + 8 > mem.length) { ex = PvmRecompiler.EXIT_FAULT; i = op.length; break; }
-                        writeLE(mem, (int) addr, regs[dst[i]]);
-                    }
-                    default -> throw new IllegalStateException("bad opcode " + op[i]);
+            // Block decomposition: leaders = {0} ∪ targets ∪ after-terminator.
+            boolean[] leader = new boolean[n + 1];
+            if (n > 0) leader[0] = true;
+            for (int i = 0; i < n; i++) {
+                if (isTerminator(op[i])) {
+                    Integer t = targetOf(op[i], imm[i]);
+                    if (t != null && t < n) leader[t] = true;
+                    if (i + 1 < n) leader[i + 1] = true;
                 }
             }
-            this.exit = ex;
+            int[] hiOf = new int[n]; // block end (exclusive) for the block owning pc
+            for (int i = 0; i < n; ) {
+                int lo = i; i++;
+                while (i < n && !leader[i]) i++;
+                for (int p = lo; p < i; p++) hiOf[p] = i;
+            }
+
+            long g = gas;
+            int pc = 0;
+            while (true) {
+                int hi = hiOf[pc];
+                g -= (hi - pc); // block cost = instruction count
+                if (g < 0) { exit = PvmRecompiler.EXIT_OOG; gasRemaining = g; return; }
+                int next = -1;
+                for (int p = pc; p < hi; p++) {
+                    int o = op[p];
+                    if (o == PvmRecompiler.OP_TRAP) { exit = PvmRecompiler.EXIT_PANIC; gasRemaining = g; return; }
+                    switch (o) {
+                        case PvmRecompiler.OP_LOAD_IMM64 -> regs[dst[p]] = imm[p];
+                        case PvmRecompiler.OP_ADD_IMM64 -> regs[dst[p]] = regs[src[p]] + imm[p];
+                        case PvmRecompiler.OP_ADD -> regs[dst[p]] = regs[src[p]] + regs[src2[p]];
+                        case PvmRecompiler.OP_SUB -> regs[dst[p]] = regs[src[p]] - regs[src2[p]];
+                        case PvmRecompiler.OP_MUL -> regs[dst[p]] = regs[src[p]] * regs[src2[p]];
+                        case PvmRecompiler.OP_LOAD_U64 -> {
+                            long addr = (regs[src[p]] + imm[p]) & 0xFFFFFFFFL;
+                            if (addr + 8 > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
+                            regs[dst[p]] = readLE(mem, (int) addr);
+                        }
+                        case PvmRecompiler.OP_STORE_U64 -> {
+                            long addr = (regs[src[p]] + imm[p]) & 0xFFFFFFFFL;
+                            if (addr + 8 > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
+                            writeLE(mem, (int) addr, regs[dst[p]]);
+                        }
+                        case PvmRecompiler.OP_JUMP -> { next = (int) imm[p]; }
+                        case PvmRecompiler.OP_BRANCH_EQ -> next = (regs[src[p]] == regs[src2[p]]) ? (int) imm[p] : hi;
+                        case PvmRecompiler.OP_BRANCH_NE -> next = (regs[src[p]] != regs[src2[p]]) ? (int) imm[p] : hi;
+                        default -> throw new IllegalStateException("bad opcode " + o);
+                    }
+                    if (next >= 0) break; // control-flow op ends the block
+                }
+                pc = (next >= 0) ? next : hi; // fall through to next block if no branch
+                // Last instruction is always TRAP, so pc never runs off the end.
+            }
         }
+    }
+
+    static boolean isTerminator(int op) {
+        return op == PvmRecompiler.OP_TRAP || op == PvmRecompiler.OP_JUMP
+                || op == PvmRecompiler.OP_BRANCH_EQ || op == PvmRecompiler.OP_BRANCH_NE;
+    }
+
+    static Integer targetOf(int op, long imm) {
+        return switch (op) {
+            case PvmRecompiler.OP_JUMP, PvmRecompiler.OP_BRANCH_EQ, PvmRecompiler.OP_BRANCH_NE -> (int) imm;
+            default -> null;
+        };
     }
 
     static long readLE(byte[] m, int off) {
@@ -74,6 +113,7 @@ public final class PvmDiffTest {
 
         try (var rc = new PvmRecompiler(lib)) {
             for (int it = 0; it < iters; it++) {
+                // Guest memory: random size (0..128, multiple of 8) + random contents.
                 int memLen = 8 * rng.nextInt(17);
                 byte[] mem0 = new byte[memLen];
                 rng.nextBytes(mem0);
@@ -85,18 +125,27 @@ public final class PvmDiffTest {
                 int[] src2 = new int[n + 1];
                 long[] imm = new long[n + 1];
                 boolean memEnabled = memLen > 0;
+                int total = n + 1; // includes the trailing trap; valid target range
                 for (int i = 0; i < n; i++) {
-                    int maxOp = memEnabled ? 7 : 5;
-                    op[i] = 1 + rng.nextInt(maxOp); // OP_LOAD_IMM64..(OP_STORE_U64)
+                    op[i] = 1 + rng.nextInt(10);
+                    if (!memEnabled && (op[i] == PvmRecompiler.OP_LOAD_U64 || op[i] == PvmRecompiler.OP_STORE_U64)) {
+                        op[i] = 1 + rng.nextInt(5); // no memory -> arith only for this slot
+                    }
                     dst[i] = 1 + rng.nextInt(R - 1); // never r0
                     src2[i] = rng.nextInt(R);
-                    if (op[i] == PvmRecompiler.OP_LOAD_U64 || op[i] == PvmRecompiler.OP_STORE_U64) {
-                        src[i] = 0; // base register (pinned 0)
-                        // aligned offset in [0, memLen+64): mostly in-bounds, some OOB
-                        imm[i] = 8L * rng.nextInt((memLen + 64) / 8);
-                    } else {
-                        src[i] = rng.nextInt(R);
-                        imm[i] = rng.nextLong();
+                    switch (op[i]) {
+                        case PvmRecompiler.OP_LOAD_U64, PvmRecompiler.OP_STORE_U64 -> {
+                            src[i] = 0; // base register (pinned 0)
+                            imm[i] = 8L * rng.nextInt((memLen + 64) / 8); // some OOB
+                        }
+                        case PvmRecompiler.OP_JUMP, PvmRecompiler.OP_BRANCH_EQ, PvmRecompiler.OP_BRANCH_NE -> {
+                            src[i] = rng.nextInt(R);
+                            imm[i] = rng.nextInt(total); // valid instruction index (incl. trap)
+                        }
+                        default -> {
+                            src[i] = rng.nextInt(R);
+                            imm[i] = rng.nextLong();
+                        }
                     }
                 }
                 op[n] = PvmRecompiler.OP_TRAP;
