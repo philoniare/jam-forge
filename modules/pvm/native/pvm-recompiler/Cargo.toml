@@ -1,0 +1,17 @@
+[package]
+name = "pvm-recompiler"
+version = "0.1.0"
+edition = "2021"
+description = "Native PVM recompiler"
+
+[dependencies]
+libc = "0.2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "pvm_recompiler"
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
