@@ -15,30 +15,51 @@ public final class PvmDiffTest {
         final int exit;
         final long gasRemaining;
         final long[] regs;
+        final byte[] mem;
 
-        Ref(int[] op, int[] dst, int[] src, int[] src2, long[] imm, long gas, long[] init) {
+        Ref(int[] op, int[] dst, int[] src, int[] src2, long[] imm, long gas, long[] init, byte[] mem0) {
             long g = gas - op.length; // 1 gas/instr incl. terminator
             this.regs = init.clone();
+            this.mem = mem0.clone();
+            this.gasRemaining = g;
             if (g < 0) {
-                this.exit = PvmRecompiler.EXIT_OOG; // regs left at init
-                this.gasRemaining = g;
+                this.exit = PvmRecompiler.EXIT_OOG; // regs + mem left at init
                 return;
             }
             int ex = PvmRecompiler.EXIT_PANIC;
             for (int i = 0; i < op.length; i++) {
-                if (op[i] == PvmRecompiler.OP_TRAP) { ex = PvmRecompiler.EXIT_PANIC; break; }
+                if (op[i] == PvmRecompiler.OP_TRAP) break;
                 switch (op[i]) {
                     case PvmRecompiler.OP_LOAD_IMM64 -> regs[dst[i]] = imm[i];
                     case PvmRecompiler.OP_ADD_IMM64 -> regs[dst[i]] = regs[src[i]] + imm[i];
                     case PvmRecompiler.OP_ADD -> regs[dst[i]] = regs[src[i]] + regs[src2[i]];
                     case PvmRecompiler.OP_SUB -> regs[dst[i]] = regs[src[i]] - regs[src2[i]];
                     case PvmRecompiler.OP_MUL -> regs[dst[i]] = regs[src[i]] * regs[src2[i]];
+                    case PvmRecompiler.OP_LOAD_U64 -> {
+                        long addr = (regs[src[i]] + imm[i]) & 0xFFFFFFFFL;
+                        if (addr + 8 > mem.length) { ex = PvmRecompiler.EXIT_FAULT; i = op.length; break; }
+                        regs[dst[i]] = readLE(mem, (int) addr);
+                    }
+                    case PvmRecompiler.OP_STORE_U64 -> {
+                        long addr = (regs[src[i]] + imm[i]) & 0xFFFFFFFFL;
+                        if (addr + 8 > mem.length) { ex = PvmRecompiler.EXIT_FAULT; i = op.length; break; }
+                        writeLE(mem, (int) addr, regs[dst[i]]);
+                    }
                     default -> throw new IllegalStateException("bad opcode " + op[i]);
                 }
             }
             this.exit = ex;
-            this.gasRemaining = g;
         }
+    }
+
+    static long readLE(byte[] m, int off) {
+        long v = 0;
+        for (int i = 0; i < 8; i++) v |= (m[off + i] & 0xFFL) << (i * 8);
+        return v;
+    }
+
+    static void writeLE(byte[] m, int off, long v) {
+        for (int i = 0; i < 8; i++) m[off + i] = (byte) ((v >>> (i * 8)) & 0xFF);
     }
 
     public static void main(String[] args) {
@@ -53,18 +74,30 @@ public final class PvmDiffTest {
 
         try (var rc = new PvmRecompiler(lib)) {
             for (int it = 0; it < iters; it++) {
+                int memLen = 8 * rng.nextInt(17);
+                byte[] mem0 = new byte[memLen];
+                rng.nextBytes(mem0);
+
                 int n = 1 + rng.nextInt(24);
                 int[] op = new int[n + 1];
                 int[] dst = new int[n + 1];
                 int[] src = new int[n + 1];
                 int[] src2 = new int[n + 1];
                 long[] imm = new long[n + 1];
+                boolean memEnabled = memLen > 0;
                 for (int i = 0; i < n; i++) {
-                    op[i] = 1 + rng.nextInt(5); // OP_LOAD_IMM64..OP_MUL
-                    dst[i] = rng.nextInt(R);
-                    src[i] = rng.nextInt(R);
+                    int maxOp = memEnabled ? 7 : 5;
+                    op[i] = 1 + rng.nextInt(maxOp); // OP_LOAD_IMM64..(OP_STORE_U64)
+                    dst[i] = 1 + rng.nextInt(R - 1); // never r0
                     src2[i] = rng.nextInt(R);
-                    imm[i] = rng.nextLong();
+                    if (op[i] == PvmRecompiler.OP_LOAD_U64 || op[i] == PvmRecompiler.OP_STORE_U64) {
+                        src[i] = 0; // base register (pinned 0)
+                        // aligned offset in [0, memLen+64): mostly in-bounds, some OOB
+                        imm[i] = 8L * rng.nextInt((memLen + 64) / 8);
+                    } else {
+                        src[i] = rng.nextInt(R);
+                        imm[i] = rng.nextLong();
+                    }
                 }
                 op[n] = PvmRecompiler.OP_TRAP;
 
@@ -76,24 +109,28 @@ public final class PvmDiffTest {
 
                 long[] init = new long[R];
                 for (int i = 0; i < R; i++) init[i] = rng.nextLong();
+                init[0] = 0; // memory base
 
-                Ref ref = new Ref(op, dst, src, src2, imm, gas, init);
+                Ref ref = new Ref(op, dst, src, src2, imm, gas, init, mem0);
 
                 long[] regsNat = init.clone();
+                byte[] memNat = mem0.clone();
                 var blk = rc.compile(op, dst, src, src2, imm);
                 if (!blk.isValid()) { System.out.println("compile null at it=" + it); mismatches++; continue; }
-                long[] out = rc.execute(blk, regsNat, gas);
+                long[] out = rc.execute(blk, regsNat, gas, memNat);
                 blk.close();
                 int natExit = (int) out[0];
                 long natGas = out[1];
 
                 checked++;
-                if (natExit != ref.exit || natGas != ref.gasRemaining || !equals(regsNat, ref.regs)) {
+                boolean bad = natExit != ref.exit || natGas != ref.gasRemaining
+                        || !equals(regsNat, ref.regs) || !java.util.Arrays.equals(memNat, ref.mem);
+                if (bad) {
                     mismatches++;
                     if (mismatches <= 5) {
-                        System.out.printf("MISMATCH it=%d seed=%d n=%d gas=%d%n", it, seed, n, gas);
-                        System.out.printf("  exit nat=%d ref=%d | gas nat=%d ref=%d%n",
-                                natExit, ref.exit, natGas, ref.gasRemaining);
+                        System.out.printf("MISMATCH it=%d seed=%d n=%d gas=%d memLen=%d%n", it, seed, n, gas, memLen);
+                        System.out.printf("  exit nat=%d ref=%d | gas nat=%d ref=%d | memEq=%b%n",
+                                natExit, ref.exit, natGas, ref.gasRemaining, java.util.Arrays.equals(memNat, ref.mem));
                         for (int i = 0; i < R; i++)
                             if (regsNat[i] != ref.regs[i])
                                 System.out.printf("  r%d nat=%d ref=%d%n", i, regsNat[i], ref.regs[i]);

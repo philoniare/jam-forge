@@ -19,11 +19,14 @@ pub const OP_ADD_IMM64: u32 = 2; // reg[dst] = reg[src] + imm      (wrapping)
 pub const OP_ADD: u32 = 3; // reg[dst] = reg[src] + reg[src2]      (wrapping)
 pub const OP_SUB: u32 = 4; // reg[dst] = reg[src] - reg[src2]      (wrapping)
 pub const OP_MUL: u32 = 5; // reg[dst] = reg[src] * reg[src2]      (wrapping)
+pub const OP_LOAD_U64: u32 = 6; // reg[dst] = mem_u64[(reg[src]+imm) & 0xFFFFFFFF]
+pub const OP_STORE_U64: u32 = 7; // mem_u64[(reg[src]+imm) & 0xFFFFFFFF] = reg[dst]
 
 // Exit codes returned by execute. Must match the Scala differential mapping.
 pub const EXIT_HALT: u32 = 0;
 pub const EXIT_PANIC: u32 = 1;
 pub const EXIT_OOG: u32 = 2;
+pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
 
 /// The recompiled block: owns its executable memory. The block's gas cost is
 /// baked into the emitted code.
@@ -39,6 +42,10 @@ pub enum Op {
     Add { dst: u8, src: u8, src2: u8 },
     Sub { dst: u8, src: u8, src2: u8 },
     Mul { dst: u8, src: u8, src2: u8 },
+    /// reg[dst] = mem_u64[ (reg[src] + imm) & 0xFFFFFFFF ]; fault if OOB.
+    LoadU64 { dst: u8, src: u8, imm: u64 },
+    /// mem_u64[ (reg[src] + imm) & 0xFFFFFFFF ] = reg[dst]; fault if OOB.
+    StoreU64 { dst: u8, src: u8, imm: u64 },
 }
 
 /// A code-emitting backend for one host ISA. Registers are addressed as byte
@@ -65,6 +72,8 @@ fn decode(instrs: &[RawInstr]) -> Option<(Vec<Op>, i64)> {
             OP_ADD => ops.push(Op::Add { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
             OP_SUB => ops.push(Op::Sub { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
             OP_MUL => ops.push(Op::Mul { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
+            OP_LOAD_U64 => ops.push(Op::LoadU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
+            OP_STORE_U64 => ops.push(Op::StoreU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
@@ -99,24 +108,36 @@ pub unsafe extern "C" fn pvm_compile(instrs: *const RawInstr, n: usize) -> *mut 
     Box::into_raw(Box::new(CompiledBlock { mem }))
 }
 
-/// Execute a compiled block over the caller's register file and gas cell.
+/// Execute a compiled block over the caller's register file, gas cell, and
+/// guest memory region.
 ///
 /// `regs` points to 13 little-endian u64 PVM registers (read and written in
 /// place). `gas` points to a single i64 the block decrements by its cost.
-/// Returns an EXIT_* code.
+/// `mem` is the base of a zero-copy guest-memory region of `mem_len` bytes
+/// (may be null with mem_len 0 for register-only programs). Returns an EXIT_*
+/// code; EXIT_FAULT on an out-of-region access.
 ///
 /// # Safety
 /// `block` must be a live pointer from `pvm_compile`; `regs` must point to 13
-/// u64s; `gas` to one i64.
+/// u64s; `gas` to one i64; `mem` to `mem_len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn pvm_execute(block: *mut CompiledBlock, regs: *mut u64, gas: *mut i64) -> u32 {
+pub unsafe extern "C" fn pvm_execute(
+    block: *mut CompiledBlock,
+    regs: *mut u64,
+    gas: *mut i64,
+    mem: *mut u8,
+    mem_len: u64,
+) -> u32 {
     if block.is_null() || regs.is_null() || gas.is_null() {
         return EXIT_PANIC;
     }
     let block = &*block;
-    // The emitted code has signature: extern "C" fn(*mut u64 /*regs*/, *mut i64 /*gas*/) -> u32
-    let f: extern "C" fn(*mut u64, *mut i64) -> u32 = std::mem::transmute(block.mem.as_ptr());
-    f(regs, gas)
+    // Emitted code signature:
+    //   extern "C" fn(*mut u64 /*x0 regs*/, *mut i64 /*x1 gas*/,
+    //                 *mut u8 /*x2 mem*/, u64 /*x3 mem_len*/) -> u32
+    let f: extern "C" fn(*mut u64, *mut i64, *mut u8, u64) -> u32 =
+        std::mem::transmute(block.mem.as_ptr());
+    f(regs, gas, mem, mem_len)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -135,10 +156,20 @@ mod tests {
     use super::*;
 
     fn run(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64) -> u32 {
+        run_mem(instrs, regs, gas, &mut [])
+    }
+
+    fn run_mem(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64, mem: &mut [u8]) -> u32 {
         unsafe {
             let blk = pvm_compile(instrs.as_ptr(), instrs.len());
             assert!(!blk.is_null(), "compile returned null");
-            let ex = pvm_execute(blk, regs.as_mut_ptr(), gas as *mut i64);
+            let ex = pvm_execute(
+                blk,
+                regs.as_mut_ptr(),
+                gas as *mut i64,
+                mem.as_mut_ptr(),
+                mem.len() as u64,
+            );
             pvm_free(blk);
             ex
         }
@@ -177,6 +208,55 @@ mod tests {
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
         assert_eq!(regs[1], 2);
+    }
+
+    #[test]
+    fn load_store_roundtrip_within_bounds() {
+        // r1 = 0xDEADBEEF; store r1 at mem[8]; load mem[8] into r2; trap
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0xDEADBEEF },
+            RawInstr { opcode: OP_STORE_U64, dst: 1, src: 0, src2: 0, imm: 8 }, // mem[r0+8]=r1, r0=0
+            RawInstr { opcode: OP_LOAD_U64, dst: 2, src: 0, src2: 0, imm: 8 },  // r2=mem[r0+8]
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 32];
+        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 0xDEADBEEF);
+        // little-endian bytes at mem[8..16]
+        assert_eq!(&mem[8..12], &[0xEF, 0xBE, 0xAD, 0xDE]);
+    }
+
+    #[test]
+    fn out_of_bounds_load_faults() {
+        // load at offset 40 into a 32-byte region -> fault
+        let prog = [
+            RawInstr { opcode: OP_LOAD_U64, dst: 1, src: 0, src2: 0, imm: 40 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 32];
+        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn boundary_load_last_valid_qword_ok() {
+        // 32-byte region: offset 24 loads bytes [24,32) — the last valid qword.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_U64, dst: 1, src: 0, src2: 0, imm: 24 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 32];
+        mem[24] = 0x7f;
+        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0x7f);
     }
 
     #[test]
