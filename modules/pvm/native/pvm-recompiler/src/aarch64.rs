@@ -80,7 +80,7 @@ impl Asm {
     fn ret(&mut self) {
         self.push(0xD65F_03C0);
     }
-    // B.cond with a forward target expressed in instruction indices; patched later.
+    // B.cond placeholder (target patched later, in instruction words).
     fn b_cond_placeholder(&mut self, cond: u32) -> usize {
         let idx = self.len();
         self.push(0x5400_0000 | cond); // imm19 = 0 for now
@@ -91,6 +91,17 @@ impl Asm {
         let imm19 = (rel as u32) & 0x7_FFFF;
         let cond = self.words[at] & 0xF;
         self.words[at] = 0x5400_0000 | (imm19 << 5) | cond;
+    }
+    // B (unconditional) placeholder; imm26 patched later (in instruction words).
+    fn b_placeholder(&mut self) -> usize {
+        let idx = self.len();
+        self.push(0x1400_0000);
+        idx
+    }
+    fn patch_b(&mut self, at: usize, target: usize) {
+        let rel = (target as i64) - (at as i64);
+        let imm26 = (rel as u32) & 0x3FF_FFFF;
+        self.words[at] = 0x1400_0000 | imm26;
     }
 
     // Materialise a full 64-bit immediate into `rd` (movz + 3 movk).
@@ -118,97 +129,193 @@ impl Asm {
     }
 }
 
+const COND_EQ: u32 = 0x0; // equal
+const COND_NE: u32 = 0x1; // not equal
 const COND_HI: u32 = 0x8; // unsigned higher
 const COND_LT: u32 = 0xB; // signed less-than
 
-impl Backend for Aarch64Backend {
-    fn emit_block(&self, ops: &[Op], gas_cost: i64) -> Vec<u8> {
-        // Skeleton constraint: block gas cost must fit an unsigned 12-bit SUBS imm.
-        assert!(gas_cost >= 0 && gas_cost < 4096, "skeleton block gas cost out of imm12 range");
-        let mut a = Asm::new();
-        let mut fault_branches: Vec<usize> = Vec::new();
+struct Blocks {
+    block_of: Vec<usize>,
+    block_lo: Vec<usize>,
+    block_hi: Vec<usize>,
+}
 
-        // --- gas: gas -= cost; if < 0 goto oog -------------------------------
-        a.ldr(X11, X1, 0); // x11 = *gas
-        a.subs_imm(X11, X11, gas_cost as u32); // x11 = x11 - cost, set flags
-        a.str(X11, X1, 0); // *gas = x11
-        let oog_branch = a.b_cond_placeholder(COND_LT); // B.LT oog (patched)
-
-        // Emit a bounds-checked effective address into x8, and mem base+addr
-        // into x11. Faults (B.HI to fault epilogue) if [addr, addr+8) escapes
-        // the guest region. Address is masked to 32 bits (PVM address space).
-        let addr_into = |a: &mut Asm, src: u8, imm: u64, fb: &mut Vec<usize>| {
-            a.ldr(X8, X0, src as u32); // x8 = reg[src]
-            a.mov_imm64(X9, imm); // x9 = imm
-            a.add(X8, X8, X9); // x8 = reg[src] + imm (64-bit)
-            a.uxtw(X8, X8); // x8 = addr & 0xFFFFFFFF
-            a.add_imm(X9, X8, 8); // x9 = addr + 8 (no overflow: addr < 2^32)
-            a.cmp(X9, X3); // compare addr+8 vs mem_len
-            fb.push(a.b_cond_placeholder(COND_HI)); // B.HI fault
-            a.add(X11, X2, X8); // x11 = mem_base + addr
-        };
-
-        // --- body ------------------------------------------------------------
-        for op in ops {
-            match *op {
-                Op::LoadImm64 { dst, imm } => {
-                    a.mov_imm64(X8, imm);
-                    a.str(X8, X0, dst as u32);
-                }
-                Op::AddImm64 { dst, src, imm } => {
-                    a.ldr(X8, X0, src as u32);
-                    a.mov_imm64(X9, imm);
-                    a.add(X8, X8, X9);
-                    a.str(X8, X0, dst as u32);
-                }
-                Op::Add { dst, src, src2 } => {
-                    a.ldr(X8, X0, src as u32);
-                    a.ldr(X9, X0, src2 as u32);
-                    a.add(X8, X8, X9);
-                    a.str(X8, X0, dst as u32);
-                }
-                Op::Sub { dst, src, src2 } => {
-                    a.ldr(X8, X0, src as u32);
-                    a.ldr(X9, X0, src2 as u32);
-                    a.sub(X8, X8, X9);
-                    a.str(X8, X0, dst as u32);
-                }
-                Op::Mul { dst, src, src2 } => {
-                    a.ldr(X8, X0, src as u32);
-                    a.ldr(X9, X0, src2 as u32);
-                    a.mul(X8, X8, X9);
-                    a.str(X8, X0, dst as u32);
-                }
-                Op::LoadU64 { dst, src, imm } => {
-                    addr_into(&mut a, src, imm, &mut fault_branches);
-                    a.ldr0(X8, X11); // x8 = mem_u64[addr]
-                    a.str(X8, X0, dst as u32); // reg[dst] = x8
-                }
-                Op::StoreU64 { dst, src, imm } => {
-                    addr_into(&mut a, src, imm, &mut fault_branches);
-                    a.ldr(X10, X0, dst as u32); // x10 = reg[dst]
-                    a.str0(X10, X11); // mem_u64[addr] = x10
-                }
+fn analyze_blocks(ops: &[Op]) -> Blocks {
+    let n = ops.len();
+    // Leaders: op 0, every branch/jump target, and the op after any terminator.
+    let mut is_leader = vec![false; n + 1];
+    if n > 0 {
+        is_leader[0] = true;
+    }
+    for (i, op) in ops.iter().enumerate() {
+        if let Some(t) = op.target() {
+            if (t as usize) < n {
+                is_leader[t as usize] = true;
             }
         }
+        if op.is_terminator() && i + 1 < n {
+            is_leader[i + 1] = true;
+        }
+    }
+    let mut block_of = vec![0usize; n];
+    let mut block_lo = Vec::new();
+    let mut block_hi = Vec::new();
+    let mut b = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        let lo = i;
+        block_lo.push(lo);
+        // extend until the next leader
+        i += 1;
+        while i < n && !is_leader[i] {
+            i += 1;
+        }
+        block_hi.push(i);
+        for pc in lo..i {
+            block_of[pc] = b;
+        }
+        b += 1;
+    }
+    Blocks { block_of, block_lo, block_hi }
+}
 
-        // --- halt epilogue: w0 = PANIC(1); ret -------------------------------
-        a.movz_w(X0, 1);
-        a.ret();
+impl Backend for Aarch64Backend {
+    fn emit_program(&self, ops: &[Op]) -> Vec<u8> {
+        let mut a = Asm::new();
+        if ops.is_empty() {
+            // empty program: immediate PANIC (nothing to run)
+            a.movz_w(X0, 1);
+            a.ret();
+            return a.to_bytes();
+        }
+        let blocks = analyze_blocks(ops);
+        let nblocks = blocks.block_lo.len();
 
-        // --- oog epilogue: w0 = OOG(2); ret ----------------------------------
+        let mut block_start_asm = vec![0usize; nblocks];
+        let mut oog_branches: Vec<usize> = Vec::new();
+        let mut fault_branches: Vec<usize> = Vec::new();
+        // (asm index of branch, target block, is_conditional)
+        let mut cf_branches: Vec<(usize, usize, bool)> = Vec::new();
+
+        // Emit a bounds-checked effective address into x8 and mem base+addr into
+        // x11; B.HI to the fault epilogue if [addr, addr+8) escapes the region.
+        // Address masked to 32 bits (PVM address space).
+        let addr_into = |a: &mut Asm, src: u8, imm: u64, fb: &mut Vec<usize>| {
+            a.ldr(X8, X0, src as u32);
+            a.mov_imm64(X9, imm);
+            a.add(X8, X8, X9);
+            a.uxtw(X8, X8);
+            a.add_imm(X9, X8, 8);
+            a.cmp(X9, X3);
+            fb.push(a.b_cond_placeholder(COND_HI));
+            a.add(X11, X2, X8);
+        };
+
+        for b in 0..nblocks {
+            block_start_asm[b] = a.len();
+            let lo = blocks.block_lo[b];
+            let hi = blocks.block_hi[b];
+            let cost = (hi - lo) as u32;
+
+            // --- block-entry gas: gas -= cost; if < 0 goto oog ---------------
+            assert!(cost < 4096, "skeleton block gas cost out of imm12 range");
+            a.ldr(X11, X1, 0);
+            a.subs_imm(X11, X11, cost);
+            a.str(X11, X1, 0);
+            oog_branches.push(a.b_cond_placeholder(COND_LT));
+
+            // --- block body --------------------------------------------------
+            for pc in lo..hi {
+                match ops[pc] {
+                    Op::LoadImm64 { dst, imm } => {
+                        a.mov_imm64(X8, imm);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::AddImm64 { dst, src, imm } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.mov_imm64(X9, imm);
+                        a.add(X8, X8, X9);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::Add { dst, src, src2 } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.ldr(X9, X0, src2 as u32);
+                        a.add(X8, X8, X9);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::Sub { dst, src, src2 } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.ldr(X9, X0, src2 as u32);
+                        a.sub(X8, X8, X9);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::Mul { dst, src, src2 } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.ldr(X9, X0, src2 as u32);
+                        a.mul(X8, X8, X9);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::LoadU64 { dst, src, imm } => {
+                        addr_into(&mut a, src, imm, &mut fault_branches);
+                        a.ldr0(X8, X11);
+                        a.str(X8, X0, dst as u32);
+                    }
+                    Op::StoreU64 { dst, src, imm } => {
+                        addr_into(&mut a, src, imm, &mut fault_branches);
+                        a.ldr(X10, X0, dst as u32);
+                        a.str0(X10, X11);
+                    }
+                    Op::Trap => {
+                        a.movz_w(X0, 1); // EXIT_PANIC
+                        a.ret();
+                    }
+                    Op::Jump { target } => {
+                        let idx = a.b_placeholder();
+                        cf_branches.push((idx, blocks.block_of[target as usize], false));
+                    }
+                    Op::BranchEq { src, src2, target } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.ldr(X9, X0, src2 as u32);
+                        a.cmp(X8, X9);
+                        let idx = a.b_cond_placeholder(COND_EQ);
+                        cf_branches.push((idx, blocks.block_of[target as usize], true));
+                        // not-taken: fall through to the next block (emitted next)
+                    }
+                    Op::BranchNe { src, src2, target } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.ldr(X9, X0, src2 as u32);
+                        a.cmp(X8, X9);
+                        let idx = a.b_cond_placeholder(COND_NE);
+                        cf_branches.push((idx, blocks.block_of[target as usize], true));
+                    }
+                }
+            }
+            // Blocks ending without a terminator fall through to the next block,
+            // which is emitted immediately after — no branch needed.
+        }
+
+        // --- epilogues -------------------------------------------------------
         let oog_idx = a.len();
-        a.movz_w(X0, 2);
+        a.movz_w(X0, 2); // EXIT_OOG
         a.ret();
-
-        // --- fault epilogue: w0 = FAULT(3); ret ------------------------------
         let fault_idx = a.len();
-        a.movz_w(X0, 3);
+        a.movz_w(X0, 3); // EXIT_FAULT
         a.ret();
 
-        a.patch_b_cond(oog_branch, oog_idx);
+        // --- patch ------------------------------------------------------------
+        for b in oog_branches {
+            a.patch_b_cond(b, oog_idx);
+        }
         for b in fault_branches {
             a.patch_b_cond(b, fault_idx);
+        }
+        for (at, target_block, is_cond) in cf_branches {
+            let tgt = block_start_asm[target_block];
+            if is_cond {
+                a.patch_b_cond(at, tgt);
+            } else {
+                a.patch_b(at, tgt);
+            }
         }
         a.to_bytes()
     }
