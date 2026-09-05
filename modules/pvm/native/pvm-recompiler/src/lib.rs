@@ -21,6 +21,16 @@ pub const OP_SUB: u32 = 4; // reg[dst] = reg[src] - reg[src2]      (wrapping)
 pub const OP_MUL: u32 = 5; // reg[dst] = reg[src] * reg[src2]      (wrapping)
 pub const OP_LOAD_U64: u32 = 6; // reg[dst] = mem_u64[(reg[src]+imm) & 0xFFFFFFFF]
 pub const OP_STORE_U64: u32 = 7; // mem_u64[(reg[src]+imm) & 0xFFFFFFFF] = reg[dst]
+// Sub-word memory (address masked to 32 bits; fault if [addr,addr+w) OOB).
+pub const OP_LOAD_U8: u32 = 12; // reg[dst] = zero-extend mem_u8[addr]
+pub const OP_LOAD_U16: u32 = 13; // reg[dst] = zero-extend mem_u16[addr]
+pub const OP_LOAD_U32: u32 = 14; // reg[dst] = zero-extend mem_u32[addr]
+pub const OP_LOAD_I8: u32 = 15; // reg[dst] = sign-extend mem_i8[addr]
+pub const OP_LOAD_I16: u32 = 16; // reg[dst] = sign-extend mem_i16[addr]
+pub const OP_LOAD_I32: u32 = 17; // reg[dst] = sign-extend mem_i32[addr]
+pub const OP_STORE_U8: u32 = 18; // mem_u8[addr] = reg[dst] & 0xFF
+pub const OP_STORE_U16: u32 = 19; // mem_u16[addr] = reg[dst] & 0xFFFF
+pub const OP_STORE_U32: u32 = 20; // mem_u32[addr] = reg[dst] & 0xFFFFFFFF
 pub const OP_JUMP: u32 = 8; // pc = imm (instruction index)
 pub const OP_BRANCH_EQ: u32 = 9; // if reg[src] == reg[src2] then pc = imm
 pub const OP_BRANCH_NE: u32 = 10; // if reg[src] != reg[src2] then pc = imm
@@ -47,10 +57,12 @@ pub enum Op {
     Add { dst: u8, src: u8, src2: u8 },
     Sub { dst: u8, src: u8, src2: u8 },
     Mul { dst: u8, src: u8, src2: u8 },
-    /// reg[dst] = mem_u64[ (reg[src] + imm) & 0xFFFFFFFF ]; fault if OOB.
-    LoadU64 { dst: u8, src: u8, imm: u64 },
-    /// mem_u64[ (reg[src] + imm) & 0xFFFFFFFF ] = reg[dst]; fault if OOB.
-    StoreU64 { dst: u8, src: u8, imm: u64 },
+    /// reg[dst] = load `width` bytes at (reg[src]+imm)&0xFFFFFFFF, zero- or
+    /// sign-extended per `signed`; fault if [addr, addr+width) is OOB.
+    Load { dst: u8, src: u8, imm: u64, width: u8, signed: bool },
+    /// store the low `width` bytes of reg[dst] at (reg[src]+imm)&0xFFFFFFFF;
+    /// fault if OOB.
+    Store { dst: u8, src: u8, imm: u64, width: u8 },
     /// Basic-block terminator: end execution with EXIT_PANIC.
     Trap,
     /// Unconditional jump to instruction index `target`.
@@ -108,8 +120,17 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_ADD => ops.push(Op::Add { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
             OP_SUB => ops.push(Op::Sub { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
             OP_MUL => ops.push(Op::Mul { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
-            OP_LOAD_U64 => ops.push(Op::LoadU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
-            OP_STORE_U64 => ops.push(Op::StoreU64 { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm }),
+            OP_LOAD_U64 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 8, signed: false }),
+            OP_LOAD_U8 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1, signed: false }),
+            OP_LOAD_U16 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2, signed: false }),
+            OP_LOAD_U32 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4, signed: false }),
+            OP_LOAD_I8 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1, signed: true }),
+            OP_LOAD_I16 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2, signed: true }),
+            OP_LOAD_I32 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4, signed: true }),
+            OP_STORE_U64 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 8 }),
+            OP_STORE_U8 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1 }),
+            OP_STORE_U16 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2 }),
+            OP_STORE_U32 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4 }),
             OP_JUMP => ops.push(Op::Jump { target: ins.imm as u32 }),
             OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
             OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
@@ -376,6 +397,61 @@ mod tests {
         let exit = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 5);
+    }
+
+    #[test]
+    fn subword_load_store_widths() {
+        // Store 0x1122334455667788 as u64; read back narrow (u8/u16/u32) and
+        // signed (i8) — all little-endian.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0x1122334455667788 },
+            RawInstr { opcode: OP_STORE_U64, dst: 1, src: 0, src2: 0, imm: 0 },
+            RawInstr { opcode: OP_LOAD_U8, dst: 2, src: 0, src2: 0, imm: 0 },  // 0x88
+            RawInstr { opcode: OP_LOAD_U16, dst: 3, src: 0, src2: 0, imm: 0 }, // 0x7788
+            RawInstr { opcode: OP_LOAD_U32, dst: 4, src: 0, src2: 0, imm: 0 }, // 0x55667788
+            RawInstr { opcode: OP_LOAD_I8, dst: 5, src: 0, src2: 0, imm: 0 },  // (i8)0x88 = -120
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 8];
+        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 0x88);
+        assert_eq!(regs[3], 0x7788);
+        assert_eq!(regs[4], 0x5566_7788);
+        assert_eq!(regs[5], 0xFFFF_FFFF_FFFF_FF88); // sign-extended -120
+    }
+
+    #[test]
+    fn narrow_store_truncates() {
+        // store_u8 of a wide value writes only the low byte; rest of mem stays 0.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0xAABBCCDD },
+            RawInstr { opcode: OP_STORE_U8, dst: 1, src: 0, src2: 0, imm: 2 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 8];
+        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(mem[2], 0xDD);
+        assert_eq!(&mem[0..2], &[0, 0]);
+        assert_eq!(&mem[3..8], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn subword_oob_faults() {
+        // u32 load at offset 6 into an 8-byte region needs [6,10) -> fault.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_U32, dst: 1, src: 0, src2: 0, imm: 6 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 8];
+        assert_eq!(run_mem(&prog, &mut regs, &mut gas, &mut mem), EXIT_FAULT);
     }
 
     #[test]

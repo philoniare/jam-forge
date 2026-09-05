@@ -10,6 +10,13 @@ public final class PvmDiffTest {
 
     static final long DEFAULT_SEED = 0x6A414D5F53454544L; // "JAM_SEED"
 
+    static final int[] MEM_OPS = {
+        PvmRecompiler.OP_LOAD_U64, PvmRecompiler.OP_LOAD_U8, PvmRecompiler.OP_LOAD_U16,
+        PvmRecompiler.OP_LOAD_U32, PvmRecompiler.OP_LOAD_I8, PvmRecompiler.OP_LOAD_I16,
+        PvmRecompiler.OP_LOAD_I32, PvmRecompiler.OP_STORE_U64, PvmRecompiler.OP_STORE_U8,
+        PvmRecompiler.OP_STORE_U16, PvmRecompiler.OP_STORE_U32,
+    };
+
     /**
      * Independent reference model of the skeleton subset
      */
@@ -58,15 +65,21 @@ public final class PvmDiffTest {
                         case PvmRecompiler.OP_ADD -> regs[dst[p]] = regs[src[p]] + regs[src2[p]];
                         case PvmRecompiler.OP_SUB -> regs[dst[p]] = regs[src[p]] - regs[src2[p]];
                         case PvmRecompiler.OP_MUL -> regs[dst[p]] = regs[src[p]] * regs[src2[p]];
-                        case PvmRecompiler.OP_LOAD_U64 -> {
+                        case PvmRecompiler.OP_LOAD_U64, PvmRecompiler.OP_LOAD_U8, PvmRecompiler.OP_LOAD_U16,
+                             PvmRecompiler.OP_LOAD_U32, PvmRecompiler.OP_LOAD_I8, PvmRecompiler.OP_LOAD_I16,
+                             PvmRecompiler.OP_LOAD_I32 -> {
+                            int w = loadWidth(o);
+                            boolean signed = isSignedLoad(o);
                             long addr = (regs[src[p]] + imm[p]) & 0xFFFFFFFFL;
-                            if (addr + 8 > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
-                            regs[dst[p]] = readLE(mem, (int) addr);
+                            if (addr + w > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
+                            regs[dst[p]] = readLE(mem, (int) addr, w, signed);
                         }
-                        case PvmRecompiler.OP_STORE_U64 -> {
+                        case PvmRecompiler.OP_STORE_U64, PvmRecompiler.OP_STORE_U8,
+                             PvmRecompiler.OP_STORE_U16, PvmRecompiler.OP_STORE_U32 -> {
+                            int w = storeWidth(o);
                             long addr = (regs[src[p]] + imm[p]) & 0xFFFFFFFFL;
-                            if (addr + 8 > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
-                            writeLE(mem, (int) addr, regs[dst[p]]);
+                            if (addr + w > mem.length) { exit = PvmRecompiler.EXIT_FAULT; gasRemaining = g; return; }
+                            writeLE(mem, (int) addr, regs[dst[p]], w);
                         }
                         case PvmRecompiler.OP_JUMP -> { next = (int) imm[p]; }
                         case PvmRecompiler.OP_BRANCH_EQ -> next = (regs[src[p]] == regs[src2[p]]) ? (int) imm[p] : hi;
@@ -102,14 +115,41 @@ public final class PvmDiffTest {
         };
     }
 
-    static long readLE(byte[] m, int off) {
+    static int loadWidth(int op) {
+        return switch (op) {
+            case PvmRecompiler.OP_LOAD_U8, PvmRecompiler.OP_LOAD_I8 -> 1;
+            case PvmRecompiler.OP_LOAD_U16, PvmRecompiler.OP_LOAD_I16 -> 2;
+            case PvmRecompiler.OP_LOAD_U32, PvmRecompiler.OP_LOAD_I32 -> 4;
+            default -> 8;
+        };
+    }
+
+    static boolean isSignedLoad(int op) {
+        return op == PvmRecompiler.OP_LOAD_I8 || op == PvmRecompiler.OP_LOAD_I16 || op == PvmRecompiler.OP_LOAD_I32;
+    }
+
+    static int storeWidth(int op) {
+        return switch (op) {
+            case PvmRecompiler.OP_STORE_U8 -> 1;
+            case PvmRecompiler.OP_STORE_U16 -> 2;
+            case PvmRecompiler.OP_STORE_U32 -> 4;
+            default -> 8;
+        };
+    }
+
+    static long readLE(byte[] m, int off, int width, boolean signed) {
         long v = 0;
-        for (int i = 0; i < 8; i++) v |= (m[off + i] & 0xFFL) << (i * 8);
+        for (int i = 0; i < width; i++) v |= (m[off + i] & 0xFFL) << (i * 8);
+        if (signed && width < 8) {
+            int bits = width * 8;
+            long sign = 1L << (bits - 1);
+            if ((v & sign) != 0) v |= -(1L << bits); // sign-extend
+        }
         return v;
     }
 
-    static void writeLE(byte[] m, int off, long v) {
-        for (int i = 0; i < 8; i++) m[off + i] = (byte) ((v >>> (i * 8)) & 0xFF);
+    static void writeLE(byte[] m, int off, long v, int width) {
+        for (int i = 0; i < width; i++) m[off + i] = (byte) ((v >>> (i * 8)) & 0xFF);
     }
 
     public static void main(String[] args) {
@@ -157,24 +197,26 @@ public final class PvmDiffTest {
                         continue;
                     }
 
-                    // Opcode menu: 1..5 arith, 6..7 mem (if enabled), 8..10 control.
-                    op[i] = 1 + rng.nextInt(10);
-                    if (!memEnabled && (op[i] == PvmRecompiler.OP_LOAD_U64 || op[i] == PvmRecompiler.OP_STORE_U64)) {
-                        op[i] = 1 + rng.nextInt(5); // no memory -> arith only for this slot
-                    }
+                    // Category: 0 arithmetic, 1 memory (if enabled), 2 control.
                     dst[i] = 1 + rng.nextInt(R - 1); // never r0
-                    src2[i] = rng.nextInt(R);
-                    switch (op[i]) {
-                        case PvmRecompiler.OP_LOAD_U64, PvmRecompiler.OP_STORE_U64 -> {
+                    int cat = memEnabled ? rng.nextInt(3) : (rng.nextInt(2) == 0 ? 0 : 2);
+                    switch (cat) {
+                        case 1 -> { // memory: full width set, r0-based, byte-granular offset
+                            op[i] = MEM_OPS[rng.nextInt(MEM_OPS.length)];
                             src[i] = 0; // base register (pinned 0)
-                            imm[i] = 8L * rng.nextInt((memLen + 64) / 8); // some OOB
+                            src2[i] = 0;
+                            imm[i] = rng.nextInt(memLen + 64); // some in-bounds, some OOB
                         }
-                        case PvmRecompiler.OP_JUMP, PvmRecompiler.OP_BRANCH_EQ, PvmRecompiler.OP_BRANCH_NE -> {
+                        case 2 -> { // control: jump / branch_eq / branch_ne
+                            op[i] = PvmRecompiler.OP_JUMP + rng.nextInt(3);
                             src[i] = rng.nextInt(R);
+                            src2[i] = rng.nextInt(R);
                             imm[i] = rng.nextInt(total); // valid instruction index (incl. trap)
                         }
-                        default -> {
+                        default -> { // arithmetic
+                            op[i] = 1 + rng.nextInt(5);
                             src[i] = rng.nextInt(R);
+                            src2[i] = rng.nextInt(R);
                             imm[i] = rng.nextLong();
                         }
                     }
