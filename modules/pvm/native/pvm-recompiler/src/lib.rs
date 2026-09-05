@@ -366,7 +366,8 @@ mod tests {
 
     #[test]
     fn oog_mid_loop_freezes_state() {
-        // Same loop, gas only enough for B0 + one B1 pass.
+        // Per-instruction gas (matches interpreter): charge 1 before each instr,
+        // OOG before executing when gas<0, registers frozen at the prior instr.
         let prog = [
             RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 },
             RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 1 },
@@ -376,10 +377,11 @@ mod tests {
             RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
         ];
         let mut regs = [0u64; 13];
-        let mut gas = 6i64; // B0(3) + B1(2) = 5 ok; next B1 entry 1-2<0 -> OOG
+        let mut gas = 6i64;
+        // charges: LOAD,LOAD,LOAD,SUB(r1=2),BRANCH(taken),SUB(r1=1),BRANCH -> OOG
         let exit = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
-        assert_eq!(regs[1], 2); // one decrement applied, then frozen
+        assert_eq!(regs[1], 1); // two SUBs applied; frozen before the 2nd branch
         assert_eq!(gas, -1);
     }
 
@@ -500,16 +502,30 @@ mod tests {
     }
 
     #[test]
-    fn out_of_gas_leaves_regs_untouched() {
+    fn out_of_gas_before_first_instr_leaves_regs_untouched() {
         let prog = [
             RawInstr { opcode: OP_LOAD_IMM64, dst: 5, src: 0, src2: 0, imm: 999 },
             RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
         ];
         let mut regs = [7u64; 13];
-        let mut gas = 1i64;
+        let mut gas = 0i64; // 0-1 < 0 before the first instruction executes
         let exit = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
-        assert_eq!(regs[5], 7);
+        assert_eq!(regs[5], 7); // nothing executed
+        assert_eq!(gas, -1);
+    }
+
+    #[test]
+    fn out_of_gas_after_partial_execution() {
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 5, src: 0, src2: 0, imm: 999 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [7u64; 13];
+        let mut gas = 1i64; // LOAD executes (1->0), trap OOGs (0->-1)
+        let exit = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_OOG);
+        assert_eq!(regs[5], 999); // partial execution before OOG
         assert_eq!(gas, -1);
     }
 }

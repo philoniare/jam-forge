@@ -53,10 +53,10 @@ public final class PvmDiffTest {
             int pc = 0;
             while (true) {
                 int hi = hiOf[pc];
-                g -= (hi - pc); // block cost = instruction count
-                if (g < 0) { exit = PvmRecompiler.EXIT_OOG; gasRemaining = g; return; }
                 int next = -1;
                 for (int p = pc; p < hi; p++) {
+                    g -= 1; // charge 1 gas before executing this instruction
+                    if (g < 0) { exit = PvmRecompiler.EXIT_OOG; gasRemaining = g; return; }
                     int o = op[p];
                     if (o == PvmRecompiler.OP_TRAP) { exit = PvmRecompiler.EXIT_PANIC; gasRemaining = g; return; }
                     switch (o) {

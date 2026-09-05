@@ -8,7 +8,8 @@ const X3: u32 = 3; // guest memory length (bytes)
 const X8: u32 = 8; // scratch a / effective address
 const X9: u32 = 9; // scratch b / address end
 const X10: u32 = 10; // scratch c (store value)
-const X11: u32 = 11; // gas value / mem access base
+const X11: u32 = 11; // GAS — live in-register for the whole program (see below)
+const X12: u32 = 12; // scratch d (memory access base)
 const XZR: u32 = 31;
 
 pub struct Aarch64Backend;
@@ -255,9 +256,10 @@ impl Backend for Aarch64Backend {
         let mut halt_branches: Vec<usize> = Vec::new();
         // (asm index of branch, target block, is_conditional)
         let mut cf_branches: Vec<(usize, usize, bool)> = Vec::new();
+        a.ldr(X11, X1, 0); // x11 = *gas (live throughout)
 
         // Emit a bounds-checked effective address into x8 and mem base+addr into
-        // x11; B.HI to the fault epilogue if [addr, addr+width) escapes the
+        // x12; B.HI to the fault epilogue if [addr, addr+width) escapes the
         // region. Address masked to 32 bits (PVM address space).
         let addr_into = |a: &mut Asm, src: u8, imm: u64, width: u8, fb: &mut Vec<usize>| {
             a.ldr(X8, X0, src as u32);
@@ -267,24 +269,19 @@ impl Backend for Aarch64Backend {
             a.add_imm(X9, X8, width as u32);
             a.cmp(X9, X3);
             fb.push(a.b_cond_placeholder(COND_HI));
-            a.add(X11, X2, X8);
+            a.add(X12, X2, X8);
         };
 
         for b in 0..nblocks {
             block_start_asm[b] = a.len();
             let lo = blocks.block_lo[b];
             let hi = blocks.block_hi[b];
-            let cost = (hi - lo) as u32;
 
-            // --- block-entry gas: gas -= cost; if < 0 goto oog ---------------
-            assert!(cost < 4096, "skeleton block gas cost out of imm12 range");
-            a.ldr(X11, X1, 0);
-            a.subs_imm(X11, X11, cost);
-            a.str(X11, X1, 0);
-            oog_branches.push(a.b_cond_placeholder(COND_LT));
-
-            // --- block body --------------------------------------------------
+            // --- block body (per-instruction gas) ----------------------------
             for pc in lo..hi {
+                // charge 1 gas for this instruction; OOG (gas<0) before executing
+                a.subs_imm(X11, X11, 1);
+                oog_branches.push(a.b_cond_placeholder(COND_LT));
                 match ops[pc] {
                     Op::LoadImm64 { dst, imm } => {
                         a.mov_imm64(X8, imm);
@@ -316,15 +313,16 @@ impl Backend for Aarch64Backend {
                     }
                     Op::Load { dst, src, imm, width, signed } => {
                         addr_into(&mut a, src, imm, width, &mut fault_branches);
-                        a.emit_load(X8, X11, width, signed);
+                        a.emit_load(X8, X12, width, signed);
                         a.str(X8, X0, dst as u32);
                     }
                     Op::Store { dst, src, imm, width } => {
                         addr_into(&mut a, src, imm, width, &mut fault_branches);
                         a.ldr(X10, X0, dst as u32);
-                        a.emit_store(X10, X11, width);
+                        a.emit_store(X10, X12, width);
                     }
                     Op::Trap => {
+                        a.str(X11, X1, 0); // flush gas
                         a.movz_w(X0, 1); // EXIT_PANIC
                         a.ret();
                     }
@@ -363,6 +361,7 @@ impl Backend for Aarch64Backend {
                             cf_branches.push((idx, blocks.block_of[ti], true));
                         }
                         // no jump-table match -> panic
+                        a.str(X11, X1, 0); // flush gas
                         a.movz_w(X0, 1);
                         a.ret();
                     }
@@ -372,14 +371,17 @@ impl Backend for Aarch64Backend {
             // which is emitted immediately after — no branch needed.
         }
 
-        // --- epilogues -------------------------------------------------------
+        // --- epilogues (each flushes the live gas register back to *gas) ------
         let oog_idx = a.len();
+        a.str(X11, X1, 0); // gas is now -1 (the failing decrement)
         a.movz_w(X0, 2); // EXIT_OOG
         a.ret();
         let fault_idx = a.len();
+        a.str(X11, X1, 0);
         a.movz_w(X0, 3); // EXIT_FAULT
         a.ret();
         let halt_idx = a.len();
+        a.str(X11, X1, 0);
         a.movz_w(X0, 0); // EXIT_HALT
         a.ret();
 
