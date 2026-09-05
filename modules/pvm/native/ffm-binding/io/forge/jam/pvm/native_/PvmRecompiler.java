@@ -32,6 +32,15 @@ public final class PvmRecompiler implements AutoCloseable {
     public static final int OP_MUL = 5;
     public static final int OP_LOAD_U64 = 6;
     public static final int OP_STORE_U64 = 7;
+    public static final int OP_LOAD_U8 = 12;
+    public static final int OP_LOAD_U16 = 13;
+    public static final int OP_LOAD_U32 = 14;
+    public static final int OP_LOAD_I8 = 15;
+    public static final int OP_LOAD_I16 = 16;
+    public static final int OP_LOAD_I32 = 17;
+    public static final int OP_STORE_U8 = 18;
+    public static final int OP_STORE_U16 = 19;
+    public static final int OP_STORE_U32 = 20;
     public static final int OP_JUMP = 8;
     public static final int OP_BRANCH_EQ = 9;
     public static final int OP_BRANCH_NE = 10;

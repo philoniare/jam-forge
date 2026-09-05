@@ -68,13 +68,61 @@ impl Asm {
     fn uxtw(&mut self, rd: u32, rn: u32) {
         self.push(0x2A00_0000 | (rn << 16) | (XZR << 5) | rd);
     }
-    // LDR Xt, [Xn]  (register-base, zero offset)
+    // Register-base, zero-offset loads/stores. Ws written by the byte/half/word
+    // variants zero the upper 32 bits of the X register; LDRS* sign-extend to 64.
     fn ldr0(&mut self, rt: u32, rn: u32) {
-        self.push(0xF940_0000 | (rn << 5) | rt);
+        self.push(0xF940_0000 | (rn << 5) | rt); // LDR Xt (64)
     }
-    // STR Xt, [Xn]  (register-base, zero offset)
     fn str0(&mut self, rt: u32, rn: u32) {
-        self.push(0xF900_0000 | (rn << 5) | rt);
+        self.push(0xF900_0000 | (rn << 5) | rt); // STR Xt (64)
+    }
+    fn ldrb(&mut self, rt: u32, rn: u32) {
+        self.push(0x3940_0000 | (rn << 5) | rt); // LDRB Wt (u8 -> zext)
+    }
+    fn ldrh(&mut self, rt: u32, rn: u32) {
+        self.push(0x7940_0000 | (rn << 5) | rt); // LDRH Wt (u16 -> zext)
+    }
+    fn ldrw(&mut self, rt: u32, rn: u32) {
+        self.push(0xB940_0000 | (rn << 5) | rt); // LDR Wt (u32 -> zext)
+    }
+    fn ldrsb(&mut self, rt: u32, rn: u32) {
+        self.push(0x3980_0000 | (rn << 5) | rt); // LDRSB Xt (i8 -> sext64)
+    }
+    fn ldrsh(&mut self, rt: u32, rn: u32) {
+        self.push(0x7980_0000 | (rn << 5) | rt); // LDRSH Xt (i16 -> sext64)
+    }
+    fn ldrsw(&mut self, rt: u32, rn: u32) {
+        self.push(0xB980_0000 | (rn << 5) | rt); // LDRSW Xt (i32 -> sext64)
+    }
+    fn strb(&mut self, rt: u32, rn: u32) {
+        self.push(0x3900_0000 | (rn << 5) | rt); // STRB Wt (low 8)
+    }
+    fn strh(&mut self, rt: u32, rn: u32) {
+        self.push(0x7900_0000 | (rn << 5) | rt); // STRH Wt (low 16)
+    }
+    fn strw(&mut self, rt: u32, rn: u32) {
+        self.push(0xB900_0000 | (rn << 5) | rt); // STR Wt (low 32)
+    }
+    fn emit_load(&mut self, rt: u32, rn: u32, width: u8, signed: bool) {
+        match (width, signed) {
+            (1, false) => self.ldrb(rt, rn),
+            (2, false) => self.ldrh(rt, rn),
+            (4, false) => self.ldrw(rt, rn),
+            (1, true) => self.ldrsb(rt, rn),
+            (2, true) => self.ldrsh(rt, rn),
+            (4, true) => self.ldrsw(rt, rn),
+            (8, _) => self.ldr0(rt, rn),
+            _ => panic!("unsupported load width {width}"),
+        }
+    }
+    fn emit_store(&mut self, rt: u32, rn: u32, width: u8) {
+        match width {
+            1 => self.strb(rt, rn),
+            2 => self.strh(rt, rn),
+            4 => self.strw(rt, rn),
+            8 => self.str0(rt, rn),
+            _ => panic!("unsupported store width {width}"),
+        }
     }
     // MOVZ Wd, #imm16
     fn movz_w(&mut self, rd: u32, imm16: u32) {
@@ -209,14 +257,14 @@ impl Backend for Aarch64Backend {
         let mut cf_branches: Vec<(usize, usize, bool)> = Vec::new();
 
         // Emit a bounds-checked effective address into x8 and mem base+addr into
-        // x11; B.HI to the fault epilogue if [addr, addr+8) escapes the region.
-        // Address masked to 32 bits (PVM address space).
-        let addr_into = |a: &mut Asm, src: u8, imm: u64, fb: &mut Vec<usize>| {
+        // x11; B.HI to the fault epilogue if [addr, addr+width) escapes the
+        // region. Address masked to 32 bits (PVM address space).
+        let addr_into = |a: &mut Asm, src: u8, imm: u64, width: u8, fb: &mut Vec<usize>| {
             a.ldr(X8, X0, src as u32);
             a.mov_imm64(X9, imm);
             a.add(X8, X8, X9);
             a.uxtw(X8, X8);
-            a.add_imm(X9, X8, 8);
+            a.add_imm(X9, X8, width as u32);
             a.cmp(X9, X3);
             fb.push(a.b_cond_placeholder(COND_HI));
             a.add(X11, X2, X8);
@@ -266,15 +314,15 @@ impl Backend for Aarch64Backend {
                         a.mul(X8, X8, X9);
                         a.str(X8, X0, dst as u32);
                     }
-                    Op::LoadU64 { dst, src, imm } => {
-                        addr_into(&mut a, src, imm, &mut fault_branches);
-                        a.ldr0(X8, X11);
+                    Op::Load { dst, src, imm, width, signed } => {
+                        addr_into(&mut a, src, imm, width, &mut fault_branches);
+                        a.emit_load(X8, X11, width, signed);
                         a.str(X8, X0, dst as u32);
                     }
-                    Op::StoreU64 { dst, src, imm } => {
-                        addr_into(&mut a, src, imm, &mut fault_branches);
+                    Op::Store { dst, src, imm, width } => {
+                        addr_into(&mut a, src, imm, width, &mut fault_branches);
                         a.ldr(X10, X0, dst as u32);
-                        a.str0(X10, X11);
+                        a.emit_store(X10, X11, width);
                     }
                     Op::Trap => {
                         a.movz_w(X0, 1); // EXIT_PANIC
