@@ -1,5 +1,5 @@
 //! AArch64 single-pass emitter
-use crate::{Backend, Op};
+use crate::{Backend, Op, DJUMP_HALT};
 
 const X0: u32 = 0; // regs base
 const X1: u32 = 1; // gas ptr
@@ -59,6 +59,10 @@ impl Asm {
     // CMP Xn, Xm  ==  SUBS XZR, Xn, Xm  (sets flags)
     fn cmp(&mut self, rn: u32, rm: u32) {
         self.push(0xEB00_0000 | (rm << 16) | (rn << 5) | XZR);
+    }
+    // CMP Xn, #imm12  ==  SUBS XZR, Xn, #imm12  (sets flags)
+    fn cmp_imm(&mut self, rn: u32, imm12: u32) {
+        self.push(0xF100_0000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | XZR);
     }
     // MOV Wd, Wn  (zero-extends low 32 bits into Xd)  ==  ORR Wd, WZR, Wn
     fn uxtw(&mut self, rd: u32, rn: u32) {
@@ -140,12 +144,18 @@ struct Blocks {
     block_hi: Vec<usize>,
 }
 
-fn analyze_blocks(ops: &[Op]) -> Blocks {
+fn analyze_blocks(ops: &[Op], jump_table: &[u32]) -> Blocks {
     let n = ops.len();
-    // Leaders: op 0, every branch/jump target, and the op after any terminator.
+    // Leaders: op 0, every branch/jump target, every indirect (djump) target,
+    // and the op after any terminator.
     let mut is_leader = vec![false; n + 1];
     if n > 0 {
         is_leader[0] = true;
+    }
+    for &t in jump_table {
+        if (t as usize) < n {
+            is_leader[t as usize] = true;
+        }
     }
     for (i, op) in ops.iter().enumerate() {
         if let Some(t) = op.target() {
@@ -180,7 +190,7 @@ fn analyze_blocks(ops: &[Op]) -> Blocks {
 }
 
 impl Backend for Aarch64Backend {
-    fn emit_program(&self, ops: &[Op]) -> Vec<u8> {
+    fn emit_program(&self, ops: &[Op], jump_table: &[u32]) -> Vec<u8> {
         let mut a = Asm::new();
         if ops.is_empty() {
             // empty program: immediate PANIC (nothing to run)
@@ -188,12 +198,13 @@ impl Backend for Aarch64Backend {
             a.ret();
             return a.to_bytes();
         }
-        let blocks = analyze_blocks(ops);
+        let blocks = analyze_blocks(ops, jump_table);
         let nblocks = blocks.block_lo.len();
 
         let mut block_start_asm = vec![0usize; nblocks];
         let mut oog_branches: Vec<usize> = Vec::new();
         let mut fault_branches: Vec<usize> = Vec::new();
+        let mut halt_branches: Vec<usize> = Vec::new();
         // (asm index of branch, target block, is_conditional)
         let mut cf_branches: Vec<(usize, usize, bool)> = Vec::new();
 
@@ -288,6 +299,25 @@ impl Backend for Aarch64Backend {
                         let idx = a.b_cond_placeholder(COND_NE);
                         cf_branches.push((idx, blocks.block_of[target as usize], true));
                     }
+                    Op::Djump { src } => {
+                        a.ldr(X8, X0, src as u32);
+                        a.mov_imm64(X9, DJUMP_HALT);
+                        a.cmp(X8, X9);
+                        halt_branches.push(a.b_cond_placeholder(COND_EQ));
+                        for &t in jump_table {
+                            let ti = t as usize;
+                            if ti >= ops.len() {
+                                continue;
+                            }
+                            assert!(t < 4096, "skeleton djump target index out of imm12 range");
+                            a.cmp_imm(X8, t);
+                            let idx = a.b_cond_placeholder(COND_EQ);
+                            cf_branches.push((idx, blocks.block_of[ti], true));
+                        }
+                        // no jump-table match -> panic
+                        a.movz_w(X0, 1);
+                        a.ret();
+                    }
                 }
             }
             // Blocks ending without a terminator fall through to the next block,
@@ -301,6 +331,9 @@ impl Backend for Aarch64Backend {
         let fault_idx = a.len();
         a.movz_w(X0, 3); // EXIT_FAULT
         a.ret();
+        let halt_idx = a.len();
+        a.movz_w(X0, 0); // EXIT_HALT
+        a.ret();
 
         // --- patch ------------------------------------------------------------
         for b in oog_branches {
@@ -308,6 +341,9 @@ impl Backend for Aarch64Backend {
         }
         for b in fault_branches {
             a.patch_b_cond(b, fault_idx);
+        }
+        for b in halt_branches {
+            a.patch_b_cond(b, halt_idx);
         }
         for (at, target_block, is_cond) in cf_branches {
             let tgt = block_start_asm[target_block];

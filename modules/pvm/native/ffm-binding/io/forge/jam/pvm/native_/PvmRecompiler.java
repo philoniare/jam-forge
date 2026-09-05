@@ -35,6 +35,8 @@ public final class PvmRecompiler implements AutoCloseable {
     public static final int OP_JUMP = 8;
     public static final int OP_BRANCH_EQ = 9;
     public static final int OP_BRANCH_NE = 10;
+    public static final int OP_DJUMP = 11;
+    public static final long DJUMP_HALT = 0xFFFF_0000L;
 
     public static final int EXIT_HALT = 0;
     public static final int EXIT_PANIC = 1;
@@ -56,7 +58,12 @@ public final class PvmRecompiler implements AutoCloseable {
 
         this.compile = linker.downcallHandle(
                 lookup.find("pvm_compile").orElseThrow(() -> missing("pvm_compile")),
-                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+                FunctionDescriptor.of(ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,   // instrs
+                        ValueLayout.JAVA_LONG, // n
+                        ValueLayout.ADDRESS,   // jump table
+                        ValueLayout.JAVA_LONG  // jt_n
+                ));
         this.execute = linker.downcallHandle(
                 lookup.find("pvm_execute").orElseThrow(() -> missing("pvm_execute")),
                 FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -102,13 +109,13 @@ public final class PvmRecompiler implements AutoCloseable {
     }
 
     /**
-     * Compile a pre-decoded single-basic-block program.
-     * {@code fields} is a flat [opcode, dst, src, src2, immLo, immHi ...]? No —
-     * we take structured columns to keep the marshalling explicit. Each instruction
-     * i is (opcodes[i], dsts[i], srcs[i], src2s[i], imms[i]).
+     * Compile a pre-decoded program. Each instruction i is
+     * (opcodes[i], dsts[i], srcs[i], src2s[i], imms[i]); for control-flow ops the
+     * branch/jump target instruction index is carried in {@code imms[i]}.
+     * {@code jumpTable} lists the valid indirect ({@code djump}) target indices.
      * Returns a Block; check {@link Block#isValid()} before executing.
      */
-    public Block compile(int[] opcodes, int[] dsts, int[] srcs, int[] src2s, long[] imms) {
+    public Block compile(int[] opcodes, int[] dsts, int[] srcs, int[] src2s, long[] imms, int[] jumpTable) {
         int n = opcodes.length;
         MemorySegment buf = arena.allocate(RAW_INSTR_SIZE * n);
         for (int i = 0; i < n; i++) {
@@ -119,12 +126,23 @@ public final class PvmRecompiler implements AutoCloseable {
             buf.set(ValueLayout.JAVA_INT, base + 12, src2s[i]);
             buf.set(ValueLayout.JAVA_LONG, base + 16, imms[i]);
         }
+        MemorySegment jt = jumpTable.length == 0
+                ? MemorySegment.NULL
+                : arena.allocate(ValueLayout.JAVA_INT, jumpTable.length);
+        for (int i = 0; i < jumpTable.length; i++) {
+            jt.setAtIndex(ValueLayout.JAVA_INT, i, jumpTable[i]);
+        }
         try {
-            MemorySegment h = (MemorySegment) compile.invoke(buf, (long) n);
+            MemorySegment h = (MemorySegment) compile.invoke(buf, (long) n, jt, (long) jumpTable.length);
             return new Block(h);
         } catch (Throwable t) {
             throw new RuntimeException("pvm_compile failed", t);
         }
+    }
+
+    /** Convenience overload with no indirect-jump targets. */
+    public Block compile(int[] opcodes, int[] dsts, int[] srcs, int[] src2s, long[] imms) {
+        return compile(opcodes, dsts, srcs, src2s, imms, new int[0]);
     }
 
     /**
