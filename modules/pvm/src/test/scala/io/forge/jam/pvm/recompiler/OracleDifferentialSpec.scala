@@ -172,9 +172,17 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private def libPath: Option[Path] =
     Option(System.getProperty("jam.pvm.recompiler.lib")).map(Path.of(_)).filter(Files.exists(_))
 
+  private def genLoopProgram(rng: Random): Seq[AInstr] =
+    val setup = (0 until rng.nextInt(4)).map(_ => randArith(rng))
+    val body = (0 until (1 + rng.nextInt(4))).map(_ => randArith(rng))
+    val loopStart = setup.length + 1 // index of block1's first instruction
+    (setup :+ Jump(loopStart)) ++ (body :+ Jump(loopStart))
+
   private def compareRun(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
+    compareRunGas(rc, prog, prog.length.toLong + rng.nextInt(50), rng) // sufficient
+
+  private def compareRunGas(rc: PvmRecompiler, prog: Seq[AInstr], gas: Long, rng: Random): Unit =
     val initRegs = Array.fill(13)(rng.nextLong())
-    val gas = prog.length.toLong + rng.nextInt(50) // forward-only => always sufficient
     val (iExit, iGas, iRegs) = runInterpreter(prog, initRegs.clone(), gas)
     val (op, dst, src, src2, imm) = toRawColumns(prog)
     val blk = rc.compile(op, dst, src, src2, imm)
@@ -213,5 +221,37 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             compareRun(rc, genControlFlowProgram(rng), rng)
           info("oracle differential (control flow): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on out-of-gas (partial-execution) semantics" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xDEAD01L)
+          // Tight gas so OOG strikes mid-program; per-instruction gas must freeze
+          // registers exactly where the interpreter does.
+          for _ <- 0 until 20000 do
+            val prog = (0 until (1 + rng.nextInt(12))).map(_ => randArith(rng)) :+ Trap
+            compareRunGas(rc, prog, rng.nextInt(prog.length + 1).toLong, rng)
+          info("oracle differential (arith OOG): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on backward loops (OOG mid-loop)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x100F00L)
+          // Infinite loops that only end via OOG — the hardest OOG case, now that
+          // per-instruction gas matches the interpreter's partial-block semantics.
+          for _ <- 0 until 20000 do
+            val prog = genLoopProgram(rng)
+            compareRunGas(rc, prog, (5 + rng.nextInt(60)).toLong, rng)
+          info("oracle differential (backward loop OOG): 20000 programs matched the interpreter")
         finally rc.close()
   }
