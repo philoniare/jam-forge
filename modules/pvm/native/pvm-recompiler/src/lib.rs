@@ -24,10 +24,12 @@ pub const OP_STORE_U64: u32 = 7; // mem_u64[(reg[src]+imm) & 0xFFFFFFFF] = reg[d
 pub const OP_JUMP: u32 = 8; // pc = imm (instruction index)
 pub const OP_BRANCH_EQ: u32 = 9; // if reg[src] == reg[src2] then pc = imm
 pub const OP_BRANCH_NE: u32 = 10; // if reg[src] != reg[src2] then pc = imm
+pub const OP_DJUMP: u32 = 11; // indirect: target = reg[src] (see DJUMP_HALT)
+pub const DJUMP_HALT: u64 = 0xFFFF_0000;
 
 // Exit codes returned by execute. Must match the Scala differential mapping.
-pub const EXIT_HALT: u32 = 0;
-pub const EXIT_PANIC: u32 = 1;
+pub const EXIT_HALT: u32 = 0; // clean exit (djump to the halt sentinel)
+pub const EXIT_PANIC: u32 = 1; // trap, or djump to a non-jump-table target
 pub const EXIT_OOG: u32 = 2;
 pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
 
@@ -57,12 +59,16 @@ pub enum Op {
     BranchEq { src: u8, src2: u8, target: u32 },
     /// if reg[src] != reg[src2] then jump to `target`, else fall through.
     BranchNe { src: u8, src2: u8, target: u32 },
+    Djump { src: u8 },
 }
 
 impl Op {
     /// True if this op ends a basic block (control leaves sequentially here).
     pub fn is_terminator(&self) -> bool {
-        matches!(self, Op::Trap | Op::Jump { .. } | Op::BranchEq { .. } | Op::BranchNe { .. })
+        matches!(
+            self,
+            Op::Trap | Op::Jump { .. } | Op::BranchEq { .. } | Op::BranchNe { .. } | Op::Djump { .. }
+        )
     }
     /// The branch/jump target instruction index, if any.
     pub fn target(&self) -> Option<u32> {
@@ -81,7 +87,9 @@ pub trait Backend {
     /// `EXIT_OOG` when insufficient), static jumps/branches resolved to code
     /// offsets, `Trap` returning `EXIT_PANIC`, and memory faults `EXIT_FAULT`.
     /// The op index is the instruction "pc" that jumps/branches target.
-    fn emit_program(&self, ops: &[Op]) -> Vec<u8>;
+    /// `jump_table` lists the instruction indices that are valid indirect
+    /// (`djump`) targets; every entry is also treated as a block leader.
+    fn emit_program(&self, ops: &[Op], jump_table: &[u32]) -> Vec<u8>;
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -105,6 +113,7 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_JUMP => ops.push(Op::Jump { target: ins.imm as u32 }),
             OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
             OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
+            OP_DJUMP => ops.push(Op::Djump { src: ins.src as u8 }),
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
@@ -115,10 +124,18 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
 /// `CompiledBlock` pointer, or null if the program contains an unsupported
 /// opcode (the caller must then deopt to the interpreter).
 ///
+/// `jump_table`/`jt_n` list the valid indirect-jump (`djump`) target indices.
+///
 /// # Safety
-/// `instrs` must point to `n` valid `RawInstr` values.
+/// `instrs` must point to `n` valid `RawInstr` values; `jump_table` to `jt_n`
+/// u32 values (may be null when `jt_n == 0`).
 #[no_mangle]
-pub unsafe extern "C" fn pvm_compile(instrs: *const RawInstr, n: usize) -> *mut CompiledBlock {
+pub unsafe extern "C" fn pvm_compile(
+    instrs: *const RawInstr,
+    n: usize,
+    jump_table: *const u32,
+    jt_n: usize,
+) -> *mut CompiledBlock {
     if instrs.is_null() {
         return std::ptr::null_mut();
     }
@@ -127,8 +144,17 @@ pub unsafe extern "C" fn pvm_compile(instrs: *const RawInstr, n: usize) -> *mut 
         Some(x) => x,
         None => return std::ptr::null_mut(),
     };
+    let jt: Vec<u32> = if jump_table.is_null() || jt_n == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(jump_table, jt_n)
+            .iter()
+            .copied()
+            .filter(|&t| (t as usize) < n) // keep only in-range targets
+            .collect()
+    };
     let backend = aarch64::Aarch64Backend;
-    let code = backend.emit_program(&ops);
+    let code = backend.emit_program(&ops, &jt);
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
@@ -184,12 +210,22 @@ mod tests {
     use super::*;
 
     fn run(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64) -> u32 {
-        run_mem(instrs, regs, gas, &mut [])
+        run_full(instrs, regs, gas, &mut [], &[])
     }
 
     fn run_mem(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64, mem: &mut [u8]) -> u32 {
+        run_full(instrs, regs, gas, mem, &[])
+    }
+
+    fn run_full(
+        instrs: &[RawInstr],
+        regs: &mut [u64; 13],
+        gas: &mut i64,
+        mem: &mut [u8],
+        jt: &[u32],
+    ) -> u32 {
         unsafe {
-            let blk = pvm_compile(instrs.as_ptr(), instrs.len());
+            let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len());
             assert!(!blk.is_null(), "compile returned null");
             let ex = pvm_execute(
                 blk,
@@ -340,6 +376,51 @@ mod tests {
         let exit = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 5);
+    }
+
+    #[test]
+    fn djump_to_valid_target_jumps() {
+        // r1 = 3 (a valid jump-table target index); djump r1; ... ; block at 3
+        // sets r2 = 7; trap. Jump table = {3}.
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 }, // 0
+            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },      // 1 -> reg[1]=3
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 99 },// 2 (skipped)
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 7 }, // 3 (target)
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 4
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        assert_eq!(exit, EXIT_PANIC); // ends at the trap
+        assert_eq!(regs[2], 7);
+    }
+
+    #[test]
+    fn djump_to_sentinel_halts() {
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: DJUMP_HALT },
+            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[]);
+        assert_eq!(exit, EXIT_HALT); // clean exit, distinct from trap's PANIC
+    }
+
+    #[test]
+    fn djump_to_untabled_target_panics() {
+        // reg holds 2 but the jump table only allows {3} -> panic
+        let prog = [
+            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 2 },
+            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },
+            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        assert_eq!(exit, EXIT_PANIC);
     }
 
     #[test]

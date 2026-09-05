@@ -19,13 +19,15 @@ public final class PvmDiffTest {
         final long[] regs;
         final byte[] mem;
 
-        Ref(int[] op, int[] dst, int[] src, int[] src2, long[] imm, long gas, long[] init, byte[] mem0) {
+        Ref(int[] op, int[] dst, int[] src, int[] src2, long[] imm, long gas, long[] init, byte[] mem0, int[] jumpTable) {
             int n = op.length;
             this.regs = init.clone();
             this.mem = mem0.clone();
-            // Block decomposition: leaders = {0} ∪ targets ∪ after-terminator.
+            // Block decomposition: leaders = {0} ∪ static targets ∪ jump-table
+            // (indirect) targets ∪ after-terminator.
             boolean[] leader = new boolean[n + 1];
             if (n > 0) leader[0] = true;
+            for (int t : jumpTable) if (t < n) leader[t] = true;
             for (int i = 0; i < n; i++) {
                 if (isTerminator(op[i])) {
                     Integer t = targetOf(op[i], imm[i]);
@@ -69,6 +71,14 @@ public final class PvmDiffTest {
                         case PvmRecompiler.OP_JUMP -> { next = (int) imm[p]; }
                         case PvmRecompiler.OP_BRANCH_EQ -> next = (regs[src[p]] == regs[src2[p]]) ? (int) imm[p] : hi;
                         case PvmRecompiler.OP_BRANCH_NE -> next = (regs[src[p]] != regs[src2[p]]) ? (int) imm[p] : hi;
+                        case PvmRecompiler.OP_DJUMP -> {
+                            long tv = regs[src[p]];
+                            if (tv == PvmRecompiler.DJUMP_HALT) { exit = PvmRecompiler.EXIT_HALT; gasRemaining = g; return; }
+                            int nx = -1;
+                            for (int t : jumpTable) if (t < n && tv == t) { nx = t; break; }
+                            if (nx < 0) { exit = PvmRecompiler.EXIT_PANIC; gasRemaining = g; return; }
+                            next = nx;
+                        }
                         default -> throw new IllegalStateException("bad opcode " + o);
                     }
                     if (next >= 0) break; // control-flow op ends the block
@@ -81,7 +91,8 @@ public final class PvmDiffTest {
 
     static boolean isTerminator(int op) {
         return op == PvmRecompiler.OP_TRAP || op == PvmRecompiler.OP_JUMP
-                || op == PvmRecompiler.OP_BRANCH_EQ || op == PvmRecompiler.OP_BRANCH_NE;
+                || op == PvmRecompiler.OP_BRANCH_EQ || op == PvmRecompiler.OP_BRANCH_NE
+                || op == PvmRecompiler.OP_DJUMP;
     }
 
     static Integer targetOf(int op, long imm) {
@@ -126,7 +137,27 @@ public final class PvmDiffTest {
                 long[] imm = new long[n + 1];
                 boolean memEnabled = memLen > 0;
                 int total = n + 1; // includes the trailing trap; valid target range
+
+                // Jump table: 0..3 valid indirect-jump target indices.
+                int jtN = rng.nextInt(4);
+                int[] jumpTable = new int[jtN];
+                for (int j = 0; j < jtN; j++) jumpTable[j] = rng.nextInt(total);
+
                 for (int i = 0; i < n; i++) {
+                    if (i + 1 < n && rng.nextInt(12) == 0) {
+                        int rD = 1 + rng.nextInt(R - 1);
+                        long chosen = switch (rng.nextInt(3)) {
+                            case 0 -> jtN > 0 ? jumpTable[rng.nextInt(jtN)] : rng.nextInt(total); // valid jump
+                            case 1 -> PvmRecompiler.DJUMP_HALT; // clean halt
+                            default -> rng.nextLong(); // untabled -> panic
+                        };
+                        op[i] = PvmRecompiler.OP_LOAD_IMM64; dst[i] = rD; src[i] = 0; src2[i] = 0; imm[i] = chosen;
+                        i++;
+                        op[i] = PvmRecompiler.OP_DJUMP; dst[i] = 0; src[i] = rD; src2[i] = 0; imm[i] = 0;
+                        continue;
+                    }
+
+                    // Opcode menu: 1..5 arith, 6..7 mem (if enabled), 8..10 control.
                     op[i] = 1 + rng.nextInt(10);
                     if (!memEnabled && (op[i] == PvmRecompiler.OP_LOAD_U64 || op[i] == PvmRecompiler.OP_STORE_U64)) {
                         op[i] = 1 + rng.nextInt(5); // no memory -> arith only for this slot
@@ -160,11 +191,11 @@ public final class PvmDiffTest {
                 for (int i = 0; i < R; i++) init[i] = rng.nextLong();
                 init[0] = 0; // memory base
 
-                Ref ref = new Ref(op, dst, src, src2, imm, gas, init, mem0);
+                Ref ref = new Ref(op, dst, src, src2, imm, gas, init, mem0, jumpTable);
 
                 long[] regsNat = init.clone();
                 byte[] memNat = mem0.clone();
-                var blk = rc.compile(op, dst, src, src2, imm);
+                var blk = rc.compile(op, dst, src, src2, imm, jumpTable);
                 if (!blk.isValid()) { System.out.println("compile null at it=" + it); mismatches++; continue; }
                 long[] out = rc.execute(blk, regsNat, gas, memNat);
                 blk.close();
