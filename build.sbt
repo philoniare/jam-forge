@@ -61,6 +61,7 @@ def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[Str
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
 lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
+lazy val buildPvmRecompilerLib = taskKey[Unit]("Build native PVM recompiler library")
 lazy val benchmark = taskKey[Unit]("Run benchmark tests")
 lazy val stressTest = taskKey[Unit]("Run long-running stress test (100K blocks)")
 val nettyQuicVersion = "0.0.75.Final"
@@ -257,7 +258,35 @@ lazy val pvm = (project in file("modules/pvm"))
       "io.circe" %% "circe-generic" % "0.14.6" % Test,
       "io.circe" %% "circe-parser" % "0.14.6" % Test
     ),
-    scalacOptions ++= commonScalacOptionsHK
+    scalacOptions ++= commonScalacOptionsHK,
+    buildPvmRecompilerLib := {
+      val baseDir = (ThisBuild / baseDirectory).value
+      val rustProjectDir = baseDir / "modules" / "pvm" / "native" / "pvm-recompiler"
+      val targetDir = baseDir / "modules" / "pvm" / "native" / "build" / osDirName
+      val libName = s"libpvm_recompiler.$libSuffix"
+      val targetLib = targetDir / libName
+      val sourceLib = rustProjectDir / "target" / "release" / libName
+      if (!targetLib.exists()) {
+        targetDir.mkdirs()
+        val cargoPath =
+          try if (osName.contains("win")) "where cargo".!!.trim else "which cargo".!!.trim
+          catch { case _: Exception => "cargo" }
+        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
+        if (buildResult != 0) sys.error("Failed to build pvm-recompiler with cargo")
+        if (sourceLib.exists()) {
+          IO.copyFile(sourceLib, targetLib)
+          if (!osName.contains("win")) s"chmod +x ${targetLib.absolutePath}".!
+          println(s"PVM recompiler native library built: ${targetLib.absolutePath}")
+        } else sys.error(s"PVM recompiler library not found at: ${sourceLib.absolutePath}")
+      } else println(s"PVM recompiler native library already exists: ${targetLib.absolutePath}")
+    },
+    Compile / compile := (Compile / compile).dependsOn(buildPvmRecompilerLib).value,
+    // The differential-oracle test forks a JVM that loads the recompiler dylib.
+    Test / fork := true,
+    Test / javaOptions ++= nativeLibJavaOptions(
+      (ThisBuild / baseDirectory).value,
+      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+    )
   )
 
 lazy val protocol = (project in file("modules/protocol"))

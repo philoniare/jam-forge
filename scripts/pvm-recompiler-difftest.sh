@@ -33,7 +33,7 @@ OUT=target/pvm-recompiler-difftest
 mkdir -p "$OUT"
 echo "== javac (FFM binding + differential harness) =="
 "$JHOME/bin/javac" -d "$OUT" \
-  modules/pvm/native/ffm-binding/io/forge/jam/pvm/native_/PvmRecompiler.java \
+  modules/pvm/src/main/java/io/forge/jam/pvm/native_/PvmRecompiler.java \
   modules/pvm/native/ffm-binding/io/forge/jam/pvm/native_/PvmDiffTest.java
 
 echo "== differential run: $ITERS iterations =="
