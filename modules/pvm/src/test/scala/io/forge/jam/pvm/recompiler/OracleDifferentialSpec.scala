@@ -36,9 +36,6 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // Indirect-store opcode by width — decodes as regs2Imm.
   private def storeIndOpcode(width: Int): Int = width match
     case 1 => 120; case 2 => 121; case 4 => 122; case _ => 123
-  private def storeIndRecompilerOp(width: Int): Int = width match
-    case 1 => PvmRecompiler.OP_STORE_U8; case 2 => PvmRecompiler.OP_STORE_U16
-    case 4 => PvmRecompiler.OP_STORE_U32; case _ => PvmRecompiler.OP_STORE_U64
 
   // Indirect-load opcode by (width, signed) — decodes as regs2Imm.
   private def loadIndOpcode(width: Int, signed: Boolean): Int = (width, signed) match
@@ -46,11 +43,6 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case (2, false) => 126; case (2, true) => 127
     case (4, false) => 128; case (4, true) => 129
     case (8, _)     => 130
-  private def loadIndRecompilerOp(width: Int, signed: Boolean): Int = (width, signed) match
-    case (1, false) => PvmRecompiler.OP_LOAD_U8;  case (1, true) => PvmRecompiler.OP_LOAD_I8
-    case (2, false) => PvmRecompiler.OP_LOAD_U16; case (2, true) => PvmRecompiler.OP_LOAD_I16
-    case (4, false) => PvmRecompiler.OP_LOAD_U32; case (4, true) => PvmRecompiler.OP_LOAD_I32
-    case (8, _)     => PvmRecompiler.OP_LOAD_U64
 
   // Fixed instruction sizes (fixed-width immediates) so byte offsets are known
   // in one pass and control-flow targets resolve without size iteration.
@@ -105,26 +97,9 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     (bytes, bitmask)
 
   // ---- abstract -> recompiler RawInstr columns --------------------------------
-  private def toRawColumns(prog: Seq[AInstr]): (Array[Int], Array[Int], Array[Int], Array[Int], Array[Long]) =
-    val n = prog.length
-    val op = new Array[Int](n); val dst = new Array[Int](n)
-    val src = new Array[Int](n); val src2 = new Array[Int](n); val imm = new Array[Long](n)
-    prog.zipWithIndex.foreach { case (a, i) =>
-      a match
-        case LoadImm64(reg, v)     => op(i) = PvmRecompiler.OP_LOAD_IMM64; dst(i) = reg; imm(i) = v
-        case AddImm64(d, s, v)     => op(i) = PvmRecompiler.OP_ADD_IMM64; dst(i) = d; src(i) = s; imm(i) = v.toLong // sign-extends
-        case Add64(d, s1, s2)      => op(i) = PvmRecompiler.OP_ADD; dst(i) = d; src(i) = s1; src2(i) = s2
-        case Sub64(d, s1, s2)      => op(i) = PvmRecompiler.OP_SUB; dst(i) = d; src(i) = s1; src2(i) = s2
-        case Mul64(d, s1, s2)      => op(i) = PvmRecompiler.OP_MUL; dst(i) = d; src(i) = s1; src2(i) = s2
-        case Jump(t)               => op(i) = PvmRecompiler.OP_JUMP; imm(i) = t.toLong
-        case BranchEq(r1, r2, t)   => op(i) = PvmRecompiler.OP_BRANCH_EQ; src(i) = r1; src2(i) = r2; imm(i) = t.toLong
-        case BranchNe(r1, r2, t)   => op(i) = PvmRecompiler.OP_BRANCH_NE; src(i) = r1; src2(i) = r2; imm(i) = t.toLong
-        case LoadInd(d, base, o, w, s) => op(i) = loadIndRecompilerOp(w, s); dst(i) = d; src(i) = base; imm(i) = o.toLong
-        // recompiler Store{dst=value, src=base, imm=offset}
-        case StoreInd(s, base, o, w) => op(i) = storeIndRecompilerOp(w); dst(i) = s; src(i) = base; imm(i) = o.toLong
-        case Trap                  => op(i) = PvmRecompiler.OP_TRAP
-    }
-    (op, dst, src, src2, imm)
+  private def toRawColumns(prog: Seq[AInstr]): RecompilerAbi.PreparedProgram =
+    val (code, bitmask) = encodeProgram(prog)
+    RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
 
   private val RW_BASE = 0x20000
   private val RW_LEN = 4096 // one page: recompiler's byte bounds == interpreter's page bounds
@@ -289,8 +264,8 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     // recompiler flat buffer covers [0, RW_END) with the RW image at RW_BASE
     val memBuf = new Array[Byte](RW_END)
     System.arraycopy(rwData, 0, memBuf, RW_BASE, RW_LEN)
-    val (op, dst, src, src2, imm) = toRawColumns(prog)
-    val blk = rc.compile(op, dst, src, src2, imm)
+    val pp = toRawColumns(prog)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.imm, pp.imm2, pp.jumpTable)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas, memBuf)
@@ -312,8 +287,8 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private def compareRunGas(rc: PvmRecompiler, prog: Seq[AInstr], gas: Long, rng: Random): Unit =
     val initRegs = Array.fill(13)(rng.nextLong())
     val (iExit, iGas, iRegs) = runInterpreter(prog, initRegs.clone(), gas)
-    val (op, dst, src, src2, imm) = toRawColumns(prog)
-    val blk = rc.compile(op, dst, src, src2, imm)
+    val pp = toRawColumns(prog)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.imm, pp.imm2, pp.jumpTable)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas)
