@@ -27,13 +27,31 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private case class Jump(targetIdx: Int) extends AInstr
   private case class BranchEq(r1: Int, r2: Int, targetIdx: Int) extends AInstr
   private case class BranchNe(r1: Int, r2: Int, targetIdx: Int) extends AInstr
+  // reg[dst] = load `width` bytes at reg[base] + offset (zero/sign-extended).
+  private case class LoadInd(dst: Int, base: Int, offset: Int, width: Int, signed: Boolean) extends AInstr
   private case object Trap extends AInstr
+
+  // Indirect-load opcode by (width, signed) — decodes as regs2Imm.
+  private def loadIndOpcode(width: Int, signed: Boolean): Int = (width, signed) match
+    case (1, false) => 124; case (1, true) => 125
+    case (2, false) => 126; case (2, true) => 127
+    case (4, false) => 128; case (4, true) => 129
+    case (8, _)     => 130
+  private def loadIndRecompilerOp(width: Int, signed: Boolean): Int = (width, signed) match
+    case (1, false) => PvmRecompiler.OP_LOAD_U8;  case (1, true) => PvmRecompiler.OP_LOAD_I8
+    case (2, false) => PvmRecompiler.OP_LOAD_U16; case (2, true) => PvmRecompiler.OP_LOAD_I16
+    case (4, false) => PvmRecompiler.OP_LOAD_U32; case (4, true) => PvmRecompiler.OP_LOAD_I32
+    case (8, _)     => PvmRecompiler.OP_LOAD_U64
+
+  // Fixed instruction sizes (fixed-width immediates) so byte offsets are known
+  // in one pass and control-flow targets resolve without size iteration.
   private def sizeOf(a: AInstr): Int = a match
     case _: LoadImm64                 => 10
     case _: AddImm64                  => 6
     case _: Add64 | _: Sub64 | _: Mul64 => 3
     case _: Jump                      => 5
     case _: BranchEq | _: BranchNe    => 6
+    case _: LoadInd                   => 6
     case Trap                         => 1
 
   // ---- PVM encoder (abstract -> code bytes + bitmask) -------------------------
@@ -54,6 +72,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case Jump(_)                 => Array[Byte](40.toByte) ++ intLE(tOff - off)
     case BranchEq(r1, r2, _)     => Array[Byte](170.toByte, regByte(r1, r2)) ++ intLE(tOff - off)
     case BranchNe(r1, r2, _)     => Array[Byte](171.toByte, regByte(r1, r2)) ++ intLE(tOff - off)
+    case LoadInd(dst, base, o, w, s) => Array[Byte](loadIndOpcode(w, s).toByte, regByte(dst, base)) ++ intLE(o)
     case Trap                    => Array[Byte](0)
 
   private def targetIdxOf(a: AInstr): Option[Int] = a match
@@ -89,16 +108,27 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         case Jump(t)               => op(i) = PvmRecompiler.OP_JUMP; imm(i) = t.toLong
         case BranchEq(r1, r2, t)   => op(i) = PvmRecompiler.OP_BRANCH_EQ; src(i) = r1; src2(i) = r2; imm(i) = t.toLong
         case BranchNe(r1, r2, t)   => op(i) = PvmRecompiler.OP_BRANCH_NE; src(i) = r1; src2(i) = r2; imm(i) = t.toLong
+        case LoadInd(d, base, o, w, s) => op(i) = loadIndRecompilerOp(w, s); dst(i) = d; src(i) = base; imm(i) = o.toLong
         case Trap                  => op(i) = PvmRecompiler.OP_TRAP
     }
     (op, dst, src, src2, imm)
 
+  private val RW_BASE = 0x20000
+  private val RW_LEN = 4096 // one page: recompiler's byte bounds == interpreter's page bounds
+  private val RW_END = RW_BASE + RW_LEN
+
   // ---- interpreter run (the oracle) ------------------------------------------
   private def runInterpreter(prog: Seq[AInstr], initRegs: Array[Long], gas: Long): (Int, Long, Array[Long]) =
+    runInterpreterMem(prog, initRegs, gas, new Array[Byte](RW_LEN))._1
+
+  /** Interpreter run with an explicit RW-region image; also returns the RW bytes
+    * after execution (for store verification). */
+  private def runInterpreterMem(prog: Seq[AInstr], initRegs: Array[Long], gas: Long, rwData: Array[Byte])
+      : ((Int, Long, Array[Long]), Array[Byte]) =
     val (code, bitmask) = encodeProgram(prog)
     val blob = ProgramBlob(
       code = code, bitmask = bitmask, jumpTable = JumpTable(Array.empty, 0),
-      is64Bit = true, roData = Array.empty, rwData = new Array[Byte](4096), stackSize = 4096
+      is64Bit = true, roData = Array.empty, rwData = rwData, stackSize = 4096
     )
     val module = InterpretedModule.create(blob) match
       case Right(m) => m
@@ -119,14 +149,18 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         case Right(InterruptKind.Ecalli(_)) => fail("unexpected ecalli")
         case Left(err)                     => fail(s"interpreter error: $err")
     val regs = Array.tabulate(13)(i => inst.getReg(i))
-    (exit, inst.gas, regs)
+    val rwAfter = inst.basicMemory.getMemorySlice(spire.math.UInt(RW_BASE), RW_LEN) match
+      case io.forge.jam.pvm.MemoryResult.Success(bytes) => bytes
+      case _ => rwData // unchanged if unreadable (e.g. faulted before any store)
+    ((exit, inst.gas, regs), rwAfter)
 
   // ---- self-check: my encoder round-trips through the real decoder ------------
   "the PVM encoder" should "round-trip every subset opcode through the real decoder" in {
     val prog = Seq(
       LoadImm64(3, 0x1122334455667788L),
       AddImm64(4, 3, -5),
-      Add64(5, 3, 4), Sub64(6, 5, 3), Mul64(7, 4, 3), Trap
+      Add64(5, 3, 4), Sub64(6, 5, 3), Mul64(7, 4, 3),
+      LoadInd(2, 0, 24, 2, signed = true), Trap
     )
     val (code, bitmask) = encodeProgram(prog)
     var off = 0
@@ -139,6 +173,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     decoded(2) shouldBe Instruction.Add64(5, 3, 4)
     decoded(3) shouldBe Instruction.Sub64(6, 5, 3)
     decoded(4) shouldBe Instruction.Mul64(7, 4, 3)
+    decoded(5) shouldBe Instruction.LoadIndirectI16(2, 0, 24) // dst, base, offset
   }
 
   // ---- generators -------------------------------------------------------------
@@ -177,6 +212,50 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val body = (0 until (1 + rng.nextInt(4))).map(_ => randArith(rng))
     val loopStart = setup.length + 1 // index of block1's first instruction
     (setup :+ Jump(loopStart)) ++ (body :+ Jump(loopStart))
+
+  private def genLoadProgram(rng: Random): Seq[AInstr] =
+    val n = 1 + rng.nextInt(10)
+    val body: Seq[AInstr] = (0 until n).map { _ =>
+      if rng.nextInt(3) == 0 then
+        // arithmetic that never writes r0 (keeps the memory base intact)
+        val d = 1 + rng.nextInt(12)
+        rng.nextInt(5) match
+          case 0 => LoadImm64(d, rng.nextLong())
+          case 1 => AddImm64(d, rng.nextInt(13), rng.nextInt())
+          case 2 => Add64(d, rng.nextInt(13), rng.nextInt(13))
+          case 3 => Sub64(d, rng.nextInt(13), rng.nextInt(13))
+          case _ => Mul64(d, rng.nextInt(13), rng.nextInt(13))
+      else
+        val (w, s) = rng.nextInt(7) match
+          case 0 => (1, false); case 1 => (1, true); case 2 => (2, false); case 3 => (2, true)
+          case 4 => (4, false); case 5 => (4, true); case _ => (8, false)
+        LoadInd(1 + rng.nextInt(12), 0, rng.nextInt(RW_LEN + 64), w, s) // base r0
+    }
+    body :+ Trap
+
+  /** Compare a load program against the interpreter with aligned RW images. */
+  private def compareRunLoads(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
+    val rwData = new Array[Byte](RW_LEN); rng.nextBytes(rwData)
+    val initRegs = Array.fill(13)(rng.nextLong())
+    initRegs(0) = RW_BASE.toLong // r0 = memory base (both engines)
+    val gas = prog.length.toLong + rng.nextInt(50)
+
+    val ((iExit, iGas, iRegs), _) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
+
+    // recompiler flat buffer covers [0, RW_END) with the RW image at RW_BASE
+    val memBuf = new Array[Byte](RW_END)
+    System.arraycopy(rwData, 0, memBuf, RW_BASE, RW_LEN)
+    val (op, dst, src, src2, imm) = toRawColumns(prog)
+    val blk = rc.compile(op, dst, src, src2, imm)
+    blk.isValid shouldBe true
+    val nRegs = initRegs.clone()
+    val out = rc.execute(blk, nRegs, gas, memBuf)
+    blk.close()
+    withClue(s"program=$prog gas=$gas\n interp(exit=$iExit gas=$iGas)\n native(exit=${out(0)} gas=${out(1)})\n") {
+      out(0).toInt shouldBe iExit
+      out(1) shouldBe iGas
+      nRegs.toSeq shouldBe iRegs.toSeq
+    }
 
   private def compareRun(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
     compareRunGas(rc, prog, prog.length.toLong + rng.nextInt(50), rng) // sufficient
@@ -253,5 +332,18 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val prog = genLoopProgram(rng)
             compareRunGas(rc, prog, (5 + rng.nextInt(60)).toLong, rng)
           info("oracle differential (backward loop OOG): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on indirect memory loads (all widths + faults)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x10ADEDL)
+          for _ <- 0 until 10000 do
+            compareRunLoads(rc, genLoadProgram(rng), rng)
+          info("oracle differential (memory loads): 10000 programs matched the interpreter")
         finally rc.close()
   }
