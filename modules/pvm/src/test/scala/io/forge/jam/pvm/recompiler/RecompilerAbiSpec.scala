@@ -153,3 +153,44 @@ class RecompilerAbiSpec extends AnyFlatSpec with Matchers:
     pp.opcodes.toSeq shouldBe Seq(Instruction.Add64(0, 0, 0).opcode.value, Instruction.Panic.opcode.value)
     pp.a(0) shouldBe 2; pp.b(0) shouldBe 0; pp.c(0) shouldBe 1
   }
+  private val branchEqImmOp: Int = Instruction.BranchEqImm(0, 0L, 0L).opcode.value
+  private val loadImmAndJumpOp: Int = Instruction.LoadImmAndJump(0, 0L, 0L).opcode.value
+
+  private def encodeRegImmOffset(op: Int, reg: Int, imm: Long, immLen: Int, disp: Array[Byte]): Array[Byte] =
+    val header = ((reg & 0xF) | ((immLen & 0x7) << 4)).toByte
+    val immBytes = Array.tabulate(immLen)(i => ((imm >> (i * 8)) & 0xff).toByte)
+    Array(op.toByte, header) ++ immBytes ++ disp
+
+  it should "map BranchEqImm with compare-immediate -1 and a VALID target normally in prepareProgram (not Panic)" in {
+    val instr0 = encodeRegImmOffset(branchEqImmOp, reg = 0, imm = -1L, immLen = 1, disp = Array[Byte](4))
+    val code = instr0 ++ Array[Byte](0)
+    val bitmask = bitmaskFor(Seq(0, instr0.length), code.length)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+
+    pp.opcodes(0) should not be Instruction.Panic.opcode.value
+    pp.opcodes(0) shouldBe branchEqImmOp
+    pp.imm(0) shouldBe -1L // compare-immediate preserved, not treated as the InvalidTarget sentinel
+    pp.imm2(0) shouldBe 1L // translated target: instruction index of the Panic leader at offset 4
+  }
+
+  it should "map LoadImmAndJump with load-immediate -1 and a VALID target normally in prepareProgram (not Panic)" in {
+    // Same shape as above but for LoadImmAndJump.
+    val instr0 = encodeRegImmOffset(loadImmAndJumpOp, reg = 2, imm = -1L, immLen = 1, disp = Array[Byte](4))
+    val code = instr0 ++ Array[Byte](0)
+    val bitmask = bitmaskFor(Seq(0, instr0.length), code.length)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+
+    pp.opcodes(0) should not be Instruction.Panic.opcode.value
+    pp.opcodes(0) shouldBe loadImmAndJumpOp
+    pp.imm(0) shouldBe -1L // load-immediate preserved, not treated as the InvalidTarget sentinel
+    pp.imm2(0) shouldBe 1L // translated target: instruction index of the Panic leader
+  }
+
+  it should "still replace BranchEqImm with Panic in prepareProgram when its target offset is INVALID" in {
+    val instr0 = encodeRegImmOffset(branchEqImmOp, reg = 0, imm = -1L, immLen = 1, disp = Array[Byte](1))
+    val code = instr0 ++ Array[Byte](0)
+    val bitmask = bitmaskFor(Seq(0, instr0.length), code.length)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+
+    pp.opcodes(0) shouldBe Instruction.Panic.opcode.value
+  }

@@ -20,23 +20,23 @@ object RecompilerAbi:
     * instruction's leader (invalid static control-flow target). */
   private val InvalidTarget: Long = -1L
 
-  /** True if this instruction carries a static control-flow byte-offset
-    * target that `mapInstruction` resolves via `targetIndex` (i.e. its
-    * mapped `imm`/`imm2` needs validating against `InvalidTarget`). Excludes
-    * `JumpIndirect`/`LoadImmAndJumpIndirect`, whose target is a *runtime*
-    * register value, not a static blob offset — those are validated at
-    * runtime against the jump table instead. */
-  private def hasStaticTarget(instr: Instruction): Boolean = instr match
-    case _: Instruction.Jump | _: Instruction.LoadImmAndJump |
+  private enum StaticTargetField:
+    case TargetInImm, TargetInImm2, NoStaticTarget
+
+  private def staticTargetField(instr: Instruction): StaticTargetField = instr match
+    case _: Instruction.LoadImmAndJump |
          _: Instruction.BranchEqImm | _: Instruction.BranchNotEqImm |
          _: Instruction.BranchLessUnsignedImm | _: Instruction.BranchLessSignedImm |
          _: Instruction.BranchGreaterOrEqualUnsignedImm | _: Instruction.BranchGreaterOrEqualSignedImm |
          _: Instruction.BranchLessOrEqualSignedImm | _: Instruction.BranchLessOrEqualUnsignedImm |
-         _: Instruction.BranchGreaterSignedImm | _: Instruction.BranchGreaterUnsignedImm |
+         _: Instruction.BranchGreaterSignedImm | _: Instruction.BranchGreaterUnsignedImm =>
+      StaticTargetField.TargetInImm2
+    case _: Instruction.Jump |
          _: Instruction.BranchEq | _: Instruction.BranchNotEq |
          _: Instruction.BranchLessUnsigned | _: Instruction.BranchLessSigned |
-         _: Instruction.BranchGreaterOrEqualUnsigned | _: Instruction.BranchGreaterOrEqualSigned => true
-    case _ => false
+         _: Instruction.BranchGreaterOrEqualUnsigned | _: Instruction.BranchGreaterOrEqualSigned =>
+      StaticTargetField.TargetInImm
+    case _ => StaticTargetField.NoStaticTarget
 
   /** Map one decoded `Instruction` to its generic tuple. `targetIndex` resolves
     * a byte-offset control-flow target to an instruction index (already
@@ -298,9 +298,12 @@ object RecompilerAbi:
       // A static control-flow target that resolved to InvalidTarget replaces
       // the whole instruction with Panic ("static jump/branch targets valid
       // only at block leaders / jump-table entries; otherwise panic").
+      val invalidTarget = staticTargetField(instrs(i)) match
+        case StaticTargetField.TargetInImm => mapped.imm == InvalidTarget
+        case StaticTargetField.TargetInImm2 => mapped.imm2 == InvalidTarget
+        case StaticTargetField.NoStaticTarget => false
       val raw =
-        if hasStaticTarget(instrs(i)) && (mapped.imm == InvalidTarget || mapped.imm2 == InvalidTarget) then
-          mapInstruction(Instruction.Panic, targetIndex)
+        if invalidTarget then mapInstruction(Instruction.Panic, targetIndex)
         else mapped
       opcodes(i) = raw.opcode; aArr(i) = raw.a; bArr(i) = raw.b; cArr(i) = raw.c
       immArr(i) = raw.imm; imm2Arr(i) = raw.imm2
