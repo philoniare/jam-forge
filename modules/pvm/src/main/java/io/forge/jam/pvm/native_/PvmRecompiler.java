@@ -5,46 +5,23 @@ import java.lang.invoke.MethodHandle;
 import java.nio.file.Path;
 
 /**
- * FFM binding to the native PVM recompiler.
- *
- * Boundary: native engine only, register-file in / register-file out.
- * No host-call upcalls or shared guest memory yet.
+ * FFM binding to the native PVM recompiler
  */
 public final class PvmRecompiler implements AutoCloseable {
 
     // RawInstr layout — must match the Rust #[repr(C)] struct exactly:
-    //   u32 opcode, u32 dst, u32 src, u32 src2, u64 imm   (24 bytes, align 8)
+    //   u32 opcode, u32 a, u32 b, u32 c, i64 imm, i64 imm2   (32 bytes, align 8)
     private static final MemoryLayout RAW_INSTR = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("opcode"),
-            ValueLayout.JAVA_INT.withName("dst"),
-            ValueLayout.JAVA_INT.withName("src"),
-            ValueLayout.JAVA_INT.withName("src2"),
-            ValueLayout.JAVA_LONG.withName("imm")
+            ValueLayout.JAVA_INT.withName("a"),
+            ValueLayout.JAVA_INT.withName("b"),
+            ValueLayout.JAVA_INT.withName("c"),
+            ValueLayout.JAVA_LONG.withName("imm"),
+            ValueLayout.JAVA_LONG.withName("imm2")
     );
-    private static final long RAW_INSTR_SIZE = RAW_INSTR.byteSize(); // 24
+    private static final long RAW_INSTR_SIZE = RAW_INSTR.byteSize(); // 32
 
-    // Opcode / exit constants mirror lib.rs.
-    public static final int OP_TRAP = 0;
-    public static final int OP_LOAD_IMM64 = 1;
-    public static final int OP_ADD_IMM64 = 2;
-    public static final int OP_ADD = 3;
-    public static final int OP_SUB = 4;
-    public static final int OP_MUL = 5;
-    public static final int OP_LOAD_U64 = 6;
-    public static final int OP_STORE_U64 = 7;
-    public static final int OP_LOAD_U8 = 12;
-    public static final int OP_LOAD_U16 = 13;
-    public static final int OP_LOAD_U32 = 14;
-    public static final int OP_LOAD_I8 = 15;
-    public static final int OP_LOAD_I16 = 16;
-    public static final int OP_LOAD_I32 = 17;
-    public static final int OP_STORE_U8 = 18;
-    public static final int OP_STORE_U16 = 19;
-    public static final int OP_STORE_U32 = 20;
-    public static final int OP_JUMP = 8;
-    public static final int OP_BRANCH_EQ = 9;
-    public static final int OP_BRANCH_NE = 10;
-    public static final int OP_DJUMP = 11;
+    
     public static final long DJUMP_HALT = 0xFFFF_0000L;
 
     public static final int EXIT_HALT = 0;
@@ -119,21 +96,24 @@ public final class PvmRecompiler implements AutoCloseable {
 
     /**
      * Compile a pre-decoded program. Each instruction i is
-     * (opcodes[i], dsts[i], srcs[i], src2s[i], imms[i]); for control-flow ops the
-     * branch/jump target instruction index is carried in {@code imms[i]}.
-     * {@code jumpTable} lists the valid indirect ({@code djump}) target indices.
+     * (opcodes[i], a[i], b[i], c[i], imm[i], imm2[i]) — opcodes[i] is the real
+     * PVM opcode value; for control-flow ops the branch/jump target
+     * instruction index is carried in {@code imm[i]} (or {@code imm2[i]} for
+     * the reg+imm+imm branch family). {@code jumpTable} lists the valid
+     * indirect ({@code JumpIndirect}) target instruction indices.
      * Returns a Block; check {@link Block#isValid()} before executing.
      */
-    public Block compile(int[] opcodes, int[] dsts, int[] srcs, int[] src2s, long[] imms, int[] jumpTable) {
+    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, long[] imm, long[] imm2, int[] jumpTable) {
         int n = opcodes.length;
         MemorySegment buf = arena.allocate(RAW_INSTR_SIZE * n);
         for (int i = 0; i < n; i++) {
             long base = i * RAW_INSTR_SIZE;
             buf.set(ValueLayout.JAVA_INT, base, opcodes[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 4, dsts[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 8, srcs[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 12, src2s[i]);
-            buf.set(ValueLayout.JAVA_LONG, base + 16, imms[i]);
+            buf.set(ValueLayout.JAVA_INT, base + 4, a[i]);
+            buf.set(ValueLayout.JAVA_INT, base + 8, b[i]);
+            buf.set(ValueLayout.JAVA_INT, base + 12, c[i]);
+            buf.set(ValueLayout.JAVA_LONG, base + 16, imm[i]);
+            buf.set(ValueLayout.JAVA_LONG, base + 24, imm2[i]);
         }
         MemorySegment jt = jumpTable.length == 0
                 ? MemorySegment.NULL
@@ -150,8 +130,8 @@ public final class PvmRecompiler implements AutoCloseable {
     }
 
     /** Convenience overload with no indirect-jump targets. */
-    public Block compile(int[] opcodes, int[] dsts, int[] srcs, int[] src2s, long[] imms) {
-        return compile(opcodes, dsts, srcs, src2s, imms, new int[0]);
+    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, long[] imm, long[] imm2) {
+        return compile(opcodes, a, b, c, imm, imm2, new int[0]);
     }
 
     /**

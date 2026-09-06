@@ -255,9 +255,15 @@ impl Backend for Aarch64Backend {
                             ; b.ne =>tgt
                         );
                     }
-                    Op::Djump { src } => {
+                    Op::Djump { src, imm } => {
                         let src = src as u32;
                         dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; add x8, x8, x9
+                            ; mov w8, w8      // mask to 32 bits (UXTW)
+                        );
                         mov_imm64(&mut a, 9, DJUMP_HALT);
                         dynasm!(a
                             ; .arch aarch64

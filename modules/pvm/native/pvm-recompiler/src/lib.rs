@@ -7,34 +7,38 @@ use execmem::ExecMem;
 #[derive(Clone, Copy, Debug)]
 pub struct RawInstr {
     pub opcode: u32,
-    pub dst: u32,
-    pub src: u32,
-    pub src2: u32,
-    pub imm: u64,
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    pub imm: i64,
+    pub imm2: i64,
 }
 
-pub const OP_TRAP: u32 = 0; // basic-block terminator -> PANIC exit
-pub const OP_LOAD_IMM64: u32 = 1; // reg[dst] = imm
-pub const OP_ADD_IMM64: u32 = 2; // reg[dst] = reg[src] + imm      (wrapping)
-pub const OP_ADD: u32 = 3; // reg[dst] = reg[src] + reg[src2]      (wrapping)
-pub const OP_SUB: u32 = 4; // reg[dst] = reg[src] - reg[src2]      (wrapping)
-pub const OP_MUL: u32 = 5; // reg[dst] = reg[src] * reg[src2]      (wrapping)
-pub const OP_LOAD_U64: u32 = 6; // reg[dst] = mem_u64[(reg[src]+imm) & 0xFFFFFFFF]
-pub const OP_STORE_U64: u32 = 7; // mem_u64[(reg[src]+imm) & 0xFFFFFFFF] = reg[dst]
-// Sub-word memory (address masked to 32 bits; fault if [addr,addr+w) OOB).
-pub const OP_LOAD_U8: u32 = 12; // reg[dst] = zero-extend mem_u8[addr]
-pub const OP_LOAD_U16: u32 = 13; // reg[dst] = zero-extend mem_u16[addr]
-pub const OP_LOAD_U32: u32 = 14; // reg[dst] = zero-extend mem_u32[addr]
-pub const OP_LOAD_I8: u32 = 15; // reg[dst] = sign-extend mem_i8[addr]
-pub const OP_LOAD_I16: u32 = 16; // reg[dst] = sign-extend mem_i16[addr]
-pub const OP_LOAD_I32: u32 = 17; // reg[dst] = sign-extend mem_i32[addr]
-pub const OP_STORE_U8: u32 = 18; // mem_u8[addr] = reg[dst] & 0xFF
-pub const OP_STORE_U16: u32 = 19; // mem_u16[addr] = reg[dst] & 0xFFFF
-pub const OP_STORE_U32: u32 = 20; // mem_u32[addr] = reg[dst] & 0xFFFFFFFF
-pub const OP_JUMP: u32 = 8; // pc = imm (instruction index)
-pub const OP_BRANCH_EQ: u32 = 9; // if reg[src] == reg[src2] then pc = imm
-pub const OP_BRANCH_NE: u32 = 10; // if reg[src] != reg[src2] then pc = imm
-pub const OP_DJUMP: u32 = 11; // indirect: target = reg[src] (see DJUMP_HALT)
+pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
+pub const OP_LOAD_IMM64: u32 = 20; // reg[a] = imm
+pub const OP_JUMP: u32 = 40; // pc = imm (instruction index)
+pub const OP_JUMP_INDIRECT: u32 = 50; // indirect: target = (reg[a]+imm) & 0xFFFFFFFF
+pub const OP_STORE_INDIRECT_U8: u32 = 120;
+pub const OP_STORE_INDIRECT_U16: u32 = 121;
+pub const OP_STORE_INDIRECT_U32: u32 = 122;
+pub const OP_STORE_INDIRECT_U64: u32 = 123;
+pub const OP_LOAD_INDIRECT_U8: u32 = 124;
+pub const OP_LOAD_INDIRECT_I8: u32 = 125;
+pub const OP_LOAD_INDIRECT_U16: u32 = 126;
+pub const OP_LOAD_INDIRECT_I16: u32 = 127;
+pub const OP_LOAD_INDIRECT_U32: u32 = 128;
+pub const OP_LOAD_INDIRECT_I32: u32 = 129;
+pub const OP_LOAD_INDIRECT_U64: u32 = 130;
+pub const OP_ADD_IMM64: u32 = 149; // reg[a] = reg[b] + imm      (wrapping)
+pub const OP_BRANCH_EQ: u32 = 170; // if reg[a] == reg[b] then pc = imm
+pub const OP_BRANCH_NE: u32 = 171; // if reg[a] != reg[b] then pc = imm
+pub const OP_ADD64: u32 = 200; // reg[a] = reg[b] + reg[c]      (wrapping)
+pub const OP_SUB64: u32 = 201; // reg[a] = reg[b] - reg[c]      (wrapping)
+pub const OP_MUL64: u32 = 202; // reg[a] = reg[b] * reg[c]      (wrapping)
+
+/// Indirect-jump sentinel: `JumpIndirect reg, offset` where `reg[a]+offset`
+/// equals this value halts the program cleanly (EXIT_HALT). Mirrors the PVM
+/// whole-program return address (2^32 - 2^16).
 pub const DJUMP_HALT: u64 = 0xFFFF_0000;
 
 // Exit codes returned by execute. Must match the Scala differential mapping.
@@ -71,7 +75,7 @@ pub enum Op {
     BranchEq { src: u8, src2: u8, target: u32 },
     /// if reg[src] != reg[src2] then jump to `target`, else fall through.
     BranchNe { src: u8, src2: u8, target: u32 },
-    Djump { src: u8 },
+    Djump { src: u8, imm: u64 },
 }
 
 impl Op {
@@ -110,31 +114,31 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
     let mut ops = Vec::with_capacity(instrs.len());
     for ins in instrs {
         match ins.opcode {
-            OP_TRAP => ops.push(Op::Trap),
-            OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.dst as u8, imm: ins.imm }),
+            OP_PANIC => ops.push(Op::Trap),
+            OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.a as u8, imm: ins.imm as u64 }),
             OP_ADD_IMM64 => ops.push(Op::AddImm64 {
-                dst: ins.dst as u8,
-                src: ins.src as u8,
-                imm: ins.imm,
+                dst: ins.a as u8,
+                src: ins.b as u8,
+                imm: ins.imm as u64,
             }),
-            OP_ADD => ops.push(Op::Add { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
-            OP_SUB => ops.push(Op::Sub { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
-            OP_MUL => ops.push(Op::Mul { dst: ins.dst as u8, src: ins.src as u8, src2: ins.src2 as u8 }),
-            OP_LOAD_U64 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 8, signed: false }),
-            OP_LOAD_U8 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1, signed: false }),
-            OP_LOAD_U16 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2, signed: false }),
-            OP_LOAD_U32 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4, signed: false }),
-            OP_LOAD_I8 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1, signed: true }),
-            OP_LOAD_I16 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2, signed: true }),
-            OP_LOAD_I32 => ops.push(Op::Load { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4, signed: true }),
-            OP_STORE_U64 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 8 }),
-            OP_STORE_U8 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 1 }),
-            OP_STORE_U16 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 2 }),
-            OP_STORE_U32 => ops.push(Op::Store { dst: ins.dst as u8, src: ins.src as u8, imm: ins.imm, width: 4 }),
+            OP_ADD64 => ops.push(Op::Add { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_SUB64 => ops.push(Op::Sub { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_MUL64 => ops.push(Op::Mul { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_LOAD_INDIRECT_U64 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 8, signed: false }),
+            OP_LOAD_INDIRECT_U8 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 1, signed: false }),
+            OP_LOAD_INDIRECT_U16 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 2, signed: false }),
+            OP_LOAD_INDIRECT_U32 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 4, signed: false }),
+            OP_LOAD_INDIRECT_I8 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 1, signed: true }),
+            OP_LOAD_INDIRECT_I16 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 2, signed: true }),
+            OP_LOAD_INDIRECT_I32 => ops.push(Op::Load { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 4, signed: true }),
+            OP_STORE_INDIRECT_U64 => ops.push(Op::Store { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 8 }),
+            OP_STORE_INDIRECT_U8 => ops.push(Op::Store { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 1 }),
+            OP_STORE_INDIRECT_U16 => ops.push(Op::Store { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 2 }),
+            OP_STORE_INDIRECT_U32 => ops.push(Op::Store { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: 4 }),
             OP_JUMP => ops.push(Op::Jump { target: ins.imm as u32 }),
-            OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
-            OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.src as u8, src2: ins.src2 as u8, target: ins.imm as u32 }),
-            OP_DJUMP => ops.push(Op::Djump { src: ins.src as u8 }),
+            OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32 }),
+            OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32 }),
+            OP_JUMP_INDIRECT => ops.push(Op::Djump { src: ins.a as u8, imm: ins.imm as u64 }),
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
@@ -260,15 +264,19 @@ mod tests {
         }
     }
 
+    fn ri(opcode: u32, a: u32, b: u32, c: u32, imm: i64) -> RawInstr {
+        RawInstr { opcode, a, b, c, imm, imm2: 0 }
+    }
+
     #[test]
     fn arithmetic_block_halts_with_correct_regs_and_gas() {
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 7, src: 0, src2: 0, imm: 100 },
-            RawInstr { opcode: OP_ADD_IMM64, dst: 8, src: 7, src2: 0, imm: 5 },
-            RawInstr { opcode: OP_ADD, dst: 9, src: 7, src2: 8, imm: 0 },
-            RawInstr { opcode: OP_SUB, dst: 10, src: 9, src2: 7, imm: 0 },
-            RawInstr { opcode: OP_MUL, dst: 11, src: 8, src2: 7, imm: 0 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 7, 0, 0, 100),
+            ri(OP_ADD_IMM64, 8, 7, 0, 5),
+            ri(OP_ADD64, 9, 7, 8, 0),
+            ri(OP_SUB64, 10, 9, 7, 0),
+            ri(OP_MUL64, 11, 8, 7, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 1000i64;
@@ -285,9 +293,9 @@ mod tests {
     #[test]
     fn wrapping_is_64bit() {
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 0, src: 0, src2: 0, imm: u64::MAX },
-            RawInstr { opcode: OP_ADD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 0, 0, 0, u64::MAX as i64),
+            ri(OP_ADD_IMM64, 1, 0, 0, 3),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -299,10 +307,10 @@ mod tests {
     fn load_store_roundtrip_within_bounds() {
         // r1 = 0xDEADBEEF; store r1 at mem[8]; load mem[8] into r2; trap
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0xDEADBEEF },
-            RawInstr { opcode: OP_STORE_U64, dst: 1, src: 0, src2: 0, imm: 8 }, // mem[r0+8]=r1, r0=0
-            RawInstr { opcode: OP_LOAD_U64, dst: 2, src: 0, src2: 0, imm: 8 },  // r2=mem[r0+8]
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xDEADBEEFu32 as i64),
+            ri(OP_STORE_INDIRECT_U64, 1, 0, 0, 8), // mem[r0+8]=r1, r0=0
+            ri(OP_LOAD_INDIRECT_U64, 2, 0, 0, 8),  // r2=mem[r0+8]
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -318,8 +326,8 @@ mod tests {
     fn out_of_bounds_load_faults() {
         // load at offset 40 into a 32-byte region -> fault
         let prog = [
-            RawInstr { opcode: OP_LOAD_U64, dst: 1, src: 0, src2: 0, imm: 40 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 40),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -332,8 +340,8 @@ mod tests {
     fn boundary_load_last_valid_qword_ok() {
         // 32-byte region: offset 24 loads bytes [24,32) — the last valid qword.
         let prog = [
-            RawInstr { opcode: OP_LOAD_U64, dst: 1, src: 0, src2: 0, imm: 24 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 24),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -348,12 +356,12 @@ mod tests {
     fn countdown_loop_runs_to_trap() {
         // r1=3; r2=1; r3=0; loop: r1-=r2; if r1!=r3 goto loop; trap
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 }, // 0  B0
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 1 }, // 1  B0
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 3, src: 0, src2: 0, imm: 0 }, // 2  B0
-            RawInstr { opcode: OP_SUB, dst: 1, src: 1, src2: 2, imm: 0 },        // 3  B1
-            RawInstr { opcode: OP_BRANCH_NE, dst: 0, src: 1, src2: 3, imm: 3 },  // 4  B1 -> 3
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 5  B2
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3), // 0  B0
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1), // 1  B0
+            ri(OP_LOAD_IMM64, 3, 0, 0, 0), // 2  B0
+            ri(OP_SUB64, 1, 1, 2, 0),      // 3  B1
+            ri(OP_BRANCH_NE, 1, 3, 0, 3),  // 4  B1 -> 3
+            ri(OP_PANIC, 0, 0, 0, 0),      // 5  B2
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -369,12 +377,12 @@ mod tests {
         // Per-instruction gas (matches interpreter): charge 1 before each instr,
         // OOG before executing when gas<0, registers frozen at the prior instr.
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 },
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 1 },
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 3, src: 0, src2: 0, imm: 0 },
-            RawInstr { opcode: OP_SUB, dst: 1, src: 1, src2: 2, imm: 0 },
-            RawInstr { opcode: OP_BRANCH_NE, dst: 0, src: 1, src2: 3, imm: 3 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 3, 0, 0, 0),
+            ri(OP_SUB64, 1, 1, 2, 0),
+            ri(OP_BRANCH_NE, 1, 3, 0, 3),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 6i64;
@@ -389,10 +397,10 @@ mod tests {
     fn unconditional_jump_skips() {
         // r1=5; jump over the overwrite; trap. r1 must stay 5.
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 5 }, // 0
-            RawInstr { opcode: OP_JUMP, dst: 0, src: 0, src2: 0, imm: 3 },       // 1 -> 3
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 99 },// 2 (skipped)
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 3
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5), // 0
+            ri(OP_JUMP, 0, 0, 0, 3),       // 1 -> 3
+            ri(OP_LOAD_IMM64, 1, 0, 0, 99),// 2 (skipped)
+            ri(OP_PANIC, 0, 0, 0, 0),      // 3
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -406,13 +414,13 @@ mod tests {
         // Store 0x1122334455667788 as u64; read back narrow (u8/u16/u32) and
         // signed (i8) — all little-endian.
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0x1122334455667788 },
-            RawInstr { opcode: OP_STORE_U64, dst: 1, src: 0, src2: 0, imm: 0 },
-            RawInstr { opcode: OP_LOAD_U8, dst: 2, src: 0, src2: 0, imm: 0 },  // 0x88
-            RawInstr { opcode: OP_LOAD_U16, dst: 3, src: 0, src2: 0, imm: 0 }, // 0x7788
-            RawInstr { opcode: OP_LOAD_U32, dst: 4, src: 0, src2: 0, imm: 0 }, // 0x55667788
-            RawInstr { opcode: OP_LOAD_I8, dst: 5, src: 0, src2: 0, imm: 0 },  // (i8)0x88 = -120
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122334455667788u64 as i64),
+            ri(OP_STORE_INDIRECT_U64, 1, 0, 0, 0),
+            ri(OP_LOAD_INDIRECT_U8, 2, 0, 0, 0),  // 0x88
+            ri(OP_LOAD_INDIRECT_U16, 3, 0, 0, 0), // 0x7788
+            ri(OP_LOAD_INDIRECT_U32, 4, 0, 0, 0), // 0x55667788
+            ri(OP_LOAD_INDIRECT_I8, 5, 0, 0, 0),  // (i8)0x88 = -120
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -429,9 +437,9 @@ mod tests {
     fn narrow_store_truncates() {
         // store_u8 of a wide value writes only the low byte; rest of mem stays 0.
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 0xAABBCCDD },
-            RawInstr { opcode: OP_STORE_U8, dst: 1, src: 0, src2: 0, imm: 2 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAABBCCDDu32 as i64),
+            ri(OP_STORE_INDIRECT_U8, 1, 0, 0, 2),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -447,8 +455,8 @@ mod tests {
     fn subword_oob_faults() {
         // u32 load at offset 6 into an 8-byte region needs [6,10) -> fault.
         let prog = [
-            RawInstr { opcode: OP_LOAD_U32, dst: 1, src: 0, src2: 0, imm: 6 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_INDIRECT_U32, 1, 0, 0, 6),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -458,14 +466,14 @@ mod tests {
 
     #[test]
     fn djump_to_valid_target_jumps() {
-        // r1 = 3 (a valid jump-table target index); djump r1; ... ; block at 3
-        // sets r2 = 7; trap. Jump table = {3}.
+        // r1 = 3 (a valid jump-table target index); JumpIndirect r1+0;
+        // ...; block at 3 sets r2 = 7; trap. Jump table = {3}.
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 3 }, // 0
-            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },      // 1 -> reg[1]=3
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 99 },// 2 (skipped)
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 2, src: 0, src2: 0, imm: 7 }, // 3 (target)
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },       // 4
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3),  // 0
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // 1 -> reg[1]+0 = 3
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),       // 4
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -475,11 +483,29 @@ mod tests {
     }
 
     #[test]
+    fn djump_with_nonzero_offset_jumps() {
+        // r1 = 1; JumpIndirect r1+2 -> target index 3 (same target as above,
+        // reached via a nonzero imm offset instead of baking it into the reg).
+        let prog = [
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),  // 0
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 2), // 1 -> reg[1]+2 = 3
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),       // 4
+        ];
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7);
+    }
+
+    #[test]
     fn djump_to_sentinel_halts() {
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: DJUMP_HALT },
-            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, DJUMP_HALT as i64),
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -491,9 +517,9 @@ mod tests {
     fn djump_to_untabled_target_panics() {
         // reg holds 2 but the jump table only allows {3} -> panic
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 1, src: 0, src2: 0, imm: 2 },
-            RawInstr { opcode: OP_DJUMP, dst: 0, src: 1, src2: 0, imm: 0 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 1, 0, 0, 2),
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
@@ -504,8 +530,8 @@ mod tests {
     #[test]
     fn out_of_gas_before_first_instr_leaves_regs_untouched() {
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 5, src: 0, src2: 0, imm: 999 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 5, 0, 0, 999),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [7u64; 13];
         let mut gas = 0i64; // 0-1 < 0 before the first instruction executes
@@ -518,8 +544,8 @@ mod tests {
     #[test]
     fn out_of_gas_after_partial_execution() {
         let prog = [
-            RawInstr { opcode: OP_LOAD_IMM64, dst: 5, src: 0, src2: 0, imm: 999 },
-            RawInstr { opcode: OP_TRAP, dst: 0, src: 0, src2: 0, imm: 0 },
+            ri(OP_LOAD_IMM64, 5, 0, 0, 999),
+            ri(OP_PANIC, 0, 0, 0, 0),
         ];
         let mut regs = [7u64; 13];
         let mut gas = 1i64; // LOAD executes (1->0), trap OOGs (0->-1)
