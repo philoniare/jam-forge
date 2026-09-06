@@ -1,191 +1,10 @@
 //! AArch64 single-pass emitter
-use crate::{Backend, Op, DJUMP_HALT};
+use crate::{Backend, Op, DJUMP_HALT, EXIT_FAULT, EXIT_HALT, EXIT_OOG, EXIT_PANIC};
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
-const X0: u32 = 0; // regs base
-const X1: u32 = 1; // gas ptr
-const X2: u32 = 2; // guest memory base
-const X3: u32 = 3; // guest memory length (bytes)
-const X8: u32 = 8; // scratch a / effective address
-const X9: u32 = 9; // scratch b / address end
-const X10: u32 = 10; // scratch c (store value)
-const X11: u32 = 11; // GAS — live in-register for the whole program (see below)
-const X12: u32 = 12; // scratch d (memory access base)
-const XZR: u32 = 31;
+type Asm = dynasmrt::aarch64::Assembler;
 
 pub struct Aarch64Backend;
-
-struct Asm {
-    words: Vec<u32>,
-}
-
-impl Asm {
-    fn new() -> Self {
-        Asm { words: Vec::new() }
-    }
-    fn push(&mut self, w: u32) {
-        self.words.push(w);
-    }
-    fn len(&self) -> usize {
-        self.words.len()
-    }
-
-    // LDR Xt, [Xn, #(imm12*8)]
-    fn ldr(&mut self, rt: u32, rn: u32, imm12: u32) {
-        self.push(0xF940_0000 | (imm12 << 10) | (rn << 5) | rt);
-    }
-    // STR Xt, [Xn, #(imm12*8)]
-    fn str(&mut self, rt: u32, rn: u32, imm12: u32) {
-        self.push(0xF900_0000 | (imm12 << 10) | (rn << 5) | rt);
-    }
-    // ADD Xd, Xn, Xm  (LSL #0)
-    fn add(&mut self, rd: u32, rn: u32, rm: u32) {
-        self.push(0x8B00_0000 | (rm << 16) | (rn << 5) | rd);
-    }
-    // SUB Xd, Xn, Xm
-    fn sub(&mut self, rd: u32, rn: u32, rm: u32) {
-        self.push(0xCB00_0000 | (rm << 16) | (rn << 5) | rd);
-    }
-    // MUL Xd, Xn, Xm  ==  MADD Xd, Xn, Xm, XZR
-    fn mul(&mut self, rd: u32, rn: u32, rm: u32) {
-        self.push(0x9B00_0000 | (rm << 16) | (XZR << 10) | (rn << 5) | rd);
-    }
-    // SUBS Xd, Xn, #imm12  (sets flags)
-    fn subs_imm(&mut self, rd: u32, rn: u32, imm12: u32) {
-        self.push(0xF100_0000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd);
-    }
-    // ADD Xd, Xn, #imm12
-    fn add_imm(&mut self, rd: u32, rn: u32, imm12: u32) {
-        self.push(0x9100_0000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd);
-    }
-    // CMP Xn, Xm  ==  SUBS XZR, Xn, Xm  (sets flags)
-    fn cmp(&mut self, rn: u32, rm: u32) {
-        self.push(0xEB00_0000 | (rm << 16) | (rn << 5) | XZR);
-    }
-    // CMP Xn, #imm12  ==  SUBS XZR, Xn, #imm12  (sets flags)
-    fn cmp_imm(&mut self, rn: u32, imm12: u32) {
-        self.push(0xF100_0000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | XZR);
-    }
-    // MOV Wd, Wn  (zero-extends low 32 bits into Xd)  ==  ORR Wd, WZR, Wn
-    fn uxtw(&mut self, rd: u32, rn: u32) {
-        self.push(0x2A00_0000 | (rn << 16) | (XZR << 5) | rd);
-    }
-    // Register-base, zero-offset loads/stores. Ws written by the byte/half/word
-    // variants zero the upper 32 bits of the X register; LDRS* sign-extend to 64.
-    fn ldr0(&mut self, rt: u32, rn: u32) {
-        self.push(0xF940_0000 | (rn << 5) | rt); // LDR Xt (64)
-    }
-    fn str0(&mut self, rt: u32, rn: u32) {
-        self.push(0xF900_0000 | (rn << 5) | rt); // STR Xt (64)
-    }
-    fn ldrb(&mut self, rt: u32, rn: u32) {
-        self.push(0x3940_0000 | (rn << 5) | rt); // LDRB Wt (u8 -> zext)
-    }
-    fn ldrh(&mut self, rt: u32, rn: u32) {
-        self.push(0x7940_0000 | (rn << 5) | rt); // LDRH Wt (u16 -> zext)
-    }
-    fn ldrw(&mut self, rt: u32, rn: u32) {
-        self.push(0xB940_0000 | (rn << 5) | rt); // LDR Wt (u32 -> zext)
-    }
-    fn ldrsb(&mut self, rt: u32, rn: u32) {
-        self.push(0x3980_0000 | (rn << 5) | rt); // LDRSB Xt (i8 -> sext64)
-    }
-    fn ldrsh(&mut self, rt: u32, rn: u32) {
-        self.push(0x7980_0000 | (rn << 5) | rt); // LDRSH Xt (i16 -> sext64)
-    }
-    fn ldrsw(&mut self, rt: u32, rn: u32) {
-        self.push(0xB980_0000 | (rn << 5) | rt); // LDRSW Xt (i32 -> sext64)
-    }
-    fn strb(&mut self, rt: u32, rn: u32) {
-        self.push(0x3900_0000 | (rn << 5) | rt); // STRB Wt (low 8)
-    }
-    fn strh(&mut self, rt: u32, rn: u32) {
-        self.push(0x7900_0000 | (rn << 5) | rt); // STRH Wt (low 16)
-    }
-    fn strw(&mut self, rt: u32, rn: u32) {
-        self.push(0xB900_0000 | (rn << 5) | rt); // STR Wt (low 32)
-    }
-    fn emit_load(&mut self, rt: u32, rn: u32, width: u8, signed: bool) {
-        match (width, signed) {
-            (1, false) => self.ldrb(rt, rn),
-            (2, false) => self.ldrh(rt, rn),
-            (4, false) => self.ldrw(rt, rn),
-            (1, true) => self.ldrsb(rt, rn),
-            (2, true) => self.ldrsh(rt, rn),
-            (4, true) => self.ldrsw(rt, rn),
-            (8, _) => self.ldr0(rt, rn),
-            _ => panic!("unsupported load width {width}"),
-        }
-    }
-    fn emit_store(&mut self, rt: u32, rn: u32, width: u8) {
-        match width {
-            1 => self.strb(rt, rn),
-            2 => self.strh(rt, rn),
-            4 => self.strw(rt, rn),
-            8 => self.str0(rt, rn),
-            _ => panic!("unsupported store width {width}"),
-        }
-    }
-    // MOVZ Wd, #imm16
-    fn movz_w(&mut self, rd: u32, imm16: u32) {
-        self.push(0x5280_0000 | ((imm16 & 0xFFFF) << 5) | rd);
-    }
-    // RET (x30)
-    fn ret(&mut self) {
-        self.push(0xD65F_03C0);
-    }
-    // B.cond placeholder (target patched later, in instruction words).
-    fn b_cond_placeholder(&mut self, cond: u32) -> usize {
-        let idx = self.len();
-        self.push(0x5400_0000 | cond); // imm19 = 0 for now
-        idx
-    }
-    fn patch_b_cond(&mut self, at: usize, target: usize) {
-        let rel = (target as i64) - (at as i64); // in instructions
-        let imm19 = (rel as u32) & 0x7_FFFF;
-        let cond = self.words[at] & 0xF;
-        self.words[at] = 0x5400_0000 | (imm19 << 5) | cond;
-    }
-    // B (unconditional) placeholder; imm26 patched later (in instruction words).
-    fn b_placeholder(&mut self) -> usize {
-        let idx = self.len();
-        self.push(0x1400_0000);
-        idx
-    }
-    fn patch_b(&mut self, at: usize, target: usize) {
-        let rel = (target as i64) - (at as i64);
-        let imm26 = (rel as u32) & 0x3FF_FFFF;
-        self.words[at] = 0x1400_0000 | imm26;
-    }
-
-    // Materialise a full 64-bit immediate into `rd` (movz + 3 movk).
-    fn mov_imm64(&mut self, rd: u32, imm: u64) {
-        let h0 = (imm & 0xFFFF) as u32;
-        let h1 = ((imm >> 16) & 0xFFFF) as u32;
-        let h2 = ((imm >> 32) & 0xFFFF) as u32;
-        let h3 = ((imm >> 48) & 0xFFFF) as u32;
-        // MOVZ rd, #h0, LSL #0
-        self.push(0xD280_0000 | (h0 << 5) | rd);
-        // MOVK rd, #h1, LSL #16
-        self.push(0xF280_0000 | (1 << 21) | (h1 << 5) | rd);
-        // MOVK rd, #h2, LSL #32
-        self.push(0xF280_0000 | (2 << 21) | (h2 << 5) | rd);
-        // MOVK rd, #h3, LSL #48
-        self.push(0xF280_0000 | (3 << 21) | (h3 << 5) | rd);
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.words.len() * 4);
-        for w in &self.words {
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-        out
-    }
-}
-
-const COND_EQ: u32 = 0x0; // equal
-const COND_NE: u32 = 0x1; // not equal
-const COND_HI: u32 = 0x8; // unsigned higher
-const COND_LT: u32 = 0xB; // signed less-than
 
 struct Blocks {
     block_of: Vec<usize>,
@@ -238,132 +57,233 @@ fn analyze_blocks(ops: &[Op], jump_table: &[u32]) -> Blocks {
     Blocks { block_of, block_lo, block_hi }
 }
 
+fn mov_imm64(a: &mut Asm, rd: u8, imm: u64) {
+    let h0 = (imm & 0xFFFF) as u32;
+    let h1 = ((imm >> 16) & 0xFFFF) as u32;
+    let h2 = ((imm >> 32) & 0xFFFF) as u32;
+    let h3 = ((imm >> 48) & 0xFFFF) as u32;
+    dynasm!(a
+        ; .arch aarch64
+        ; movz X(rd), #h0
+        ; movk X(rd), #h1, lsl #16
+        ; movk X(rd), #h2, lsl #32
+        ; movk X(rd), #h3, lsl #48
+    );
+}
+
+fn addr_into(a: &mut Asm, src: u8, imm: u64, width: u8, fault_label: dynasmrt::DynamicLabel) {
+    let src = src as u32;
+    dynasm!(a
+        ; .arch aarch64
+        ; ldr x8, [x0, #src * 8]
+    );
+    mov_imm64(a, 9, imm);
+    let width = width as u32;
+    dynasm!(a
+        ; .arch aarch64
+        ; add x8, x8, x9
+        ; mov w8, w8              // zero-extend low 32 bits into x8 (UXTW)
+        ; add x9, x8, #width
+        ; cmp x9, x3
+        ; b.hi =>fault_label
+        ; add x12, x2, x8
+    );
+}
+
+/// Emit a bounds-checked load of `width` bytes at [x12] into x8, zero- or
+/// sign-extended per `signed`.
+fn emit_load(a: &mut Asm, width: u8, signed: bool) {
+    match (width, signed) {
+        (1, false) => dynasm!(a; .arch aarch64; ldrb w8, [x12]),
+        (2, false) => dynasm!(a; .arch aarch64; ldrh w8, [x12]),
+        (4, false) => dynasm!(a; .arch aarch64; ldr w8, [x12]),
+        (1, true) => dynasm!(a; .arch aarch64; ldrsb x8, [x12]),
+        (2, true) => dynasm!(a; .arch aarch64; ldrsh x8, [x12]),
+        (4, true) => dynasm!(a; .arch aarch64; ldrsw x8, [x12]),
+        (8, _) => dynasm!(a; .arch aarch64; ldr x8, [x12]),
+        _ => panic!("unsupported load width {width}"),
+    }
+}
+
+/// Emit a store of the low `width` bytes of x10 at [x12].
+fn emit_store(a: &mut Asm, width: u8) {
+    match width {
+        1 => dynasm!(a; .arch aarch64; strb w10, [x12]),
+        2 => dynasm!(a; .arch aarch64; strh w10, [x12]),
+        4 => dynasm!(a; .arch aarch64; str w10, [x12]),
+        8 => dynasm!(a; .arch aarch64; str x10, [x12]),
+        _ => panic!("unsupported store width {width}"),
+    }
+}
+
 impl Backend for Aarch64Backend {
     fn emit_program(&self, ops: &[Op], jump_table: &[u32]) -> Vec<u8> {
-        let mut a = Asm::new();
+        let mut a = Asm::new().expect("dynasm assembler alloc");
+
         if ops.is_empty() {
             // empty program: immediate PANIC (nothing to run)
-            a.movz_w(X0, 1);
-            a.ret();
-            return a.to_bytes();
+            dynasm!(a
+                ; .arch aarch64
+                ; movz w0, #EXIT_PANIC as u32
+                ; ret
+            );
+            let buf = a.finalize().expect("finalize");
+            return buf.to_vec();
         }
+
         let blocks = analyze_blocks(ops, jump_table);
         let nblocks = blocks.block_lo.len();
 
-        let mut block_start_asm = vec![0usize; nblocks];
-        let mut oog_branches: Vec<usize> = Vec::new();
-        let mut fault_branches: Vec<usize> = Vec::new();
-        let mut halt_branches: Vec<usize> = Vec::new();
-        // (asm index of branch, target block, is_conditional)
-        let mut cf_branches: Vec<(usize, usize, bool)> = Vec::new();
-        a.ldr(X11, X1, 0); // x11 = *gas (live throughout)
+        // One dynamic label per basic block (branch/jump target resolution),
+        // plus the shared OOG/FAULT/HALT epilogues.
+        let block_labels: Vec<dynasmrt::DynamicLabel> = (0..nblocks).map(|_| a.new_dynamic_label()).collect();
+        let oog_label = a.new_dynamic_label();
+        let fault_label = a.new_dynamic_label();
+        let halt_label = a.new_dynamic_label();
 
-        // Emit a bounds-checked effective address into x8 and mem base+addr into
-        // x12; B.HI to the fault epilogue if [addr, addr+width) escapes the
-        // region. Address masked to 32 bits (PVM address space).
-        let addr_into = |a: &mut Asm, src: u8, imm: u64, width: u8, fb: &mut Vec<usize>| {
-            a.ldr(X8, X0, src as u32);
-            a.mov_imm64(X9, imm);
-            a.add(X8, X8, X9);
-            a.uxtw(X8, X8);
-            a.add_imm(X9, X8, width as u32);
-            a.cmp(X9, X3);
-            fb.push(a.b_cond_placeholder(COND_HI));
-            a.add(X12, X2, X8);
-        };
+        dynasm!(a
+            ; .arch aarch64
+            ; ldr x11, [x1]   // x11 = *gas (live throughout)
+        );
 
         for b in 0..nblocks {
-            block_start_asm[b] = a.len();
+            dynasm!(a
+                ; .arch aarch64
+                ; =>block_labels[b]
+            );
             let lo = blocks.block_lo[b];
             let hi = blocks.block_hi[b];
 
             // --- block body (per-instruction gas) ----------------------------
             for pc in lo..hi {
                 // charge 1 gas for this instruction; OOG (gas<0) before executing
-                a.subs_imm(X11, X11, 1);
-                oog_branches.push(a.b_cond_placeholder(COND_LT));
+                dynasm!(a
+                    ; .arch aarch64
+                    ; subs x11, x11, #1
+                    ; b.lt =>oog_label
+                );
                 match ops[pc] {
                     Op::LoadImm64 { dst, imm } => {
-                        a.mov_imm64(X8, imm);
-                        a.str(X8, X0, dst as u32);
+                        let dst = dst as u32;
+                        mov_imm64(&mut a, 8, imm);
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
                     }
                     Op::AddImm64 { dst, src, imm } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.mov_imm64(X9, imm);
-                        a.add(X8, X8, X9);
-                        a.str(X8, X0, dst as u32);
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; add x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
                     }
                     Op::Add { dst, src, src2 } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.ldr(X9, X0, src2 as u32);
-                        a.add(X8, X8, X9);
-                        a.str(X8, X0, dst as u32);
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; add x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
                     }
                     Op::Sub { dst, src, src2 } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.ldr(X9, X0, src2 as u32);
-                        a.sub(X8, X8, X9);
-                        a.str(X8, X0, dst as u32);
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; sub x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
                     }
                     Op::Mul { dst, src, src2 } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.ldr(X9, X0, src2 as u32);
-                        a.mul(X8, X8, X9);
-                        a.str(X8, X0, dst as u32);
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; mul x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
                     }
                     Op::Load { dst, src, imm, width, signed } => {
-                        addr_into(&mut a, src, imm, width, &mut fault_branches);
-                        a.emit_load(X8, X12, width, signed);
-                        a.str(X8, X0, dst as u32);
+                        addr_into(&mut a, src, imm, width, fault_label);
+                        emit_load(&mut a, width, signed);
+                        let dst = dst as u32;
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
                     }
                     Op::Store { dst, src, imm, width } => {
-                        addr_into(&mut a, src, imm, width, &mut fault_branches);
-                        a.ldr(X10, X0, dst as u32);
-                        a.emit_store(X10, X12, width);
+                        addr_into(&mut a, src, imm, width, fault_label);
+                        let dst = dst as u32;
+                        dynasm!(a; .arch aarch64; ldr x10, [x0, #dst * 8]);
+                        emit_store(&mut a, width);
                     }
                     Op::Trap => {
-                        a.str(X11, X1, 0); // flush gas
-                        a.movz_w(X0, 1); // EXIT_PANIC
-                        a.ret();
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; str x11, [x1]     // flush gas
+                            ; movz w0, #EXIT_PANIC as u32
+                            ; ret
+                        );
                     }
                     Op::Jump { target } => {
-                        let idx = a.b_placeholder();
-                        cf_branches.push((idx, blocks.block_of[target as usize], false));
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a; .arch aarch64; b =>tgt);
                     }
                     Op::BranchEq { src, src2, target } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.ldr(X9, X0, src2 as u32);
-                        a.cmp(X8, X9);
-                        let idx = a.b_cond_placeholder(COND_EQ);
-                        cf_branches.push((idx, blocks.block_of[target as usize], true));
+                        let (src, src2) = (src as u32, src2 as u32);
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cmp x8, x9
+                            ; b.eq =>tgt
+                        );
                         // not-taken: fall through to the next block (emitted next)
                     }
                     Op::BranchNe { src, src2, target } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.ldr(X9, X0, src2 as u32);
-                        a.cmp(X8, X9);
-                        let idx = a.b_cond_placeholder(COND_NE);
-                        cf_branches.push((idx, blocks.block_of[target as usize], true));
+                        let (src, src2) = (src as u32, src2 as u32);
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cmp x8, x9
+                            ; b.ne =>tgt
+                        );
                     }
                     Op::Djump { src } => {
-                        a.ldr(X8, X0, src as u32);
-                        a.mov_imm64(X9, DJUMP_HALT);
-                        a.cmp(X8, X9);
-                        halt_branches.push(a.b_cond_placeholder(COND_EQ));
+                        let src = src as u32;
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, DJUMP_HALT);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp x8, x9
+                            ; b.eq =>halt_label
+                        );
                         for &t in jump_table {
                             let ti = t as usize;
                             if ti >= ops.len() {
                                 continue;
                             }
                             assert!(t < 4096, "skeleton djump target index out of imm12 range");
-                            a.cmp_imm(X8, t);
-                            let idx = a.b_cond_placeholder(COND_EQ);
-                            cf_branches.push((idx, blocks.block_of[ti], true));
+                            let tgt = block_labels[blocks.block_of[ti]];
+                            dynasm!(a
+                                ; .arch aarch64
+                                ; cmp x8, #t
+                                ; b.eq =>tgt
+                            );
                         }
                         // no jump-table match -> panic
-                        a.str(X11, X1, 0); // flush gas
-                        a.movz_w(X0, 1);
-                        a.ret();
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; str x11, [x1]     // flush gas
+                            ; movz w0, #EXIT_PANIC as u32
+                            ; ret
+                        );
                     }
                 }
             }
@@ -372,37 +292,23 @@ impl Backend for Aarch64Backend {
         }
 
         // --- epilogues (each flushes the live gas register back to *gas) ------
-        let oog_idx = a.len();
-        a.str(X11, X1, 0); // gas is now -1 (the failing decrement)
-        a.movz_w(X0, 2); // EXIT_OOG
-        a.ret();
-        let fault_idx = a.len();
-        a.str(X11, X1, 0);
-        a.movz_w(X0, 3); // EXIT_FAULT
-        a.ret();
-        let halt_idx = a.len();
-        a.str(X11, X1, 0);
-        a.movz_w(X0, 0); // EXIT_HALT
-        a.ret();
+        dynasm!(a
+            ; .arch aarch64
+            ; =>oog_label
+            ; str x11, [x1]     // gas is now -1 (the failing decrement)
+            ; movz w0, #EXIT_OOG as u32
+            ; ret
+            ; =>fault_label
+            ; str x11, [x1]
+            ; movz w0, #EXIT_FAULT as u32
+            ; ret
+            ; =>halt_label
+            ; str x11, [x1]
+            ; movz w0, #EXIT_HALT as u32
+            ; ret
+        );
 
-        // --- patch ------------------------------------------------------------
-        for b in oog_branches {
-            a.patch_b_cond(b, oog_idx);
-        }
-        for b in fault_branches {
-            a.patch_b_cond(b, fault_idx);
-        }
-        for b in halt_branches {
-            a.patch_b_cond(b, halt_idx);
-        }
-        for (at, target_block, is_cond) in cf_branches {
-            let tgt = block_start_asm[target_block];
-            if is_cond {
-                a.patch_b_cond(at, tgt);
-            } else {
-                a.patch_b(at, tgt);
-            }
-        }
-        a.to_bytes()
+        let buf = a.finalize().expect("finalize: unresolved labels or relocation range overflow");
+        buf.to_vec()
     }
 }
