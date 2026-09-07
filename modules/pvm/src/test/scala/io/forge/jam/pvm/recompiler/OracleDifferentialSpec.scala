@@ -101,18 +101,29 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val (code, bitmask) = encodeProgram(prog)
     RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
 
+  // With roData empty and a page-sized RW region, the RW region occupies exactly
+  // [RW_BASE, RW_BASE + RW_LEN) = [0x20000, 0x21000). See Abi.build: rwDataAddr =
+  // 2*ZZ (ZZ = 0x10000) when roData is empty.
   private val RW_BASE = 0x20000
   private val RW_LEN = 4096 // one page: recompiler's byte bounds == interpreter's page bounds
-  private val RW_END = RW_BASE + RW_LEN
+  private val PAGE_SHIFT = 12 // log2(4096) — the fixed TINY/test page size throughout this suite
 
   // ---- interpreter run (the oracle) ------------------------------------------
-  private def runInterpreter(prog: Seq[AInstr], initRegs: Array[Long], gas: Long): (Int, Long, Array[Long]) =
+  private final case class InterpResult(
+    exit: Int,
+    gas: Long,
+    regs: Array[Long],
+    pc: Long,
+    faultPage: Long
+  )
+
+  private def runInterpreter(prog: Seq[AInstr], initRegs: Array[Long], gas: Long): InterpResult =
     runInterpreterMem(prog, initRegs, gas, new Array[Byte](RW_LEN))._1
 
   /** Interpreter run with an explicit RW-region image; also returns the RW bytes
     * after execution (for store verification). */
   private def runInterpreterMem(prog: Seq[AInstr], initRegs: Array[Long], gas: Long, rwData: Array[Byte])
-      : ((Int, Long, Array[Long]), Array[Byte]) =
+      : (InterpResult, Array[Byte]) =
     val (code, bitmask) = encodeProgram(prog)
     val blob = ProgramBlob(
       code = code, bitmask = bitmask, jumpTable = JumpTable(Array.empty, 0),
@@ -125,22 +136,34 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     inst.setGas(gas)
     inst.setNextProgramCounter(ProgramCounter(0))
     initRegs.zipWithIndex.foreach { case (v, i) => inst.setReg(i, v) }
+    val (exit, faultPage) = runToTerminal(inst)
+    val regs = Array.tabulate(13)(i => inst.getReg(i))
+    val pc = inst.programCounter.map(_.toInt.toLong & 0xFFFFFFFFL).getOrElse(fail("no programCounter set on exit"))
+    val rwAfter = inst.basicMemory.getMemorySlice(spire.math.UInt(RW_BASE), RW_LEN) match
+      case io.forge.jam.pvm.MemoryResult.Success(bytes) => bytes
+      case _ => rwData // unchanged if unreadable (e.g. faulted before any store)
+    (InterpResult(exit, inst.gas, regs, pc, faultPage), rwAfter)
+
+  /** Drives `inst.run()` to a terminal interrupt (skipping Step); returns
+    * (exitCode, faultPage). Shared by the flat-buffer runner above and the
+    * region-table runner below (`runInterpreterOn`). */
+  private def runToTerminal(inst: InterpretedInstance): (Int, Long) =
     var exit = -1
+    var faultPage = 0L
     var running = true
     while running do
       inst.run() match
         case Right(InterruptKind.Panic)    => exit = PvmRecompiler.EXIT_PANIC; running = false
         case Right(InterruptKind.OutOfGas) => exit = PvmRecompiler.EXIT_OOG; running = false
         case Right(InterruptKind.Finished) => exit = PvmRecompiler.EXIT_HALT; running = false
-        case Right(InterruptKind.Segfault(_)) => exit = PvmRecompiler.EXIT_FAULT; running = false
+        case Right(InterruptKind.Segfault(info)) =>
+          exit = PvmRecompiler.EXIT_FAULT
+          faultPage = info.pageAddress.toLong & 0xFFFFFFFFL
+          running = false
         case Right(InterruptKind.Step)     => () // keep going
         case Right(InterruptKind.Ecalli(_)) => fail("unexpected ecalli")
         case Left(err)                     => fail(s"interpreter error: $err")
-    val regs = Array.tabulate(13)(i => inst.getReg(i))
-    val rwAfter = inst.basicMemory.getMemorySlice(spire.math.UInt(RW_BASE), RW_LEN) match
-      case io.forge.jam.pvm.MemoryResult.Success(bytes) => bytes
-      case _ => rwData // unchanged if unreadable (e.g. faulted before any store)
-    ((exit, inst.gas, regs), rwAfter)
+    (exit, faultPage)
 
   // ---- self-check: my encoder round-trips through the real decoder ------------
   "the PVM encoder" should "round-trip every subset opcode through the real decoder" in {
@@ -251,31 +274,35 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 0 => (1, false); case 1 => (1, true); case 2 => (2, false); case 3 => (2, true)
     case 4 => (4, false); case 5 => (4, true); case _ => (8, false)
 
+  private def singleRwRegion(base: Long, data: Array[Byte]): Array[PvmRecompiler.Region] =
+    Array(new PvmRecompiler.Region(base, data.length.toLong, 0L, true))
+
   /** Compare a load/store program against the interpreter with aligned RW images,
-    * including the RW-region contents after execution. */
+    * including the RW-region contents after execution, AND the final PC. */
   private def compareRunMem(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
     val rwData = new Array[Byte](RW_LEN); rng.nextBytes(rwData)
     val initRegs = Array.fill(13)(rng.nextLong())
     initRegs(0) = RW_BASE.toLong // r0 = memory base (both engines)
     val gas = prog.length.toLong + rng.nextInt(50)
 
-    val ((iExit, iGas, iRegs), iRwAfter) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
+    val (interp, iRwAfter) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
 
-    // recompiler flat buffer covers [0, RW_END) with the RW image at RW_BASE
-    val memBuf = new Array[Byte](RW_END)
-    System.arraycopy(rwData, 0, memBuf, RW_BASE, RW_LEN)
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.imm, pp.imm2, pp.jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
-    val out = rc.execute(blk, nRegs, gas, memBuf)
+    val backing = rwData.clone()
+    val regions = singleRwRegion(RW_BASE.toLong, backing)
+    val out = rc.execute(blk, nRegs, gas, regions, backing, PAGE_SHIFT, 0)
     blk.close()
-    val nRwAfter = memBuf.slice(RW_BASE, RW_END)
-    withClue(s"program=$prog gas=$gas\n interp(exit=$iExit gas=$iGas)\n native(exit=${out(0)} gas=${out(1)})\n") {
-      out(0).toInt shouldBe iExit
-      out(1) shouldBe iGas
-      nRegs.toSeq shouldBe iRegs.toSeq
-      nRwAfter.toSeq shouldBe iRwAfter.toSeq
+    withClue(s"program=$prog gas=$gas\n interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc})\n" +
+      s"native(exit=${out.exit} gas=${out.gasRemaining} pc=${out.pc})\n") {
+      out.exit shouldBe interp.exit
+      out.gasRemaining shouldBe interp.gas
+      out.pc shouldBe interp.pc
+      if out.exit == PvmRecompiler.EXIT_FAULT then out.faultPage shouldBe interp.faultPage
+      nRegs.toSeq shouldBe interp.regs.toSeq
+      backing.toSeq shouldBe iRwAfter.toSeq
     }
 
   private def compareRunLoads(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
@@ -286,17 +313,19 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   private def compareRunGas(rc: PvmRecompiler, prog: Seq[AInstr], gas: Long, rng: Random): Unit =
     val initRegs = Array.fill(13)(rng.nextLong())
-    val (iExit, iGas, iRegs) = runInterpreter(prog, initRegs.clone(), gas)
+    val interp = runInterpreter(prog, initRegs.clone(), gas)
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.imm, pp.imm2, pp.jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas)
     blk.close()
-    withClue(s"program=$prog gas=$gas\n interp(exit=$iExit gas=$iGas)\n native(exit=${out(0)} gas=${out(1)})\n") {
-      out(0).toInt shouldBe iExit
-      out(1) shouldBe iGas
-      nRegs.toSeq shouldBe iRegs.toSeq
+    withClue(s"program=$prog gas=$gas\n interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc})\n" +
+      s"native(exit=${out.exit} gas=${out.gasRemaining} pc=${out.pc})\n") {
+      out.exit shouldBe interp.exit
+      out.gasRemaining shouldBe interp.gas
+      out.pc shouldBe interp.pc
+      nRegs.toSeq shouldBe interp.regs.toSeq
     }
 
   "the native recompiler" should "match the production interpreter on arithmetic programs" in {
@@ -380,9 +409,242 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         try
           val rng = new Random(0x570E5L)
           // Interleaved loads + stores at all widths; compares the RW region
-          // contents after execution as well as registers/gas/exit.
+          // contents after execution as well as registers/gas/exit/pc.
           for _ <- 0 until 10000 do
             compareRunMem(rc, genMemProgram(rng), rng)
           info("oracle differential (memory load+store): 10000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  private def setupRegionRun(
+    prog: Seq[AInstr],
+    initRegs: Array[Long],
+    gas: Long,
+    roData: Array[Byte],
+    rwData: Array[Byte],
+    initialPcByteOffset: Int
+  ): (InterpResult, RecompilerMemory.Described) =
+    val (code, bitmask) = encodeProgram(prog)
+    val blob = ProgramBlob(
+      code = code, bitmask = bitmask, jumpTable = JumpTable(Array.empty, 0),
+      is64Bit = true, roData = roData, rwData = rwData, stackSize = 4096
+    )
+    val module = InterpretedModule.create(blob) match
+      case Right(m) => m
+      case Left(e)  => fail(s"module create failed: $e")
+    val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+    inst.setGas(gas)
+    inst.setNextProgramCounter(ProgramCounter(initialPcByteOffset))
+    initRegs.zipWithIndex.foreach { case (v, i) => inst.setReg(i, v) }
+
+    // Snapshot the region table + backing bytes BEFORE running (this is what
+    // a real caller would hand the recompiler prior to execution).
+    val described = RecompilerMemory.describe(inst)
+
+    val (exit, faultPage) = runToTerminal(inst)
+    val regsAfter = Array.tabulate(13)(i => inst.getReg(i))
+    val pc = inst.programCounter.map(_.toInt.toLong & 0xFFFFFFFFL).getOrElse(fail("no programCounter set on exit"))
+    (InterpResult(exit, inst.gas, regsAfter, pc, faultPage), described)
+
+  private def compareRegionRun(
+    rc: PvmRecompiler,
+    prog: Seq[AInstr],
+    initRegs: Array[Long],
+    gas: Long,
+    described: RecompilerMemory.Described,
+    interp: InterpResult,
+    entryIndex: Int = 0
+  ): Unit =
+    val pp = toRawColumns(prog)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
+    blk.isValid shouldBe true
+    val nRegs = initRegs.clone()
+    val backing = described.backing.clone()
+    val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
+    val out = rc.execute(blk, nRegs, gas, regions, backing, described.pageShift, entryIndex)
+    blk.close()
+    withClue(s"program=$prog gas=$gas entryIndex=$entryIndex\n" +
+      s"interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc} faultPage=${interp.faultPage})\n" +
+      s"native(exit=${out.exit} gas=${out.gasRemaining} pc=${out.pc} faultPage=${out.faultPage})\n") {
+      out.exit shouldBe interp.exit
+      out.gasRemaining shouldBe interp.gas
+      out.pc shouldBe interp.pc
+      if interp.exit == PvmRecompiler.EXIT_FAULT then out.faultPage shouldBe interp.faultPage
+      nRegs.toSeq shouldBe interp.regs.toSeq
+    }
+
+  private def runBoth(
+    rc: PvmRecompiler,
+    prog: Seq[AInstr],
+    initRegs: Array[Long],
+    gas: Long,
+    roData: Array[Byte] = Array.emptyByteArray,
+    rwData: Array[Byte] = new Array[Byte](RW_LEN),
+    initialPcByteOffset: Int = 0,
+    entryIndex: Int = 0
+  ): InterpResult =
+    val (interp, described) = setupRegionRun(prog, initRegs, gas, roData, rwData, initialPcByteOffset)
+    compareRegionRun(rc, prog, initRegs, gas, described, interp, entryIndex)
+    interp
+
+  it should "match the production interpreter: loads from an RO region succeed, stores fault" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x120000L)
+          var faultCount = 0
+          var loadOkCount = 0
+          for _ <- 0 until 4000 do
+            val roData = Array.fill(4096)(rng.nextInt(256).toByte)
+            val rwData = new Array[Byte](4096)
+            val roBase = 0x10000 // memoryMap.roDataAddress with a nonzero roData size
+            val isStore = rng.nextBoolean()
+            val offset = rng.nextInt(4096)
+            val prog =
+              if isStore then Seq(LoadImm64(1, 0xAAL), StoreInd(1, 0, offset, randWidth(rng)), Trap)
+              else Seq(LoadInd(1, 0, offset, randWidth(rng), signed = false), Trap)
+            val initRegs = Array.fill(13)(0L)
+            initRegs(0) = roBase.toLong
+            val interp = runBoth(rc, prog, initRegs, 100L, roData = roData, rwData = rwData)
+            if isStore then
+              interp.exit shouldBe PvmRecompiler.EXIT_FAULT
+              interp.faultPage shouldBe roBase.toLong
+              faultCount += 1
+            else
+              interp.exit should not be PvmRecompiler.EXIT_FAULT
+              loadOkCount += 1
+          faultCount should be > 0
+          loadOkCount should be > 0
+          info(s"oracle differential (RO region): 4000 programs matched; $faultCount RO-stores faulted, $loadOkCount RO-loads succeeded")
+        finally rc.close()
+  }
+
+  // ---- unmapped-gap accesses and page-boundary-spanning accesses -------------
+  //
+  // Real interpreter layout guarantees a gap between the RW-data region and
+  // the stack (both far apart in address space by construction — see
+  // Abi/MemoryMap.build). r0 sweeps across that gap and across the RW
+  // region's own upper page boundary, driving both an unmapped-gap fault and
+  // an in-region-then-off-the-end spanning fault against the SAME real
+  // MemoryMap the interpreter built.
+  it should "match the production interpreter on unmapped-gap and page-spanning accesses" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x9A9A9AL)
+          var gapFaults = 0
+          var spanningFaults = 0
+          var oks = 0
+          for _ <- 0 until 4000 do
+            val rwData = Array.fill(4096)(rng.nextInt(256).toByte)
+            // Base RW region address with empty roData: 2*ZZ = 0x20000 (see the
+            // RW_BASE comment above) — offsets near its upper edge span into
+            // the unmapped gap after it; large positive offsets land well past
+            // the gap, deep in genuinely unmapped space.
+            val mode = rng.nextInt(3)
+            val offset = mode match
+              case 0 => 4096 - 4 + rng.nextInt(8) // spans the region's own top page boundary
+              case 1 => rng.nextInt(4096 - 8)     // fully in-bounds
+              case _ => 0x100000 + rng.nextInt(0x100000) // deep unmapped gap
+            val prog = Seq(LoadInd(1, 0, offset, 8, signed = false), Trap)
+            val initRegs = Array.fill(13)(0L)
+            initRegs(0) = RW_BASE.toLong
+            val interp = runBoth(rc, prog, initRegs, 100L, rwData = rwData)
+            mode match
+              case 0 => if interp.exit == PvmRecompiler.EXIT_FAULT then spanningFaults += 1 else oks += 1
+              case 1 => interp.exit should not be PvmRecompiler.EXIT_FAULT; oks += 1
+              case _ => interp.exit shouldBe PvmRecompiler.EXIT_FAULT; gapFaults += 1
+          gapFaults should be > 0
+          spanningFaults should be > 0
+          oks should be > 0
+          info(s"oracle differential (unmapped gap / spanning): 4000 programs matched; " +
+            s"$gapFaults gap faults, $spanningFaults spanning faults, $oks in-bounds")
+        finally rc.close()
+  }
+
+  // ---- sub-0x10000 panic escalation -------------------------------------------
+  it should "match the production interpreter: sub-0x10000 faults escalate to panic" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x00FEEDL)
+          var escalations = 0
+          for _ <- 0 until 3000 do
+            val rwData = new Array[Byte](4096)
+            val offset = rng.nextInt(0x8000) // well below MinValidAddress=0x10000
+            val prog = Seq(LoadInd(1, 0, offset, randWidth(rng), signed = false), Trap)
+            val initRegs = Array.fill(13)(0L) // r0 = 0
+            val interp = runBoth(rc, prog, initRegs, 100L, rwData = rwData)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+            escalations += 1
+          escalations shouldBe 3000
+          info(s"oracle differential (sub-0x10000 escalation): $escalations programs matched (all escalated to panic)")
+        finally rc.close()
+  }
+
+  // ---- entry-index: nonzero initial PC (mid-program start) -------------------
+  it should "match the production interpreter when starting mid-program (nonzero entry index)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xE7719DL)
+          for _ <- 0 until 3000 do
+            // instruction 0 (skipped): a LoadImm64 that would corrupt r1 if run.
+            // instruction 1 (entry): arithmetic. instruction 2: Trap.
+            val skipped = LoadImm64(1, 0xDEADL)
+            val body = randArith(rng)
+            val prog = Seq(skipped, body, Trap)
+            val entryByteOffset = sizeOf(skipped) // byte offset of instruction 1
+            val pp = toRawColumns(prog)
+            val entryIndex = pp.byteOffsetToIndex.getOrElse(entryByteOffset, fail("entry offset not a decoded leader"))
+            entryIndex shouldBe 1
+            val initRegs = Array.fill(13)(rng.nextLong())
+            val interp = runBoth(rc, prog, initRegs, 100L, initialPcByteOffset = entryByteOffset, entryIndex = entryIndex)
+            // instruction 0 never ran: r1 must NOT be 0xDEAD unless body also
+            // happens to target r1 with that exact value (astronomically
+            // unlikely with random operands) — assert exit matches at minimum
+            // (compareRegionRun already asserted full register equality).
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC // always runs to the trap
+          info("oracle differential (entry index / mid-program start): 3000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  // ---- PC assertions across ALL exit kinds (dedicated smoke coverage) --------
+  it should "report the correct PC on halt, panic, OOG, and fault exits" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          // halt: JumpIndirect to the sentinel address 0xFFFF0000 is not
+          // representable via this suite's abstract encoder (no djump case),
+          // so halt coverage lives in the Rust unit tests
+          // (djump_to_sentinel_halts) — this suite covers the remaining three.
+
+          // panic (trap)
+          val panicProg = Seq(LoadImm64(1, 1L), Trap)
+          val panicInterp = runBoth(rc, panicProg, Array.fill(13)(0L), 100L)
+          panicInterp.exit shouldBe PvmRecompiler.EXIT_PANIC
+
+          // OOG mid-program
+          val oogProg = Seq(LoadImm64(1, 1L), LoadImm64(2, 2L), LoadImm64(3, 3L), Trap)
+          val oogInterp = runBoth(rc, oogProg, Array.fill(13)(0L), 2L) // charges for 2 instrs then OOGs
+          oogInterp.exit shouldBe PvmRecompiler.EXIT_OOG
+
+          // fault (RO store)
+          val roData = Array.fill(4096)(0.toByte)
+          val faultProg = Seq(LoadImm64(1, 1L), StoreInd(1, 0, 0, 8), Trap)
+          val faultInitRegs = Array.fill(13)(0L); faultInitRegs(0) = 0x10000L
+          val faultInterp = runBoth(rc, faultProg, faultInitRegs, 100L, roData = roData)
+          faultInterp.exit shouldBe PvmRecompiler.EXIT_FAULT
+          info("oracle differential (PC per exit kind): panic/OOG/fault PCs all matched the interpreter")
         finally rc.close()
   }
