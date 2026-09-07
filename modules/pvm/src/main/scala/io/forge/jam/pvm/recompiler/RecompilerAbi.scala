@@ -250,15 +250,17 @@ object RecompilerAbi:
         RawInstr(op, dst, base, 0, imm, offset)
 
   /** A fully-prepared program ready for `PvmRecompiler.compile`: parallel
-    * column arrays plus the (already index-translated) jump table. */
+    * column arrays plus the (already index-translated) jump table */
   final case class PreparedProgram(
     opcodes: Array[Int],
     a: Array[Int],
     b: Array[Int],
     c: Array[Int],
+    pc: Array[Int],
     imm: Array[Long],
     imm2: Array[Long],
-    jumpTable: Array[Int]
+    jumpTable: Array[Int],
+    byteOffsetToIndex: Map[Int, Int]
   )
 
   /**
@@ -282,6 +284,7 @@ object RecompilerAbi:
     val aArr = new Array[Int](n)
     val bArr = new Array[Int](n)
     val cArr = new Array[Int](n)
+    val pcArr = new Array[Int](n)
     val immArr = new Array[Long](n)
     val imm2Arr = new Array[Long](n)
 
@@ -306,6 +309,7 @@ object RecompilerAbi:
         if invalidTarget then mapInstruction(Instruction.Panic, targetIndex)
         else mapped
       opcodes(i) = raw.opcode; aArr(i) = raw.a; bArr(i) = raw.b; cArr(i) = raw.c
+      pcArr(i) = byteOffsets(i)
       immArr(i) = raw.imm; imm2Arr(i) = raw.imm2
 
     // Jump table: byte-offset entries -> instruction indices; invalid (not a
@@ -313,7 +317,7 @@ object RecompilerAbi:
     // current Rust `pvm_compile` in-range filtering.
     val jt = jumpTable.iterator.flatMap(entry => offsetToIndex.get(entry)).map(_.toInt).toArray
 
-    PreparedProgram(opcodes, aArr, bArr, cArr, immArr, imm2Arr, jt)
+    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, jt, offsetToIndex)
 
   /** Convenience overload taking a `ProgramBlob` directly. */
   def prepareProgram(blob: ProgramBlob): PreparedProgram =
