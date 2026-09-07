@@ -11,6 +11,7 @@ import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.{Files, Path}
 import scala.util.Random
+import spire.math.UInt
 
 /**
  * The oracle differential
@@ -646,5 +647,82 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           val faultInterp = runBoth(rc, faultProg, faultInitRegs, 100L, roData = roData)
           faultInterp.exit shouldBe PvmRecompiler.EXIT_FAULT
           info("oracle differential (PC per exit kind): panic/OOG/fault PCs all matched the interpreter")
+        finally rc.close()
+  }
+
+  // ---- sbrk-grown heap: RecompilerMemory.describe region fidelity ------------
+  it should "extend the RW region to cover an sbrk-grown heap (region fidelity)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x5B4B5B4BL)
+          val pageSize = 4096
+          val rwData = new Array[Byte](pageSize) // memoryMap.rwDataSize == 1 page pre-sbrk
+
+          // A load/store program targeting an address in the page sbrk is
+          // about to add — unreachable under the pre-fix (static rwDataSize
+          // only) region table, since it's beyond the initial one-page RW
+          // region entirely.
+          val grownOffset = pageSize + rng.nextInt(pageSize - 8) // inside the newly-mapped 2nd page
+          val prog = Seq(
+            LoadImm64(1, 0x0102030405060708L),
+            StoreInd(1, 0, grownOffset, 8),
+            LoadInd(2, 0, grownOffset, 8, signed = false),
+            Trap
+          )
+          val (code, bitmask) = encodeProgram(prog)
+          val blob = ProgramBlob(
+            code = code, bitmask = bitmask, jumpTable = JumpTable(Array.empty, 0),
+            is64Bit = true, roData = Array.empty, rwData = rwData, stackSize = 4096
+          )
+          val module = InterpretedModule.create(blob) match
+            case Right(m) => m
+            case Left(e)  => fail(s"module create failed: $e")
+          val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+
+          val rwBase = module.memoryMap.rwDataAddress
+          val preRwSize = module.memoryMap.rwDataSize.signed
+          preRwSize shouldBe pageSize // sanity: exactly one page before growth
+
+          // Grow the heap by one extra page via sbrk — the public entrypoint
+          // BasicMemory exposes for tests that don't want to drive it through
+          // a real PVM `sbrk` instruction/host call.
+          val grown = inst.basicMemory.sbrk(UInt(pageSize))
+          grown shouldBe defined
+          inst.basicMemory.heapSize.signed shouldBe (preRwSize + pageSize)
+          inst.basicMemory.heapEnd shouldBe (rwBase + UInt(preRwSize + pageSize))
+
+          // (a) describe()'s RW region must cover the grown page too — the
+          // finding under test: pre-fix this only reported `preRwSize` bytes.
+          val described = RecompilerMemory.describe(inst)
+          val rwRegion = described.regions.find(r => r.base == (rwBase.toLong & 0xFFFFFFFFL))
+            .getOrElse(fail("no RW region found in described regions"))
+          rwRegion.len should be >= (preRwSize + pageSize).toLong
+          rwRegion.writable shouldBe true
+
+          // (b) the load/store at `grownOffset` (in the grown page) must
+          // succeed on the interpreter post-sbrk, and the recompiler — handed
+          // this same post-sbrk region table — must match it exactly.
+          val initRegs = Array.fill(13)(0L)
+          initRegs(0) = rwBase.toLong
+          inst.setGas(100L)
+          inst.setNextProgramCounter(ProgramCounter(0))
+          initRegs.zipWithIndex.foreach { case (v, i) => inst.setReg(i, v) }
+          val (exit, faultPage) = runToTerminal(inst)
+          exit shouldBe PvmRecompiler.EXIT_PANIC // Trap after the load/store
+          val regsAfter = Array.tabulate(13)(i => inst.getReg(i))
+          val pcAfter = inst.programCounter.map(_.toInt.toLong & 0xFFFFFFFFL).getOrElse(fail("no PC on exit"))
+          val interp = InterpResult(exit, inst.gas, regsAfter, pcAfter, faultPage)
+          // Sanity: the store/load round-tripped through the grown page (r2
+          // must equal what was stored) — i.e. this test actually exercises
+          // the grown extent, not a fault that short-circuited the checks.
+          regsAfter(2) shouldBe 0x0102030405060708L
+
+          compareRegionRun(rc, prog, initRegs, 100L, described, interp)
+
+          info(s"oracle differential (sbrk-grown heap): RW region extended from $preRwSize to " +
+            s"${rwRegion.len} bytes; load/store at grown offset $grownOffset matched the interpreter")
         finally rc.close()
   }

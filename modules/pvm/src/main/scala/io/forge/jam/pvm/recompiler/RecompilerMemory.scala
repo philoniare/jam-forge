@@ -1,12 +1,12 @@
 package io.forge.jam.pvm.recompiler
 
 import spire.math.UInt
-import io.forge.jam.pvm.MemoryResult
+import io.forge.jam.pvm.{AlignmentOps, MemoryResult}
 import io.forge.jam.pvm.engine.InterpretedInstance
 
 /**
  * Describes an interpreter memory map (`MemoryMap` + its `PageMap`) as the
- * native recompiler's region table + one shared backing buffer.
+ * native recompiler's region table + one shared backing buffer
  */
 object RecompilerMemory:
 
@@ -21,7 +21,7 @@ object RecompilerMemory:
 
   /**
    * Build the region table + backing bytes for `instance`'s CURRENT memory
-   * state 
+   * state
    */
   def describe(instance: InterpretedInstance): Described =
     val memoryMap = instance.module.memoryMap
@@ -44,8 +44,10 @@ object RecompilerMemory:
     // RO data — ReadOnly (initializePageMap: mappings += (roDataAddress, roSize, ReadOnly)).
     appendRegion(memoryMap.roDataAddress, memoryMap.roDataSize.signed, writable = false)
 
-    // RW data — ReadWrite.
-    appendRegion(memoryMap.rwDataAddress, memoryMap.rwDataSize.signed, writable = true)
+    // RW data — ReadWrite
+    val rwEffectiveLen = math.max(memoryMap.rwDataSize.signed, instance.basicMemory.heapSize.signed)
+    val rwEffectiveLenAligned = AlignmentOps.alignUp(rwEffectiveLen, pageSize.signed)
+    appendRegion(memoryMap.rwDataAddress, rwEffectiveLenAligned, writable = true)
 
     // Stack — ReadWrite.
     appendRegion(memoryMap.stackAddressLow, memoryMap.stackSize.signed, writable = true)
