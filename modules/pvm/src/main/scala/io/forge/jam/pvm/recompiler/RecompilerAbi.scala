@@ -260,7 +260,8 @@ object RecompilerAbi:
     imm: Array[Long],
     imm2: Array[Long],
     jumpTable: Array[Int],
-    byteOffsetToIndex: Map[Int, Int]
+    byteOffsetToIndex: Map[Int, Int],
+    codeLen: Int
   )
 
   /**
@@ -317,7 +318,7 @@ object RecompilerAbi:
     // current Rust `pvm_compile` in-range filtering.
     val jt = jumpTable.iterator.flatMap(entry => offsetToIndex.get(entry)).map(_.toInt).toArray
 
-    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, jt, offsetToIndex)
+    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, jt, offsetToIndex, code.length)
 
   /** Convenience overload taking a `ProgramBlob` directly. */
   def prepareProgram(blob: ProgramBlob): PreparedProgram =

@@ -124,7 +124,7 @@ pub trait Backend {
     /// The op index is the instruction "pc" that jumps/branches target.
     /// `jump_table` lists the instruction indices that are valid indirect
     /// (`djump`) targets; every entry is also treated as a block leader.
-    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32]) -> (Vec<u8>, u32);
+    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32], code_len: u32) -> (Vec<u8>, u32);
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -179,6 +179,7 @@ pub unsafe extern "C" fn pvm_compile(
     n: usize,
     jump_table: *const u32,
     jt_n: usize,
+    code_len: u32,
 ) -> *mut CompiledBlock {
     if instrs.is_null() {
         return std::ptr::null_mut();
@@ -199,7 +200,7 @@ pub unsafe extern "C" fn pvm_compile(
             .collect()
     };
     let backend = aarch64::Aarch64Backend;
-    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt);
+    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt, code_len);
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
@@ -283,8 +284,22 @@ mod tests {
         jt: &[u32],
         entry_index: u32,
     ) -> (u32, ExecOut) {
+        let code_len = (instrs.len() as u32) * 4;
+        run_full_with_code_len(instrs, regs, gas, regions, backing, jt, entry_index, code_len)
+    }
+
+    fn run_full_with_code_len(
+        instrs: &[RawInstr],
+        regs: &mut [u64; 13],
+        gas: &mut i64,
+        regions: &[Region],
+        backing: &mut [u8],
+        jt: &[u32],
+        entry_index: u32,
+        code_len: u32,
+    ) -> (u32, ExecOut) {
         unsafe {
-            let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len());
+            let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len(), code_len);
             assert!(!blk.is_null(), "compile returned null");
             let mut out = ExecOut::default();
             let ex = pvm_execute(
@@ -747,5 +762,58 @@ mod tests {
         assert_eq!(regs[5], 7); // nothing executed
         assert_eq!(gas, 100); // no gas charged either
         assert_eq!(out.pc, 0);
+    }
+
+    #[test]
+    fn falls_off_end_of_code_with_no_terminator_panics_at_code_len() {
+        let prog = with_pcs(vec![ri(OP_ADD64, 9, 7, 8, 0)]);
+        let mut regs = [0u64; 13];
+        regs[7] = 1;
+        regs[8] = 2;
+        let mut gas = 10_000i64;
+        let code_len = 3u32;
+        let (exit, out) = run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, code_len);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[9], 3); // the arithmetic itself still ran correctly
+        assert_eq!(out.pc, code_len);
+        assert_eq!(gas, 10_000 - 2);
+    }
+
+    #[test]
+    fn falls_off_end_of_code_when_gas_exhausted_reports_oog_not_panic() {
+        let prog = with_pcs(vec![ri(OP_ADD64, 9, 7, 8, 0)]);
+        let mut regs = [0u64; 13];
+        regs[7] = 1;
+        regs[8] = 2;
+        let mut gas = 1i64; // Add64 charges 1->0; synthesized Panic charges 0->-1
+        let code_len = 3u32;
+        let (exit, out) = run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, code_len);
+        assert_eq!(exit, EXIT_OOG);
+        assert_eq!(regs[9], 3); // Add64 still executed before the OOG
+        assert_eq!(out.pc, code_len);
+        assert_eq!(gas, -1);
+    }
+
+    #[test]
+    fn entry_index_mid_program_falls_off_end_of_code_panics_at_code_len() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 99),
+            ri(OP_ADD64, 9, 7, 8, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        regs[7] = 10;
+        regs[8] = 20;
+        let mut gas = 100i64;
+        // code_len independent of the pc=index*4 convention, as above.
+        let code_len = 7u32;
+        let (exit, out) =
+            run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 1, code_len);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0); // instruction 0 never ran
+        assert_eq!(regs[9], 30); // Add64 (the entry instruction) did run
+        assert_eq!(out.pc, code_len);
+        // Gas charged only for the 2 dispatched "instructions": the real
+        // Add64 at entry, plus the synthesized trailing Panic.
+        assert_eq!(gas, 100 - 2);
     }
 }

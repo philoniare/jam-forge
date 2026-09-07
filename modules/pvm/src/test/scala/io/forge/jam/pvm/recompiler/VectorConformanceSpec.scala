@@ -146,7 +146,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
             s"panic immediately (status=${interp.actualStatus}, finalPc=${interp.finalPc}) — cannot derive a recompiler entry index")
 
       case Some(entryIndex) =>
-        val blk = rc.compile(prepared.opcodes, prepared.a, prepared.b, prepared.c, prepared.pc, prepared.imm, prepared.imm2, prepared.jumpTable)
+        val blk = rc.compile(prepared.opcodes, prepared.a, prepared.b, prepared.c, prepared.pc, prepared.imm, prepared.imm2, prepared.jumpTable, prepared.codeLen)
         try
           if !blk.isValid then
             Outcome.Unsupported("pvm_compile returned an invalid block (unsupported opcode in program)")

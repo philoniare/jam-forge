@@ -240,7 +240,7 @@ fn emit_store(a: &mut Asm, width: u8) {
 }
 
 impl Backend for Aarch64Backend {
-    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32]) -> (Vec<u8>, u32) {
+    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32], code_len: u32) -> (Vec<u8>, u32) {
         let mut a = Asm::new().expect("dynasm assembler alloc");
 
         if ops.is_empty() {
@@ -267,6 +267,7 @@ impl Backend for Aarch64Backend {
         let panic_label = a.new_dynamic_label();
         let halt_label = a.new_dynamic_label();
         let bounds_check_label = a.new_dynamic_label();
+        let end_of_code_label = a.new_dynamic_label();
 
         dynasm!(a
             ; .arch aarch64
@@ -453,13 +454,24 @@ impl Backend for Aarch64Backend {
                     }
                 }
             }
-            // Blocks ending without a terminator fall through to the next block,
-            // which is emitted immediately after — no branch needed.
+            let last_op_is_terminator = ops[hi - 1].is_terminator();
+            let is_last_block = b + 1 == nblocks;
+            if !last_op_is_terminator && is_last_block {
+                dynasm!(a; .arch aarch64; b =>end_of_code_label);
+            }
         }
 
         let fault_escalate_label = a.new_dynamic_label();
         dynasm!(a
             ; .arch aarch64
+            ; =>end_of_code_label
+        );
+        mov_imm32(&mut a, 12, code_len);
+        dynasm!(a
+            ; .arch aarch64
+            ; subs x11, x11, #1
+            ; b.lt =>oog_label
+            ; b =>panic_label
             ; =>oog_label
             ; str w12, [x6]      // out->pc = current instruction's pc
             ; str x11, [x1]      // gas is now -1 (the failing decrement)

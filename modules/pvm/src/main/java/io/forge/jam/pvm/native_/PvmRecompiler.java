@@ -84,7 +84,8 @@ public final class PvmRecompiler implements AutoCloseable {
                         ValueLayout.ADDRESS,   // instrs
                         ValueLayout.JAVA_LONG, // n
                         ValueLayout.ADDRESS,   // jump table
-                        ValueLayout.JAVA_LONG  // jt_n
+                        ValueLayout.JAVA_LONG, // jt_n
+                        ValueLayout.JAVA_INT   // code_len (byte length of the decoded code section)
                 ));
         this.execute = linker.downcallHandle(
                 lookup.find("pvm_execute").orElseThrow(() -> missing("pvm_execute")),
@@ -144,7 +145,7 @@ public final class PvmRecompiler implements AutoCloseable {
      * indirect ({@code JumpIndirect}) target instruction indices.
      * Returns a Block; check {@link Block#isValid()} before executing.
      */
-    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, int[] pc, long[] imm, long[] imm2, int[] jumpTable) {
+    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, int[] pc, long[] imm, long[] imm2, int[] jumpTable, int codeLen) {
         int n = opcodes.length;
         MemorySegment buf = arena.allocate(RAW_INSTR_SIZE * n);
         for (int i = 0; i < n; i++) {
@@ -165,7 +166,7 @@ public final class PvmRecompiler implements AutoCloseable {
             jt.setAtIndex(ValueLayout.JAVA_INT, i, jumpTable[i]);
         }
         try {
-            MemorySegment h = (MemorySegment) compile.invoke(buf, (long) n, jt, (long) jumpTable.length);
+            MemorySegment h = (MemorySegment) compile.invoke(buf, (long) n, jt, (long) jumpTable.length, codeLen);
             return new Block(h);
         } catch (Throwable t) {
             throw new RuntimeException("pvm_compile failed", t);
@@ -173,8 +174,8 @@ public final class PvmRecompiler implements AutoCloseable {
     }
 
     /** Convenience overload with no indirect-jump targets. */
-    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, int[] pc, long[] imm, long[] imm2) {
-        return compile(opcodes, a, b, c, pc, imm, imm2, new int[0]);
+    public Block compile(int[] opcodes, int[] a, int[] b, int[] c, int[] pc, long[] imm, long[] imm2, int codeLen) {
+        return compile(opcodes, a, b, c, pc, imm, imm2, new int[0], codeLen);
     }
 
     /**
