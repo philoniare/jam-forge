@@ -10,8 +10,27 @@ pub struct RawInstr {
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    pub pc: u32,
     pub imm: i64,
     pub imm2: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Region {
+    pub base: u32,
+    pub len: u32,
+    pub buf_offset: u32,
+    /// 1 = ReadWrite, 0 = ReadOnly. Loads succeed against either; stores
+    /// require this to be 1 (matches `PageAccess.isWritable`, PageMap.scala).
+    pub writable: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecOut {
+    pub pc: u32,
+    pub fault_page: u32,
 }
 
 pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
@@ -47,10 +66,10 @@ pub const EXIT_PANIC: u32 = 1; // trap, or djump to a non-jump-table target
 pub const EXIT_OOG: u32 = 2;
 pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
 
-/// The recompiled block: owns its executable memory. The block's gas cost is
-/// baked into the emitted code.
+/// The recompiled block: owns its executable memory
 pub struct CompiledBlock {
     mem: ExecMem,
+    instruction_count: u32,
 }
 
 /// The abstract op the backend emitter consumes (decoupled from the FFI struct).
@@ -105,7 +124,7 @@ pub trait Backend {
     /// The op index is the instruction "pc" that jumps/branches target.
     /// `jump_table` lists the instruction indices that are valid indirect
     /// (`djump`) targets; every entry is also treated as a block leader.
-    fn emit_program(&self, ops: &[Op], jump_table: &[u32]) -> Vec<u8>;
+    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32]) -> (Vec<u8>, u32);
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -169,6 +188,7 @@ pub unsafe extern "C" fn pvm_compile(
         Some(x) => x,
         None => return std::ptr::null_mut(),
     };
+    let pcs: Vec<u32> = slice.iter().map(|i| i.pc).collect();
     let jt: Vec<u32> = if jump_table.is_null() || jt_n == 0 {
         Vec::new()
     } else {
@@ -179,44 +199,50 @@ pub unsafe extern "C" fn pvm_compile(
             .collect()
     };
     let backend = aarch64::Aarch64Backend;
-    let code = backend.emit_program(&ops, &jt);
+    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt);
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
     };
-    Box::into_raw(Box::new(CompiledBlock { mem }))
+    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count }))
 }
 
 /// Execute a compiled block over the caller's register file, gas cell, and
-/// guest memory region.
+/// permission-aware guest memory
 ///
 /// `regs` points to 13 little-endian u64 PVM registers (read and written in
 /// place). `gas` points to a single i64 the block decrements by its cost.
-/// `mem` is the base of a zero-copy guest-memory region of `mem_len` bytes
-/// (may be null with mem_len 0 for register-only programs). Returns an EXIT_*
-/// code; EXIT_FAULT on an out-of-region access.
+/// `regions`/`n_regions` describe the guest memory map (see [`Region`]);
 ///
 /// # Safety
 /// `block` must be a live pointer from `pvm_compile`; `regs` must point to 13
-/// u64s; `gas` to one i64; `mem` to `mem_len` bytes.
+/// u64s; `gas` to one i64; `regions` to `n_regions` valid `Region`s; `backing`
+/// to `backing_len` bytes (every region's `[buf_offset, buf_offset+len)` must
+/// lie within it); `out` to one `ExecOut`.
 #[no_mangle]
 pub unsafe extern "C" fn pvm_execute(
     block: *mut CompiledBlock,
     regs: *mut u64,
     gas: *mut i64,
-    mem: *mut u8,
-    mem_len: u64,
+    regions: *const Region,
+    n_regions: u64,
+    backing: *mut u8,
+    page_shift: u32,
+    entry_index: u32,
+    out: *mut ExecOut,
 ) -> u32 {
-    if block.is_null() || regs.is_null() || gas.is_null() {
+    if block.is_null() || regs.is_null() || gas.is_null() || out.is_null() {
         return EXIT_PANIC;
     }
     let block = &*block;
-    // Emitted code signature:
-    //   extern "C" fn(*mut u64 /*x0 regs*/, *mut i64 /*x1 gas*/,
-    //                 *mut u8 /*x2 mem*/, u64 /*x3 mem_len*/) -> u32
-    let f: extern "C" fn(*mut u64, *mut i64, *mut u8, u64) -> u32 =
-        std::mem::transmute(block.mem.as_ptr());
-    f(regs, gas, mem, mem_len)
+    if entry_index >= block.instruction_count {
+        *out = ExecOut { pc: 0, fault_page: 0 };
+        return EXIT_PANIC;
+    }
+    let base = block.mem.as_ptr();
+    let f: extern "C" fn(*mut u64, *mut i64, *const Region, u64, *mut u8, u32, *mut ExecOut, u32) -> u32 =
+        std::mem::transmute(base);
+    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -234,53 +260,78 @@ pub unsafe extern "C" fn pvm_free(block: *mut CompiledBlock) {
 mod tests {
     use super::*;
 
-    fn run(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64) -> u32 {
-        run_full(instrs, regs, gas, &mut [], &[])
+    fn run(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64) -> (u32, ExecOut) {
+        run_full(instrs, regs, gas, &[], &mut [], &[], 0)
     }
 
-    fn run_mem(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64, mem: &mut [u8]) -> u32 {
-        run_full(instrs, regs, gas, mem, &[])
+    fn run_mem(
+        instrs: &[RawInstr],
+        regs: &mut [u64; 13],
+        gas: &mut i64,
+        regions: &[Region],
+        backing: &mut [u8],
+    ) -> (u32, ExecOut) {
+        run_full(instrs, regs, gas, regions, backing, &[], 0)
     }
 
     fn run_full(
         instrs: &[RawInstr],
         regs: &mut [u64; 13],
         gas: &mut i64,
-        mem: &mut [u8],
+        regions: &[Region],
+        backing: &mut [u8],
         jt: &[u32],
-    ) -> u32 {
+        entry_index: u32,
+    ) -> (u32, ExecOut) {
         unsafe {
             let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len());
             assert!(!blk.is_null(), "compile returned null");
+            let mut out = ExecOut::default();
             let ex = pvm_execute(
                 blk,
                 regs.as_mut_ptr(),
                 gas as *mut i64,
-                mem.as_mut_ptr(),
-                mem.len() as u64,
+                regions.as_ptr(),
+                regions.len() as u64,
+                backing.as_mut_ptr(),
+                12, // page_shift: 4096-byte pages in these tests
+                entry_index,
+                &mut out as *mut ExecOut,
             );
             pvm_free(blk);
-            ex
+            (ex, out)
         }
     }
 
     fn ri(opcode: u32, a: u32, b: u32, c: u32, imm: i64) -> RawInstr {
-        RawInstr { opcode, a, b, c, imm, imm2: 0 }
+        RawInstr { opcode, a, b, c, pc: 0, imm, imm2: 0 }
+    }
+
+    fn with_pcs(mut prog: Vec<RawInstr>) -> Vec<RawInstr> {
+        for (i, ins) in prog.iter_mut().enumerate() {
+            ins.pc = (i as u32) * 4;
+        }
+        prog
+    }
+
+    /// A single RW region covering `[0, len)` backed 1:1 by `backing`.
+    fn rw_region(len: u32) -> Region {
+        Region { base: 0, len, buf_offset: 0, writable: 1 }
     }
 
     #[test]
     fn arithmetic_block_halts_with_correct_regs_and_gas() {
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 7, 0, 0, 100),
             ri(OP_ADD_IMM64, 8, 7, 0, 5),
             ri(OP_ADD64, 9, 7, 8, 0),
             ri(OP_SUB64, 10, 9, 7, 0),
             ri(OP_MUL64, 11, 8, 7, 0),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 1000i64;
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[7], 100);
         assert_eq!(regs[8], 105);
@@ -288,15 +339,18 @@ mod tests {
         assert_eq!(regs[10], 105);
         assert_eq!(regs[11], 105 * 100);
         assert_eq!(gas, 1000 - 6);
+        // Final pc = the panicking instruction's own pc (interpreter-semantics.md
+        // "Panic: PC = the panicking instruction's own pc").
+        assert_eq!(out.pc, 5 * 4);
     }
 
     #[test]
     fn wrapping_is_64bit() {
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 0, 0, 0, u64::MAX as i64),
             ri(OP_ADD_IMM64, 1, 0, 0, 3),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
@@ -306,17 +360,19 @@ mod tests {
     #[test]
     fn load_store_roundtrip_within_bounds() {
         // r1 = 0xDEADBEEF; store r1 at mem[8]; load mem[8] into r2; trap
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 0xDEADBEEFu32 as i64),
             ri(OP_STORE_INDIRECT_U64, 1, 0, 0, 8), // mem[r0+8]=r1, r0=0
             ri(OP_LOAD_INDIRECT_U64, 2, 0, 0, 8),  // r2=mem[r0+8]
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
         let mut mem = [0u8; 32];
-        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        let regions = [rw_region(32)];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 3 * 4);
         assert_eq!(regs[2], 0xDEADBEEF);
         // little-endian bytes at mem[8..16]
         assert_eq!(&mem[8..12], &[0xEF, 0xBE, 0xAD, 0xDE]);
@@ -324,96 +380,107 @@ mod tests {
 
     #[test]
     fn out_of_bounds_load_faults() {
-        // load at offset 40 into a 32-byte region -> fault
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 40),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
+        regs[0] = 0x10000;
         let mut gas = 100i64;
         let mut mem = [0u8; 32];
-        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        let regions = [Region { base: 0x10000, len: 32, buf_offset: 0, writable: 1 }];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_FAULT);
+        assert_eq!(out.pc, 0);
+        assert_eq!(out.fault_page, 0x10000);
     }
 
     #[test]
     fn boundary_load_last_valid_qword_ok() {
         // 32-byte region: offset 24 loads bytes [24,32) — the last valid qword.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 24),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
+        regs[0] = 0x10000;
         let mut gas = 100i64;
         let mut mem = [0u8; 32];
         mem[24] = 0x7f;
-        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        let regions = [Region { base: 0x10000, len: 32, buf_offset: 0, writable: 1 }];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 4);
         assert_eq!(regs[1], 0x7f);
     }
 
     #[test]
     fn countdown_loop_runs_to_trap() {
         // r1=3; r2=1; r3=0; loop: r1-=r2; if r1!=r3 goto loop; trap
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 3), // 0  B0
             ri(OP_LOAD_IMM64, 2, 0, 0, 1), // 1  B0
             ri(OP_LOAD_IMM64, 3, 0, 0, 0), // 2  B0
             ri(OP_SUB64, 1, 1, 2, 0),      // 3  B1
             ri(OP_BRANCH_NE, 1, 3, 0, 3),  // 4  B1 -> 3
             ri(OP_PANIC, 0, 0, 0, 0),      // 5  B2
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 0);
         // B0 cost 3, B1 cost 2 run 3x, B2 cost 1 => 3 + 6 + 1 = 10
         assert_eq!(gas, 90);
+        assert_eq!(out.pc, 5 * 4);
     }
 
     #[test]
     fn oog_mid_loop_freezes_state() {
         // Per-instruction gas (matches interpreter): charge 1 before each instr,
         // OOG before executing when gas<0, registers frozen at the prior instr.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 3),
             ri(OP_LOAD_IMM64, 2, 0, 0, 1),
             ri(OP_LOAD_IMM64, 3, 0, 0, 0),
             ri(OP_SUB64, 1, 1, 2, 0),
             ri(OP_BRANCH_NE, 1, 3, 0, 3),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 6i64;
         // charges: LOAD,LOAD,LOAD,SUB(r1=2),BRANCH(taken),SUB(r1=1),BRANCH -> OOG
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
         assert_eq!(regs[1], 1); // two SUBs applied; frozen before the 2nd branch
         assert_eq!(gas, -1);
+        // OOG PC = the instruction whose charge tipped gas < 0: the 2nd BRANCH_NE
+        // at instruction index 4 (byte offset 16), NOT the target it never took.
+        assert_eq!(out.pc, 4 * 4);
     }
 
     #[test]
     fn unconditional_jump_skips() {
         // r1=5; jump over the overwrite; trap. r1 must stay 5.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 5), // 0
             ri(OP_JUMP, 0, 0, 0, 3),       // 1 -> 3
             ri(OP_LOAD_IMM64, 1, 0, 0, 99),// 2 (skipped)
             ri(OP_PANIC, 0, 0, 0, 0),      // 3
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 5);
+        assert_eq!(out.pc, 3 * 4);
     }
 
     #[test]
     fn subword_load_store_widths() {
         // Store 0x1122334455667788 as u64; read back narrow (u8/u16/u32) and
         // signed (i8) — all little-endian.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122334455667788u64 as i64),
             ri(OP_STORE_INDIRECT_U64, 1, 0, 0, 0),
             ri(OP_LOAD_INDIRECT_U8, 2, 0, 0, 0),  // 0x88
@@ -421,11 +488,12 @@ mod tests {
             ri(OP_LOAD_INDIRECT_U32, 4, 0, 0, 0), // 0x55667788
             ri(OP_LOAD_INDIRECT_I8, 5, 0, 0, 0),  // (i8)0x88 = -120
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
         let mut mem = [0u8; 8];
-        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        let regions = [rw_region(8)];
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[2], 0x88);
         assert_eq!(regs[3], 0x7788);
@@ -436,15 +504,16 @@ mod tests {
     #[test]
     fn narrow_store_truncates() {
         // store_u8 of a wide value writes only the low byte; rest of mem stays 0.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 0xAABBCCDDu32 as i64),
             ri(OP_STORE_INDIRECT_U8, 1, 0, 0, 2),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
         let mut mem = [0u8; 8];
-        let exit = run_mem(&prog, &mut regs, &mut gas, &mut mem);
+        let regions = [rw_region(8)];
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(mem[2], 0xDD);
         assert_eq!(&mem[0..2], &[0, 0]);
@@ -454,104 +523,229 @@ mod tests {
     #[test]
     fn subword_oob_faults() {
         // u32 load at offset 6 into an 8-byte region needs [6,10) -> fault.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_INDIRECT_U32, 1, 0, 0, 6),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
+        regs[0] = 0x10000;
         let mut gas = 100i64;
         let mut mem = [0u8; 8];
-        assert_eq!(run_mem(&prog, &mut regs, &mut gas, &mut mem), EXIT_FAULT);
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
     }
 
     #[test]
     fn djump_to_valid_target_jumps() {
         // r1 = 3 (a valid jump-table target index); JumpIndirect r1+0;
         // ...; block at 3 sets r2 = 7; trap. Jump table = {3}.
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 3),  // 0
             ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // 1 -> reg[1]+0 = 3
             ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
             ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
             ri(OP_PANIC, 0, 0, 0, 0),       // 4
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
         assert_eq!(exit, EXIT_PANIC); // ends at the trap
         assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
     }
 
     #[test]
     fn djump_with_nonzero_offset_jumps() {
         // r1 = 1; JumpIndirect r1+2 -> target index 3 (same target as above,
         // reached via a nonzero imm offset instead of baking it into the reg).
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 1),  // 0
             ri(OP_JUMP_INDIRECT, 1, 0, 0, 2), // 1 -> reg[1]+2 = 3
             ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
             ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
             ri(OP_PANIC, 0, 0, 0, 0),       // 4
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
     }
 
     #[test]
     fn djump_to_sentinel_halts() {
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, DJUMP_HALT as i64),
             ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[]);
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0);
         assert_eq!(exit, EXIT_HALT); // clean exit, distinct from trap's PANIC
+        // Halt PC = the pc of the djump instruction that hit the sentinel
+        // (interpreter-semantics.md "Halt/Finished").
+        assert_eq!(out.pc, 1 * 4);
     }
 
     #[test]
     fn djump_to_untabled_target_panics() {
         // reg holds 2 but the jump table only allows {3} -> panic
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 2),
             ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let exit = run_full(&prog, &mut regs, &mut gas, &mut [], &[3]);
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
         assert_eq!(exit, EXIT_PANIC);
+        // Panic PC = the djump instruction's own pc, never a target.
+        assert_eq!(out.pc, 1 * 4);
     }
 
     #[test]
     fn out_of_gas_before_first_instr_leaves_regs_untouched() {
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 5, 0, 0, 999),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [7u64; 13];
         let mut gas = 0i64; // 0-1 < 0 before the first instruction executes
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
         assert_eq!(regs[5], 7); // nothing executed
         assert_eq!(gas, -1);
+        assert_eq!(out.pc, 0);
     }
 
     #[test]
     fn out_of_gas_after_partial_execution() {
-        let prog = [
+        let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 5, 0, 0, 999),
             ri(OP_PANIC, 0, 0, 0, 0),
-        ];
+        ]);
         let mut regs = [7u64; 13];
         let mut gas = 1i64; // LOAD executes (1->0), trap OOGs (0->-1)
-        let exit = run(&prog, &mut regs, &mut gas);
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
         assert_eq!(regs[5], 999); // partial execution before OOG
         assert_eq!(gas, -1);
+        assert_eq!(out.pc, 1 * 4);
+    }
+
+    #[test]
+    fn store_to_read_only_region_faults_not_panics() {
+        // Region is RO; a store must fault (Segfault), never panic.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 42),
+            ri(OP_STORE_INDIRECT_U64, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 4096];
+        let regions = [Region { base: 0x10000, len: 4096, buf_offset: 0, writable: 0 }];
+        // r0 must point at the region base for the store's effective address
+        // to land inside it: base = 0x10000.
+        regs[0] = 0x10000;
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+        assert_eq!(out.pc, 1 * 4); // the STORE instruction's own pc
+        assert_eq!(out.fault_page, 0x10000); // page-aligned base of the RO page
+        // Nothing was actually written (mem stays untouched at store's target).
+        assert_eq!(&mem[0..8], &[0u8; 8]);
+    }
+
+    #[test]
+    fn unmapped_gap_between_regions_faults_at_gap_page() {
+        // Two regions with a gap: [0x10000,0x11000) and [0x20000,0x21000).
+        // A load at 0x18000 (in the gap, page-aligned) must fault at 0x18000.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        regs[0] = 0x18000;
+        let mut gas = 100i64;
+        let mut mem = [0u8; 8192];
+        let regions = [
+            Region { base: 0x10000, len: 4096, buf_offset: 0, writable: 1 },
+            Region { base: 0x20000, len: 4096, buf_offset: 4096, writable: 1 },
+        ];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+        assert_eq!(out.pc, 0);
+        assert_eq!(out.fault_page, 0x18000);
+    }
+
+    #[test]
+    fn spanning_access_reports_first_failing_page_low_to_high() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 0x0FFC),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        regs[0] = 0x10000;
+        let mut gas = 100i64;
+        let mut mem = [0u8; 4096];
+        let regions = [Region { base: 0x10000, len: 4096, buf_offset: 0, writable: 1 }];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+        assert_eq!(out.fault_page, 0x11000);
+    }
+
+    #[test]
+    fn fault_page_below_min_valid_address_escalates_to_panic() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_INDIRECT_U64, 1, 0, 0, 0), // r0=0 -> access [0,8) unmapped, page 0
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        regs[0] = 0;
+        let mut gas = 100i64;
+        let mut mem = [0u8; 4096];
+        // Only a region far above address 0 is mapped, so [0,8) is unmapped.
+        let regions = [Region { base: 0x10000, len: 4096, buf_offset: 0, writable: 1 }];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 0); // the load instruction's own pc, per panic rule
+    }
+
+    #[test]
+    fn entry_index_starts_mid_program() {
+        // Program: [0]=LOAD r1=99 (skipped), [1]=LOAD r2=7 (entry), [2]=PANIC.
+        // Entering at index 1 must never execute instruction 0.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 99),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 1);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0); // instruction 0 never ran
+        assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 2 * 4);
+        // Gas charged only for the 2 executed instructions (index 1, 2).
+        assert_eq!(gas, 98);
+    }
+
+    #[test]
+    fn entry_index_out_of_range_panics_without_executing() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 5, 0, 0, 999),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [7u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 99);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[5], 7); // nothing executed
+        assert_eq!(gas, 100); // no gas charged either
+        assert_eq!(out.pc, 0);
     }
 }
