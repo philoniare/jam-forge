@@ -289,7 +289,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val (interp, iRwAfter) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
 
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val backing = rwData.clone()
@@ -316,7 +316,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val initRegs = Array.fill(13)(rng.nextLong())
     val interp = runInterpreter(prog, initRegs.clone(), gas)
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas)
@@ -457,7 +457,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     entryIndex: Int = 0
   ): Unit =
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val backing = described.backing.clone()
