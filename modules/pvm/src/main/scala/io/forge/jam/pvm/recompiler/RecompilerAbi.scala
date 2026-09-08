@@ -264,6 +264,8 @@ object RecompilerAbi:
     codeLen: Int
   )
 
+  private val InvalidJumpTableSlot: Int = -1
+
   /**
    * Decode a whole code blob and translate it into the recompiler's generic
    * column form.
@@ -281,6 +283,14 @@ object RecompilerAbi:
     val offsetToIndex: Map[Int, Int] = byteOffsets.zipWithIndex.toMap
 
     val n = instrs.length
+    val isLeader = new Array[Boolean](n)
+    for i <- 0 until n do
+      isLeader(i) = if i == 0 then true else instrs(i - 1).opcode.startsNewBasicBlock
+    def targetIndex(byteOffset: Long): Long =
+      offsetToIndex.get((byteOffset & 0xFFFFFFFFL).toInt) match
+        case Some(idx) if isLeader(idx) => idx.toLong
+        case _ => InvalidTarget
+
     val opcodes = new Array[Int](n)
     val aArr = new Array[Int](n)
     val bArr = new Array[Int](n)
@@ -288,14 +298,6 @@ object RecompilerAbi:
     val pcArr = new Array[Int](n)
     val immArr = new Array[Long](n)
     val imm2Arr = new Array[Long](n)
-
-    // Byte offset -> instruction index, or InvalidTarget (sentinel: caller
-    // replaces the whole instruction with Panic when a target doesn't land
-    // on a decoded instruction's leader byte).
-    def targetIndex(byteOffset: Long): Long =
-      offsetToIndex.get((byteOffset & 0xFFFFFFFFL).toInt) match
-        case Some(idx) => idx.toLong
-        case None => InvalidTarget
 
     for i <- 0 until n do
       val mapped = mapInstruction(instrs(i), targetIndex)
@@ -313,10 +315,11 @@ object RecompilerAbi:
       pcArr(i) = byteOffsets(i)
       immArr(i) = raw.imm; imm2Arr(i) = raw.imm2
 
-    // Jump table: byte-offset entries -> instruction indices; invalid (not a
-    // decoded instruction's byte offset) entries are dropped, matching the
-    // current Rust `pvm_compile` in-range filtering.
-    val jt = jumpTable.iterator.flatMap(entry => offsetToIndex.get(entry)).map(_.toInt).toArray
+    val jt = jumpTable.iterator.map { entry =>
+      offsetToIndex.get(entry) match
+        case Some(idx) if isLeader(idx) => idx
+        case _ => InvalidJumpTableSlot
+    }.toArray
 
     PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, jt, offsetToIndex, code.length)
 
