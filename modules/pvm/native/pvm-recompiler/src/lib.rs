@@ -34,9 +34,16 @@ pub struct ExecOut {
 }
 
 pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
+pub const OP_FALLTHROUGH: u32 = 1; // no-op block terminator; falls through to the next instruction
 pub const OP_LOAD_IMM64: u32 = 20; // reg[a] = imm
 pub const OP_JUMP: u32 = 40; // pc = imm (instruction index)
 pub const OP_JUMP_INDIRECT: u32 = 50; // indirect: target = (reg[a]+imm) & 0xFFFFFFFF
+pub const OP_LOAD_IMM: u32 = 51; // reg[a] = imm (32-bit imm, sign-extended)
+pub const OP_LOAD_U64: u32 = 58; // reg[a] = load 8 bytes at absolute address imm & 0xFFFFFFFF
+pub const OP_STORE_U64: u32 = 62; // store reg[a] (8 bytes) at absolute address imm & 0xFFFFFFFF
+pub const OP_BRANCH_EQ_IMM: u32 = 81; // if reg[a] == imm then pc = imm2
+pub const OP_BRANCH_NE_IMM: u32 = 82; // if reg[a] != imm then pc = imm2
+pub const OP_MOVE_REG: u32 = 100; // reg[a] = reg[b]
 pub const OP_STORE_INDIRECT_U8: u32 = 120;
 pub const OP_STORE_INDIRECT_U16: u32 = 121;
 pub const OP_STORE_INDIRECT_U32: u32 = 122;
@@ -48,12 +55,17 @@ pub const OP_LOAD_INDIRECT_I16: u32 = 127;
 pub const OP_LOAD_INDIRECT_U32: u32 = 128;
 pub const OP_LOAD_INDIRECT_I32: u32 = 129;
 pub const OP_LOAD_INDIRECT_U64: u32 = 130;
+pub const OP_ADD_IMM32: u32 = 131; // reg[a] = sign_extend32(reg[b] as i32 + imm as i32)
 pub const OP_ADD_IMM64: u32 = 149; // reg[a] = reg[b] + imm      (wrapping)
+pub const OP_SHIFT_LOGICAL_LEFT_IMM64: u32 = 151; // reg[a] = reg[b] << (imm & 63)
 pub const OP_BRANCH_EQ: u32 = 170; // if reg[a] == reg[b] then pc = imm
 pub const OP_BRANCH_NE: u32 = 171; // if reg[a] != reg[b] then pc = imm
 pub const OP_ADD64: u32 = 200; // reg[a] = reg[b] + reg[c]      (wrapping)
 pub const OP_SUB64: u32 = 201; // reg[a] = reg[b] - reg[c]      (wrapping)
 pub const OP_MUL64: u32 = 202; // reg[a] = reg[b] * reg[c]      (wrapping)
+pub const OP_AND: u32 = 210; // reg[a] = reg[b] & reg[c]
+pub const OP_OR: u32 = 212; // reg[a] = reg[b] | reg[c]
+pub const OP_CMOV_IF_NOT_ZERO: u32 = 219; // if reg[c] != 0 then reg[a] = reg[b]
 
 /// Indirect-jump sentinel: `JumpIndirect reg, offset` where `reg[a]+offset`
 /// equals this value halts the program cleanly (EXIT_HALT). Mirrors the PVM
@@ -70,6 +82,8 @@ pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
 pub struct CompiledBlock {
     mem: ExecMem,
     instruction_count: u32,
+    #[allow(dead_code)] // kept alive for its address, never read from Rust after compile
+    jump_table: Box<[u32]>,
 }
 
 /// The abstract op the backend emitter consumes (decoupled from the FFI struct).
@@ -88,13 +102,36 @@ pub enum Op {
     Store { dst: u8, src: u8, imm: u64, width: u8 },
     /// Basic-block terminator: end execution with EXIT_PANIC.
     Trap,
+    /// No-op basic-block terminator: falls through to the next instruction
+    Fallthrough,
     /// Unconditional jump to instruction index `target`.
     Jump { target: u32 },
     /// if reg[src] == reg[src2] then jump to `target`, else fall through.
     BranchEq { src: u8, src2: u8, target: u32 },
     /// if reg[src] != reg[src2] then jump to `target`, else fall through.
     BranchNe { src: u8, src2: u8, target: u32 },
+    /// if reg[src] == imm then jump to `target`, else fall through.
+    BranchEqImm { src: u8, imm: u64, target: u32 },
+    /// if reg[src] != imm then jump to `target`, else fall through.
+    BranchNeImm { src: u8, imm: u64, target: u32 },
     Djump { src: u8, imm: u64 },
+    LoadImm32 { dst: u8, imm: u32 },
+    /// reg[dst] = load 8 bytes at ABSOLUTE address (imm & 0xFFFFFFFF)
+    LoadAbs64 { dst: u8, imm: u64 },
+    /// store the low 8 bytes of reg[src] at ABSOLUTE address
+    StoreAbs64 { src: u8, imm: u64 },
+    /// reg[dst] = reg[src] (raw 64-bit copy, Opcode.MoveReg).
+    MoveReg { dst: u8, src: u8 },
+    /// reg[dst] = sign_extend32((reg[src] as i32).wrapping_add(imm as i32))
+    AddImm32 { dst: u8, src: u8, imm: u32 },
+    /// reg[dst] = reg[src] << (imm & 63) (Opcode.ShiftLogicalLeftImm64).
+    Shl64Imm { dst: u8, src: u8, imm: u64 },
+    /// reg[dst] = reg[src] & reg[src2] (Opcode.And).
+    And { dst: u8, src: u8, src2: u8 },
+    /// reg[dst] = reg[src] | reg[src2] (Opcode.Or).
+    Or { dst: u8, src: u8, src2: u8 },
+    /// if reg[src2] != 0 then reg[dst] = reg[src]
+    CmovIfNotZero { dst: u8, src: u8, src2: u8 },
 }
 
 impl Op {
@@ -102,13 +139,24 @@ impl Op {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            Op::Trap | Op::Jump { .. } | Op::BranchEq { .. } | Op::BranchNe { .. } | Op::Djump { .. }
+            Op::Trap
+                | Op::Fallthrough
+                | Op::Jump { .. }
+                | Op::BranchEq { .. }
+                | Op::BranchNe { .. }
+                | Op::BranchEqImm { .. }
+                | Op::BranchNeImm { .. }
+                | Op::Djump { .. }
         )
     }
     /// The branch/jump target instruction index, if any.
     pub fn target(&self) -> Option<u32> {
         match self {
-            Op::Jump { target } | Op::BranchEq { target, .. } | Op::BranchNe { target, .. } => Some(*target),
+            Op::Jump { target }
+            | Op::BranchEq { target, .. }
+            | Op::BranchNe { target, .. }
+            | Op::BranchEqImm { target, .. }
+            | Op::BranchNeImm { target, .. } => Some(*target),
             _ => None,
         }
     }
@@ -122,9 +170,15 @@ pub trait Backend {
     /// `EXIT_OOG` when insufficient), static jumps/branches resolved to code
     /// offsets, `Trap` returning `EXIT_PANIC`, and memory faults `EXIT_FAULT`.
     /// The op index is the instruction "pc" that jumps/branches target.
-    /// `jump_table` lists the instruction indices that are valid indirect
-    /// (`djump`) targets; every entry is also treated as a block leader.
-    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32], code_len: u32) -> (Vec<u8>, u32);
+    /// `jump_table` 
+    fn emit_program(
+        &self,
+        ops: &[Op],
+        pcs: &[u32],
+        jump_table: &[u32],
+        jump_table_ptr: *const u32,
+        code_len: u32,
+    ) -> (Vec<u8>, u32);
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -157,7 +211,19 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_JUMP => ops.push(Op::Jump { target: ins.imm as u32 }),
             OP_BRANCH_EQ => ops.push(Op::BranchEq { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32 }),
             OP_BRANCH_NE => ops.push(Op::BranchNe { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32 }),
+            OP_BRANCH_EQ_IMM => ops.push(Op::BranchEqImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32 }),
+            OP_BRANCH_NE_IMM => ops.push(Op::BranchNeImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32 }),
             OP_JUMP_INDIRECT => ops.push(Op::Djump { src: ins.a as u8, imm: ins.imm as u64 }),
+            OP_FALLTHROUGH => ops.push(Op::Fallthrough),
+            OP_LOAD_IMM => ops.push(Op::LoadImm32 { dst: ins.a as u8, imm: ins.imm as u32 }),
+            OP_LOAD_U64 => ops.push(Op::LoadAbs64 { dst: ins.a as u8, imm: ins.imm as u64 }),
+            OP_STORE_U64 => ops.push(Op::StoreAbs64 { src: ins.a as u8, imm: ins.imm as u64 }),
+            OP_MOVE_REG => ops.push(Op::MoveReg { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_ADD_IMM32 => ops.push(Op::AddImm32 { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u32 }),
+            OP_SHIFT_LOGICAL_LEFT_IMM64 => ops.push(Op::Shl64Imm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64 }),
+            OP_AND => ops.push(Op::And { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_OR => ops.push(Op::Or { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_CMOV_IF_NOT_ZERO => ops.push(Op::CmovIfNotZero { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
@@ -168,7 +234,7 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
 /// `CompiledBlock` pointer, or null if the program contains an unsupported
 /// opcode (the caller must then deopt to the interpreter).
 ///
-/// `jump_table`/`jt_n` list the valid indirect-jump (`djump`) target indices.
+/// `jump_table`/`jt_n`
 ///
 /// # Safety
 /// `instrs` must point to `n` valid `RawInstr` values; `jump_table` to `jt_n`
@@ -190,22 +256,19 @@ pub unsafe extern "C" fn pvm_compile(
         None => return std::ptr::null_mut(),
     };
     let pcs: Vec<u32> = slice.iter().map(|i| i.pc).collect();
-    let jt: Vec<u32> = if jump_table.is_null() || jt_n == 0 {
-        Vec::new()
+    let jt: Box<[u32]> = if jump_table.is_null() || jt_n == 0 {
+        Box::new([])
     } else {
-        std::slice::from_raw_parts(jump_table, jt_n)
-            .iter()
-            .copied()
-            .filter(|&t| (t as usize) < n) // keep only in-range targets
-            .collect()
+        std::slice::from_raw_parts(jump_table, jt_n).to_vec().into_boxed_slice()
     };
+    let jt_ptr = jt.as_ptr();
     let backend = aarch64::Aarch64Backend;
-    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt, code_len);
+    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt, jt_ptr, code_len);
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
     };
-    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count }))
+    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt }))
 }
 
 /// Execute a compiled block over the caller's register file, gas cell, and
@@ -553,11 +616,9 @@ mod tests {
 
     #[test]
     fn djump_to_valid_target_jumps() {
-        // r1 = 3 (a valid jump-table target index); JumpIndirect r1+0;
-        // ...; block at 3 sets r2 = 7; trap. Jump table = {3}.
         let prog = with_pcs(vec![
-            ri(OP_LOAD_IMM64, 1, 0, 0, 3),  // 0
-            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // 1 -> reg[1]+0 = 3
+            ri(OP_LOAD_IMM64, 1, 0, 0, 2),  // 0
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // 1 -> addr=2 -> idx=0 -> table[0]=3
             ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
             ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
             ri(OP_PANIC, 0, 0, 0, 0),       // 4
@@ -572,11 +633,12 @@ mod tests {
 
     #[test]
     fn djump_with_nonzero_offset_jumps() {
-        // r1 = 1; JumpIndirect r1+2 -> target index 3 (same target as above,
-        // reached via a nonzero imm offset instead of baking it into the reg).
+        // r1 = 1; JumpIndirect r1+1 -> addr=2 (same target as above, reached
+        // via a nonzero imm offset instead of baking the whole address into
+        // the reg) -> idx=0 -> table[0]=3.
         let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 1),  // 0
-            ri(OP_JUMP_INDIRECT, 1, 0, 0, 2), // 1 -> reg[1]+2 = 3
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 1), // 1 -> reg[1]+1 = addr 2 -> idx=0 -> table[0]=3
             ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
             ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
             ri(OP_PANIC, 0, 0, 0, 0),       // 4
@@ -587,6 +649,84 @@ mod tests {
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[2], 7);
         assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn djump_second_table_slot_jumps_via_addr_four() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 4),  // 0
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // 1 -> addr=4 -> idx=1 -> table[1]=3
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),       // 4
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[1, 3], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn djump_zero_address_panics() {
+        // addr == 0 is always invalid, regardless of table contents.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0), // addr=0 -> panic
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[0], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 1 * 4); // the djump instruction's own pc
+    }
+
+    #[test]
+    fn djump_misaligned_address_panics() {
+        // addr must be even (addr % 2 == 0); an odd address is invalid
+        // regardless of whether some nearby even address would resolve.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3), // odd addr
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[0, 0], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 1 * 4);
+    }
+
+    #[test]
+    fn djump_out_of_range_index_panics() {
+        // Table has 1 slot (idx 0 only, addr=2). addr=4 -> idx=1, out of
+        // range for a 1-slot table -> panic.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 4),
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[0], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 1 * 4);
+    }
+
+    #[test]
+    fn djump_non_leader_table_entry_panics() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 2),
+            ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[u32::MAX], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 1 * 4);
     }
 
     #[test]
@@ -607,7 +747,8 @@ mod tests {
 
     #[test]
     fn djump_to_untabled_target_panics() {
-        // reg holds 2 but the jump table only allows {3} -> panic
+        // Empty jump table: ANY valid (nonzero, even) address is out of
+        // range (idx >= table.len() == 0 always) -> panic.
         let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 2),
             ri(OP_JUMP_INDIRECT, 1, 0, 0, 0),
@@ -615,7 +756,7 @@ mod tests {
         ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
-        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0);
         assert_eq!(exit, EXIT_PANIC);
         // Panic PC = the djump instruction's own pc, never a target.
         assert_eq!(out.pc, 1 * 4);
@@ -815,5 +956,258 @@ mod tests {
         // Gas charged only for the 2 dispatched "instructions": the real
         // Add64 at entry, plus the synthesized trailing Panic.
         assert_eq!(gas, 100 - 2);
+    }
+
+    #[test]
+    fn fallthrough_is_a_noop_that_continues_to_the_next_instruction() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5), // 0
+            ri(OP_FALLTHROUGH, 0, 0, 0, 0), // 1 (block boundary, no-op)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 9), // 2
+            ri(OP_PANIC, 0, 0, 0, 0),      // 3
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 5);
+        assert_eq!(regs[2], 9);
+        assert_eq!(out.pc, 3 * 4);
+        assert_eq!(gas, 100 - 4); // all 4 instructions charged, including Fallthrough
+    }
+
+    #[test]
+    fn fallthrough_as_last_instruction_falls_into_end_of_code_panic() {
+        let prog = with_pcs(vec![ri(OP_FALLTHROUGH, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let code_len = 1u32;
+        let (exit, out) = run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, code_len);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, code_len);
+        assert_eq!(gas, 100 - 2); // Fallthrough's own charge + the synthesized Panic's charge
+    }
+
+    #[test]
+    fn load_imm_sign_extends_negative_32bit_immediate() {
+        // LoadImm materializes a 32-bit imm then sign-extends to 64 (setReg32Int).
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM, 1, 0, 0, -1i32 as i64), // reg[1] = sign_extend64(-1i32) = u64::MAX
+            ri(OP_LOAD_IMM, 2, 0, 0, 0x7FFFFFFFi64), // positive edge: stays positive
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], u64::MAX);
+        assert_eq!(regs[2], 0x7FFFFFFFu64);
+    }
+
+    #[test]
+    fn load_u64_and_store_u64_use_absolute_addressing_no_base_register() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 0, 0, 0, 0xDEAD_0000_0000_0000u64 as i64), // r0 poison (must be ignored)
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122334455667788u64 as i64),
+            ri(OP_STORE_U64, 1, 0, 0, 0x10008), // mem[0x10008] = r1 (absolute)
+            ri(OP_LOAD_U64, 2, 0, 0, 0x10008),  // r2 = mem[0x10008] (absolute)
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 32];
+        let regions = [Region { base: 0x10000, len: 32, buf_offset: 0, writable: 1 }];
+        let (exit, out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(out.pc, 4 * 4);
+        assert_eq!(regs[2], 0x1122334455667788u64);
+        assert_eq!(&mem[8..16], &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+    }
+
+    #[test]
+    fn store_u64_out_of_region_faults() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_STORE_U64, 1, 0, 0, 0x20000), // far outside the mapped region
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let mut mem = [0u8; 32];
+        let regions = [Region { base: 0x10000, len: 32, buf_offset: 0, writable: 1 }];
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn branch_eq_imm_and_ne_imm_compare_against_a_negative_immediate() {
+        // r1 = -5 (as u64 bit pattern); BranchEqImm r1, -5 -> taken.
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -5i64), // 0
+            ri(OP_BRANCH_EQ_IMM, 1, 0, 0, -5i64), // 1 -> target index 3 (imm2 set below)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),    // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),     // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),          // 4
+        ]);
+        prog[1].imm2 = 3; // BranchEqImm's target index (imm2), per the ABI convention
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn branch_ne_imm_not_taken_falls_through() {
+        // r1 = -5; BranchNotEqImm r1, -5 -> NOT taken (equal) -> falls through.
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -5i64), // 0
+            ri(OP_BRANCH_NE_IMM, 1, 0, 0, -5i64), // 1 -> would target 3 if taken
+            ri(OP_LOAD_IMM64, 2, 0, 0, 42),    // 2 (fallthrough path)
+            ri(OP_PANIC, 0, 0, 0, 0),          // 3
+        ]);
+        prog[1].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 42);
+        assert_eq!(out.pc, 3 * 4);
+    }
+
+    #[test]
+    fn branch_ne_imm_taken_when_different() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 10), // 0
+            ri(OP_BRANCH_NE_IMM, 1, 0, 0, -5i64), // 1 -> 10 != -5 -> taken -> target 3
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99), // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),  // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),       // 4
+        ]);
+        prog[1].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn move_reg_copies_raw_64_bits_no_sign_extension() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x8000000012345678u64 as i64),
+            ri(OP_MOVE_REG, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x8000000012345678u64);
+    }
+
+    #[test]
+    fn add_imm32_sign_extends_result_crossing_0x7fffffff() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x7FFFFFFFi64),
+            ri(OP_ADD_IMM32, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn add_imm32_wraps_within_32_bits_ignoring_high_bits_of_src() {
+        // High 32 bits of the source register must be ignored (32-bit op).
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFF00000010u64 as i64), // low32 = 0x10
+            ri(OP_ADD_IMM32, 2, 1, 0, 5),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x15u64); // 0x10 + 5, sign-extended (positive, so unchanged)
+    }
+
+    #[test]
+    fn shift_logical_left_imm64_masks_shift_amount_to_63() {
+        // imm=64 masked to 64&63=0 -> no shift at all (NOT undefined/full-clear).
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1u64 as i64),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM64, 2, 1, 0, 64), // 64 & 63 = 0
+            ri(OP_LOAD_IMM64, 3, 0, 0, 0x1u64 as i64),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM64, 4, 3, 0, 65), // 65 & 63 = 1
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 1u64); // shift by 0
+        assert_eq!(regs[4], 2u64); // shift by 1
+    }
+
+    #[test]
+    fn shift_logical_left_imm64_shift_by_63_edge() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1i64),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM64, 2, 1, 0, 63),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 1u64 << 63);
+    }
+
+    #[test]
+    fn and_and_or_three_register_forms() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0b1100i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0b1010i64),
+            ri(OP_AND, 3, 1, 2, 0),
+            ri(OP_OR, 4, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0b1000u64);
+        assert_eq!(regs[4], 0b1110u64);
+    }
+
+    #[test]
+    fn cmov_if_not_zero_moves_when_condition_nonzero() {
+        // CmovIfNotZero(d, s1, s2): if reg[s2] != 0 then reg[d] = reg[s1].
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 42),  // s1 (the value)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),   // s2 (the condition, nonzero)
+            ri(OP_LOAD_IMM64, 3, 0, 0, 999), // d, pre-existing value
+            ri(OP_CMOV_IF_NOT_ZERO, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 42);
+    }
+
+    #[test]
+    fn cmov_if_not_zero_leaves_dst_unchanged_when_condition_zero() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 42),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0), // condition zero
+            ri(OP_LOAD_IMM64, 3, 0, 0, 999),
+            ri(OP_CMOV_IF_NOT_ZERO, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 999); // unchanged
     }
 }
