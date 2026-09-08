@@ -240,7 +240,14 @@ fn emit_store(a: &mut Asm, width: u8) {
 }
 
 impl Backend for Aarch64Backend {
-    fn emit_program(&self, ops: &[Op], pcs: &[u32], jump_table: &[u32], code_len: u32) -> (Vec<u8>, u32) {
+    fn emit_program(
+        &self,
+        ops: &[Op],
+        pcs: &[u32],
+        jump_table: &[u32],
+        jump_table_ptr: *const u32,
+        code_len: u32,
+    ) -> (Vec<u8>, u32) {
         let mut a = Asm::new().expect("dynasm assembler alloc");
 
         if ops.is_empty() {
@@ -267,6 +274,7 @@ impl Backend for Aarch64Backend {
         let panic_label = a.new_dynamic_label();
         let halt_label = a.new_dynamic_label();
         let bounds_check_label = a.new_dynamic_label();
+        let dispatch_by_index_label = a.new_dynamic_label();
         let end_of_code_label = a.new_dynamic_label();
 
         dynasm!(a
@@ -275,6 +283,15 @@ impl Backend for Aarch64Backend {
             ; mov x19, x30    // save the entry LR before any `bl` clobbers x30 (see LR NOTE)
         );
         assert!(ops.len() < 4096, "skeleton entry-index dispatch chain out of imm12 range");
+        for i in 0..ops.len() {
+            dynasm!(a
+                ; .arch aarch64
+                ; cmp w7, #i as u32
+                ; b.eq =>instr_labels[i]
+            );
+        }
+        dynasm!(a; .arch aarch64; b =>panic_label);
+        dynasm!(a; .arch aarch64; =>dispatch_by_index_label);
         for i in 0..ops.len() {
             dynasm!(a
                 ; .arch aarch64
@@ -425,31 +442,175 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; add x8, x8, x9
-                            ; mov w8, w8      // mask to 32 bits (UXTW)
+                            ; mov w8, w8      // mask to 32 bits (UXTW), addr now in x8/w8
                         );
                         mov_imm64(&mut a, 9, DJUMP_HALT);
                         dynasm!(a
                             ; .arch aarch64
                             ; cmp x8, x9
                             ; b.eq =>halt_label
+                            // invalid if addr == 0
+                            ; cbz w8, =>panic_label
+                            ; and w16, w8, #1
+                            ; cbnz w16, =>panic_label
                         );
-                        for &t in jump_table {
-                            let ti = t as usize;
-                            if ti >= ops.len() {
-                                continue;
-                            }
-                            assert!(t < 4096, "skeleton djump target index out of imm12 range");
-                            let tgt = block_labels[blocks.block_of[ti]];
-                            dynasm!(a
-                                ; .arch aarch64
-                                ; cmp x8, #t
-                                ; b.eq =>tgt
-                            );
-                        }
-                        // no jump-table match -> panic
+                        // idx = addr/2 - 1 (addr already known even and nonzero)
                         dynasm!(a
                             ; .arch aarch64
-                            ; b =>panic_label
+                            ; lsr w9, w8, #1
+                            ; sub w9, w9, #1
+                        );
+                        mov_imm32(&mut a, 10, jump_table.len() as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp w9, w10
+                            ; b.hs =>panic_label   // idx >= table.len() (unsigned) -> panic
+                        );
+                        mov_imm64(&mut a, 13, jump_table_ptr as u64);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; lsl x14, x9, #2     // byte offset = idx * 4
+                            ; add x13, x13, x14
+                            ; ldr w7, [x13]        // w7 = jump_table[idx] (target instruction index, or u32::MAX)
+                            ; mov w9, #0xFFFF
+                            ; movk w9, #0xFFFF, lsl #16   // w9 = u32::MAX sentinel
+                            ; cmp w7, w9
+                            ; b.eq =>panic_label
+                            ; bl =>dispatch_by_index_label
+                        );
+                    }
+                    Op::Fallthrough => {
+                        if pc + 1 < ops.len() {
+                            let tgt = block_labels[blocks.block_of[pc + 1]];
+                            dynasm!(a; .arch aarch64; b =>tgt);
+                        } else {
+                            dynasm!(a; .arch aarch64; b =>end_of_code_label);
+                        }
+                    }
+                    Op::LoadImm32 { dst, imm } => {
+                        let dst = dst as u32;
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; movz w8, #(imm & 0xFFFF) as u32
+                            ; movk w8, #((imm >> 16) & 0xFFFF) as u32, lsl #16
+                            ; sxtw x8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::LoadAbs64 { dst, imm } => {
+                        let dst = dst as u32;
+                        mov_imm64(&mut a, 13, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; mov w13, w13          // mask address to 32 bits (UXTW)
+                            ; mov x14, #8            // width
+                            ; mov x15, #0            // load
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                        );
+                        emit_load(&mut a, 8, false);
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::StoreAbs64 { src, imm } => {
+                        let src = src as u32;
+                        mov_imm64(&mut a, 13, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; mov w13, w13
+                            ; mov x14, #8
+                            ; mov x15, #1            // store
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                            ; ldr x10, [x0, #src * 8]
+                        );
+                        emit_store(&mut a, 8);
+                    }
+                    Op::MoveReg { dst, src } => {
+                        // reg[dst] = reg[src] (raw 64-bit copy, no sign extension).
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::AddImm32 { dst, src, imm } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr w8, [x0, #src * 8]
+                            ; movz w9, #(imm & 0xFFFF) as u32
+                            ; movk w9, #((imm >> 16) & 0xFFFF) as u32, lsl #16
+                            ; add w8, w8, w9
+                            ; sxtw x8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::Shl64Imm { dst, src, imm } => {
+                        // reg[dst] = reg[src] << (imm & 63).
+                        let (dst, src) = (dst as u32, src as u32);
+                        let shift = (imm & 63) as u32;
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; lsl x8, x8, #shift
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::And { dst, src, src2 } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; and x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::Or { dst, src, src2 } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; orr x8, x8, x9
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::CmovIfNotZero { dst, src, src2 } => {
+                        // if reg[src2] != 0 then reg[dst] = reg[src] (else unchanged).
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        let skip = a.new_dynamic_label();
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cbz x9, =>skip
+                            ; ldr x8, [x0, #src * 8]
+                            ; str x8, [x0, #dst * 8]
+                            ; =>skip
+                        );
+                    }
+                    Op::BranchEqImm { src, imm, target } => {
+                        let src = src as u32;
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp x8, x9
+                            ; b.eq =>tgt
+                        );
+                        // not-taken: fall through to the next block (emitted next)
+                    }
+                    Op::BranchNeImm { src, imm, target } => {
+                        let src = src as u32;
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp x8, x9
+                            ; b.ne =>tgt
                         );
                     }
                 }
