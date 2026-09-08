@@ -46,7 +46,8 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     actualStatus: PvmStatus,
     rawExit: Int,
     finalPc: Int,
-    pageFaultAddress: Long
+    pageFaultAddress: Long,
+    rawGas: Long
   )
 
   private def runInterpreter(tc: PvmTestCase): InterpRun =
@@ -73,6 +74,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     var pageFaultAddress: Long = 0L
     var actualStatus: PvmStatus = PvmStatus.Panic
     var rawExit: Int = -1
+    var rawGas: Long = tc.initialGas
     var continue = true
     while continue do
       instance.run() match
@@ -80,17 +82,20 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
           actualStatus = PvmStatus.Halt
           rawExit = PvmRecompiler.EXIT_HALT
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
+          rawGas = instance.gas
           continue = false
         case Right(InterruptKind.Panic) =>
           actualStatus = PvmStatus.Panic
           rawExit = PvmRecompiler.EXIT_PANIC
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
+          rawGas = instance.gas
           continue = false
         case Right(InterruptKind.Segfault(info)) =>
           pageFaultAddress = info.pageAddress.toLong
           actualStatus = PvmStatus.PageFault
           rawExit = PvmRecompiler.EXIT_FAULT
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
+          rawGas = instance.gas
           // NOTE: PVM test vectors expect 1 gas consumed on page fault (PvmSpec parity).
           instance.consumeGas(1)
           continue = false
@@ -100,6 +105,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
           // Raw exit (recompiler parity): OOG is its own EXIT_OOG code.
           rawExit = PvmRecompiler.EXIT_OOG
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
+          rawGas = instance.gas
           continue = false
         case Right(InterruptKind.Ecalli(_)) =>
           fail(s"Unexpected ecalli in test ${tc.name}")
@@ -111,7 +117,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     if actualStatus != PvmStatus.Halt then
       finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
 
-    InterpRun(instance, blob, actualStatus, rawExit, finalPc, pageFaultAddress)
+    InterpRun(instance, blob, actualStatus, rawExit, finalPc, pageFaultAddress, rawGas)
 
   // ---- outcome of attempting one vector ----------------------------------------
   private enum Outcome:
@@ -187,17 +193,16 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     recompilerMappedStatusOpt match
       case None => Outcome.Fail(s"unrecognized recompiler exit code ${out.exit}")
       case Some(recompilerMappedStatus) =>
-        val recompilerGasForParity =
+        val recompilerGasForExpected =
           if out.exit == PvmRecompiler.EXIT_FAULT then out.gasRemaining - 1 else out.gasRemaining
-        val recompilerGasForExpected = out.gasRemaining
 
         val failures = scala.collection.mutable.ArrayBuffer.empty[String]
 
         // ---- 1) oracle parity: recompiler vs interpreter --------------------
         if out.exit != interp.rawExit then
           failures += s"[parity] exit: interpreter=${interp.rawExit} recompiler=${out.exit}"
-        if recompilerGasForParity != interp.instance.gas then
-          failures += s"[parity] gas: interpreter=${interp.instance.gas} recompiler(raw, +1-adjusted)=$recompilerGasForParity (recompiler raw=${out.gasRemaining})"
+        if out.gasRemaining != interp.rawGas then
+          failures += s"[parity] gas: interpreter(raw)=${interp.rawGas} recompiler(raw)=${out.gasRemaining}"
         if out.pc != (interp.finalPc.toLong & 0xFFFFFFFFL) then
           failures += s"[parity] pc: interpreter=${interp.finalPc} (0x${interp.finalPc.toHexString}) recompiler=${out.pc} (0x${out.pc.toHexString})"
         if out.exit == PvmRecompiler.EXIT_FAULT && out.faultPage != interp.pageFaultAddress then
