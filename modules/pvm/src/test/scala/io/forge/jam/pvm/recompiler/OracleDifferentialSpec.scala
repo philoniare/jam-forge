@@ -33,6 +33,20 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // store the low `width` bytes of reg[src] at reg[base] + offset.
   private case class StoreInd(src: Int, base: Int, offset: Int, width: Int) extends AInstr
   private case object Trap extends AInstr
+  private case object Fallthrough extends AInstr
+  private case class LoadImm(reg: Int, imm: Int) extends AInstr
+  // absolute address (no base register), matching Opcode.LoadU64/StoreU64.
+  private case class LoadAbs64(reg: Int, address: Int) extends AInstr
+  private case class StoreAbs64(reg: Int, address: Int) extends AInstr
+  private case class BranchEqImm(reg: Int, imm: Int, targetIdx: Int) extends AInstr
+  private case class BranchNeImm(reg: Int, imm: Int, targetIdx: Int) extends AInstr
+  private case class MoveReg(dst: Int, src: Int) extends AInstr
+  private case class AddImm32(dst: Int, src: Int, imm32: Int) extends AInstr
+  private case class Shl64Imm(dst: Int, src: Int, imm: Int) extends AInstr
+  private case class And3(d: Int, s1: Int, s2: Int) extends AInstr
+  private case class Or3(d: Int, s1: Int, s2: Int) extends AInstr
+  private case class CmovNz(d: Int, s1: Int, s2: Int) extends AInstr
+  private case class Djump(src: Int, imm: Int) extends AInstr
 
   // Indirect-store opcode by width — decodes as regs2Imm.
   private def storeIndOpcode(width: Int): Int = width match
@@ -56,6 +70,15 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case _: LoadInd                   => 6
     case _: StoreInd                  => 6
     case Trap                         => 1
+    case Fallthrough                  => 1
+    case _: LoadImm                   => 6  // [op, reg] ++ 4-byte imm
+    case _: LoadAbs64 | _: StoreAbs64 => 6  // [op, reg] ++ 4-byte absolute address
+    case _: BranchEqImm | _: BranchNeImm => 10 // [op, reg|len] ++ 4-byte imm ++ 4-byte disp
+    case _: MoveReg                   => 2  // [op, regByte]
+    case _: AddImm32                  => 6  // [op, regByte] ++ 4-byte imm
+    case _: Shl64Imm                  => 6  // [op, regByte] ++ 4-byte imm
+    case _: And3 | _: Or3 | _: CmovNz => 3  // [op, regByte(s1,s2), d]
+    case _: Djump                     => 6  // [op, reg] ++ 4-byte imm offset
 
   // ---- PVM encoder (abstract -> code bytes + bitmask) -------------------------
   private def longLE(v: Long): Array[Byte] =
@@ -78,9 +101,25 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case LoadInd(dst, base, o, w, s) => Array[Byte](loadIndOpcode(w, s).toByte, regByte(dst, base)) ++ intLE(o)
     case StoreInd(src, base, o, w)   => Array[Byte](storeIndOpcode(w).toByte, regByte(src, base)) ++ intLE(o)
     case Trap                    => Array[Byte](0)
+    case Fallthrough             => Array[Byte](1)
+    case LoadImm(reg, imm)       => Array[Byte](51.toByte, reg.toByte) ++ intLE(imm)
+    case LoadAbs64(reg, address) => Array[Byte](58.toByte, reg.toByte) ++ intLE(address)
+    case StoreAbs64(reg, address) => Array[Byte](62.toByte, reg.toByte) ++ intLE(address)
+    case BranchEqImm(reg, imm, _) =>
+      Array[Byte](81.toByte, ((reg & 0xF) | (4 << 4)).toByte) ++ intLE(imm) ++ intLE(tOff - off)
+    case BranchNeImm(reg, imm, _) =>
+      Array[Byte](82.toByte, ((reg & 0xF) | (4 << 4)).toByte) ++ intLE(imm) ++ intLE(tOff - off)
+    case MoveReg(dst, src)       => Array[Byte](100.toByte, regByte(dst, src))
+    case AddImm32(dst, src, imm) => Array[Byte](131.toByte, regByte(dst, src)) ++ intLE(imm)
+    case Shl64Imm(dst, src, imm) => Array[Byte](151.toByte, regByte(dst, src)) ++ intLE(imm)
+    case And3(d, s1, s2)         => Array[Byte](210.toByte, regByte(s1, s2), d.toByte)
+    case Or3(d, s1, s2)          => Array[Byte](212.toByte, regByte(s1, s2), d.toByte)
+    case CmovNz(d, s1, s2)       => Array[Byte](219.toByte, regByte(s1, s2), d.toByte)
+    case Djump(src, imm)         => Array[Byte](50.toByte, src.toByte) ++ intLE(imm)
 
   private def targetIdxOf(a: AInstr): Option[Int] = a match
     case Jump(t) => Some(t); case BranchEq(_, _, t) => Some(t); case BranchNe(_, _, t) => Some(t)
+    case BranchEqImm(_, _, t) => Some(t); case BranchNeImm(_, _, t) => Some(t)
     case _ => None
 
   /** Encode a program to (code, bitmask). Bitmask marks each instruction's first
@@ -101,6 +140,14 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private def toRawColumns(prog: Seq[AInstr]): RecompilerAbi.PreparedProgram =
     val (code, bitmask) = encodeProgram(prog)
     RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+
+  private def instrByteOffsets(prog: Seq[AInstr]): Seq[Int] =
+    prog.map(sizeOf).scanLeft(0)(_ + _).init
+
+  private def encodeJumpTable(prog: Seq[AInstr], targetIndices: Seq[Int]): JumpTable =
+    val offsets = instrByteOffsets(prog)
+    val blob = targetIndices.flatMap(idx => intLE(offsets(idx))).toArray
+    JumpTable(blob, entrySize = 4)
 
   // With roData empty and a page-sized RW region, the RW region occupies exactly
   // [RW_BASE, RW_BASE + RW_LEN) = [0x20000, 0x21000). See Abi.build: rwDataAddr =
@@ -724,5 +771,267 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
           info(s"oracle differential (sbrk-grown heap): RW region extended from $preRwSize to " +
             s"${rwRegion.len} bytes; load/store at grown offset $grownOffset matched the interpreter")
+        finally rc.close()
+  }
+
+  private def randBatchAArith(rng: Random): AInstr = rng.nextInt(11) match
+    case 0 => LoadImm64(rng.nextInt(13), rng.nextLong())
+    case 1 => AddImm64(rng.nextInt(13), rng.nextInt(13), rng.nextInt())
+    case 2 => Add64(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case 3 => LoadImm(rng.nextInt(13), rng.nextInt())
+    case 4 => MoveReg(rng.nextInt(13), rng.nextInt(13))
+    case 5 => AddImm32(rng.nextInt(13), rng.nextInt(13), rng.nextInt()) // exercises sign-extension edges via random i32
+    case 6 => Shl64Imm(rng.nextInt(13), rng.nextInt(13), rng.nextInt(200) - 100) // includes shift amounts > 63 and negative-imm edge
+    case 7 => And3(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case 8 => Or3(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case 9 => CmovNz(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case _ => Fallthrough
+
+  private def genBatchAControlFlowProgram(rng: Random): Seq[AInstr] =
+    val k = 2 + rng.nextInt(5)
+    val arithLens = Array.fill(k)(rng.nextInt(3))
+    val starts = arithLens.map(_ + 1).scanLeft(0)(_ + _)
+    val out = scala.collection.mutable.ArrayBuffer.empty[AInstr]
+    for b <- 0 until k do
+      for _ <- 0 until arithLens(b) do out += randBatchAArith(rng)
+      if b == k - 1 then out += Trap
+      else
+        val tb = b + 1 + rng.nextInt(k - b - 1)
+        val tgt = starts(tb)
+        out += (rng.nextInt(5) match
+          case 0 => Jump(tgt)
+          case 1 => BranchEq(rng.nextInt(13), rng.nextInt(13), tgt)
+          case 2 => BranchNe(rng.nextInt(13), rng.nextInt(13), tgt)
+          case 3 => BranchEqImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt) // negative imm edge
+          case _ => BranchNeImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt))
+    out.toSeq
+
+  it should "match the production interpreter on batch-A straight-line arithmetic (Fallthrough/LoadImm/MoveReg/AddImm32/Shl64Imm/And/Or/Cmov)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xBA7C4AL)
+          for _ <- 0 until 20000 do
+            val n = 1 + rng.nextInt(12)
+            val prog = (0 until n).map(_ => randBatchAArith(rng)) :+ Trap
+            compareRun(rc, prog, rng)
+          info("oracle differential (batch-A arithmetic): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on batch-A control flow (BranchEqImm/BranchNeImm with negative immediates)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xBA7C4BL)
+          for _ <- 0 until 20000 do
+            compareRun(rc, genBatchAControlFlowProgram(rng), rng)
+          info("oracle differential (batch-A control flow): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on absolute LoadU64/StoreU64 in and out of mapped regions" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xA65011L)
+          var faultCount = 0
+          var okCount = 0
+          for _ <- 0 until 10000 do
+            val isStore = rng.nextBoolean()
+            // Sweep addresses in and just past the RW region [RW_BASE, RW_BASE+RW_LEN).
+            val address = RW_BASE + rng.nextInt(RW_LEN + 64) - 32
+            val prog =
+              if isStore then Seq(LoadImm64(1, rng.nextLong()), StoreAbs64(1, address), Trap)
+              else Seq(LoadAbs64(1, address), Trap)
+            val initRegs = Array.fill(13)(rng.nextLong())
+            val gas = prog.length.toLong + 10
+            val interp = runInterpreter(prog, initRegs.clone(), gas)
+            val pp = toRawColumns(prog)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blk.isValid shouldBe true
+            val nRegs = initRegs.clone()
+            val backing = new Array[Byte](RW_LEN)
+            val regions = singleRwRegion(RW_BASE.toLong, backing)
+            val out = rc.execute(blk, nRegs, gas, regions, backing, PAGE_SHIFT, 0)
+            blk.close()
+            withClue(s"program=$prog address=$address\n") {
+              out.exit shouldBe interp.exit
+              out.gasRemaining shouldBe interp.gas
+              out.pc shouldBe interp.pc
+              nRegs.toSeq shouldBe interp.regs.toSeq
+            }
+            if interp.exit == PvmRecompiler.EXIT_FAULT then faultCount += 1 else okCount += 1
+          faultCount should be > 0
+          okCount should be > 0
+          info(s"oracle differential (absolute LoadU64/StoreU64): 10000 programs matched; $faultCount faulted, $okCount succeeded")
+        finally rc.close()
+  }
+
+  private def compareDjumpRun(rc: PvmRecompiler, prog: Seq[AInstr], jumpTargetIndices: Seq[Int], initRegs: Array[Long], gas: Long): InterpResult =
+    val (code, bitmask) = encodeProgram(prog)
+    val jumpTable = encodeJumpTable(prog, jumpTargetIndices)
+    val blob = ProgramBlob(
+      code = code, bitmask = bitmask, jumpTable = jumpTable,
+      is64Bit = true, roData = Array.empty, rwData = new Array[Byte](RW_LEN), stackSize = 4096
+    )
+    val module = InterpretedModule.create(blob) match
+      case Right(m) => m
+      case Left(e)  => fail(s"module create failed: $e")
+    val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+    inst.setGas(gas)
+    inst.setNextProgramCounter(ProgramCounter(0))
+    initRegs.zipWithIndex.foreach { case (v, i) => inst.setReg(i, v) }
+    val (exit, faultPage) = runToTerminal(inst)
+    val regs = Array.tabulate(13)(i => inst.getReg(i))
+    val pc = inst.programCounter.map(_.toInt.toLong & 0xFFFFFFFFL).getOrElse(fail("no programCounter set on exit"))
+    val interp = InterpResult(exit, inst.gas, regs, pc, faultPage)
+
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, jumpTable)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    blk.isValid shouldBe true
+    val nRegs = initRegs.clone()
+    val out = rc.execute(blk, nRegs, gas)
+    blk.close()
+    withClue(s"program=$prog jumpTargetIndices=$jumpTargetIndices gas=$gas\n" +
+      s"interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc})\n" +
+      s"native(exit=${out.exit} gas=${out.gasRemaining} pc=${out.pc})\n") {
+      out.exit shouldBe interp.exit
+      out.gasRemaining shouldBe interp.gas
+      out.pc shouldBe interp.pc
+      nRegs.toSeq shouldBe interp.regs.toSeq
+    }
+    interp
+
+  private def genDjumpProgram(rng: Random, mode: Int): (Seq[AInstr], Seq[Int], Int) =
+    val tableSize = 1 + rng.nextInt(4)
+    val blocks = scala.collection.mutable.ArrayBuffer.empty[AInstr]
+    val leaderIdx = scala.collection.mutable.ArrayBuffer.empty[Int]
+    for i <- 0 until tableSize do
+      leaderIdx += blocks.length
+      blocks += LoadImm64(2, 1000L + i)
+      blocks += Trap
+    val djumpSiteIdx = blocks.length
+    // addrReg placeholder LoadImm64 patched below (depends on mode).
+    blocks += LoadImm64(1, 0L) // [djumpSiteIdx]
+    blocks += Djump(1, 0)      // [djumpSiteIdx+1]
+    blocks += Trap             // [djumpSiteIdx+2] (only reached on a resolution bug)
+    val prog = blocks.toSeq
+
+    val targetIndices: Seq[Int] = mode match
+      case 4 => Seq(djumpSiteIdx) // slot 0 targets the djump SITE itself: a
+      case _ => leaderIdx.toSeq
+
+    val nonLeaderMidBlockIdx = leaderIdx(0) + 1 // the Trap right after block 0's LoadImm64 — decoded, not a leader
+    val effectiveTargetIndices = if mode == 4 then Seq(nonLeaderMidBlockIdx) else targetIndices
+
+    val addr = mode match
+      case 0 => // valid: pick a random in-range slot
+        val slot = rng.nextInt(tableSize)
+        (slot + 1) * 2
+      case 1 => // misaligned: odd address
+        val slot = rng.nextInt(tableSize)
+        (slot + 1) * 2 + 1
+      case 2 => 0 // zero address
+      case 3 => (tableSize + 1 + rng.nextInt(5)) * 2 // out of range (idx >= tableSize)
+      case 4 => 2 // slot 0, which now holds the non-leader sentinel target
+      case _ => 0
+
+    val patchedProg = prog.updated(djumpSiteIdx, LoadImm64(1, addr.toLong))
+    (patchedProg, effectiveTargetIndices, mode)
+
+  it should "match the production interpreter on djump: valid table resolution through a REAL encoded jump table" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xD31170L)
+          var validCount = 0
+          for _ <- 0 until 12000 do
+            val (prog, targets, _) = genDjumpProgram(rng, mode = 0)
+            val initRegs = Array.fill(13)(0L)
+            val interp = compareDjumpRun(rc, prog, targets, initRegs, 100L)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC // always ends at a Trap (valid jump lands on a block ending in Trap)
+            validCount += 1
+          info(s"oracle differential (djump valid): $validCount programs matched the interpreter")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on djump: misaligned address panics" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xD31171L)
+          var panicCount = 0
+          for _ <- 0 until 8000 do
+            val (prog, targets, _) = genDjumpProgram(rng, mode = 1)
+            val initRegs = Array.fill(13)(0L)
+            val interp = compareDjumpRun(rc, prog, targets, initRegs, 100L)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+            panicCount += 1
+          info(s"oracle differential (djump misaligned): $panicCount programs matched the interpreter (all panicked)")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on djump: zero address panics" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xD31172L)
+          var panicCount = 0
+          for _ <- 0 until 4000 do
+            val (prog, targets, _) = genDjumpProgram(rng, mode = 2)
+            val initRegs = Array.fill(13)(0L)
+            val interp = compareDjumpRun(rc, prog, targets, initRegs, 100L)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+            panicCount += 1
+          info(s"oracle differential (djump zero address): $panicCount programs matched the interpreter (all panicked)")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on djump: out-of-range table index panics" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xD31173L)
+          var panicCount = 0
+          for _ <- 0 until 8000 do
+            val (prog, targets, _) = genDjumpProgram(rng, mode = 3)
+            val initRegs = Array.fill(13)(0L)
+            val interp = compareDjumpRun(rc, prog, targets, initRegs, 100L)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+            panicCount += 1
+          info(s"oracle differential (djump out-of-range index): $panicCount programs matched the interpreter (all panicked)")
+        finally rc.close()
+  }
+
+  it should "match the production interpreter on djump: a non-leader table entry panics" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xD31174L)
+          var panicCount = 0
+          for _ <- 0 until 4000 do
+            val (prog, targets, _) = genDjumpProgram(rng, mode = 4)
+            val initRegs = Array.fill(13)(0L)
+            val interp = compareDjumpRun(rc, prog, targets, initRegs, 100L)
+            interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+            panicCount += 1
+          info(s"oracle differential (djump non-leader entry): $panicCount programs matched the interpreter (all panicked)")
         finally rc.close()
   }

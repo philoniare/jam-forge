@@ -135,14 +135,30 @@ class RecompilerAbiSpec extends AnyFlatSpec with Matchers:
     pp.imm(0) shouldBe 0L
   }
 
-  it should "translate jump-table byte-offset entries to instruction indices, dropping invalid entries" in {
+  it should "translate jump-table byte-offset entries to instruction indices POSITIONALLY, sentineling invalid slots with -1" in {
     // instr0: Panic (offset 0), instr1: Panic (offset 1). Jump table entries:
-    // {1 (valid -> index 1), 4 (invalid, not a leader)}.
+    // {1 (valid -> index 1), 4 (invalid, out of range/not a leader)}.
     val code = Array[Byte](0, 0)
     val bitmask = bitmaskFor(Seq(0, 1), code.length)
     val jt = JumpTable(Array[Byte](1, 0, 0, 0, 4, 0, 0, 0), entrySize = 4)
     val pp = RecompilerAbi.prepareProgram(code, bitmask, jt)
-    pp.jumpTable.toSeq shouldBe Seq(1)
+    pp.jumpTable.toSeq shouldBe Seq(1, -1)
+  }
+
+  it should "sentinel a jump-table entry that lands on a decoded instruction which is NOT a basic-block leader" in {
+    val code = Array[Byte](200.toByte, regByte(0, 1), 2.toByte) ++ Array[Byte](0)
+    val bitmask = bitmaskFor(Seq(0, 3), code.length)
+    val jt = JumpTable(Array[Byte](3, 0, 0, 0), entrySize = 4)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, jt)
+    pp.jumpTable.toSeq shouldBe Seq(-1)
+  }
+
+  it should "keep a jump-table entry valid when it lands right after a branch (a real basic-block leader)" in {
+    val code = Array[Byte](170.toByte, regByte(0, 1)) ++ branchDisp ++ Array[Byte](0)
+    val bitmask = bitmaskFor(Seq(0, 6), code.length)
+    val jt = JumpTable(Array[Byte](6, 0, 0, 0), entrySize = 4)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, jt)
+    pp.jumpTable.toSeq shouldBe Seq(1) // instruction index 1 (the Panic at offset 6)
   }
 
   it should "leave a program with no control-flow untouched (identity target translation)" in {
@@ -153,9 +169,31 @@ class RecompilerAbiSpec extends AnyFlatSpec with Matchers:
     pp.opcodes.toSeq shouldBe Seq(Instruction.Add64(0, 0, 0).opcode.value, Instruction.Panic.opcode.value)
     pp.a(0) shouldBe 2; pp.b(0) shouldBe 0; pp.c(0) shouldBe 1
   }
+
+  it should "replace a Jump targeting a mid-block instruction (boundary but NOT a leader) with Panic" in {
+    val add0 = Array[Byte](200.toByte, regByte(0, 1), 2.toByte) // Add64(2,0,1) @0
+    val add1 = Array[Byte](200.toByte, regByte(0, 1), 2.toByte) // Add64(2,0,1) @3
+    val jumpTargetingOffset3 = Array[Byte](40.toByte) ++ intLE(3 - 6) // Jump @6, disp -3 -> target 3
+    val code = add0 ++ add1 ++ jumpTargetingOffset3
+    val bitmask = bitmaskFor(Seq(0, 3, 6), code.length)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+    pp.opcodes(2) shouldBe Instruction.Panic.opcode.value
+  }
+
+  it should "keep a Jump targeting the instruction right after a branch (a real leader) valid" in {
+    val branch0 = Array[Byte](170.toByte, regByte(0, 1)) ++ intLE(0) // BranchEq @0, target itself
+    val add1 = Array[Byte](200.toByte, regByte(0, 1), 2.toByte) // Add64 @6
+    val jumpTargetingOffset6 = Array[Byte](40.toByte) ++ intLE(6 - 9) // Jump @9, disp -3 -> target 6
+    val code = branch0 ++ add1 ++ jumpTargetingOffset6
+    val bitmask = bitmaskFor(Seq(0, 6, 9), code.length)
+    val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+    pp.opcodes(2) should not be Instruction.Panic.opcode.value
+    pp.opcodes(2) shouldBe Instruction.Jump(0).opcode.value
+    pp.imm(2) shouldBe 1L // instruction index of Add64 at offset 6
+  }
+
   private val branchEqImmOp: Int = Instruction.BranchEqImm(0, 0L, 0L).opcode.value
   private val loadImmAndJumpOp: Int = Instruction.LoadImmAndJump(0, 0L, 0L).opcode.value
-
   private def encodeRegImmOffset(op: Int, reg: Int, imm: Long, immLen: Int, disp: Array[Byte]): Array[Byte] =
     val header = ((reg & 0xF) | ((immLen & 0x7) << 4)).toByte
     val immBytes = Array.tabulate(immLen)(i => ((imm >> (i * 8)) & 0xff).toByte)
