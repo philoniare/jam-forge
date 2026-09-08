@@ -292,6 +292,7 @@ impl Backend for Aarch64Backend {
         }
         dynasm!(a; .arch aarch64; b =>panic_label);
         dynasm!(a; .arch aarch64; =>dispatch_by_index_label);
+        assert!(ops.len() < 4096, "skeleton dispatch-by-index chain out of imm12 range");
         for i in 0..ops.len() {
             dynasm!(a
                 ; .arch aarch64
