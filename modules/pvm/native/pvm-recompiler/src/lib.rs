@@ -43,6 +43,14 @@ pub const OP_LOAD_U64: u32 = 58; // reg[a] = load 8 bytes at absolute address im
 pub const OP_STORE_U64: u32 = 62; // store reg[a] (8 bytes) at absolute address imm & 0xFFFFFFFF
 pub const OP_BRANCH_EQ_IMM: u32 = 81; // if reg[a] == imm then pc = imm2
 pub const OP_BRANCH_NE_IMM: u32 = 82; // if reg[a] != imm then pc = imm2
+pub const OP_BRANCH_LT_U_IMM: u32 = 83; // if reg[a] <u imm then pc = imm2
+pub const OP_BRANCH_LE_U_IMM: u32 = 84; // if reg[a] <=u imm then pc = imm2
+pub const OP_BRANCH_GE_U_IMM: u32 = 85; // if reg[a] >=u imm then pc = imm2
+pub const OP_BRANCH_GT_U_IMM: u32 = 86; // if reg[a] >u imm then pc = imm2
+pub const OP_BRANCH_LT_S_IMM: u32 = 87; // if reg[a] <s imm then pc = imm2
+pub const OP_BRANCH_LE_S_IMM: u32 = 88; // if reg[a] <=s imm then pc = imm2
+pub const OP_BRANCH_GE_S_IMM: u32 = 89; // if reg[a] >=s imm then pc = imm2
+pub const OP_BRANCH_GT_S_IMM: u32 = 90; // if reg[a] >s imm then pc = imm2
 pub const OP_MOVE_REG: u32 = 100; // reg[a] = reg[b]
 pub const OP_STORE_INDIRECT_U8: u32 = 120;
 pub const OP_STORE_INDIRECT_U16: u32 = 121;
@@ -56,16 +64,51 @@ pub const OP_LOAD_INDIRECT_U32: u32 = 128;
 pub const OP_LOAD_INDIRECT_I32: u32 = 129;
 pub const OP_LOAD_INDIRECT_U64: u32 = 130;
 pub const OP_ADD_IMM32: u32 = 131; // reg[a] = sign_extend32(reg[b] as i32 + imm as i32)
+pub const OP_SET_LT_U_IMM: u32 = 136; // reg[a] = (reg[b] <u imm) ? 1 : 0
+pub const OP_SET_LT_S_IMM: u32 = 137; // reg[a] = (reg[b] <s imm) ? 1 : 0
+pub const OP_SHIFT_LOGICAL_LEFT_IMM32: u32 = 138; // reg[a] = sign_extend32((reg[b] as i32) << (imm & 31))
+pub const OP_SHIFT_LOGICAL_RIGHT_IMM32: u32 = 139; // reg[a] = sign_extend32((reg[b] as u32) >> (imm & 31))
+pub const OP_SHIFT_ARITH_RIGHT_IMM32: u32 = 140; // reg[a] = sign_extend32((reg[b] as i32) >> (imm & 31))
+pub const OP_SET_GT_U_IMM: u32 = 142; // reg[a] = (reg[b] >u imm) ? 1 : 0
+pub const OP_SET_GT_S_IMM: u32 = 143; // reg[a] = (reg[b] >s imm) ? 1 : 0
+pub const OP_SHIFT_LOGICAL_LEFT_IMM_ALT32: u32 = 144; // reg[a] = sign_extend32((imm as i32) << (reg[b] & 31))
+pub const OP_SHIFT_LOGICAL_RIGHT_IMM_ALT32: u32 = 145; // reg[a] = sign_extend32((imm as u32) >> (reg[b] & 31))
+pub const OP_SHIFT_ARITH_RIGHT_IMM_ALT32: u32 = 146; // reg[a] = sign_extend32((imm as i32) >> (reg[b] & 31))
 pub const OP_ADD_IMM64: u32 = 149; // reg[a] = reg[b] + imm      (wrapping)
 pub const OP_SHIFT_LOGICAL_LEFT_IMM64: u32 = 151; // reg[a] = reg[b] << (imm & 63)
+pub const OP_SHIFT_LOGICAL_RIGHT_IMM64: u32 = 152; // reg[a] = reg[b] >>u (imm & 63)
+pub const OP_SHIFT_ARITH_RIGHT_IMM64: u32 = 153; // reg[a] = reg[b] >>s (imm & 63)
+pub const OP_SHIFT_LOGICAL_LEFT_IMM_ALT64: u32 = 155; // reg[a] = imm << (reg[b] & 63)
+pub const OP_SHIFT_LOGICAL_RIGHT_IMM_ALT64: u32 = 156; // reg[a] = imm >>u (reg[b] & 63)
+pub const OP_SHIFT_ARITH_RIGHT_IMM_ALT64: u32 = 157; // reg[a] = imm >>s (reg[b] & 63)
+pub const OP_ROTATE_RIGHT_IMM64: u32 = 158; // reg[a] = rotr64(reg[b], imm & 63)
+pub const OP_ROTATE_RIGHT_IMM_ALT64: u32 = 159; // reg[a] = rotr64(imm, reg[b] & 63)
+pub const OP_ROTATE_RIGHT_IMM32: u32 = 160; // reg[a] = sign_extend32(rotr32(reg[b] as i32, imm & 31))
+pub const OP_ROTATE_RIGHT_IMM_ALT32: u32 = 161; // reg[a] = sign_extend32(rotr32(imm as i32, reg[b] & 31))
 pub const OP_BRANCH_EQ: u32 = 170; // if reg[a] == reg[b] then pc = imm
 pub const OP_BRANCH_NE: u32 = 171; // if reg[a] != reg[b] then pc = imm
+pub const OP_BRANCH_LT_U: u32 = 172; // if reg[a] <u reg[b] then pc = imm
+pub const OP_BRANCH_LT_S: u32 = 173; // if reg[a] <s reg[b] then pc = imm
+pub const OP_BRANCH_GE_U: u32 = 174; // if reg[a] >=u reg[b] then pc = imm
+pub const OP_BRANCH_GE_S: u32 = 175; // if reg[a] >=s reg[b] then pc = imm
 pub const OP_ADD64: u32 = 200; // reg[a] = reg[b] + reg[c]      (wrapping)
 pub const OP_SUB64: u32 = 201; // reg[a] = reg[b] - reg[c]      (wrapping)
 pub const OP_MUL64: u32 = 202; // reg[a] = reg[b] * reg[c]      (wrapping)
+pub const OP_SHIFT_LOGICAL_LEFT32: u32 = 197; // reg[a] = sign_extend32((reg[b] as i32) << (reg[c] & 31))
+pub const OP_SHIFT_LOGICAL_RIGHT32: u32 = 198; // reg[a] = sign_extend32((reg[b] as u32) >> (reg[c] & 31))
+pub const OP_SHIFT_ARITH_RIGHT32: u32 = 199; // reg[a] = sign_extend32((reg[b] as i32) >> (reg[c] & 31))
+pub const OP_SHIFT_LOGICAL_LEFT64: u32 = 207; // reg[a] = reg[b] << (reg[c] & 63)
+pub const OP_SHIFT_LOGICAL_RIGHT64: u32 = 208; // reg[a] = reg[b] >>u (reg[c] & 63)
+pub const OP_SHIFT_ARITH_RIGHT64: u32 = 209; // reg[a] = reg[b] >>s (reg[c] & 63)
 pub const OP_AND: u32 = 210; // reg[a] = reg[b] & reg[c]
 pub const OP_OR: u32 = 212; // reg[a] = reg[b] | reg[c]
+pub const OP_SET_LT_U: u32 = 216; // reg[a] = (reg[b] <u reg[c]) ? 1 : 0
+pub const OP_SET_LT_S: u32 = 217; // reg[a] = (reg[b] <s reg[c]) ? 1 : 0
 pub const OP_CMOV_IF_NOT_ZERO: u32 = 219; // if reg[c] != 0 then reg[a] = reg[b]
+pub const OP_ROTATE_LEFT64: u32 = 220; // reg[a] = rotl64(reg[b], reg[c] & 63)
+pub const OP_ROTATE_LEFT32: u32 = 221; // reg[a] = sign_extend32(rotl32(reg[b] as i32, reg[c] & 31))
+pub const OP_ROTATE_RIGHT64: u32 = 222; // reg[a] = rotr64(reg[b], reg[c] & 63)
+pub const OP_ROTATE_RIGHT32: u32 = 223; // reg[a] = sign_extend32(rotr32(reg[b] as i32, reg[c] & 31))
 
 /// Indirect-jump sentinel: `JumpIndirect reg, offset` where `reg[a]+offset`
 /// equals this value halts the program cleanly (EXIT_HALT). Mirrors the PVM
@@ -132,6 +175,40 @@ pub enum Op {
     Or { dst: u8, src: u8, src2: u8 },
     /// if reg[src2] != 0 then reg[dst] = reg[src]
     CmovIfNotZero { dst: u8, src: u8, src2: u8 },
+    BranchCmpImm { src: u8, imm: u64, target: u32, cond: CmpCond },
+    BranchCmp { src: u8, src2: u8, target: u32, cond: CmpCond },
+    SetCmpImm { dst: u8, src: u8, imm: u64, cond: CmpCond },
+    SetCmp { dst: u8, src: u8, src2: u8, cond: CmpCond },
+    ShiftRotateImm { dst: u8, src: u8, imm: u64, kind: ShiftKind, width: Width },
+    ShiftRotateImmAlt { dst: u8, src: u8, imm: u64, kind: ShiftKind, width: Width },
+    ShiftRotateReg { dst: u8, src: u8, src2: u8, kind: ShiftKind, width: Width },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpCond {
+    LtU,
+    LeU,
+    GeU,
+    GtU,
+    LtS,
+    LeS,
+    GeS,
+    GtS,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftKind {
+    Shl,
+    ShrLogical,
+    ShrArith,
+    RotateLeft,
+    RotateRight,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Width {
+    W32,
+    W64,
 }
 
 impl Op {
@@ -147,6 +224,8 @@ impl Op {
                 | Op::BranchEqImm { .. }
                 | Op::BranchNeImm { .. }
                 | Op::Djump { .. }
+                | Op::BranchCmpImm { .. }
+                | Op::BranchCmp { .. }
         )
     }
     /// The branch/jump target instruction index, if any.
@@ -156,7 +235,9 @@ impl Op {
             | Op::BranchEq { target, .. }
             | Op::BranchNe { target, .. }
             | Op::BranchEqImm { target, .. }
-            | Op::BranchNeImm { target, .. } => Some(*target),
+            | Op::BranchNeImm { target, .. }
+            | Op::BranchCmpImm { target, .. }
+            | Op::BranchCmp { target, .. } => Some(*target),
             _ => None,
         }
     }
@@ -224,6 +305,68 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_AND => ops.push(Op::And { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
             OP_OR => ops.push(Op::Or { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
             OP_CMOV_IF_NOT_ZERO => ops.push(Op::CmovIfNotZero { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+
+            // ---- Branch*Imm (a=reg, imm=compare-imm, imm2=target index) ----
+            OP_BRANCH_LT_U_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::LtU }),
+            OP_BRANCH_LE_U_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::LeU }),
+            OP_BRANCH_GE_U_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::GeU }),
+            OP_BRANCH_GT_U_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::GtU }),
+            OP_BRANCH_LT_S_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::LtS }),
+            OP_BRANCH_LE_S_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::LeS }),
+            OP_BRANCH_GE_S_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::GeS }),
+            OP_BRANCH_GT_S_IMM => ops.push(Op::BranchCmpImm { src: ins.a as u8, imm: ins.imm as u64, target: ins.imm2 as u32, cond: CmpCond::GtS }),
+
+            // ---- reg-reg branches (a=r1, b=r2, imm=target index) ----
+            OP_BRANCH_LT_U => ops.push(Op::BranchCmp { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32, cond: CmpCond::LtU }),
+            OP_BRANCH_LT_S => ops.push(Op::BranchCmp { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32, cond: CmpCond::LtS }),
+            OP_BRANCH_GE_U => ops.push(Op::BranchCmp { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32, cond: CmpCond::GeU }),
+            OP_BRANCH_GE_S => ops.push(Op::BranchCmp { src: ins.a as u8, src2: ins.b as u8, target: ins.imm as u32, cond: CmpCond::GeS }),
+
+            // ---- SetLessThan/GreaterThan *Imm (a=dst, b=src, imm=compare-imm) ----
+            OP_SET_LT_U_IMM => ops.push(Op::SetCmpImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, cond: CmpCond::LtU }),
+            OP_SET_LT_S_IMM => ops.push(Op::SetCmpImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, cond: CmpCond::LtS }),
+            OP_SET_GT_U_IMM => ops.push(Op::SetCmpImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, cond: CmpCond::GtU }),
+            OP_SET_GT_S_IMM => ops.push(Op::SetCmpImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, cond: CmpCond::GtS }),
+
+            // ---- SetLessThanUnsigned/Signed (a=d, b=s1, c=s2) ----
+            OP_SET_LT_U => ops.push(Op::SetCmp { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, cond: CmpCond::LtU }),
+            OP_SET_LT_S => ops.push(Op::SetCmp { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, cond: CmpCond::LtS }),
+
+            // ---- Shift/Rotate Imm32 (plain: a=dst, b=src, imm=amount) ----
+            OP_SHIFT_LOGICAL_LEFT_IMM32 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::Shl, width: Width::W32 }),
+            OP_SHIFT_LOGICAL_RIGHT_IMM32 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrLogical, width: Width::W32 }),
+            OP_SHIFT_ARITH_RIGHT_IMM32 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrArith, width: Width::W32 }),
+            OP_ROTATE_RIGHT_IMM32 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::RotateRight, width: Width::W32 }),
+
+            // ---- Shift/Rotate ImmAlt32 (alt: operand roles swapped — a=dst, b=src supplies the RUNTIME shift amount, imm=the value being shifted) ----
+            OP_SHIFT_LOGICAL_LEFT_IMM_ALT32 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::Shl, width: Width::W32 }),
+            OP_SHIFT_LOGICAL_RIGHT_IMM_ALT32 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrLogical, width: Width::W32 }),
+            OP_SHIFT_ARITH_RIGHT_IMM_ALT32 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrArith, width: Width::W32 }),
+            OP_ROTATE_RIGHT_IMM_ALT32 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::RotateRight, width: Width::W32 }),
+
+            // ---- Shift/Rotate Imm64 (plain) ----
+            OP_SHIFT_LOGICAL_RIGHT_IMM64 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrLogical, width: Width::W64 }),
+            OP_SHIFT_ARITH_RIGHT_IMM64 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrArith, width: Width::W64 }),
+            OP_ROTATE_RIGHT_IMM64 => ops.push(Op::ShiftRotateImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::RotateRight, width: Width::W64 }),
+
+            // ---- Shift/Rotate ImmAlt64 (alt) ----
+            OP_SHIFT_LOGICAL_LEFT_IMM_ALT64 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::Shl, width: Width::W64 }),
+            OP_SHIFT_LOGICAL_RIGHT_IMM_ALT64 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrLogical, width: Width::W64 }),
+            OP_SHIFT_ARITH_RIGHT_IMM_ALT64 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::ShrArith, width: Width::W64 }),
+            OP_ROTATE_RIGHT_IMM_ALT64 => ops.push(Op::ShiftRotateImmAlt { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: ShiftKind::RotateRight, width: Width::W64 }),
+
+            // ---- Shift/Rotate reg-reg (a=d, b=s1, c=s2) ----
+            OP_SHIFT_LOGICAL_LEFT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::Shl, width: Width::W32 }),
+            OP_SHIFT_LOGICAL_RIGHT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::ShrLogical, width: Width::W32 }),
+            OP_SHIFT_ARITH_RIGHT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::ShrArith, width: Width::W32 }),
+            OP_SHIFT_LOGICAL_LEFT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::Shl, width: Width::W64 }),
+            OP_SHIFT_LOGICAL_RIGHT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::ShrLogical, width: Width::W64 }),
+            OP_SHIFT_ARITH_RIGHT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::ShrArith, width: Width::W64 }),
+            OP_ROTATE_LEFT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateLeft, width: Width::W32 }),
+            OP_ROTATE_LEFT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateLeft, width: Width::W64 }),
+            OP_ROTATE_RIGHT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateRight, width: Width::W32 }),
+            OP_ROTATE_RIGHT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateRight, width: Width::W64 }),
+
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
     }
@@ -1209,5 +1352,510 @@ mod tests {
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
         assert_eq!(regs[3], 999); // unchanged
+    }
+
+    #[test]
+    fn branch_lt_u_imm_treats_negative_reg_as_large_unsigned() {
+        // reg[1] = -1 (u64::MAX unsigned) is NOT < 5 unsigned -> not taken.
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64), // 0
+            ri(OP_BRANCH_LT_U_IMM, 1, 0, 0, 5), // 1 -> would target 3 if taken
+            ri(OP_LOAD_IMM64, 2, 0, 0, 42),    // 2 (fallthrough expected)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),    // 3 (NOT taken)
+            ri(OP_PANIC, 0, 0, 0, 0),          // 4
+        ]);
+        prog[1].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 99); // fell through to instr 2, then ran into instr 3 too
+    }
+
+    #[test]
+    fn branch_lt_s_imm_treats_negative_reg_as_small_signed() {
+        // reg[1] = -1 (signed) IS < 5 signed -> taken.
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64), // 0
+            ri(OP_BRANCH_LT_S_IMM, 1, 0, 0, 5), // 1 -> target 3
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),    // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),     // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),          // 4
+        ]);
+        prog[1].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7);
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn branch_le_ge_gt_imm_variants_all_match_expected_directions() {
+        let mut p1 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5),
+            ri(OP_BRANCH_LE_U_IMM, 1, 0, 0, 5),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p1[1].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&p1, &mut regs, &mut gas);
+        assert_eq!(regs[2], 7, "LessOrEqualUnsignedImm: 5<=u5 must be taken");
+
+        // BranchGreaterOrEqualUnsignedImm(5 >=u 5) -> taken.
+        let mut p2 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5),
+            ri(OP_BRANCH_GE_U_IMM, 1, 0, 0, 5),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p2[1].imm2 = 3;
+        let mut regs2 = [0u64; 13];
+        let mut gas2 = 100i64;
+        run(&p2, &mut regs2, &mut gas2);
+        assert_eq!(regs2[2], 7, "GreaterOrEqualUnsignedImm: 5>=u5 must be taken");
+
+        // BranchGreaterUnsignedImm(5 >u 5) -> NOT taken (strict).
+        let mut p3 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5),
+            ri(OP_BRANCH_GT_U_IMM, 1, 0, 0, 5),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 42),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p3[1].imm2 = 3;
+        let mut regs3 = [0u64; 13];
+        let mut gas3 = 100i64;
+        run(&p3, &mut regs3, &mut gas3);
+        assert_eq!(regs3[2], 42, "GreaterUnsignedImm: 5>u5 must NOT be taken (strict)");
+
+        // BranchLessOrEqualSignedImm(-1 <=s 5) -> taken.
+        let mut p4 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_BRANCH_LE_S_IMM, 1, 0, 0, 5),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p4[1].imm2 = 3;
+        let mut regs4 = [0u64; 13];
+        let mut gas4 = 100i64;
+        run(&p4, &mut regs4, &mut gas4);
+        assert_eq!(regs4[2], 7, "LessOrEqualSignedImm: -1<=s5 must be taken");
+
+        // BranchGreaterOrEqualSignedImm(-1 >=s 5) -> NOT taken.
+        let mut p5 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_BRANCH_GE_S_IMM, 1, 0, 0, 5),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 42),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p5[1].imm2 = 3;
+        let mut regs5 = [0u64; 13];
+        let mut gas5 = 100i64;
+        run(&p5, &mut regs5, &mut gas5);
+        assert_eq!(regs5[2], 42, "GreaterOrEqualSignedImm: -1>=s5 must NOT be taken");
+
+        // BranchGreaterSignedImm(-1 >s -5) -> taken.
+        let mut p6 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_BRANCH_GT_S_IMM, 1, 0, 0, -5i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        p6[1].imm2 = 3;
+        let mut regs6 = [0u64; 13];
+        let mut gas6 = 100i64;
+        run(&p6, &mut regs6, &mut gas6);
+        assert_eq!(regs6[2], 7, "GreaterSignedImm: -1>s-5 must be taken");
+    }
+
+    #[test]
+    fn branch_reg_reg_lt_u_vs_lt_s_diverge_on_negative_operand() {
+        let prog_u = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_BRANCH_LT_U, 1, 2, 0, 4), // -> target 4
+            ri(OP_LOAD_IMM64, 3, 0, 0, 42), // NOT skipped (branch not taken)
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_u = [0u64; 13];
+        let mut gas_u = 100i64;
+        run(&prog_u, &mut regs_u, &mut gas_u);
+        assert_eq!(regs_u[3], 42, "BranchLessUnsigned: u64::MAX <u 1 must be false");
+
+        // BranchLessSigned(reg1 <s reg2): -1 <s 1 -> true (taken, skips instr 3).
+        let prog_s = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_BRANCH_LT_S, 1, 2, 0, 4), // -> target 4
+            ri(OP_LOAD_IMM64, 3, 0, 0, 42), // skipped (branch taken)
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_s = [0u64; 13];
+        let mut gas_s = 100i64;
+        run(&prog_s, &mut regs_s, &mut gas_s);
+        assert_eq!(regs_s[3], 0, "BranchLessSigned: -1 <s 1 must be true (instr 3 skipped)");
+    }
+
+    #[test]
+    fn branch_reg_reg_ge_u_vs_ge_s_diverge_on_negative_operand() {
+        // reg[1] = -1 (u64::MAX unsigned), reg[2] = 1.
+        // BranchGreaterOrEqualUnsigned(reg1 >=u reg2): MAX >=u 1 -> true (taken).
+        let prog_u = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_BRANCH_GE_U, 1, 2, 0, 4),
+            ri(OP_LOAD_IMM64, 3, 0, 0, 42), // skipped
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_u = [0u64; 13];
+        let mut gas_u = 100i64;
+        run(&prog_u, &mut regs_u, &mut gas_u);
+        assert_eq!(regs_u[3], 0, "BranchGreaterOrEqualUnsigned: MAX >=u 1 must be true");
+
+        // BranchGreaterOrEqualSigned(reg1 >=s reg2): -1 >=s 1 -> false (not taken).
+        let prog_s = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_BRANCH_GE_S, 1, 2, 0, 4),
+            ri(OP_LOAD_IMM64, 3, 0, 0, 42), // NOT skipped
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_s = [0u64; 13];
+        let mut gas_s = 100i64;
+        run(&prog_s, &mut regs_s, &mut gas_s);
+        assert_eq!(regs_s[3], 42, "BranchGreaterOrEqualSigned: -1 >=s 1 must be false");
+    }
+
+    #[test]
+    fn set_less_than_unsigned_vs_signed_imm_diverge_on_negative_reg() {
+        // reg[1] = -1 (u64::MAX unsigned). Compare against imm=5.
+        // SetLessThanUnsignedImm: MAX <u 5 -> 0.
+        let prog_u = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_SET_LT_U_IMM, 2, 1, 0, 5),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_u = [0u64; 13];
+        let mut gas_u = 100i64;
+        run(&prog_u, &mut regs_u, &mut gas_u);
+        assert_eq!(regs_u[2], 0, "SetLessThanUnsignedImm: MAX <u 5 must be 0");
+
+        // SetLessThanSignedImm: -1 <s 5 -> 1.
+        let prog_s = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_SET_LT_S_IMM, 2, 1, 0, 5),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_s = [0u64; 13];
+        let mut gas_s = 100i64;
+        run(&prog_s, &mut regs_s, &mut gas_s);
+        assert_eq!(regs_s[2], 1, "SetLessThanSignedImm: -1 <s 5 must be 1");
+    }
+
+    #[test]
+    fn set_greater_than_unsigned_vs_signed_imm_diverge_on_negative_reg() {
+        // reg[1] = -1 (u64::MAX unsigned). Compare against imm=5.
+        // SetGreaterThanUnsignedImm: MAX >u 5 -> 1.
+        let prog_u = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_SET_GT_U_IMM, 2, 1, 0, 5),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_u = [0u64; 13];
+        let mut gas_u = 100i64;
+        run(&prog_u, &mut regs_u, &mut gas_u);
+        assert_eq!(regs_u[2], 1, "SetGreaterThanUnsignedImm: MAX >u 5 must be 1");
+
+        // SetGreaterThanSignedImm: -1 >s 5 -> 0.
+        let prog_s = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_SET_GT_S_IMM, 2, 1, 0, 5),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_s = [0u64; 13];
+        let mut gas_s = 100i64;
+        run(&prog_s, &mut regs_s, &mut gas_s);
+        assert_eq!(regs_s[2], 0, "SetGreaterThanSignedImm: -1 >s 5 must be 0");
+    }
+
+    #[test]
+    fn set_less_than_reg_reg_unsigned_vs_signed_diverge() {
+        // reg[1] = -1 (u64::MAX unsigned), reg[2] = 1.
+        let prog_u = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_SET_LT_U, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_u = [0u64; 13];
+        let mut gas_u = 100i64;
+        run(&prog_u, &mut regs_u, &mut gas_u);
+        assert_eq!(regs_u[3], 0, "SetLessThanUnsigned: MAX <u 1 must be 0");
+
+        let prog_s = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_SET_LT_S, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_s = [0u64; 13];
+        let mut gas_s = 100i64;
+        run(&prog_s, &mut regs_s, &mut gas_s);
+        assert_eq!(regs_s[3], 1, "SetLessThanSigned: -1 <s 1 must be 1");
+    }
+
+    #[test]
+    fn shift_logical_left_imm32_sign_extends_result_and_ignores_high_reg_bits() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFF40000000u64 as i64),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM32, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn shift_logical_right_imm32_is_unsigned_shr_not_arithmetic() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x80000000u32 as i64),
+            ri(OP_SHIFT_LOGICAL_RIGHT_IMM32, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x40000000u64);
+    }
+
+    #[test]
+    fn shift_arith_right_imm32_sign_extends_through_the_shift() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x80000000u32 as i64),
+            ri(OP_SHIFT_ARITH_RIGHT_IMM32, 2, 1, 0, 4),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFFFFFF8000000u64);
+    }
+
+    #[test]
+    fn shift_imm32_amount_masks_to_31_not_32() {
+        // imm=32 masked to 32&31=0 -> no shift.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM32, 2, 1, 0, 32), // 32&31=0
+            ri(OP_LOAD_IMM64, 3, 0, 0, 1),
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM32, 4, 3, 0, 33), // 33&31=1
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 1u64);
+        assert_eq!(regs[4], 2u64);
+    }
+
+    #[test]
+    fn shift_logical_left_imm_alt32_swaps_operand_roles() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3), // shift amount register
+            ri(OP_SHIFT_LOGICAL_LEFT_IMM_ALT32, 2, 1, 0, 1), // reg[2] = 1 << (reg[1]&31) = 8
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 8u64);
+    }
+
+    #[test]
+    fn shift_logical_right_imm_alt64_swaps_operand_roles_and_masks_amount_from_register() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 65),
+            ri(OP_SHIFT_LOGICAL_RIGHT_IMM_ALT64, 2, 1, 0, 0x8000000000000000u64 as i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x4000000000000000u64);
+    }
+
+    #[test]
+    fn shift_arith_right_imm_alt64_swaps_roles_and_sign_extends_the_immediate_value() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 4),
+            ri(OP_SHIFT_ARITH_RIGHT_IMM_ALT64, 2, 1, 0, i64::MIN),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, i64::MIN >> 4);
+    }
+
+    #[test]
+    fn rotate_right_imm64_masks_amount_to_63() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_ROTATE_RIGHT_IMM64, 2, 1, 0, 65), // 65&63=1 -> rotr(1,1) = 1<<63
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 1u64 << 63);
+    }
+
+    #[test]
+    fn rotate_right_imm_alt64_swaps_operand_roles() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_ROTATE_RIGHT_IMM_ALT64, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 1u64 << 63);
+    }
+
+    #[test]
+    fn rotate_right_imm32_sign_extends_result_after_masking_source_to_32_bits() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xDEAD000000000001u64 as i64),
+            ri(OP_ROTATE_RIGHT_IMM32, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn rotate_right_imm_alt32_swaps_operand_roles_and_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_ROTATE_RIGHT_IMM_ALT32, 2, 1, 0, 1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn shift_reg_reg_amount_masks_to_width_and_ignores_high_amount_bits() {
+        // 32-bit: reg[src2] = 33 masked to 33&31=1.
+        let prog32 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 33),
+            ri(OP_SHIFT_LOGICAL_LEFT32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs32 = [0u64; 13];
+        let mut gas32 = 100i64;
+        run(&prog32, &mut regs32, &mut gas32);
+        assert_eq!(regs32[3], 2u64);
+
+        // 64-bit: reg[src2] = 65 masked to 65&63=1.
+        let prog64 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 65),
+            ri(OP_SHIFT_LOGICAL_LEFT64, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs64 = [0u64; 13];
+        let mut gas64 = 100i64;
+        run(&prog64, &mut regs64, &mut gas64);
+        assert_eq!(regs64[3], 2u64);
+    }
+
+    #[test]
+    fn shift_logical_right32_reg_reg_is_unsigned_ignoring_high_source_bits() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xDEAD000080000000u64 as i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_SHIFT_LOGICAL_RIGHT32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0x40000000u64);
+    }
+
+    #[test]
+    fn shift_arith_right64_reg_reg_sign_extends_when_negative() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, i64::MIN),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 4),
+            ri(OP_SHIFT_ARITH_RIGHT64, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3] as i64, i64::MIN >> 4);
+    }
+
+    #[test]
+    fn rotate_left_vs_rotate_right_reg_reg_are_inverse_directions() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000000000001u64 as i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1), // rotate amount
+            ri(OP_ROTATE_LEFT64, 3, 1, 2, 0),  // rotl(1,1) = 2
+            ri(OP_ROTATE_RIGHT64, 4, 3, 2, 0), // rotr(2,1) = 1 (restores original)
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 2u64);
+        assert_eq!(regs[4], 1u64);
+    }
+
+    #[test]
+    fn rotate_left32_reg_reg_sign_extends_result() {
+        // rotl32(1, 31) = 0x80000000i32 = i32::MIN -> sign-extends to 64.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 31),
+            ri(OP_ROTATE_LEFT32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn rotate_right32_reg_reg_amount_masks_to_31() {
+        // rotate amount 32 masks to 32&31=0 -> no rotation.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x12345678),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 32),
+            ri(OP_ROTATE_RIGHT32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0x12345678u64);
     }
 }
