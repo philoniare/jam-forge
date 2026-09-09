@@ -239,6 +239,96 @@ fn emit_store(a: &mut Asm, width: u8) {
     }
 }
 
+fn emit_b_cond(a: &mut Asm, cond: CmpCond, target: dynasmrt::DynamicLabel) {
+    match cond {
+        CmpCond::LtU => dynasm!(a; .arch aarch64; b.lo =>target),
+        CmpCond::LeU => dynasm!(a; .arch aarch64; b.ls =>target),
+        CmpCond::GeU => dynasm!(a; .arch aarch64; b.hs =>target),
+        CmpCond::GtU => dynasm!(a; .arch aarch64; b.hi =>target),
+        CmpCond::LtS => dynasm!(a; .arch aarch64; b.lt =>target),
+        CmpCond::LeS => dynasm!(a; .arch aarch64; b.le =>target),
+        CmpCond::GeS => dynasm!(a; .arch aarch64; b.ge =>target),
+        CmpCond::GtS => dynasm!(a; .arch aarch64; b.gt =>target),
+    }
+}
+
+fn emit_cset(a: &mut Asm, rd: u8, cond: CmpCond) {
+    match cond {
+        CmpCond::LtU => dynasm!(a; .arch aarch64; cset X(rd), lo),
+        CmpCond::LeU => dynasm!(a; .arch aarch64; cset X(rd), ls),
+        CmpCond::GeU => dynasm!(a; .arch aarch64; cset X(rd), hs),
+        CmpCond::GtU => dynasm!(a; .arch aarch64; cset X(rd), hi),
+        CmpCond::LtS => dynasm!(a; .arch aarch64; cset X(rd), lt),
+        CmpCond::LeS => dynasm!(a; .arch aarch64; cset X(rd), le),
+        CmpCond::GeS => dynasm!(a; .arch aarch64; cset X(rd), ge),
+        CmpCond::GtS => dynasm!(a; .arch aarch64; cset X(rd), gt),
+    }
+}
+
+enum ShiftAmount {
+    Imm(u32),
+    Reg(u8),
+}
+
+fn emit_shift_rotate(a: &mut Asm, kind: ShiftKind, width: Width, amount: ShiftAmount) {
+    match (width, kind, amount) {
+        // ---- 64-bit, immediate amount ----
+        (Width::W64, ShiftKind::Shl, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; lsl x8, x8, #n),
+        (Width::W64, ShiftKind::ShrLogical, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; lsr x8, x8, #n),
+        (Width::W64, ShiftKind::ShrArith, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; asr x8, x8, #n),
+        (Width::W64, ShiftKind::RotateRight, ShiftAmount::Imm(n)) => {
+            if n == 0 { /* ROR #0 is not encodable; a zero rotate is a no-op */ }
+            else { dynasm!(a; .arch aarch64; ror x8, x8, #n) }
+        }
+        (Width::W64, ShiftKind::RotateLeft, ShiftAmount::Imm(n)) => {
+            // No native ROL; rotl(x, n) == ror(x, 64-n) for 1<=n<=63; n==0 is a no-op.
+            let rn = (64 - n) % 64;
+            if rn == 0 { /* no-op */ } else { dynasm!(a; .arch aarch64; ror x8, x8, #rn) }
+        }
+        // ---- 64-bit, register amount (already masked & 63 by the caller) ----
+        (Width::W64, ShiftKind::Shl, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; lslv x8, x8, X(rm)),
+        (Width::W64, ShiftKind::ShrLogical, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; lsrv x8, x8, X(rm)),
+        (Width::W64, ShiftKind::ShrArith, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; asrv x8, x8, X(rm)),
+        (Width::W64, ShiftKind::RotateRight, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; rorv x8, x8, X(rm)),
+        (Width::W64, ShiftKind::RotateLeft, ShiftAmount::Reg(rm)) => {
+            dynasm!(a
+                ; .arch aarch64
+                ; mov x13, #64
+                ; sub x13, x13, X(rm)
+                ; and x13, x13, #63
+                ; rorv x8, x8, x13
+            );
+        }
+        // ---- 32-bit, immediate amount (operates on w8, low 32 bits) ----
+        (Width::W32, ShiftKind::Shl, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; lsl w8, w8, #n),
+        (Width::W32, ShiftKind::ShrLogical, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; lsr w8, w8, #n),
+        (Width::W32, ShiftKind::ShrArith, ShiftAmount::Imm(n)) => dynasm!(a; .arch aarch64; asr w8, w8, #n),
+        (Width::W32, ShiftKind::RotateRight, ShiftAmount::Imm(n)) => {
+            if n == 0 { /* no-op */ } else { dynasm!(a; .arch aarch64; ror w8, w8, #n) }
+        }
+        (Width::W32, ShiftKind::RotateLeft, ShiftAmount::Imm(n)) => {
+            let rn = (32 - n) % 32;
+            if rn == 0 { /* no-op */ } else { dynasm!(a; .arch aarch64; ror w8, w8, #rn) }
+        }
+        // ---- 32-bit, register amount (already masked & 31 by the caller) ----
+        (Width::W32, ShiftKind::Shl, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; lslv w8, w8, W(rm)),
+        (Width::W32, ShiftKind::ShrLogical, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; lsrv w8, w8, W(rm)),
+        (Width::W32, ShiftKind::ShrArith, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; asrv w8, w8, W(rm)),
+        (Width::W32, ShiftKind::RotateRight, ShiftAmount::Reg(rm)) => dynasm!(a; .arch aarch64; rorv w8, w8, W(rm)),
+        (Width::W32, ShiftKind::RotateLeft, ShiftAmount::Reg(rm)) => {
+            // Same `rm` == the caller's masked-amount scratch (w9) hazard as
+            // the 64-bit arm above — compute into w13 first.
+            dynasm!(a
+                ; .arch aarch64
+                ; mov w13, #32
+                ; sub w13, w13, W(rm)
+                ; and w13, w13, #31
+                ; rorv w8, w8, w13
+            );
+        }
+    }
+}
+
 impl Backend for Aarch64Backend {
     fn emit_program(
         &self,
@@ -613,6 +703,110 @@ impl Backend for Aarch64Backend {
                             ; cmp x8, x9
                             ; b.ne =>tgt
                         );
+                    }
+                    Op::BranchCmpImm { src, imm, target, cond } => {
+                        let src = src as u32;
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_b_cond(&mut a, cond, tgt);
+                    }
+                    Op::BranchCmp { src, src2, target, cond } => {
+                        let (src, src2) = (src as u32, src2 as u32);
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cmp x8, x9
+                        );
+                        emit_b_cond(&mut a, cond, tgt);
+                    }
+                    Op::SetCmpImm { dst, src, imm, cond } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                        mov_imm64(&mut a, 9, imm);
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_cset(&mut a, 8, cond);
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::SetCmp { dst, src, src2, cond } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cmp x8, x9
+                        );
+                        emit_cset(&mut a, 8, cond);
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::ShiftRotateImm { dst, src, imm, kind, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        let mask: u64 = match width { Width::W32 => 31, Width::W64 => 63 };
+                        let n = (imm & mask) as u32;
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; ldr w8, [x0, #src * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]),
+                        }
+                        emit_shift_rotate(&mut a, kind, width, ShiftAmount::Imm(n));
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
+                    }
+                    Op::ShiftRotateImmAlt { dst, src, imm, kind, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        let mask: u32 = match width { Width::W32 => 31, Width::W64 => 63 };
+                        let mask64: u64 = mask as u64;
+                        match width {
+                            Width::W32 => {
+                                mov_imm32(&mut a, 8, imm as u32);
+                                dynasm!(a
+                                    ; .arch aarch64
+                                    ; ldr w9, [x0, #src * 8]
+                                    ; and w9, w9, #mask
+                                );
+                            }
+                            Width::W64 => {
+                                mov_imm64(&mut a, 8, imm);
+                                dynasm!(a
+                                    ; .arch aarch64
+                                    ; ldr x9, [x0, #src * 8]
+                                    ; and x9, x9, #mask64
+                                );
+                            }
+                        }
+                        emit_shift_rotate(&mut a, kind, width, ShiftAmount::Reg(9));
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
+                    }
+                    Op::ShiftRotateReg { dst, src, src2, kind, width } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        let mask: u32 = match width { Width::W32 => 31, Width::W64 => 63 };
+                        let mask64: u64 = mask as u64;
+                        match width {
+                            Width::W32 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr w8, [x0, #src * 8]
+                                ; ldr w9, [x0, #src2 * 8]
+                                ; and w9, w9, #mask
+                            ),
+                            Width::W64 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr x8, [x0, #src * 8]
+                                ; ldr x9, [x0, #src2 * 8]
+                                ; and x9, x9, #mask64
+                            ),
+                        }
+                        emit_shift_rotate(&mut a, kind, width, ShiftAmount::Reg(9));
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
                     }
                 }
             }
