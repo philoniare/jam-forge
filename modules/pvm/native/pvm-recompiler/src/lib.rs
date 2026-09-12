@@ -64,17 +64,23 @@ pub const OP_LOAD_INDIRECT_U32: u32 = 128;
 pub const OP_LOAD_INDIRECT_I32: u32 = 129;
 pub const OP_LOAD_INDIRECT_U64: u32 = 130;
 pub const OP_ADD_IMM32: u32 = 131; // reg[a] = sign_extend32(reg[b] as i32 + imm as i32)
+pub const OP_AND_IMM: u32 = 132; // reg[a] = reg[b] & imm (full 64-bit, imm sign-extended)
+pub const OP_XOR_IMM: u32 = 133; // reg[a] = reg[b] ^ imm (full 64-bit, imm sign-extended)
+pub const OP_OR_IMM: u32 = 134; // reg[a] = reg[b] | imm (full 64-bit, imm sign-extended)
+pub const OP_MUL_IMM32: u32 = 135; // reg[a] = sign_extend32((reg[b] as i32).wrapping_mul(imm as i32))
 pub const OP_SET_LT_U_IMM: u32 = 136; // reg[a] = (reg[b] <u imm) ? 1 : 0
 pub const OP_SET_LT_S_IMM: u32 = 137; // reg[a] = (reg[b] <s imm) ? 1 : 0
 pub const OP_SHIFT_LOGICAL_LEFT_IMM32: u32 = 138; // reg[a] = sign_extend32((reg[b] as i32) << (imm & 31))
 pub const OP_SHIFT_LOGICAL_RIGHT_IMM32: u32 = 139; // reg[a] = sign_extend32((reg[b] as u32) >> (imm & 31))
 pub const OP_SHIFT_ARITH_RIGHT_IMM32: u32 = 140; // reg[a] = sign_extend32((reg[b] as i32) >> (imm & 31))
+pub const OP_NEGATE_AND_ADD_IMM32: u32 = 141; // reg[a] = sign_extend32((imm as i32).wrapping_sub(reg[b] as i32)) -- imm MINUS reg
 pub const OP_SET_GT_U_IMM: u32 = 142; // reg[a] = (reg[b] >u imm) ? 1 : 0
 pub const OP_SET_GT_S_IMM: u32 = 143; // reg[a] = (reg[b] >s imm) ? 1 : 0
 pub const OP_SHIFT_LOGICAL_LEFT_IMM_ALT32: u32 = 144; // reg[a] = sign_extend32((imm as i32) << (reg[b] & 31))
 pub const OP_SHIFT_LOGICAL_RIGHT_IMM_ALT32: u32 = 145; // reg[a] = sign_extend32((imm as u32) >> (reg[b] & 31))
 pub const OP_SHIFT_ARITH_RIGHT_IMM_ALT32: u32 = 146; // reg[a] = sign_extend32((imm as i32) >> (reg[b] & 31))
 pub const OP_ADD_IMM64: u32 = 149; // reg[a] = reg[b] + imm      (wrapping)
+pub const OP_MUL_IMM64: u32 = 150; // reg[a] = reg[b] * imm      (wrapping, full 64-bit)
 pub const OP_SHIFT_LOGICAL_LEFT_IMM64: u32 = 151; // reg[a] = reg[b] << (imm & 63)
 pub const OP_SHIFT_LOGICAL_RIGHT_IMM64: u32 = 152; // reg[a] = reg[b] >>u (imm & 63)
 pub const OP_SHIFT_ARITH_RIGHT_IMM64: u32 = 153; // reg[a] = reg[b] >>s (imm & 63)
@@ -83,6 +89,7 @@ pub const OP_SHIFT_LOGICAL_RIGHT_IMM_ALT64: u32 = 156; // reg[a] = imm >>u (reg[
 pub const OP_SHIFT_ARITH_RIGHT_IMM_ALT64: u32 = 157; // reg[a] = imm >>s (reg[b] & 63)
 pub const OP_ROTATE_RIGHT_IMM64: u32 = 158; // reg[a] = rotr64(reg[b], imm & 63)
 pub const OP_ROTATE_RIGHT_IMM_ALT64: u32 = 159; // reg[a] = rotr64(imm, reg[b] & 63)
+pub const OP_NEGATE_AND_ADD_IMM64: u32 = 154; // reg[a] = imm.wrapping_sub(reg[b]) -- imm MINUS reg, full 64-bit
 pub const OP_ROTATE_RIGHT_IMM32: u32 = 160; // reg[a] = sign_extend32(rotr32(reg[b] as i32, imm & 31))
 pub const OP_ROTATE_RIGHT_IMM_ALT32: u32 = 161; // reg[a] = sign_extend32(rotr32(imm as i32, reg[b] & 31))
 pub const OP_BRANCH_EQ: u32 = 170; // if reg[a] == reg[b] then pc = imm
@@ -91,6 +98,9 @@ pub const OP_BRANCH_LT_U: u32 = 172; // if reg[a] <u reg[b] then pc = imm
 pub const OP_BRANCH_LT_S: u32 = 173; // if reg[a] <s reg[b] then pc = imm
 pub const OP_BRANCH_GE_U: u32 = 174; // if reg[a] >=u reg[b] then pc = imm
 pub const OP_BRANCH_GE_S: u32 = 175; // if reg[a] >=s reg[b] then pc = imm
+pub const OP_ADD32: u32 = 190; // reg[a] = sign_extend32(reg[b] as i32 + reg[c] as i32)
+pub const OP_SUB32: u32 = 191; // reg[a] = sign_extend32(reg[b] as i32 - reg[c] as i32)
+pub const OP_MUL32: u32 = 192; // reg[a] = sign_extend32(reg[b] as i32 * reg[c] as i32)
 pub const OP_ADD64: u32 = 200; // reg[a] = reg[b] + reg[c]      (wrapping)
 pub const OP_SUB64: u32 = 201; // reg[a] = reg[b] - reg[c]      (wrapping)
 pub const OP_MUL64: u32 = 202; // reg[a] = reg[b] * reg[c]      (wrapping)
@@ -101,6 +111,7 @@ pub const OP_SHIFT_LOGICAL_LEFT64: u32 = 207; // reg[a] = reg[b] << (reg[c] & 63
 pub const OP_SHIFT_LOGICAL_RIGHT64: u32 = 208; // reg[a] = reg[b] >>u (reg[c] & 63)
 pub const OP_SHIFT_ARITH_RIGHT64: u32 = 209; // reg[a] = reg[b] >>s (reg[c] & 63)
 pub const OP_AND: u32 = 210; // reg[a] = reg[b] & reg[c]
+pub const OP_XOR: u32 = 211; // reg[a] = reg[b] ^ reg[c]
 pub const OP_OR: u32 = 212; // reg[a] = reg[b] | reg[c]
 pub const OP_SET_LT_U: u32 = 216; // reg[a] = (reg[b] <u reg[c]) ? 1 : 0
 pub const OP_SET_LT_S: u32 = 217; // reg[a] = (reg[b] <s reg[c]) ? 1 : 0
@@ -182,6 +193,19 @@ pub enum Op {
     ShiftRotateImm { dst: u8, src: u8, imm: u64, kind: ShiftKind, width: Width },
     ShiftRotateImmAlt { dst: u8, src: u8, imm: u64, kind: ShiftKind, width: Width },
     ShiftRotateReg { dst: u8, src: u8, src2: u8, kind: ShiftKind, width: Width },
+    AluReg { dst: u8, src: u8, src2: u8, kind: AluKind, width: Width },
+    AluImm { dst: u8, src: u8, imm: u64, kind: AluKind, width: Width },
+    NegateAndAddImm { dst: u8, src: u8, imm: u64, width: Width },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AluKind {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,6 +390,17 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_ROTATE_LEFT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateLeft, width: Width::W64 }),
             OP_ROTATE_RIGHT32 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateRight, width: Width::W32 }),
             OP_ROTATE_RIGHT64 => ops.push(Op::ShiftRotateReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: ShiftKind::RotateRight, width: Width::W64 }),
+            OP_ADD32 => ops.push(Op::AluReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: AluKind::Add, width: Width::W32 }),
+            OP_SUB32 => ops.push(Op::AluReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: AluKind::Sub, width: Width::W32 }),
+            OP_MUL32 => ops.push(Op::AluReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: AluKind::Mul, width: Width::W32 }),
+            OP_XOR => ops.push(Op::AluReg { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: AluKind::Xor, width: Width::W64 }),
+            OP_AND_IMM => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::And, width: Width::W64 }),
+            OP_XOR_IMM => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::Xor, width: Width::W64 }),
+            OP_OR_IMM => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::Or, width: Width::W64 }),
+            OP_MUL_IMM32 => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::Mul, width: Width::W32 }),
+            OP_MUL_IMM64 => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::Mul, width: Width::W64 }),
+            OP_NEGATE_AND_ADD_IMM32 => ops.push(Op::NegateAndAddImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: Width::W32 }),
+            OP_NEGATE_AND_ADD_IMM64 => ops.push(Op::NegateAndAddImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: Width::W64 }),
 
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
@@ -1857,5 +1892,201 @@ mod tests {
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
         assert_eq!(regs[3], 0x12345678u64);
+    }
+
+    #[test]
+    fn add32_sign_extends_across_the_i32_overflow_edge() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122334400000001u64 as i64), // high garbage on r1
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0x7FFFFFFFu32 as i64),
+            ri(OP_ADD32, 3, 2, 1, 0), // 0x7FFFFFFF + 1 = 0x80000000 -> sign-extend
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0xFFFFFFFF80000000u64);
+    }
+
+    #[test]
+    fn sub32_underflow_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, i32::MIN as i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
+            ri(OP_SUB32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0x7FFFFFFFu64);
+    }
+
+    #[test]
+    fn mul32_negative_product_sign_extends_and_truncates_sources() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xDEADBEEFFFFFFFFFu64 as i64), // low32 = -1, high32 garbage
+            ri(OP_LOAD_IMM64, 2, 0, 0, 5),
+            ri(OP_MUL32, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3] as i64, -5i64);
+    }
+
+    #[test]
+    fn xor_is_full_64bit_no_truncation() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x00FF00FF00FF00FFu64 as i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0xFF00FF00FF00FF00u64 as i64),
+            ri(OP_XOR, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0xFFFFFFFFFFFFFFFFu64);
+    }
+
+    #[test]
+    fn and_imm_or_imm_xor_imm_are_full_64bit_with_sign_extended_immediate() {
+        let src = 0x0123456789ABCDEFu64;
+
+        let prog_and = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, src as i64),
+            ri(OP_AND_IMM, 2, 1, 0, -1i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog_and, &mut regs, &mut gas);
+        assert_eq!(regs[2], src, "AndImm with all-ones imm must be a no-op");
+
+        let prog_or = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, src as i64),
+            ri(OP_OR_IMM, 2, 1, 0, -1i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog_or, &mut regs, &mut gas);
+        assert_eq!(regs[2], u64::MAX, "OrImm with all-ones imm must set every bit");
+
+        let prog_xor = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, src as i64),
+            ri(OP_XOR_IMM, 2, 1, 0, -1i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog_xor, &mut regs, &mut gas);
+        assert_eq!(regs[2], !src, "XorImm with all-ones imm must invert every bit");
+    }
+
+    #[test]
+    fn mul_imm32_truncates_source_and_imm_then_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x11111111FFFFFFFDu64 as i64), // low32 = -3
+            ri(OP_MUL_IMM32, 2, 1, 0, -7i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, 21i64);
+    }
+
+    #[test]
+    fn mul_imm32_overflow_wraps_in_32_bits_then_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x7FFFFFFFu32 as i64),
+            ri(OP_MUL_IMM32, 2, 1, 0, 2),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, -2i64);
+    }
+
+    #[test]
+    fn mul_imm64_is_full_64bit_no_truncation() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x100000001u64 as i64),
+            ri(OP_MUL_IMM64, 2, 1, 0, 0x100000001u64 as i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        let expected = (0x100000001u64).wrapping_mul(0x100000001u64);
+        assert_eq!(regs[2], expected);
+    }
+
+    #[test]
+    fn negate_and_add_imm32_is_imm_minus_src_not_src_minus_imm() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3),
+            ri(OP_NEGATE_AND_ADD_IMM32, 2, 1, 0, 10),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, 7i64, "NegateAndAddImm32 must compute imm - src, not src - imm");
+    }
+
+    #[test]
+    fn negate_and_add_imm32_underflow_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_NEGATE_AND_ADD_IMM32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], u64::MAX);
+    }
+
+    #[test]
+    fn negate_and_add_imm32_truncates_source_high_bits() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAAAAAAAA00000003u64 as i64),
+            ri(OP_NEGATE_AND_ADD_IMM32, 2, 1, 0, 10),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, 7i64);
+    }
+
+    #[test]
+    fn negate_and_add_imm64_is_imm_minus_src_full_64bit() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000100000000u64 as i64),
+            ri(OP_NEGATE_AND_ADD_IMM64, 2, 1, 0, 0x0000000300000000u64 as i64),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x0000000200000000u64);
+    }
+
+    #[test]
+    fn negate_and_add_imm64_underflow_wraps() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_NEGATE_AND_ADD_IMM64, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], u64::MAX);
     }
 }
