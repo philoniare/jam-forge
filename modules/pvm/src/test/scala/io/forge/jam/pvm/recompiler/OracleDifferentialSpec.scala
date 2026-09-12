@@ -58,6 +58,9 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private case class AluImm2(op: Int, dst: Int, src: Int, imm: Int) extends AInstr
   private case class NegateAndAddImm(op: Int, dst: Int, src: Int, imm: Int) extends AInstr
   private case class UnaryOp(op: Int, dst: Int, src: Int) extends AInstr
+  private case class MinMaxOrInvLogic(op: Int, d: Int, s1: Int, s2: Int) extends AInstr
+  private case class CmovZ(d: Int, s1: Int, s2: Int) extends AInstr
+  private case class CmovImm(op: Int, dst: Int, src: Int, imm: Int) extends AInstr
 
   // Indirect-store opcode by width — decodes as regs2Imm.
   private def storeIndOpcode(width: Int): Int = width match
@@ -101,6 +104,9 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case _: AluImm2                   => 6  // [op, regByte(dst,src)] ++ 4-byte imm
     case _: NegateAndAddImm           => 6  // [op, regByte(dst,src)] ++ 4-byte imm
     case _: UnaryOp                   => 2  // [op, regByte(dst,src)]
+    case _: MinMaxOrInvLogic           => 3  // [op, regByte(s1,s2), d]
+    case _: CmovZ                     => 3  // [op, regByte(s1,s2), d]
+    case _: CmovImm                   => 6  // [op, regByte(dst,src)] ++ 4-byte imm
 
   // ---- PVM encoder (abstract -> code bytes + bitmask) -------------------------
   private def longLE(v: Long): Array[Byte] =
@@ -151,6 +157,9 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case AluImm2(op, dst, src, imm) => Array[Byte](op.toByte, regByte(dst, src)) ++ intLE(imm)
     case NegateAndAddImm(op, dst, src, imm) => Array[Byte](op.toByte, regByte(dst, src)) ++ intLE(imm)
     case UnaryOp(op, dst, src) => Array[Byte](op.toByte, regByte(dst, src))
+    case MinMaxOrInvLogic(op, d, s1, s2) => Array[Byte](op.toByte, regByte(s1, s2), d.toByte)
+    case CmovZ(d, s1, s2) => Array[Byte](218.toByte, regByte(s1, s2), d.toByte)
+    case CmovImm(op, dst, src, imm) => Array[Byte](op.toByte, regByte(dst, src)) ++ intLE(imm)
 
   private def targetIdxOf(a: AInstr): Option[Int] = a match
     case Jump(t) => Some(t); case BranchEq(_, _, t) => Some(t); case BranchNe(_, _, t) => Some(t)
@@ -1466,5 +1475,142 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
               nRegs.toSeq shouldBe interp.regs.toSeq
             }
           info("oracle differential (batch-D control flow): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  // Three-register min/max + inverted-logical (224-230): regs3 shape.
+  private val minMaxInvLogicOpcodes: Array[Int] = Array(224, 225, 226, 227, 228, 229, 230)
+  // CmovIfZeroImm/CmovIfNotZeroImm (147/148): regs2+imm shape.
+  private val cmovImmOpcodes: Array[Int] = Array(147, 148)
+
+  private def randBatchEArith(rng: Random): AInstr = rng.nextInt(4) match
+    case 0 => LoadImm64(rng.nextInt(13), rng.nextLong())
+    case 1 => MinMaxOrInvLogic(minMaxInvLogicOpcodes(rng.nextInt(minMaxInvLogicOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case 2 => CmovZ(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+    case _ => CmovImm(cmovImmOpcodes(rng.nextInt(cmovImmOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt())
+
+  it should "match the production interpreter on batch-E straight-line arithmetic (Maximum/MaximumUnsigned/Minimum/MinimumUnsigned/AndInverted/OrInverted/Xnor/CmovIfZero/CmovIfZeroImm/CmovIfNotZeroImm)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xE47C40L)
+          for _ <- 0 until 20000 do
+            val n = 1 + rng.nextInt(12)
+            val prog = (0 until n).map(_ => randBatchEArith(rng)) :+ Trap
+            compareRun(rc, prog, rng)
+          info("oracle differential (batch-E arithmetic): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  private def randBatchEEdgeArith(rng: Random): AInstr =
+    val edgeImm = rng.nextInt(5) match
+      case 0 => 0
+      case 1 => 1
+      case 2 => -1
+      case 3 => i32Min
+      case _ => rng.nextInt()
+    rng.nextInt(4) match
+      case 0 => LoadImm64(rng.nextInt(13), if rng.nextBoolean() then edgeRegs(rng)(0) else rng.nextLong())
+      case 1 => MinMaxOrInvLogic(minMaxInvLogicOpcodes(rng.nextInt(minMaxInvLogicOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+      case 2 => CmovZ(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
+      case _ => CmovImm(cmovImmOpcodes(rng.nextInt(cmovImmOpcodes.length)), rng.nextInt(13), rng.nextInt(13), edgeImm)
+
+  it should "match the production interpreter on batch-E min/max with signed/unsigned crossover values and cmov condition boundaries" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xE47C41L)
+          for _ <- 0 until 20000 do
+            val n = 1 + rng.nextInt(10)
+            val prog = (0 until n).map(_ => randBatchEEdgeArith(rng)) :+ Trap
+            val initRegs = Array.tabulate(13) { _ =>
+              rng.nextInt(8) match
+                case 0 => 0L
+                case 1 => 1L
+                case 2 => -1L
+                case 3 => Long.MinValue
+                case 4 => Long.MaxValue
+                case 5 => 0x8000000000000000L
+                case 6 => 0x7FFFFFFFFFFFFFFFL
+                case _ => rng.nextLong()
+            }
+            val gas = prog.length.toLong + rng.nextInt(50)
+            val interp = runInterpreter(prog, initRegs.clone(), gas)
+            val pp = toRawColumns(prog)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blk.isValid shouldBe true
+            val nRegs = initRegs.clone()
+            val out = rc.execute(blk, nRegs, gas)
+            blk.close()
+            withClue(s"program=$prog initRegs=${initRegs.toSeq}\n") {
+              out.exit shouldBe interp.exit
+              out.gasRemaining shouldBe interp.gas
+              out.pc shouldBe interp.pc
+              nRegs.toSeq shouldBe interp.regs.toSeq
+            }
+          info("oracle differential (batch-E edge values): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+
+  private def genBatchEControlFlowProgram(rng: Random): Seq[AInstr] =
+    val k = 2 + rng.nextInt(6)
+    val arithLens = Array.fill(k)(rng.nextInt(3))
+    val starts = arithLens.map(_ + 1).scanLeft(0)(_ + _)
+    val out = scala.collection.mutable.ArrayBuffer.empty[AInstr]
+    for b <- 0 until k do
+      for _ <- 0 until arithLens(b) do
+        out += (rng.nextInt(5) match
+          case 0 => randBatchAArith(rng)
+          case 1 => randBatchBArith(rng)
+          case 2 => randBatchCArith(rng)
+          case 3 => randBatchDArith(rng)
+          case _ => randBatchEArith(rng))
+      if b == k - 1 then out += Trap
+      else
+        val tb = b + 1 + rng.nextInt(k - b - 1)
+        val tgt = starts(tb)
+        out += (rng.nextInt(9) match
+          case 0 => Jump(tgt)
+          case 1 => BranchEq(rng.nextInt(13), rng.nextInt(13), tgt)
+          case 2 => BranchNe(rng.nextInt(13), rng.nextInt(13), tgt)
+          case 3 => BranchEqImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt)
+          case 4 => BranchNeImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt)
+          case 5 => BranchCmpImm(branchCmpImmOpcodes(rng.nextInt(branchCmpImmOpcodes.length)), rng.nextInt(13), rng.nextInt(400) - 200, tgt)
+          case 6 => BranchCmpImm(branchCmpImmOpcodes(rng.nextInt(branchCmpImmOpcodes.length)), rng.nextInt(13), -1 - rng.nextInt(50), tgt)
+          case 7 => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt)
+          case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
+    out.toSeq
+
+  it should "match the production interpreter on batch-E control flow (mixed with batch-A/B/C/D ops)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0xE47C42L)
+          for _ <- 0 until 20000 do
+            val prog = genBatchEControlFlowProgram(rng)
+            val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
+            val gas = prog.length.toLong + rng.nextInt(50)
+            val interp = runInterpreter(prog, initRegs.clone(), gas)
+            val pp = toRawColumns(prog)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blk.isValid shouldBe true
+            val nRegs = initRegs.clone()
+            val out = rc.execute(blk, nRegs, gas)
+            blk.close()
+            withClue(s"program=$prog gas=$gas initRegs=${initRegs.toSeq}\n" +
+              s"interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc})\n" +
+              s"native(exit=${out.exit} gas=${out.gasRemaining} pc=${out.pc})\n") {
+              out.exit shouldBe interp.exit
+              out.gasRemaining shouldBe interp.gas
+              out.pc shouldBe interp.pc
+              nRegs.toSeq shouldBe interp.regs.toSeq
+            }
+          info("oracle differential (batch-E control flow): 20000 programs matched the interpreter")
         finally rc.close()
   }

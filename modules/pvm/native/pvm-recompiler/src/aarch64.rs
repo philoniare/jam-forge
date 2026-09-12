@@ -995,6 +995,64 @@ impl Backend for Aarch64Backend {
                             ; str x8, [x0, #dst * 8]
                         );
                     }
+                    Op::InvertedLogical { dst, src, src2, kind } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                        );
+                        match kind {
+                            InvLogicalKind::AndNot => dynasm!(a; .arch aarch64; bic x8, x8, x9),
+                            InvLogicalKind::OrNot => dynasm!(a; .arch aarch64; orn x8, x8, x9),
+                            InvLogicalKind::Xnor => dynasm!(a; .arch aarch64; eon x8, x8, x9),
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::MinMax { dst, src, src2, kind } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cmp x8, x9
+                        );
+                        match kind {
+                            MinMaxKind::MaxSigned => dynasm!(a; .arch aarch64; csel x8, x8, x9, gt),
+                            MinMaxKind::MaxUnsigned => dynasm!(a; .arch aarch64; csel x8, x8, x9, hi),
+                            MinMaxKind::MinSigned => dynasm!(a; .arch aarch64; csel x8, x8, x9, lt),
+                            MinMaxKind::MinUnsigned => dynasm!(a; .arch aarch64; csel x8, x8, x9, lo),
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::CmovIfZero { dst, src, src2 } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        let skip = a.new_dynamic_label();
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x9, [x0, #src2 * 8]
+                            ; cbnz x9, =>skip
+                            ; ldr x8, [x0, #src * 8]
+                            ; str x8, [x0, #dst * 8]
+                            ; =>skip
+                        );
+                    }
+                    Op::CmovImm { dst, src, imm, zero_taken } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        let skip = a.new_dynamic_label();
+                        dynasm!(a; .arch aarch64; ldr x9, [x0, #src * 8]);
+                        if zero_taken {
+                            dynasm!(a; .arch aarch64; cbnz x9, =>skip);
+                        } else {
+                            dynasm!(a; .arch aarch64; cbz x9, =>skip);
+                        }
+                        mov_imm64(&mut a, 8, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; str x8, [x0, #dst * 8]
+                            ; =>skip
+                        );
+                    }
                 }
             }
             let last_op_is_terminator = ops[hi - 1].is_terminator();
