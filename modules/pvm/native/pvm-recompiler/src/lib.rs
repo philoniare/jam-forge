@@ -120,6 +120,16 @@ pub const OP_ROTATE_LEFT64: u32 = 220; // reg[a] = rotl64(reg[b], reg[c] & 63)
 pub const OP_ROTATE_LEFT32: u32 = 221; // reg[a] = sign_extend32(rotl32(reg[b] as i32, reg[c] & 31))
 pub const OP_ROTATE_RIGHT64: u32 = 222; // reg[a] = rotr64(reg[b], reg[c] & 63)
 pub const OP_ROTATE_RIGHT32: u32 = 223; // reg[a] = sign_extend32(rotr32(reg[b] as i32, reg[c] & 31))
+pub const OP_COUNT_SET_BITS64: u32 = 102; // reg[a] = popcount64(reg[b])
+pub const OP_COUNT_SET_BITS32: u32 = 103; // reg[a] = sign_extend32(popcount32(reg[b] as i32))
+pub const OP_COUNT_LEADING_ZERO_BITS64: u32 = 104; // reg[a] = clz64(reg[b])  (0 -> 64)
+pub const OP_COUNT_LEADING_ZERO_BITS32: u32 = 105; // reg[a] = sign_extend32(clz32(reg[b] as i32))  (0 -> 32)
+pub const OP_COUNT_TRAILING_ZERO_BITS64: u32 = 106; // reg[a] = ctz64(reg[b])  (0 -> 64)
+pub const OP_COUNT_TRAILING_ZERO_BITS32: u32 = 107; // reg[a] = sign_extend32(ctz32(reg[b] as i32))  (0 -> 32)
+pub const OP_SIGN_EXTEND8: u32 = 108; // reg[a] = sign_extend64(reg[b] as i8)
+pub const OP_SIGN_EXTEND16: u32 = 109; // reg[a] = sign_extend64(reg[b] as i16)
+pub const OP_ZERO_EXTEND16: u32 = 110; // reg[a] = reg[b] & 0xFFFF  (zero-extended, no sign extension)
+pub const OP_REVERSE_BYTE: u32 = 111; // reg[a] = byte_swap64(reg[b])  (full 64-bit byte reversal, NOT bit-reversal)
 
 /// Indirect-jump sentinel: `JumpIndirect reg, offset` where `reg[a]+offset`
 /// equals this value halts the program cleanly (EXIT_HALT). Mirrors the PVM
@@ -196,6 +206,13 @@ pub enum Op {
     AluReg { dst: u8, src: u8, src2: u8, kind: AluKind, width: Width },
     AluImm { dst: u8, src: u8, imm: u64, kind: AluKind, width: Width },
     NegateAndAddImm { dst: u8, src: u8, imm: u64, width: Width },
+    CountSetBits { dst: u8, src: u8, width: Width },
+    CountLeadingZeroBits { dst: u8, src: u8, width: Width },
+    CountTrailingZeroBits { dst: u8, src: u8, width: Width },
+    SignExtend8 { dst: u8, src: u8 },
+    SignExtend16 { dst: u8, src: u8 },
+    ZeroExtend16 { dst: u8, src: u8 },
+    ReverseByte { dst: u8, src: u8 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -401,6 +418,16 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_MUL_IMM64 => ops.push(Op::AluImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, kind: AluKind::Mul, width: Width::W64 }),
             OP_NEGATE_AND_ADD_IMM32 => ops.push(Op::NegateAndAddImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: Width::W32 }),
             OP_NEGATE_AND_ADD_IMM64 => ops.push(Op::NegateAndAddImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, width: Width::W64 }),
+            OP_COUNT_SET_BITS64 => ops.push(Op::CountSetBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W64 }),
+            OP_COUNT_SET_BITS32 => ops.push(Op::CountSetBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W32 }),
+            OP_COUNT_LEADING_ZERO_BITS64 => ops.push(Op::CountLeadingZeroBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W64 }),
+            OP_COUNT_LEADING_ZERO_BITS32 => ops.push(Op::CountLeadingZeroBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W32 }),
+            OP_COUNT_TRAILING_ZERO_BITS64 => ops.push(Op::CountTrailingZeroBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W64 }),
+            OP_COUNT_TRAILING_ZERO_BITS32 => ops.push(Op::CountTrailingZeroBits { dst: ins.a as u8, src: ins.b as u8, width: Width::W32 }),
+            OP_SIGN_EXTEND8 => ops.push(Op::SignExtend8 { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_SIGN_EXTEND16 => ops.push(Op::SignExtend16 { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_ZERO_EXTEND16 => ops.push(Op::ZeroExtend16 { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_REVERSE_BYTE => ops.push(Op::ReverseByte { dst: ins.a as u8, src: ins.b as u8 }),
 
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
@@ -2088,5 +2115,285 @@ mod tests {
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
         assert_eq!(regs[2], u64::MAX);
+    }
+
+    #[test]
+    fn count_set_bits64_zero_all_ones_single_bit() {
+        let cases: [(u64, u64); 4] =
+            [(0, 0), (u64::MAX, 64), (1, 1), (1u64 << 63, 1)];
+        for (input, expected) in cases {
+            let prog = with_pcs(vec![
+                ri(OP_LOAD_IMM64, 1, 0, 0, input as i64),
+                ri(OP_COUNT_SET_BITS64, 2, 1, 0, 0),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            run(&prog, &mut regs, &mut gas);
+            assert_eq!(regs[2], expected, "popcount64({input:#x})");
+        }
+    }
+
+    #[test]
+    fn count_set_bits32_truncates_source_and_sign_extends_result() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAAAAAAAAFFFFFFFFu64 as i64),
+            ri(OP_COUNT_SET_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2] as i64, 32i64);
+
+        // Zero low32 (nonzero high garbage) -> count 0.
+        let prog0 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFF00000000u64 as i64),
+            ri(OP_COUNT_SET_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs0 = [0u64; 13];
+        let mut gas0 = 100i64;
+        run(&prog0, &mut regs0, &mut gas0);
+        assert_eq!(regs0[2], 0);
+
+        // Single bit in low32 -> count 1.
+        let prog1 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000080000000u64 as i64),
+            ri(OP_COUNT_SET_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs1 = [0u64; 13];
+        let mut gas1 = 100i64;
+        run(&prog1, &mut regs1, &mut gas1);
+        assert_eq!(regs1[2], 1);
+    }
+
+    #[test]
+    fn count_leading_zero_bits64_zero_all_ones_single_bit() {
+        let cases: [(u64, u64); 4] =
+            [(0, 64), (u64::MAX, 0), (1, 63), (1u64 << 63, 0)];
+        for (input, expected) in cases {
+            let prog = with_pcs(vec![
+                ri(OP_LOAD_IMM64, 1, 0, 0, input as i64),
+                ri(OP_COUNT_LEADING_ZERO_BITS64, 2, 1, 0, 0),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            run(&prog, &mut regs, &mut gas);
+            assert_eq!(regs[2], expected, "clz64({input:#x})");
+        }
+    }
+
+    #[test]
+    fn count_leading_zero_bits32_zero_all_ones_single_bit_truncates_high_garbage() {
+        let prog0 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFF00000000u64 as i64),
+            ri(OP_COUNT_LEADING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs0 = [0u64; 13];
+        let mut gas0 = 100i64;
+        run(&prog0, &mut regs0, &mut gas0);
+        assert_eq!(regs0[2], 32);
+
+        // low32 all-ones -> 0 leading zeros.
+        let prog_ones = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x00000000FFFFFFFFu64 as i64),
+            ri(OP_COUNT_LEADING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_ones = [0u64; 13];
+        let mut gas_ones = 100i64;
+        run(&prog_ones, &mut regs_ones, &mut gas_ones);
+        assert_eq!(regs_ones[2], 0);
+
+        // single bit at low32's bit 0 -> 31 leading zeros.
+        let prog1 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000000000001u64 as i64),
+            ri(OP_COUNT_LEADING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs1 = [0u64; 13];
+        let mut gas1 = 100i64;
+        run(&prog1, &mut regs1, &mut gas1);
+        assert_eq!(regs1[2] as i64, 31i64);
+    }
+
+    #[test]
+    fn count_trailing_zero_bits64_zero_all_ones_single_bit() {
+        let cases: [(u64, u64); 4] =
+            [(0, 64), (u64::MAX, 0), (1, 0), (1u64 << 63, 63)];
+        for (input, expected) in cases {
+            let prog = with_pcs(vec![
+                ri(OP_LOAD_IMM64, 1, 0, 0, input as i64),
+                ri(OP_COUNT_TRAILING_ZERO_BITS64, 2, 1, 0, 0),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            run(&prog, &mut regs, &mut gas);
+            assert_eq!(regs[2], expected, "ctz64({input:#x})");
+        }
+    }
+
+    #[test]
+    fn count_trailing_zero_bits32_zero_all_ones_single_bit_truncates_high_garbage() {
+        let prog0 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000100000000u64 as i64),
+            ri(OP_COUNT_TRAILING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs0 = [0u64; 13];
+        let mut gas0 = 100i64;
+        run(&prog0, &mut regs0, &mut gas0);
+        assert_eq!(regs0[2], 32);
+
+        // low32 all-ones -> 0 trailing zeros.
+        let prog_ones = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFFFFFFFFFFu64 as i64),
+            ri(OP_COUNT_TRAILING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_ones = [0u64; 13];
+        let mut gas_ones = 100i64;
+        run(&prog_ones, &mut regs_ones, &mut gas_ones);
+        assert_eq!(regs_ones[2], 0);
+
+        // single bit at low32's bit 31 -> 31 trailing zeros.
+        let prog1 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000080000000u64 as i64),
+            ri(OP_COUNT_TRAILING_ZERO_BITS32, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs1 = [0u64; 13];
+        let mut gas1 = 100i64;
+        run(&prog1, &mut regs1, &mut gas1);
+        assert_eq!(regs1[2] as i64, 31i64);
+    }
+
+    #[test]
+    fn sign_extend8_boundary_values() {
+        let prog_pos = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAAAAAAAAAAAAAA7Fu64 as i64),
+            ri(OP_SIGN_EXTEND8, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_pos = [0u64; 13];
+        let mut gas_pos = 100i64;
+        run(&prog_pos, &mut regs_pos, &mut gas_pos);
+        assert_eq!(regs_pos[2] as i64, 0x7Fi64);
+
+        let prog_neg = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000000000080u64 as i64),
+            ri(OP_SIGN_EXTEND8, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_neg = [0u64; 13];
+        let mut gas_neg = 100i64;
+        run(&prog_neg, &mut regs_neg, &mut gas_neg);
+        assert_eq!(regs_neg[2] as i64, -128i64);
+
+        // 0xFF -> -1.
+        let prog_ff = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x00000000000000FFu64 as i64),
+            ri(OP_SIGN_EXTEND8, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_ff = [0u64; 13];
+        let mut gas_ff = 100i64;
+        run(&prog_ff, &mut regs_ff, &mut gas_ff);
+        assert_eq!(regs_ff[2] as i64, -1i64);
+    }
+
+    #[test]
+    fn sign_extend16_boundary_values() {
+        let prog_pos = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAAAAAAAAAAAA7FFFu64 as i64),
+            ri(OP_SIGN_EXTEND16, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_pos = [0u64; 13];
+        let mut gas_pos = 100i64;
+        run(&prog_pos, &mut regs_pos, &mut gas_pos);
+        assert_eq!(regs_pos[2] as i64, 0x7FFFi64);
+
+        let prog_neg = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0000000000008000u64 as i64),
+            ri(OP_SIGN_EXTEND16, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_neg = [0u64; 13];
+        let mut gas_neg = 100i64;
+        run(&prog_neg, &mut regs_neg, &mut gas_neg);
+        assert_eq!(regs_neg[2] as i64, -32768i64);
+
+        // 0xFFFF -> -1.
+        let prog_ffff = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x000000000000FFFFu64 as i64),
+            ri(OP_SIGN_EXTEND16, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_ffff = [0u64; 13];
+        let mut gas_ffff = 100i64;
+        run(&prog_ffff, &mut regs_ffff, &mut gas_ffff);
+        assert_eq!(regs_ffff[2] as i64, -1i64);
+    }
+
+    #[test]
+    fn zero_extend16_clears_upper_bits_no_sign_extension() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFFFFFFFFFFu64 as i64),
+            ri(OP_ZERO_EXTEND16, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0xFFFFu64);
+        let prog2 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xAAAAAAAAAAAA8000u64 as i64),
+            ri(OP_ZERO_EXTEND16, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs2 = [0u64; 13];
+        let mut gas2 = 100i64;
+        run(&prog2, &mut regs2, &mut gas2);
+        assert_eq!(regs2[2], 0x8000u64);
+    }
+
+    #[test]
+    fn reverse_byte_is_full_64bit_byte_swap_not_bit_reversal() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x0102030405060708u64 as i64),
+            ri(OP_REVERSE_BYTE, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 0x0807060504030201u64);
+
+        // Zero and all-ones are their own byte-reversal (sanity edges).
+        let prog0 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),
+            ri(OP_REVERSE_BYTE, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs0 = [0u64; 13];
+        let mut gas0 = 100i64;
+        run(&prog0, &mut regs0, &mut gas0);
+        assert_eq!(regs0[2], 0);
+
+        let prog_ones = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0xFFFFFFFFFFFFFFFFu64 as i64),
+            ri(OP_REVERSE_BYTE, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs_ones = [0u64; 13];
+        let mut gas_ones = 100i64;
+        run(&prog_ones, &mut regs_ones, &mut gas_ones);
+        assert_eq!(regs_ones[2], 0xFFFFFFFFFFFFFFFFu64);
     }
 }

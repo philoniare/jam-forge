@@ -265,6 +265,37 @@ fn emit_cset(a: &mut Asm, rd: u8, cond: CmpCond) {
     }
 }
 
+fn emit_popcount64(a: &mut Asm) {
+    mov_imm64(a, 9, 0x5555_5555_5555_5555);
+    dynasm!(a
+        ; .arch aarch64
+        ; and x10, x8, x9        // x10 = x8 & m1
+        ; lsr x8, x8, #1
+        ; and x8, x8, x9         // x8 = (x8 >> 1) & m1
+        ; add x8, x8, x10        // x8 = pairwise 2-bit counts
+    );
+    mov_imm64(a, 9, 0x3333_3333_3333_3333);
+    dynasm!(a
+        ; .arch aarch64
+        ; and x10, x8, x9        // x10 = x8 & m2
+        ; lsr x8, x8, #2
+        ; and x8, x8, x9         // x8 = (x8 >> 2) & m2
+        ; add x8, x8, x10        // x8 = nibble 4-bit counts
+    );
+    mov_imm64(a, 9, 0x0f0f_0f0f_0f0f_0f0f);
+    dynasm!(a
+        ; .arch aarch64
+        ; add x8, x8, x8, lsr #4 // x8 = byte-pair sums (each nibble <= 8, no overflow)
+        ; and x8, x8, x9         // x8 = per-byte popcount (0..8) in each byte lane
+    );
+    mov_imm64(a, 9, 0x0101_0101_0101_0101);
+    dynasm!(a
+        ; .arch aarch64
+        ; mul x8, x8, x9         // x8 = sum of all 8 byte lanes folds into the top byte
+        ; lsr x8, x8, #56        // x8 = final population count (0..64)
+    );
+}
+
 fn emit_alu(a: &mut Asm, kind: AluKind, width: Width) {
     match (width, kind) {
         (Width::W32, AluKind::Add) => dynasm!(a; .arch aarch64; add w8, w8, w9),
@@ -879,6 +910,90 @@ impl Backend for Aarch64Backend {
                             }
                         }
                         dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::CountSetBits { dst, src, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; ldr w8, [x0, #src * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]),
+                        }
+                        emit_popcount64(&mut a);
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
+                    }
+                    Op::CountLeadingZeroBits { dst, src, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        match width {
+                            Width::W32 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr w8, [x0, #src * 8]
+                                ; clz w8, w8
+                                ; sxtw x8, w8
+                            ),
+                            Width::W64 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr x8, [x0, #src * 8]
+                                ; clz x8, x8
+                            ),
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::CountTrailingZeroBits { dst, src, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        match width {
+                            Width::W32 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr w8, [x0, #src * 8]
+                                ; rbit w8, w8
+                                ; clz w8, w8
+                                ; sxtw x8, w8
+                            ),
+                            Width::W64 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr x8, [x0, #src * 8]
+                                ; rbit x8, x8
+                                ; clz x8, x8
+                            ),
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::SignExtend8 { dst, src } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr w8, [x0, #src * 8]
+                            ; sxtb x8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::SignExtend16 { dst, src } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr w8, [x0, #src * 8]
+                            ; sxth x8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::ZeroExtend16 { dst, src } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr w8, [x0, #src * 8]
+                            ; uxth w8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                    }
+                    Op::ReverseByte { dst, src } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; rev x8, x8
+                            ; str x8, [x0, #dst * 8]
+                        );
                     }
                 }
             }
