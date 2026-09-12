@@ -120,6 +120,16 @@ pub const OP_ROTATE_LEFT64: u32 = 220; // reg[a] = rotl64(reg[b], reg[c] & 63)
 pub const OP_ROTATE_LEFT32: u32 = 221; // reg[a] = sign_extend32(rotl32(reg[b] as i32, reg[c] & 31))
 pub const OP_ROTATE_RIGHT64: u32 = 222; // reg[a] = rotr64(reg[b], reg[c] & 63)
 pub const OP_ROTATE_RIGHT32: u32 = 223; // reg[a] = sign_extend32(rotr32(reg[b] as i32, reg[c] & 31))
+pub const OP_CMOV_IF_ZERO_IMM: u32 = 147; // if reg[b] == 0 then reg[a] = imm  (else reg[a] unchanged)
+pub const OP_CMOV_IF_NOT_ZERO_IMM: u32 = 148; // if reg[b] != 0 then reg[a] = imm  (else reg[a] unchanged)
+pub const OP_CMOV_IF_ZERO: u32 = 218; // if reg[c] == 0 then reg[a] = reg[b]  (else reg[a] unchanged)
+pub const OP_AND_INVERTED: u32 = 224; // reg[a] = reg[b] & !reg[c]
+pub const OP_OR_INVERTED: u32 = 225; // reg[a] = reg[b] | !reg[c]
+pub const OP_XNOR: u32 = 226; // reg[a] = !(reg[b] ^ reg[c])
+pub const OP_MAXIMUM: u32 = 227; // reg[a] = max_signed(reg[b], reg[c])
+pub const OP_MAXIMUM_UNSIGNED: u32 = 228; // reg[a] = max_unsigned(reg[b], reg[c])
+pub const OP_MINIMUM: u32 = 229; // reg[a] = min_signed(reg[b], reg[c])
+pub const OP_MINIMUM_UNSIGNED: u32 = 230; // reg[a] = min_unsigned(reg[b], reg[c])
 pub const OP_COUNT_SET_BITS64: u32 = 102; // reg[a] = popcount64(reg[b])
 pub const OP_COUNT_SET_BITS32: u32 = 103; // reg[a] = sign_extend32(popcount32(reg[b] as i32))
 pub const OP_COUNT_LEADING_ZERO_BITS64: u32 = 104; // reg[a] = clz64(reg[b])  (0 -> 64)
@@ -213,6 +223,10 @@ pub enum Op {
     SignExtend16 { dst: u8, src: u8 },
     ZeroExtend16 { dst: u8, src: u8 },
     ReverseByte { dst: u8, src: u8 },
+    InvertedLogical { dst: u8, src: u8, src2: u8, kind: InvLogicalKind },
+    MinMax { dst: u8, src: u8, src2: u8, kind: MinMaxKind },
+    CmovIfZero { dst: u8, src: u8, src2: u8 },
+    CmovImm { dst: u8, src: u8, imm: u64, zero_taken: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +237,22 @@ pub enum AluKind {
     And,
     Or,
     Xor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvLogicalKind {
+    AndNot,
+    OrNot,
+    Xnor,
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinMaxKind {
+    MaxSigned,
+    MaxUnsigned,
+    MinSigned,
+    MinUnsigned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +458,16 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_SIGN_EXTEND16 => ops.push(Op::SignExtend16 { dst: ins.a as u8, src: ins.b as u8 }),
             OP_ZERO_EXTEND16 => ops.push(Op::ZeroExtend16 { dst: ins.a as u8, src: ins.b as u8 }),
             OP_REVERSE_BYTE => ops.push(Op::ReverseByte { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_AND_INVERTED => ops.push(Op::InvertedLogical { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: InvLogicalKind::AndNot }),
+            OP_OR_INVERTED => ops.push(Op::InvertedLogical { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: InvLogicalKind::OrNot }),
+            OP_XNOR => ops.push(Op::InvertedLogical { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: InvLogicalKind::Xnor }),
+            OP_MAXIMUM => ops.push(Op::MinMax { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MinMaxKind::MaxSigned }),
+            OP_MAXIMUM_UNSIGNED => ops.push(Op::MinMax { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MinMaxKind::MaxUnsigned }),
+            OP_MINIMUM => ops.push(Op::MinMax { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MinMaxKind::MinSigned }),
+            OP_MINIMUM_UNSIGNED => ops.push(Op::MinMax { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MinMaxKind::MinUnsigned }),
+            OP_CMOV_IF_ZERO => ops.push(Op::CmovIfZero { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
+            OP_CMOV_IF_ZERO_IMM => ops.push(Op::CmovImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, zero_taken: true }),
+            OP_CMOV_IF_NOT_ZERO_IMM => ops.push(Op::CmovImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, zero_taken: false }),
 
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
@@ -2395,5 +2435,258 @@ mod tests {
         let mut gas_ones = 100i64;
         run(&prog_ones, &mut regs_ones, &mut gas_ones);
         assert_eq!(regs_ones[2], 0xFFFFFFFFFFFFFFFFu64);
+    }
+
+    #[test]
+    fn and_inverted_inverts_the_second_operand() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0b1100i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0b1010i64),
+            ri(OP_AND_INVERTED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 0b0100u64);
+
+        let prog2 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0b1010i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0b1100i64),
+            ri(OP_AND_INVERTED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs2 = [0u64; 13];
+        let mut gas2 = 100i64;
+        run(&prog2, &mut regs2, &mut gas2);
+        assert_eq!(regs2[3], 0b0010u64);
+    }
+
+    #[test]
+    fn or_inverted_inverts_the_second_operand() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0),
+            ri(OP_OR_INVERTED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], u64::MAX);
+
+        let prog2 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0xFFFFFFFFFFFFFFFFu64 as i64),
+            ri(OP_OR_INVERTED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs2 = [0u64; 13];
+        let mut gas2 = 100i64;
+        run(&prog2, &mut regs2, &mut gas2);
+        assert_eq!(regs2[3], 0u64);
+    }
+
+    #[test]
+    fn xnor_is_bitwise_not_of_xor_and_operand_order_symmetric() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0b1100i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0b1010i64),
+            ri(OP_XNOR, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        // 0b1100 ^ 0b1010 = 0b0110; !0b0110 = ...1001 (64-bit).
+        assert_eq!(regs[3], !0b0110u64);
+
+        // Equal operands: a ^ a = 0, !0 = all-ones.
+        let prog2 = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1234_5678_9abc_def0u64 as i64),
+            ri(OP_XNOR, 3, 1, 1, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs2 = [0u64; 13];
+        let mut gas2 = 100i64;
+        run(&prog2, &mut regs2, &mut gas2);
+        assert_eq!(regs2[3], u64::MAX);
+    }
+
+    #[test]
+    fn maximum_signed_treats_negative_as_smaller() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64), // 0xFFFF...FFFF, signed -1
+            ri(OP_LOAD_IMM64, 2, 0, 0, 5i64),
+            ri(OP_MAXIMUM, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3] as i64, 5i64, "signed max(-1, 5) must be 5");
+    }
+
+    #[test]
+    fn maximum_unsigned_treats_negative_bit_pattern_as_huge() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 5i64),
+            ri(OP_MAXIMUM_UNSIGNED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], u64::MAX, "unsigned max(u64::MAX, 5) must be u64::MAX");
+    }
+
+    #[test]
+    fn minimum_signed_picks_the_negative_value() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 5i64),
+            ri(OP_MINIMUM, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3] as i64, -1i64, "signed min(-1, 5) must be -1");
+    }
+
+    #[test]
+    fn minimum_unsigned_picks_the_small_value_despite_negative_bit_pattern() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, -1i64),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 5i64),
+            ri(OP_MINIMUM_UNSIGNED, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 5u64, "unsigned min(u64::MAX, 5) must be 5");
+    }
+
+    #[test]
+    fn minmax_equal_operands_returns_that_value_for_all_four_kinds() {
+        for (op, expect) in [
+            (OP_MAXIMUM, 42u64), (OP_MAXIMUM_UNSIGNED, 42u64),
+            (OP_MINIMUM, 42u64), (OP_MINIMUM_UNSIGNED, 42u64),
+        ] {
+            let prog = with_pcs(vec![
+                ri(OP_LOAD_IMM64, 1, 0, 0, 42),
+                ri(OP_LOAD_IMM64, 2, 0, 0, 42),
+                ri(op, 3, 1, 2, 0),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            run(&prog, &mut regs, &mut gas);
+            assert_eq!(regs[3], expect, "op={op} equal operands");
+        }
+    }
+
+    #[test]
+    fn cmov_if_zero_moves_when_condition_zero() {
+        // CmovIfZero(d, s1, s2): if reg[s2] == 0 then reg[d] = reg[s1].
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 42),  // s1 (the value)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0),   // s2 (the condition, zero -> taken)
+            ri(OP_LOAD_IMM64, 3, 0, 0, 999), // d, pre-existing value
+            ri(OP_CMOV_IF_ZERO, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 42);
+    }
+
+    #[test]
+    fn cmov_if_zero_leaves_dst_unchanged_when_condition_nonzero() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 42),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7), // condition nonzero -> not taken
+            ri(OP_LOAD_IMM64, 3, 0, 0, 999),
+            ri(OP_CMOV_IF_ZERO, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[3], 999); // unchanged
+    }
+
+    #[test]
+    fn cmov_if_zero_imm_writes_the_immediate_not_a_register_copy() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),   // src (condition, zero -> taken)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 999), // dst, pre-existing value
+            ri(OP_CMOV_IF_ZERO_IMM, 2, 1, 0, 12345),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 12345, "dst must become the IMMEDIATE, not reg[src]'s value (0)");
+    }
+
+    #[test]
+    fn cmov_if_zero_imm_leaves_dst_unchanged_when_condition_nonzero() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 7), // src nonzero -> not taken
+            ri(OP_LOAD_IMM64, 2, 0, 0, 999),
+            ri(OP_CMOV_IF_ZERO_IMM, 2, 1, 0, 12345),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 999); // unchanged
+    }
+
+    #[test]
+    fn cmov_if_not_zero_imm_writes_the_immediate_when_condition_nonzero() {
+        // CmovIfNotZeroImm(dst, src, imm): if reg[src] != 0 then reg[dst] = imm.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 7), // src nonzero -> taken
+            ri(OP_LOAD_IMM64, 2, 0, 0, 999),
+            ri(OP_CMOV_IF_NOT_ZERO_IMM, 2, 1, 0, 54321),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 54321);
+    }
+
+    #[test]
+    fn cmov_if_not_zero_imm_leaves_dst_unchanged_when_condition_zero() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0), // src zero -> not taken
+            ri(OP_LOAD_IMM64, 2, 0, 0, 999),
+            ri(OP_CMOV_IF_NOT_ZERO_IMM, 2, 1, 0, 54321),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], 999); // unchanged
+    }
+
+    #[test]
+    fn cmov_if_zero_imm_negative_immediate_sign_extends() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0),
+            ri(OP_CMOV_IF_ZERO_IMM, 2, 1, 0, -1),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        assert_eq!(regs[2], u64::MAX);
     }
 }
