@@ -265,6 +265,23 @@ fn emit_cset(a: &mut Asm, rd: u8, cond: CmpCond) {
     }
 }
 
+fn emit_alu(a: &mut Asm, kind: AluKind, width: Width) {
+    match (width, kind) {
+        (Width::W32, AluKind::Add) => dynasm!(a; .arch aarch64; add w8, w8, w9),
+        (Width::W32, AluKind::Sub) => dynasm!(a; .arch aarch64; sub w8, w8, w9),
+        (Width::W32, AluKind::Mul) => dynasm!(a; .arch aarch64; mul w8, w8, w9),
+        (Width::W32, AluKind::And) => dynasm!(a; .arch aarch64; and w8, w8, w9),
+        (Width::W32, AluKind::Or) => dynasm!(a; .arch aarch64; orr w8, w8, w9),
+        (Width::W32, AluKind::Xor) => dynasm!(a; .arch aarch64; eor w8, w8, w9),
+        (Width::W64, AluKind::Add) => dynasm!(a; .arch aarch64; add x8, x8, x9),
+        (Width::W64, AluKind::Sub) => dynasm!(a; .arch aarch64; sub x8, x8, x9),
+        (Width::W64, AluKind::Mul) => dynasm!(a; .arch aarch64; mul x8, x8, x9),
+        (Width::W64, AluKind::And) => dynasm!(a; .arch aarch64; and x8, x8, x9),
+        (Width::W64, AluKind::Or) => dynasm!(a; .arch aarch64; orr x8, x8, x9),
+        (Width::W64, AluKind::Xor) => dynasm!(a; .arch aarch64; eor x8, x8, x9),
+    }
+}
+
 enum ShiftAmount {
     Imm(u32),
     Reg(u8),
@@ -807,6 +824,61 @@ impl Backend for Aarch64Backend {
                             Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
                             Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
                         }
+                    }
+                    Op::AluReg { dst, src, src2, kind, width } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        match width {
+                            Width::W32 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr w8, [x0, #src * 8]
+                                ; ldr w9, [x0, #src2 * 8]
+                            ),
+                            Width::W64 => dynasm!(a
+                                ; .arch aarch64
+                                ; ldr x8, [x0, #src * 8]
+                                ; ldr x9, [x0, #src2 * 8]
+                            ),
+                        }
+                        emit_alu(&mut a, kind, width);
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
+                    }
+                    Op::AluImm { dst, src, imm, kind, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        match width {
+                            Width::W32 => {
+                                dynasm!(a; .arch aarch64; ldr w8, [x0, #src * 8]);
+                                mov_imm32(&mut a, 9, imm as u32);
+                            }
+                            Width::W64 => {
+                                dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                                mov_imm64(&mut a, 9, imm);
+                            }
+                        }
+                        emit_alu(&mut a, kind, width);
+                        match width {
+                            Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+                            Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+                        }
+                    }
+                    Op::NegateAndAddImm { dst, src, imm, width } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        match width {
+                            Width::W32 => {
+                                dynasm!(a; .arch aarch64; ldr w8, [x0, #src * 8]);
+                                mov_imm32(&mut a, 9, imm as u32);
+                                // x9(imm) - x8(src): operand order matters.
+                                dynasm!(a; .arch aarch64; sub w8, w9, w8; sxtw x8, w8);
+                            }
+                            Width::W64 => {
+                                dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
+                                mov_imm64(&mut a, 9, imm);
+                                dynasm!(a; .arch aarch64; sub x8, x9, x8);
+                            }
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
                     }
                 }
             }
