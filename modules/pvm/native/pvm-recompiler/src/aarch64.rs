@@ -313,6 +313,151 @@ fn emit_alu(a: &mut Asm, kind: AluKind, width: Width) {
     }
 }
 
+fn emit_load_operands_w(a: &mut Asm, src: u32, src2: u32, width: Width) {
+    match width {
+        Width::W32 => dynasm!(a
+            ; .arch aarch64
+            ; ldr w8, [x0, #src * 8]
+            ; ldr w9, [x0, #src2 * 8]
+        ),
+        Width::W64 => dynasm!(a
+            ; .arch aarch64
+            ; ldr x8, [x0, #src * 8]
+            ; ldr x9, [x0, #src2 * 8]
+        ),
+    }
+}
+
+fn emit_div(a: &mut Asm, width: Width, signed: bool) {
+    let zero_label = a.new_dynamic_label();
+    let done_label = a.new_dynamic_label();
+    match width {
+        Width::W32 => {
+            dynasm!(a; .arch aarch64; cbz w9, =>zero_label); // divisor==0 -> result -1
+            if signed {
+                let overflow_label = a.new_dynamic_label();
+                mov_imm32(a, 10, 0x8000_0000u32); // i32::MIN
+                dynasm!(a
+                    ; .arch aarch64
+                    ; cmp w8, w10
+                    ; b.ne =>overflow_label
+                    ; cmn w9, #1              // divisor == -1? (w9 + 1 == 0)
+                    ; b.eq =>done_label       // MIN/-1 -> result MIN == dividend, x8 already holds it
+                    ; =>overflow_label
+                    ; sdiv w8, w8, w9
+                    ; b =>done_label
+                );
+            } else {
+                dynasm!(a; .arch aarch64; udiv w8, w8, w9; b =>done_label);
+            }
+            dynasm!(a
+                ; .arch aarch64
+                ; =>zero_label
+                ; movn w8, #0                 // all-ones (i32 -1), sign-extends to i64 -1 downstream
+                ; =>done_label
+            );
+        }
+        Width::W64 => {
+            dynasm!(a; .arch aarch64; cbz x9, =>zero_label); // divisor==0 -> result -1
+            if signed {
+                let overflow_label = a.new_dynamic_label();
+                emit_load_i64_min(a, 10);
+                dynasm!(a
+                    ; .arch aarch64
+                    ; cmp x8, x10
+                    ; b.ne =>overflow_label
+                    ; cmn x9, #1              // divisor == -1?
+                    ; b.eq =>done_label       // MIN/-1 -> result MIN == dividend, x8 already holds it
+                    ; =>overflow_label
+                    ; sdiv x8, x8, x9
+                    ; b =>done_label
+                );
+            } else {
+                dynasm!(a; .arch aarch64; udiv x8, x8, x9; b =>done_label);
+            }
+            dynasm!(a
+                ; .arch aarch64
+                ; =>zero_label
+                ; movn x8, #0                 // all-ones (i64 -1)
+                ; =>done_label
+            );
+        }
+    }
+}
+
+fn emit_load_i64_min(a: &mut Asm, rd: u8) {
+    mov_imm64(a, rd, 0x8000_0000_0000_0000u64);
+}
+
+fn emit_rem(a: &mut Asm, width: Width, signed: bool) {
+    let zero_label = a.new_dynamic_label();
+    let overflow_label = a.new_dynamic_label();
+    let done_label = a.new_dynamic_label();
+    match width {
+        Width::W32 => {
+            dynasm!(a; .arch aarch64; cbz w9, =>zero_label); // divisor==0 -> result = dividend (x8 unchanged)
+            if signed {
+                mov_imm32(a, 10, 0x8000_0000u32); // i32::MIN
+                dynasm!(a
+                    ; .arch aarch64
+                    ; cmp w8, w10
+                    ; b.ne =>overflow_label
+                    ; cmn w9, #1              // divisor == -1?
+                    ; b.ne =>overflow_label
+                    ; movz w8, #0             // MIN % -1 -> 0
+                    ; b =>done_label
+                    ; =>overflow_label
+                    ; sdiv w10, w8, w9
+                    ; msub w8, w10, w9, w8    // w8 = dividend - quotient*divisor
+                    ; b =>done_label
+                );
+            } else {
+                dynasm!(a
+                    ; .arch aarch64
+                    ; udiv w10, w8, w9
+                    ; msub w8, w10, w9, w8
+                    ; b =>done_label
+                );
+            }
+            dynasm!(a; .arch aarch64; =>zero_label; =>done_label); // divisor==0: x8 (dividend) already the result
+        }
+        Width::W64 => {
+            dynasm!(a; .arch aarch64; cbz x9, =>zero_label); // divisor==0 -> result = dividend (x8 unchanged)
+            if signed {
+                emit_load_i64_min(a, 10);
+                dynasm!(a
+                    ; .arch aarch64
+                    ; cmp x8, x10
+                    ; b.ne =>overflow_label
+                    ; cmn x9, #1              // divisor == -1?
+                    ; b.ne =>overflow_label
+                    ; movz x8, #0             // MIN % -1 -> 0
+                    ; b =>done_label
+                    ; =>overflow_label
+                    ; sdiv x10, x8, x9
+                    ; msub x8, x10, x9, x8
+                    ; b =>done_label
+                );
+            } else {
+                dynasm!(a
+                    ; .arch aarch64
+                    ; udiv x10, x8, x9
+                    ; msub x8, x10, x9, x8
+                    ; b =>done_label
+                );
+            }
+            dynasm!(a; .arch aarch64; =>zero_label; =>done_label); // divisor==0: x8 (dividend) already the result
+        }
+    }
+}
+
+fn emit_div_rem_finish(a: &mut Asm, dst: u32, width: Width) {
+    match width {
+        Width::W32 => dynasm!(a; .arch aarch64; sxtw x8, w8; str x8, [x0, #dst * 8]),
+        Width::W64 => dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]),
+    }
+}
+
 enum ShiftAmount {
     Imm(u32),
     Reg(u8),
@@ -1052,6 +1197,40 @@ impl Backend for Aarch64Backend {
                             ; str x8, [x0, #dst * 8]
                             ; =>skip
                         );
+                    }
+                    Op::Div { dst, src, src2, width, signed } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        emit_load_operands_w(&mut a, src, src2, width);
+                        emit_div(&mut a, width, signed);
+                        emit_div_rem_finish(&mut a, dst, width);
+                    }
+                    Op::Rem { dst, src, src2, width, signed } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        emit_load_operands_w(&mut a, src, src2, width);
+                        emit_rem(&mut a, width, signed);
+                        emit_div_rem_finish(&mut a, dst, width);
+                    }
+                    Op::MulUpper { dst, src, src2, kind } => {
+                        let (dst, src, src2) = (dst as u32, src as u32, src2 as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x8, [x0, #src * 8]
+                            ; ldr x9, [x0, #src2 * 8]
+                        );
+                        match kind {
+                            MulUpperKind::SignedSigned => dynasm!(a; .arch aarch64; smulh x8, x8, x9),
+                            MulUpperKind::UnsignedUnsigned => dynasm!(a; .arch aarch64; umulh x8, x8, x9),
+                            MulUpperKind::SignedUnsigned => {
+                                dynasm!(a
+                                    ; .arch aarch64
+                                    ; cmp x8, #0          // sets N per a's sign (a in x8, pre-umulh)
+                                    ; umulh x10, x8, x9    // x10 = umulh(a, b); x8/x9 untouched
+                                    ; sub x13, x10, x9     // x13 = umulh(a,b) - b (candidate if a<0)
+                                    ; csel x8, x13, x10, lt // a<0 (N set, LT after cmp #0) -> corrected, else raw umulh
+                                );
+                            }
+                        }
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
                     }
                 }
             }
