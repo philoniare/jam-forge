@@ -312,7 +312,10 @@ lazy val protocol = (project in file("modules/protocol"))
     scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
-    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value)
+    Test / javaOptions ++= nativeLibJavaOptions(
+      (ThisBuild / baseDirectory).value,
+      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+    )
   )
 
 lazy val db = (project in file("modules/db"))

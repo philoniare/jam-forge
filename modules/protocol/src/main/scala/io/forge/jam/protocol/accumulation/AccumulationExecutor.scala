@@ -3,9 +3,10 @@ package io.forge.jam.protocol.accumulation
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.pvm.{InterruptKind, MemoryResult}
+import io.forge.jam.pvm.{ExecutionMode, InterruptKind, MemoryResult}
 import io.forge.jam.pvm.memory.Memory.{isReadable, isWritable}
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
+import io.forge.jam.pvm.recompiler.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UByte}
@@ -44,7 +45,8 @@ class AccumulationExecutor(val config: ChainConfig):
       serviceId: Long,
       gasLimit: Long,
       entropy: JamBytes,
-      operands: List[AccumulationOperand]
+      operands: List[AccumulationOperand],
+      executionMode: ExecutionMode = ExecutionMode.Interpreted
   ): AccumulationOneResult =
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
@@ -104,7 +106,7 @@ class AccumulationExecutor(val config: ChainConfig):
     )
 
     // Execute PVM
-    val execResult = executePvm(context, code.get, gasLimit, operands, JamBytes(codeHash.bytes.toArray))
+    val execResult = executePvm(context, code.get, gasLimit, operands, JamBytes(codeHash.bytes.toArray), executionMode)
 
     // Collapse state based on exit reason
     val finalState = context.collapse(execResult.exitReason)
@@ -137,7 +139,8 @@ class AccumulationExecutor(val config: ChainConfig):
       code: Array[Byte],
       gasLimit: Long,
       operands: List[AccumulationOperand],
-      codeHash: JamBytes
+      codeHash: JamBytes,
+      executionMode: ExecutionMode = ExecutionMode.Interpreted
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
@@ -189,6 +192,16 @@ class AccumulationExecutor(val config: ChainConfig):
     // Execute loop
     var exitReason = ExitReason.HALT
     var continueExecution = true
+    val nativeOutcome = NativeRunner.run(instance, entryPointPc.toInt, executionMode)
+    nativeOutcome match
+      case Some(outcome) =>
+        exitReason = outcome match
+          case NativeRunner.RunOutcome.Halt => ExitReason.HALT
+          case NativeRunner.RunOutcome.Panic => ExitReason.PANIC
+          case NativeRunner.RunOutcome.OutOfGas => ExitReason.OUT_OF_GAS
+          case NativeRunner.RunOutcome.PageFault(_) => ExitReason.PAGE_FAULT
+        continueExecution = false
+      case None => ()
 
     while continueExecution do
       val result = instance.run()
