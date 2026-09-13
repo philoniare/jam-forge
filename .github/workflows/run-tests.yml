@@ -91,8 +91,8 @@ jobs:
                     restore-keys: |
                         ${{ runner.os }}-sbt-
 
-            -   name: Report runner architecture
-                run: uname -m
+            -   name: Require aarch64 runner
+                run: test "$(uname -m)" = "arm64"
 
             -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
                 run: sbt "pvm/test"
