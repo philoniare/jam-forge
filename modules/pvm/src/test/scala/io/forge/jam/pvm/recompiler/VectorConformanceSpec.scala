@@ -18,6 +18,10 @@ import spire.math.UInt
 class VectorConformanceSpec extends AnyFlatSpec with Matchers:
   private def libPath: Option[Path] =
     Option(System.getProperty("jam.pvm.recompiler.lib")).map(Path.of(_)).filter(Files.exists(_))
+  private def isAarch64Host: Boolean =
+    val arch = System.getProperty("os.arch", "").toLowerCase
+    arch == "aarch64" || arch == "arm64"
+
   private val testDir = new File(getClass.getClassLoader.getResource("pvm").toURI)
 
   private def loadTestCase(file: File): PvmTestCase =
@@ -266,15 +270,25 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
         else Outcome.Fail(failures.mkString("; "))
 
   // ---- top-level suite ----------------------------------------------------------
-  "the native recompiler" should "match the production interpreter and expected-* fields across all PVM test vectors (coverage mode)" in {
+  private val minExpectedVectors = 300
+
+  "the native recompiler" should "match the production interpreter and expected-* fields across all PVM test vectors (hard gate)" in {
+    if !isAarch64Host then
+      cancel(s"recompiler is AArch64-only through Phase 4 (host os.arch=" +
+        s"${System.getProperty("os.arch", "<unknown>")}); skipping — this is NOT a pass, " +
+        s"the gate does not execute on this architecture")
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
         val rc = new PvmRecompiler(lib)
         try
           val files = testDir.listFiles().filter(_.getName.endsWith(".json")).sortBy(_.getName)
+          val total = files.length
+          total should be >= minExpectedVectors
+
           var passCount = 0
           var unsupportedCount = 0
+          val unsupportedDetails = scala.collection.mutable.ArrayBuffer.empty[String]
           val failures = scala.collection.mutable.ArrayBuffer.empty[String]
 
           files.foreach { file =>
@@ -284,21 +298,28 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
               catch case e: Throwable => Outcome.Fail(s"exception: ${e.getClass.getSimpleName}: ${e.getMessage}")
             outcome match
               case Outcome.Pass => passCount += 1
-              case Outcome.Unsupported(_) => unsupportedCount += 1
+              case Outcome.Unsupported(reason) =>
+                unsupportedCount += 1
+                unsupportedDetails += s"${tc.name}: $reason"
               case Outcome.Fail(msg) => failures += s"${tc.name}: $msg"
           }
 
-          val total = files.length
           val failCount = failures.length
           val coverageLine =
             s"recompiler vector conformance: $passCount/$total pass, $unsupportedCount unsupported (deopt), $failCount fail"
           info(coverageLine)
           println(coverageLine)
 
+          if unsupportedDetails.nonEmpty then
+            val detail = unsupportedDetails.take(20).mkString("\n  - ", "\n  - ", "")
+            fail(s"$coverageLine\n${unsupportedDetails.length} vector(s) were UNSUPPORTED (deopt) — the recompiler must " +
+              s"cover every opcode in every vector (showing up to 20):$detail")
+
           if failures.nonEmpty then
             val detail = failures.take(20).mkString("\n  - ", "\n  - ", "")
             fail(s"$coverageLine\n${failures.length} vector(s) compiled but FAILED parity/expected-* (showing up to 20):$detail")
 
-          total shouldBe 309
+          unsupportedCount shouldBe 0
+          passCount shouldBe total
         finally rc.close()
   }
