@@ -1,7 +1,8 @@
 package io.forge.jam.protocol.refine
 
-import io.forge.jam.pvm.InterruptKind
+import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
+import io.forge.jam.pvm.recompiler.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, PvmInstance}
 
@@ -26,7 +27,8 @@ object PvmRunner:
       inputData: Array[Byte],
       gasLimit: Long,
       entryPc: Int,
-      hostCalls: HostCallDispatcher
+      hostCalls: HostCallDispatcher,
+      executionMode: ExecutionMode = ExecutionMode.Interpreted
   ): (PvmExit, Long, Array[Byte]) =
     val instance = InterpretedInstance.fromModule(
       module,
@@ -52,6 +54,17 @@ object PvmRunner:
 
     var exit = PvmExit.Halt
     var continueExecution = true
+
+    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode)
+    nativeOutcome match
+      case Some(outcome) =>
+        exit = outcome match
+          case NativeRunner.RunOutcome.Halt => PvmExit.Halt
+          case NativeRunner.RunOutcome.Panic => PvmExit.Panic
+          case NativeRunner.RunOutcome.OutOfGas => PvmExit.OutOfGas
+          case NativeRunner.RunOutcome.PageFault(_) => PvmExit.Panic
+        continueExecution = false
+      case None => ()
 
     while continueExecution do
       instance.run() match

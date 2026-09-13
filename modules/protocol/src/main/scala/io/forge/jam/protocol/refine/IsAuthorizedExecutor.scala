@@ -4,6 +4,7 @@ import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
+import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.protocol.accumulation.{
   HostCall,
@@ -94,7 +95,8 @@ class IsAuthorizedExecutor(val config: ChainConfig):
   def execute(
       workPackage: WorkPackage,
       coreIndex: Int,
-      accounts: HistoricalLookupService
+      accounts: HistoricalLookupService,
+      executionMode: ExecutionMode = ExecutionMode.Interpreted
   ): IsAuthorizedResult =
     val hostService = workPackage.authCodeHost.value.toLong
     val lookupAnchorTimeslot =
@@ -139,7 +141,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
 
     val hostCalls = new IsAuthorizedHostCalls(config, workPackage)
     val (exit, gasUsed, output) =
-      PvmRunner.run(module, args, PACKAGE_AUTH_GAS, entryPc = 0, hostCalls)
+      PvmRunner.run(module, args, PACKAGE_AUTH_GAS, entryPc = 0, hostCalls, executionMode)
 
     exit match
       case PvmRunner.PvmExit.OutOfGas =>
