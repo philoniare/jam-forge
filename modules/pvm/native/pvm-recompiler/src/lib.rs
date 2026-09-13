@@ -130,6 +130,19 @@ pub const OP_MAXIMUM: u32 = 227; // reg[a] = max_signed(reg[b], reg[c])
 pub const OP_MAXIMUM_UNSIGNED: u32 = 228; // reg[a] = max_unsigned(reg[b], reg[c])
 pub const OP_MINIMUM: u32 = 229; // reg[a] = min_signed(reg[b], reg[c])
 pub const OP_MINIMUM_UNSIGNED: u32 = 230; // reg[a] = min_unsigned(reg[b], reg[c])
+pub const OP_DIV_U32: u32 = 193;
+pub const OP_DIV_S32: u32 = 194;
+pub const OP_REM_U32: u32 = 195;
+pub const OP_REM_S32: u32 = 196;
+pub const OP_DIV_U64: u32 = 203;
+pub const OP_DIV_S64: u32 = 204;
+pub const OP_REM_U64: u32 = 205;
+pub const OP_REM_S64: u32 = 206;
+pub const OP_MUL_UPPER_SS: u32 = 213;
+pub const OP_MUL_UPPER_UU: u32 = 214;
+pub const OP_MUL_UPPER_SU: u32 = 215;
+
+// ---- Phase 2D (batch D): unary / bit ops (regs2: a=dst, b=src) ----
 pub const OP_COUNT_SET_BITS64: u32 = 102; // reg[a] = popcount64(reg[b])
 pub const OP_COUNT_SET_BITS32: u32 = 103; // reg[a] = sign_extend32(popcount32(reg[b] as i32))
 pub const OP_COUNT_LEADING_ZERO_BITS64: u32 = 104; // reg[a] = clz64(reg[b])  (0 -> 64)
@@ -227,6 +240,16 @@ pub enum Op {
     MinMax { dst: u8, src: u8, src2: u8, kind: MinMaxKind },
     CmovIfZero { dst: u8, src: u8, src2: u8 },
     CmovImm { dst: u8, src: u8, imm: u64, zero_taken: bool },
+    Div { dst: u8, src: u8, src2: u8, width: Width, signed: bool },
+    Rem { dst: u8, src: u8, src2: u8, width: Width, signed: bool },
+    MulUpper { dst: u8, src: u8, src2: u8, kind: MulUpperKind },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MulUpperKind {
+    SignedSigned,
+    UnsignedUnsigned,
+    SignedUnsigned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +491,17 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_CMOV_IF_ZERO => ops.push(Op::CmovIfZero { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8 }),
             OP_CMOV_IF_ZERO_IMM => ops.push(Op::CmovImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, zero_taken: true }),
             OP_CMOV_IF_NOT_ZERO_IMM => ops.push(Op::CmovImm { dst: ins.a as u8, src: ins.b as u8, imm: ins.imm as u64, zero_taken: false }),
+            OP_DIV_U32 => ops.push(Op::Div { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W32, signed: false }),
+            OP_DIV_S32 => ops.push(Op::Div { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W32, signed: true }),
+            OP_REM_U32 => ops.push(Op::Rem { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W32, signed: false }),
+            OP_REM_S32 => ops.push(Op::Rem { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W32, signed: true }),
+            OP_DIV_U64 => ops.push(Op::Div { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W64, signed: false }),
+            OP_DIV_S64 => ops.push(Op::Div { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W64, signed: true }),
+            OP_REM_U64 => ops.push(Op::Rem { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W64, signed: false }),
+            OP_REM_S64 => ops.push(Op::Rem { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, width: Width::W64, signed: true }),
+            OP_MUL_UPPER_SS => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::SignedSigned }),
+            OP_MUL_UPPER_UU => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::UnsignedUnsigned }),
+            OP_MUL_UPPER_SU => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::SignedUnsigned }),
 
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
@@ -2688,5 +2722,295 @@ mod tests {
         let mut gas = 100i64;
         run(&prog, &mut regs, &mut gas);
         assert_eq!(regs[2], u64::MAX);
+    }
+
+    /// r1 op r2 -> r3, single-instruction program, panics immediately after.
+    fn run_alu3(op: u32, r1: i64, r2: i64) -> u64 {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, r1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, r2),
+            ri(op, 3, 1, 2, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        run(&prog, &mut regs, &mut gas);
+        regs[3]
+    }
+
+    #[test]
+    fn div_unsigned32_by_zero_returns_all_ones_sign_extended() {
+        let r = run_alu3(OP_DIV_U32, 42, 0);
+        assert_eq!(r, u64::MAX);
+    }
+
+    #[test]
+    fn div_signed32_by_zero_returns_all_ones_sign_extended() {
+        let r = run_alu3(OP_DIV_S32, -42, 0);
+        assert_eq!(r, u64::MAX);
+        let r2 = run_alu3(OP_DIV_S32, 42, 0);
+        assert_eq!(r2, u64::MAX);
+    }
+
+    #[test]
+    fn div_unsigned64_by_zero_returns_all_ones() {
+        let r = run_alu3(OP_DIV_U64, 42, 0);
+        assert_eq!(r, u64::MAX);
+    }
+
+    #[test]
+    fn div_signed64_by_zero_returns_all_ones() {
+        let r = run_alu3(OP_DIV_S64, -42, 0);
+        assert_eq!(r, u64::MAX);
+    }
+
+    #[test]
+    fn rem_unsigned32_by_zero_returns_the_dividend_sign_extended() {
+        let r = run_alu3(OP_REM_U32, -42, 0);
+        assert_eq!(r as i64, -42i64, "zero-divisor rem32 must yield the sign-extended dividend");
+        let r2 = run_alu3(OP_REM_U32, 42, 0);
+        assert_eq!(r2, 42);
+    }
+
+    #[test]
+    fn rem_signed32_by_zero_returns_the_dividend() {
+        let r = run_alu3(OP_REM_S32, -42, 0);
+        assert_eq!(r as i64, -42i64);
+        let r2 = run_alu3(OP_REM_S32, 42, 0);
+        assert_eq!(r2, 42);
+    }
+
+    #[test]
+    fn rem_unsigned64_by_zero_returns_the_dividend() {
+        let r = run_alu3(OP_REM_U64, -42, 0);
+        assert_eq!(r as i64, -42i64);
+    }
+
+    #[test]
+    fn rem_signed64_by_zero_returns_the_dividend() {
+        let r = run_alu3(OP_REM_S64, -42, 0);
+        assert_eq!(r as i64, -42i64);
+        let r2 = run_alu3(OP_REM_S64, 42, 0);
+        assert_eq!(r2, 42);
+    }
+
+    #[test]
+    fn div_signed32_min_by_neg_one_returns_min_not_wrapped_garbage() {
+        // handler: `if v1 == Int.MinValue && v2 == -1 then Int.MinValue`.
+        let r = run_alu3(OP_DIV_S32, 0x8000_0000u32 as i32 as i64, -1);
+        assert_eq!(r as i64, 0x8000_0000u32 as i32 as i64, "i32::MIN sign-extended");
+        assert_eq!(r, 0xFFFF_FFFF_8000_0000u64);
+    }
+
+    #[test]
+    fn rem_signed32_min_by_neg_one_returns_zero() {
+        // handler: `if v1 == Int.MinValue && v2 == -1 then 0`.
+        let r = run_alu3(OP_REM_S32, 0x8000_0000u32 as i32 as i64, -1);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn div_signed64_min_by_neg_one_returns_min() {
+        let r = run_alu3(OP_DIV_S64, i64::MIN, -1);
+        assert_eq!(r as i64, i64::MIN);
+    }
+
+    #[test]
+    fn rem_signed64_min_by_neg_one_returns_zero() {
+        let r = run_alu3(OP_REM_S64, i64::MIN, -1);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn div_unsigned32_truncates_operands_to_low_32_bits() {
+        let r1: i64 = (0x1234_5678u64 << 32 | 100) as i64; // low32 = 100
+        let r2: i64 = (0x9ABC_DEF0u64 << 32 | 5) as i64; // low32 = 5
+        let r = run_alu3(OP_DIV_U32, r1, r2);
+        assert_eq!(r, 20);
+    }
+
+    #[test]
+    fn div_signed32_result_sign_extends_to_64() {
+        let r = run_alu3(OP_DIV_S32, -100, 3);
+        assert_eq!(r as i64, -33i64);
+        assert_eq!(r, 0xFFFF_FFFF_FFFF_FFDFu64);
+    }
+
+    #[test]
+    fn rem_signed32_result_follows_dividend_sign() {
+        assert_eq!(run_alu3(OP_REM_S32, -7, 3) as i64, -1i64);
+        assert_eq!(run_alu3(OP_REM_S32, 7, -3) as i64, 1i64);
+    }
+
+    #[test]
+    fn rem_unsigned32_ordinary_case() {
+        let r = run_alu3(OP_REM_U32, 17, 5);
+        assert_eq!(r, 2);
+    }
+
+    #[test]
+    fn div_unsigned64_ordinary_case_full_width() {
+        let r = run_alu3(OP_DIV_U64, u64::MAX as i64, 2);
+        // u64::MAX / 2 = 0x7FFFFFFFFFFFFFFF
+        assert_eq!(r, u64::MAX / 2);
+    }
+
+    #[test]
+    fn rem_signed64_ordinary_case() {
+        assert_eq!(run_alu3(OP_REM_S64, -7, 3) as i64, -1i64);
+    }
+
+    #[test]
+    fn mul_upper_unsigned_unsigned_matches_u128_high64() {
+        let a: u64 = 0xFFFF_FFFF_FFFF_FFFF; // largest u64
+        let b: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        let expect = (((a as u128) * (b as u128)) >> 64) as u64;
+        let r = run_alu3(OP_MUL_UPPER_UU, a as i64, b as i64);
+        assert_eq!(r, expect);
+    }
+
+    #[test]
+    fn mul_upper_signed_signed_negative_times_negative() {
+        let a: i64 = -2;
+        let b: i64 = -3;
+        let expect = (((a as i128) * (b as i128)) >> 64) as u64;
+        let r = run_alu3(OP_MUL_UPPER_SS, a, b);
+        assert_eq!(r, expect, "smulh(-2,-3) high64 must match i128 math");
+    }
+
+    #[test]
+    fn mul_upper_signed_signed_min_times_min() {
+        let a = i64::MIN;
+        let b = i64::MIN;
+        let expect = (((a as i128) * (b as i128)) >> 64) as u64;
+        let r = run_alu3(OP_MUL_UPPER_SS, a, b);
+        assert_eq!(r, expect);
+    }
+
+    #[test]
+    fn mul_upper_signed_signed_min_times_neg_one() {
+        let a = i64::MIN;
+        let b: i64 = -1;
+        let expect = (((a as i128) * (b as i128)) >> 64) as u64;
+        let r = run_alu3(OP_MUL_UPPER_SS, a, b);
+        assert_eq!(r, expect);
+    }
+
+    #[test]
+    fn mul_upper_signed_unsigned_negative_times_large_unsigned() {
+        let a: i64 = -5; // signed operand (s1)
+        let b_u: u64 = 0xFFFF_FFFF_FFFF_FFF0; // unsigned operand (s2), huge
+        let a_bits = a as u64;
+        let mulu = (((a_bits as u128) * (b_u as u128)) >> 64) as u64;
+        let expect = mulu.wrapping_sub(b_u); // a<0 -> subtract b
+        let r = run_alu3(OP_MUL_UPPER_SU, a, b_u as i64);
+        assert_eq!(r, expect, "SU: s1 signed(-5), s2 unsigned(huge) must match UInt128.mulUpperSignedUnsigned");
+    }
+
+    #[test]
+    fn mul_upper_signed_unsigned_positive_s1_no_correction() {
+        let a: i64 = 12345;
+        let b_u: u64 = 0xFFFF_FFFF_FFFF_FFF0;
+        let expect = (((a as u128) * (b_u as u128)) >> 64) as u64;
+        let r = run_alu3(OP_MUL_UPPER_SU, a, b_u as i64);
+        assert_eq!(r, expect);
+    }
+
+    #[test]
+    fn mul_upper_signed_unsigned_min_s1_max_unsigned_s2() {
+        let a = i64::MIN;
+        let b_u = u64::MAX;
+        let a_bits = a as u64;
+        let mulu = (((a_bits as u128) * (b_u as u128)) >> 64) as u64;
+        let expect = mulu.wrapping_sub(b_u);
+        let r = run_alu3(OP_MUL_UPPER_SU, a, b_u as i64);
+        assert_eq!(r, expect);
+    }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn edge_biased_operand(state: &mut u64) -> i64 {
+        match xorshift64(state) % 8 {
+            0 => 0,
+            1 => 1,
+            2 => -1,
+            3 => i64::MIN,
+            4 => i64::MAX,
+            5 => i32::MIN as i64,
+            6 => i32::MAX as i64,
+            _ => xorshift64(state) as i64,
+        }
+    }
+
+    #[test]
+    fn randomized_div_rem_cross_check_against_native_i128_model() {
+        let mut state = 0x5EED_1234_u64;
+        for _ in 0..20_000 {
+            let a = edge_biased_operand(&mut state);
+            let b = edge_biased_operand(&mut state);
+
+            // ---- 32-bit ----
+            let a32 = a as i32;
+            let b32 = b as i32;
+            let expect_div_u32 = if b32 == 0 { -1i32 } else { ((a32 as u32).wrapping_div(b32 as u32)) as i32 };
+            let expect_div_s32 = if b32 == 0 {
+                -1i32
+            } else if a32 == i32::MIN && b32 == -1 {
+                i32::MIN
+            } else {
+                a32 / b32
+            };
+            let expect_rem_u32 = if b32 == 0 { a32 } else { ((a32 as u32).wrapping_rem(b32 as u32)) as i32 };
+            let expect_rem_s32 = if b32 == 0 {
+                a32
+            } else if a32 == i32::MIN && b32 == -1 {
+                0
+            } else {
+                a32 % b32
+            };
+            assert_eq!(run_alu3(OP_DIV_U32, a, b) as i64, expect_div_u32 as i64, "DivU32 a={a32} b={b32}");
+            assert_eq!(run_alu3(OP_DIV_S32, a, b) as i64, expect_div_s32 as i64, "DivS32 a={a32} b={b32}");
+            assert_eq!(run_alu3(OP_REM_U32, a, b) as i64, expect_rem_u32 as i64, "RemU32 a={a32} b={b32}");
+            assert_eq!(run_alu3(OP_REM_S32, a, b) as i64, expect_rem_s32 as i64, "RemS32 a={a32} b={b32}");
+
+            // ---- 64-bit ----
+            let expect_div_u64: u64 = if b == 0 { u64::MAX } else { (a as u64).wrapping_div(b as u64) };
+            let expect_div_s64: i64 = if b == 0 {
+                -1i64
+            } else if a == i64::MIN && b == -1 {
+                i64::MIN
+            } else {
+                a / b
+            };
+            let expect_rem_u64: u64 = if b == 0 { a as u64 } else { (a as u64).wrapping_rem(b as u64) };
+            let expect_rem_s64: i64 = if b == 0 {
+                a
+            } else if a == i64::MIN && b == -1 {
+                0
+            } else {
+                a % b
+            };
+            assert_eq!(run_alu3(OP_DIV_U64, a, b), expect_div_u64, "DivU64 a={a} b={b}");
+            assert_eq!(run_alu3(OP_DIV_S64, a, b) as i64, expect_div_s64, "DivS64 a={a} b={b}");
+            assert_eq!(run_alu3(OP_REM_U64, a, b), expect_rem_u64, "RemU64 a={a} b={b}");
+            assert_eq!(run_alu3(OP_REM_S64, a, b) as i64, expect_rem_s64, "RemS64 a={a} b={b}");
+
+            let expect_uu = (((a as u64 as u128) * (b as u64 as u128)) >> 64) as u64;
+            let expect_ss = (((a as i128) * (b as i128)) >> 64) as u64;
+            let a_u = a as u64;
+            let b_u = b as u64;
+            let mulu = ((a_u as u128) * (b_u as u128) >> 64) as u64;
+            let expect_su = if a < 0 { mulu.wrapping_sub(b_u) } else { mulu };
+            assert_eq!(run_alu3(OP_MUL_UPPER_UU, a, b), expect_uu, "MulUpperUU a={a} b={b}");
+            assert_eq!(run_alu3(OP_MUL_UPPER_SS, a, b), expect_ss, "MulUpperSS a={a} b={b}");
+            assert_eq!(run_alu3(OP_MUL_UPPER_SU, a, b), expect_su, "MulUpperSU a={a} b={b}");
+        }
     }
 }
