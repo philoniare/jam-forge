@@ -1232,6 +1232,126 @@ impl Backend for Aarch64Backend {
                         }
                         dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
                     }
+                    Op::LoadImmAndJump { dst, imm, target } => {
+                        let dst = dst as u32;
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; movz w8, #(imm & 0xFFFF) as u32
+                            ; movk w8, #((imm >> 16) & 0xFFFF) as u32, lsl #16
+                            ; sxtw x8, w8
+                            ; str x8, [x0, #dst * 8]
+                        );
+                        let tgt = block_labels[blocks.block_of[target as usize]];
+                        dynasm!(a; .arch aarch64; b =>tgt);
+                    }
+                    Op::LoadImmAndJumpIndirect { dst, base, imm, offset } => {
+                        let dstr = dst as u32;
+                        let baser = base as u32;
+                        dynasm!(a; .arch aarch64; ldr x8, [x0, #baser * 8]); // x8 = reg[base] (PRE-write)
+                        mov_imm64(&mut a, 9, offset);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; add x8, x8, x9
+                            ; mov w8, w8      // mask to 32 bits (UXTW), addr now in x8/w8
+                        );
+                        // Now safe to write reg[dst] — addr is already captured in x8/w8.
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; movz w13, #(imm & 0xFFFF) as u32
+                            ; movk w13, #((imm >> 16) & 0xFFFF) as u32, lsl #16
+                            ; sxtw x13, w13
+                            ; str x13, [x0, #dstr * 8]
+                        );
+                        mov_imm64(&mut a, 9, DJUMP_HALT);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp x8, x9
+                            ; b.eq =>halt_label
+                            ; cbz w8, =>panic_label
+                            ; and w16, w8, #1
+                            ; cbnz w16, =>panic_label
+                        );
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; lsr w9, w8, #1
+                            ; sub w9, w9, #1
+                        );
+                        mov_imm32(&mut a, 10, jump_table.len() as u32);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; cmp w9, w10
+                            ; b.hs =>panic_label
+                        );
+                        mov_imm64(&mut a, 13, jump_table_ptr as u64);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; lsl x14, x9, #2
+                            ; add x13, x13, x14
+                            ; ldr w7, [x13]
+                            ; mov w9, #0xFFFF
+                            ; movk w9, #0xFFFF, lsl #16
+                            ; cmp w7, w9
+                            ; b.eq =>panic_label
+                            ; bl =>dispatch_by_index_label
+                        );
+                    }
+                    Op::LoadAbs { dst, imm, width, signed } => {
+                        let dst = dst as u32;
+                        mov_imm64(&mut a, 13, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; mov w13, w13          // mask address to 32 bits (UXTW)
+                            ; mov x14, #width as u64
+                            ; mov x15, #0            // load
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                        );
+                        emit_load(&mut a, width, signed);
+                        dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
+                    }
+                    Op::StoreAbs { src, imm, width } => {
+                        let src = src as u32;
+                        mov_imm64(&mut a, 13, imm);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; mov w13, w13
+                            ; mov x14, #width as u64
+                            ; mov x15, #1            // store
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                            ; ldr x10, [x0, #src * 8]
+                        );
+                        emit_store(&mut a, width);
+                    }
+                    Op::StoreImmAbs { imm_addr, value, width } => {
+                        mov_imm64(&mut a, 13, imm_addr);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; mov w13, w13
+                            ; mov x14, #width as u64
+                            ; mov x15, #1            // store
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                        );
+                        mov_imm64(&mut a, 10, value);
+                        emit_store(&mut a, width);
+                    }
+                    Op::StoreImmIndirect { base, offset, value, width } => {
+                        let baser = base as u32;
+                        mov_imm64(&mut a, 9, offset);
+                        dynasm!(a
+                            ; .arch aarch64
+                            ; ldr x13, [x0, #baser * 8]
+                            ; add x13, x13, x9
+                            ; mov w13, w13
+                            ; mov x14, #width as u64
+                            ; mov x15, #1            // store
+                            ; bl =>bounds_check_label
+                            ; cbz w9, =>fault_label
+                        );
+                        mov_imm64(&mut a, 10, value);
+                        emit_store(&mut a, width);
+                    }
                 }
             }
             let last_op_is_terminator = ops[hi - 1].is_terminator();

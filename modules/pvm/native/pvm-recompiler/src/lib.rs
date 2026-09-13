@@ -153,6 +153,25 @@ pub const OP_SIGN_EXTEND8: u32 = 108; // reg[a] = sign_extend64(reg[b] as i8)
 pub const OP_SIGN_EXTEND16: u32 = 109; // reg[a] = sign_extend64(reg[b] as i16)
 pub const OP_ZERO_EXTEND16: u32 = 110; // reg[a] = reg[b] & 0xFFFF  (zero-extended, no sign extension)
 pub const OP_REVERSE_BYTE: u32 = 111; // reg[a] = byte_swap64(reg[b])  (full 64-bit byte reversal, NOT bit-reversal)
+pub const OP_LOAD_IMM_AND_JUMP: u32 = 80;
+pub const OP_LOAD_IMM_AND_JUMP_INDIRECT: u32 = 180;
+pub const OP_LOAD_U8: u32 = 52;
+pub const OP_LOAD_I8: u32 = 53;
+pub const OP_LOAD_U16: u32 = 54;
+pub const OP_LOAD_I16: u32 = 55;
+pub const OP_LOAD_U32: u32 = 56;
+pub const OP_LOAD_I32: u32 = 57;
+pub const OP_STORE_U8: u32 = 59;
+pub const OP_STORE_U16: u32 = 60;
+pub const OP_STORE_U32: u32 = 61;
+pub const OP_STORE_IMM_U8: u32 = 30;
+pub const OP_STORE_IMM_U16: u32 = 31;
+pub const OP_STORE_IMM_U32: u32 = 32;
+pub const OP_STORE_IMM_U64: u32 = 33;
+pub const OP_STORE_IMM_INDIRECT_U8: u32 = 70;
+pub const OP_STORE_IMM_INDIRECT_U16: u32 = 71;
+pub const OP_STORE_IMM_INDIRECT_U32: u32 = 72;
+pub const OP_STORE_IMM_INDIRECT_U64: u32 = 73;
 
 /// Indirect-jump sentinel: `JumpIndirect reg, offset` where `reg[a]+offset`
 /// equals this value halts the program cleanly (EXIT_HALT). Mirrors the PVM
@@ -243,6 +262,12 @@ pub enum Op {
     Div { dst: u8, src: u8, src2: u8, width: Width, signed: bool },
     Rem { dst: u8, src: u8, src2: u8, width: Width, signed: bool },
     MulUpper { dst: u8, src: u8, src2: u8, kind: MulUpperKind },
+    LoadImmAndJump { dst: u8, imm: u32, target: u32 },
+    LoadImmAndJumpIndirect { dst: u8, base: u8, imm: u32, offset: u64 },
+    LoadAbs { dst: u8, imm: u64, width: u8, signed: bool },
+    StoreAbs { src: u8, imm: u64, width: u8 },
+    StoreImmAbs { imm_addr: u64, value: u64, width: u8 },
+    StoreImmIndirect { base: u8, offset: u64, value: u64, width: u8 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,6 +345,8 @@ impl Op {
                 | Op::Djump { .. }
                 | Op::BranchCmpImm { .. }
                 | Op::BranchCmp { .. }
+                | Op::LoadImmAndJump { .. }
+                | Op::LoadImmAndJumpIndirect { .. }
         )
     }
     /// The branch/jump target instruction index, if any.
@@ -331,7 +358,8 @@ impl Op {
             | Op::BranchEqImm { target, .. }
             | Op::BranchNeImm { target, .. }
             | Op::BranchCmpImm { target, .. }
-            | Op::BranchCmp { target, .. } => Some(*target),
+            | Op::BranchCmp { target, .. }
+            | Op::LoadImmAndJump { target, .. } => Some(*target),
             _ => None,
         }
     }
@@ -502,6 +530,25 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
             OP_MUL_UPPER_SS => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::SignedSigned }),
             OP_MUL_UPPER_UU => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::UnsignedUnsigned }),
             OP_MUL_UPPER_SU => ops.push(Op::MulUpper { dst: ins.a as u8, src: ins.b as u8, src2: ins.c as u8, kind: MulUpperKind::SignedUnsigned }),
+            OP_LOAD_IMM_AND_JUMP => ops.push(Op::LoadImmAndJump { dst: ins.a as u8, imm: ins.imm as u32, target: ins.imm2 as u32 }),
+            OP_LOAD_IMM_AND_JUMP_INDIRECT => ops.push(Op::LoadImmAndJumpIndirect { dst: ins.a as u8, base: ins.b as u8, imm: ins.imm as u32, offset: ins.imm2 as u64 }),
+            OP_LOAD_U8 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 1, signed: false }),
+            OP_LOAD_I8 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 1, signed: true }),
+            OP_LOAD_U16 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 2, signed: false }),
+            OP_LOAD_I16 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 2, signed: true }),
+            OP_LOAD_U32 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 4, signed: false }),
+            OP_LOAD_I32 => ops.push(Op::LoadAbs { dst: ins.a as u8, imm: ins.imm as u64, width: 4, signed: true }),
+            OP_STORE_U8 => ops.push(Op::StoreAbs { src: ins.a as u8, imm: ins.imm as u64, width: 1 }),
+            OP_STORE_U16 => ops.push(Op::StoreAbs { src: ins.a as u8, imm: ins.imm as u64, width: 2 }),
+            OP_STORE_U32 => ops.push(Op::StoreAbs { src: ins.a as u8, imm: ins.imm as u64, width: 4 }),
+            OP_STORE_IMM_U8 => ops.push(Op::StoreImmAbs { imm_addr: ins.imm as u64, value: ins.imm2 as u64, width: 1 }),
+            OP_STORE_IMM_U16 => ops.push(Op::StoreImmAbs { imm_addr: ins.imm as u64, value: ins.imm2 as u64, width: 2 }),
+            OP_STORE_IMM_U32 => ops.push(Op::StoreImmAbs { imm_addr: ins.imm as u64, value: ins.imm2 as u64, width: 4 }),
+            OP_STORE_IMM_U64 => ops.push(Op::StoreImmAbs { imm_addr: ins.imm as u64, value: ins.imm2 as u64, width: 8 }),
+            OP_STORE_IMM_INDIRECT_U8 => ops.push(Op::StoreImmIndirect { base: ins.a as u8, offset: ins.imm as u64, value: ins.imm2 as u64, width: 1 }),
+            OP_STORE_IMM_INDIRECT_U16 => ops.push(Op::StoreImmIndirect { base: ins.a as u8, offset: ins.imm as u64, value: ins.imm2 as u64, width: 2 }),
+            OP_STORE_IMM_INDIRECT_U32 => ops.push(Op::StoreImmIndirect { base: ins.a as u8, offset: ins.imm as u64, value: ins.imm2 as u64, width: 4 }),
+            OP_STORE_IMM_INDIRECT_U64 => ops.push(Op::StoreImmIndirect { base: ins.a as u8, offset: ins.imm as u64, value: ins.imm2 as u64, width: 8 }),
 
             _ => return None, // unsupported opcode: signal deopt to the caller
         }
@@ -3012,5 +3059,464 @@ mod tests {
             assert_eq!(run_alu3(OP_MUL_UPPER_SS, a, b), expect_ss, "MulUpperSS a={a} b={b}");
             assert_eq!(run_alu3(OP_MUL_UPPER_SU, a, b), expect_su, "MulUpperSU a={a} b={b}");
         }
+    }
+    #[test]
+    fn load_imm_and_jump_writes_register_then_jumps() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM_AND_JUMP, 1, 0, 0, 42), // 0 -> target index 3 (imm2 set below)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),        // 1 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 100),       // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),         // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),              // 4
+        ]);
+        let mut prog = prog;
+        prog[0].imm2 = 3;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 42, "reg[dst] must be written to the load-immediate value");
+        assert_eq!(regs[2], 7, "must have jumped to instruction 3, not fallen through");
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn load_imm_and_jump_sign_extends_negative_32bit_immediate() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM_AND_JUMP, 1, 0, 0, -1i64), // 0 -> target 2
+            ri(OP_LOAD_IMM64, 2, 0, 0, 99),           // 1 (skipped)
+            ri(OP_PANIC, 0, 0, 0, 0),                 // 2 (target)
+        ]);
+        let mut prog = prog;
+        prog[0].imm2 = 2;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1] as i64, -1, "32-bit imm 0xFFFFFFFF must sign-extend to i64 -1");
+    }
+
+    #[test]
+    fn load_imm_and_jump_backward_target_is_a_valid_leader() {
+        let prog = with_pcs(vec![
+            ri(OP_PANIC, 0, 0, 0, 0),                 // 0 (target, block leader after nothing precedes -> also leader by construction)
+            ri(OP_LOAD_IMM_AND_JUMP, 1, 0, 0, 5),      // 1 -> target 0
+        ]);
+        let mut prog = prog;
+        prog[1].imm2 = 0;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 1);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 5, "register write must persist even though the jump lands on a Panic instruction");
+        assert_eq!(out.pc, 0, "pc must be the target Panic's own pc (0), not the LoadImmAndJump's pc");
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_writes_dst_then_djumps_via_table() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 2, 0, 0, 2),               // 0: reg[2] = 2 (base)
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 2, 0, 77), // 1: dst=reg1, base=reg2, imm=77, offset=0(imm2)
+            ri(OP_LOAD_IMM64, 3, 0, 0, 99),              // 2 (skipped)
+            ri(OP_LOAD_IMM64, 3, 0, 0, 7),                // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),                     // 4
+        ]);
+        prog[1].imm2 = 0; // offset
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 77, "reg[dst] must be written to the load-immediate value");
+        assert_eq!(regs[2], 2, "reg[base] must be unchanged (dst != base here)");
+        assert_eq!(regs[3], 7, "must have djumped to instruction 3 via the table");
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_dst_equals_base_reads_pre_write_value() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 2),                  // 0: reg[1] = 2 (both dst and base)
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 1, 0, 999), // 1: dst=reg1, base=reg1 (ALIASED), imm=999, offset=0
+            ri(OP_LOAD_IMM64, 2, 0, 0, 88),                 // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),                   // 3 (target, reached only if addr used the PRE-write base=2)
+            ri(OP_PANIC, 0, 0, 0, 0),                        // 4
+        ]);
+        prog[1].imm2 = 0; // offset
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
+        assert_eq!(exit, EXIT_PANIC, "must reach the trap at instruction 4 via a VALID djump, not panic on a corrupted address");
+        assert_eq!(regs[1], 999, "reg[dst]==reg[base] must end up holding the NEW immediate value");
+        assert_eq!(regs[2], 7, "must have djumped to instruction 3 — proves addr was computed from base's PRE-write value (2), not the new imm (999)");
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_dst_equals_base_with_nonzero_offset() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),                  // 0: reg[1] = 1
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 1, 0, 5),   // 1: dst=reg1, base=reg1, imm=5, offset=1(imm2)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 88),                 // 2 (skipped)
+            ri(OP_LOAD_IMM64, 2, 0, 0, 7),                   // 3 (target)
+            ri(OP_PANIC, 0, 0, 0, 0),                        // 4
+        ]);
+        prog[1].imm2 = 1; // offset
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[3], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 5, "reg[dst]==reg[base] must hold the new immediate");
+        assert_eq!(regs[2], 7, "addr must have used base's pre-write value (1) + offset (1) = 2");
+        assert_eq!(out.pc, 4 * 4);
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_halt_sentinel() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 2, 0, 0, DJUMP_HALT as i64), // 0: reg[2] = 0xFFFF0000
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 2, 0, 55), // 1: dst=reg1, base=reg2, imm=55, offset=0
+        ]);
+        prog[1].imm2 = 0;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0);
+        assert_eq!(exit, EXIT_HALT);
+        assert_eq!(regs[1], 55, "reg[dst] must be written even on the halt path");
+        assert_eq!(out.pc, 1 * 4, "halt pc must be the djump instruction's own pc");
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_zero_address_panics_but_writes_dst() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 2, 0, 0, 0),                  // 0: reg[2] = 0
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 2, 0, 33),  // 1: addr=0 -> panic
+            ri(OP_PANIC, 0, 0, 0, 0),                        // 2
+        ]);
+        prog[1].imm2 = 0;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 33, "register write happens even when the djump then panics on addr==0");
+        assert_eq!(out.pc, 1 * 4, "panic pc must be the djump instruction's OWN pc, not a target pc");
+    }
+
+    #[test]
+    fn load_imm_and_jump_indirect_misaligned_address_panics_but_writes_dst() {
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 2, 0, 0, 3),                  // 0: reg[2] = 3 (odd -> misaligned)
+            ri(OP_LOAD_IMM_AND_JUMP_INDIRECT, 1, 2, 0, 44),  // 1: addr=3 -> panic
+            ri(OP_PANIC, 0, 0, 0, 0),                        // 2
+        ]);
+        prog[1].imm2 = 0;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 44, "register write happens even when the djump then panics on misalignment");
+        assert_eq!(out.pc, 1 * 4);
+    }
+
+    // ---- Absolute loads (opcodes 52-57) -------------------------------------
+
+    #[test]
+    fn absolute_loads_all_widths_and_signedness() {
+        // backing[0..8] = [0x80, 1, 2, 3, 4, 5, 6, 7] at region base 0x10000.
+        let mut mem = [0x80u8, 1, 2, 3, 4, 5, 6, 7];
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+
+        // LoadU8: zero-extend byte 0 (0x80) -> 0x80 (unsigned, no sign bit set semantics for u8 widening)
+        let prog = with_pcs(vec![ri(OP_LOAD_U8, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0x80, "LoadU8 must zero-extend");
+
+        // LoadI8: sign-extend byte 0 (0x80 = -128 as i8) -> 0xFFFFFFFFFFFFFF80
+        let prog = with_pcs(vec![ri(OP_LOAD_I8, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1] as i64, -128, "LoadI8 must sign-extend");
+
+        // LoadU16: bytes [0,1] = 0x80,0x01 LE -> 0x0180
+        let prog = with_pcs(vec![ri(OP_LOAD_U16, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0x0180, "LoadU16 must zero-extend a positive halfword");
+
+        // LoadI16: bytes [6,7] = 6,7 LE -> 0x0706 (positive, no sign effect) — use bytes [0,1] with high bit set instead.
+        // bytes[0,1] = 0x80,0x01 -> 0x0180 (bit15 clear, positive) so use a value with bit15 set: patch mem.
+        let mut mem2 = [0xFFu8, 0x80, 0, 0, 0, 0, 0, 0]; // halfword 0x80FF = negative as i16
+        let prog = with_pcs(vec![ri(OP_LOAD_I16, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem2);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1] as i64, 0x80FFu16 as i16 as i64, "LoadI16 must sign-extend a negative halfword");
+
+        // LoadU32: bytes[0..4] of mem2 = FF,80,0,0 LE -> 0x000080FF
+        let prog = with_pcs(vec![ri(OP_LOAD_U32, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem2);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0x000080FF, "LoadU32 must zero-extend");
+
+        // LoadI32: use a word with the sign bit set: FF FF FF 80 LE -> 0x80FFFFFF (negative as i32)
+        let mut mem3 = [0xFFu8, 0xFF, 0xFF, 0x80, 0, 0, 0, 0];
+        let prog = with_pcs(vec![ri(OP_LOAD_I32, 1, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem3);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1] as i64, 0x80FFFFFFu32 as i32 as i64, "LoadI32 must sign-extend");
+    }
+
+    #[test]
+    fn absolute_load_out_of_region_faults() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+        let mut mem = [0u8; 8];
+        let prog = with_pcs(vec![ri(OP_LOAD_U32, 1, 0, 0, 0x20000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn absolute_stores_all_widths_write_only_the_low_bytes() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+
+        // StoreU8: only the low byte of reg[1] is written.
+        let mut mem = [0xAAu8; 8];
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122_3344_5566_7788u64 as i64),
+            ri(OP_STORE_U8, 1, 0, 0, 0x10000),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(mem[0], 0x88, "StoreU8 must write only the low byte");
+        assert_eq!(mem[1], 0xAA, "StoreU8 must not touch byte 1");
+
+        // StoreU16: low 2 bytes.
+        let mut mem = [0xAAu8; 8];
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122_3344_5566_7788u64 as i64),
+            ri(OP_STORE_U16, 1, 0, 0, 0x10000),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..2], &[0x88, 0x77]);
+        assert_eq!(mem[2], 0xAA);
+
+        // StoreU32: low 4 bytes.
+        let mut mem = [0xAAu8; 8];
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x1122_3344_5566_7788u64 as i64),
+            ri(OP_STORE_U32, 1, 0, 0, 0x10000),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..4], &[0x88, 0x77, 0x66, 0x55]);
+        assert_eq!(mem[4], 0xAA);
+    }
+
+    #[test]
+    fn absolute_store_to_read_only_region_faults() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 0 }];
+        let mut mem = [0u8; 8];
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 5),
+            ri(OP_STORE_U8, 1, 0, 0, 0x10000),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn store_imm_widths_truncate_the_immediate_value() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+        let big: i64 = 0x1122_3344_5566_7788u64 as i64;
+
+        let mut mem = [0xAAu8; 8];
+        let mut prog = with_pcs(vec![ri(OP_STORE_IMM_U8, 0, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        prog[0].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(mem[0], 0x88, "StoreImmU8 must truncate the value to its low byte");
+        assert_eq!(mem[1], 0xAA, "must not touch adjacent bytes");
+
+        let mut mem = [0xAAu8; 8];
+        let mut prog = with_pcs(vec![ri(OP_STORE_IMM_U16, 0, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        prog[0].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..2], &[0x88, 0x77], "StoreImmU16 must truncate to the low 2 bytes");
+        assert_eq!(mem[2], 0xAA);
+
+        let mut mem = [0xAAu8; 8];
+        let mut prog = with_pcs(vec![ri(OP_STORE_IMM_U32, 0, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        prog[0].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..4], &[0x88, 0x77, 0x66, 0x55], "StoreImmU32 must truncate to the low 4 bytes");
+        assert_eq!(mem[4], 0xAA);
+
+        let mut mem = [0xAAu8; 8];
+        let mut prog = with_pcs(vec![ri(OP_STORE_IMM_U64, 0, 0, 0, 0x10000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        prog[0].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..8], &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11], "StoreImmU64 must write the full 8 bytes, no truncation");
+    }
+
+    #[test]
+    fn store_imm_out_of_region_faults() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+        let mut mem = [0u8; 8];
+        let mut prog = with_pcs(vec![ri(OP_STORE_IMM_U32, 0, 0, 0, 0x20000), ri(OP_PANIC, 0, 0, 0, 0)]);
+        prog[0].imm2 = 42;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn store_imm_indirect_widths_truncate_and_use_base_plus_offset() {
+        let regions = [Region { base: 0x10000, len: 16, buf_offset: 0, writable: 1 }];
+        let big: i64 = 0x1122_3344_5566_7788u64 as i64;
+
+        // addr = reg[1] (0x10004) + offset(4) = 0x10008
+        let mut mem = [0xAAu8; 16];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10004),
+            ri(OP_STORE_IMM_INDIRECT_U32, 1, 0, 0, 4), // base=reg1, offset=4(imm)
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = big; // value
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[8..12], &[0x88, 0x77, 0x66, 0x55], "addr must be base(0x10004)+offset(4)=0x10008 -> backing index 8");
+        assert_eq!(mem[12], 0xAA, "must not spill past width 4");
+
+        // Narrower widths at the same addr, truncation check.
+        let mut mem = [0xAAu8; 16];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10000),
+            ri(OP_STORE_IMM_INDIRECT_U8, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(mem[0], 0x88);
+        assert_eq!(mem[1], 0xAA);
+
+        let mut mem = [0xAAu8; 16];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10000),
+            ri(OP_STORE_IMM_INDIRECT_U16, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..2], &[0x88, 0x77]);
+        assert_eq!(mem[2], 0xAA);
+
+        let mut mem = [0xAAu8; 16];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10000),
+            ri(OP_STORE_IMM_INDIRECT_U64, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = big;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(&mem[0..8], &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+    }
+
+    #[test]
+    fn store_imm_indirect_negative_offset() {
+        // addr = reg[1](0x10008) + offset(-4) = 0x10004.
+        let regions = [Region { base: 0x10000, len: 16, buf_offset: 0, writable: 1 }];
+        let mut mem = [0xAAu8; 16];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10008),
+            ri(OP_STORE_IMM_INDIRECT_U8, 1, 0, 0, -4),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = 0x42;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(mem[4], 0x42);
+    }
+
+    #[test]
+    fn store_imm_indirect_out_of_region_faults() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 1 }];
+        let mut mem = [0u8; 8];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x20000),
+            ri(OP_STORE_IMM_INDIRECT_U32, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = 7;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
+    }
+
+    #[test]
+    fn store_imm_indirect_to_read_only_region_faults() {
+        let regions = [Region { base: 0x10000, len: 8, buf_offset: 0, writable: 0 }];
+        let mut mem = [0u8; 8];
+        let mut prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 0x10000),
+            ri(OP_STORE_IMM_INDIRECT_U8, 1, 0, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        prog[1].imm2 = 7;
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
+        assert_eq!(exit, EXIT_FAULT);
     }
 }
