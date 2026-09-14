@@ -56,7 +56,7 @@ def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[Str
     s"-Djava.library.path=$baseDir/modules/crypto/native/build/$osDirName:$baseDir/modules/crypto/src/main/resources",
     s"-Djam.base.dir=$baseDir",
     "--enable-native-access=ALL-UNNAMED"
-  ) ++ extra
+  ) ++ sys.props.get("jam.pvm.executionMode").map(v => s"-Djam.pvm.executionMode=$v").toSeq ++ extra
 
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
@@ -423,7 +423,10 @@ lazy val conformance = (project in file("modules/conformance"))
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
     Test / envVars ++= sys.env.get("LOG_LEVEL").map("LOG_LEVEL" -> _).toMap,
-    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value),
+    Test / javaOptions ++= nativeLibJavaOptions(
+      (ThisBuild / baseDirectory).value,
+      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+    ),
     // Assembly settings for creating fat JAR
     assembly / mainClass := Some("io.forge.jam.conformance.ConformanceServerApp"),
     assembly / assemblyJarName := "jam-conformance.jar",
