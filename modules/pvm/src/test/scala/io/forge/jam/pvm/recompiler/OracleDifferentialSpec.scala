@@ -9,6 +9,7 @@ import io.forge.jam.pvm.types.ProgramCounter
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.lang.foreign.ValueLayout
 import java.nio.file.{Files, Path}
 import scala.util.Random
 import spire.math.UInt
@@ -2213,5 +2214,201 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
                 backing.toSeq shouldBe iRwAfter.toSeq
             }
           info("oracle differential (batch-G control flow): 20000 programs matched the interpreter")
+        finally rc.close()
+  }
+  private def runLiveRegsOnly(rc: PvmRecompiler, prog: Seq[AInstr], initRegs: Array[Long], gas: Long)
+      : (PvmRecompiler.ExecResult, Array[Long]) =
+    val pp = toRawColumns(prog)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    blk.isValid shouldBe true
+    try
+      val nRegs = initRegs.clone()
+      val live = rc.executeLive(blk, nRegs, gas, new Array[PvmRecompiler.Region](0), new Array[Byte](0), 12, 0)
+      try
+        val out = live.run()
+        (out, nRegs) // nRegs not yet written back — only valid after live.close()
+      finally live.close()
+    finally blk.close()
+
+  private def runLiveWithMemory(
+    rc: PvmRecompiler,
+    prog: Seq[AInstr],
+    initRegs: Array[Long],
+    gas: Long,
+    described: RecompilerMemory.Described,
+    entryIndex: Int = 0
+  ): (PvmRecompiler.ExecResult, Array[Long], Array[Byte]) =
+    val pp = toRawColumns(prog)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    blk.isValid shouldBe true
+    try
+      val nRegs = initRegs.clone()
+      val backing = described.backing.clone()
+      val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
+      val live = rc.executeLive(blk, nRegs, gas, regions, backing, described.pageShift, entryIndex)
+      try
+        val out = live.run()
+        (out, nRegs, backing)
+      finally live.close()
+    finally blk.close()
+
+  it should "produce identical results via executeLive and execute on register-only arithmetic programs" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x11EE0000L)
+          for _ <- 0 until 5000 do
+            val n = 1 + rng.nextInt(12)
+            val prog = (0 until n).map(_ => randArith(rng)) :+ Trap
+            val initRegs = Array.fill(13)(rng.nextLong())
+            val gas = prog.length.toLong + rng.nextInt(50)
+
+            val pp = toRawColumns(prog)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blkA.isValid shouldBe true
+            val copyRegs = initRegs.clone()
+            val copyOut = try rc.execute(blkA, copyRegs, gas) finally blkA.close()
+
+            val (liveOut, liveRegs) = runLiveRegsOnly(rc, prog, initRegs, gas)
+
+            withClue(s"program=$prog gas=$gas\n copy(exit=${copyOut.exit} gas=${copyOut.gasRemaining} pc=${copyOut.pc})\n" +
+              s"live(exit=${liveOut.exit} gas=${liveOut.gasRemaining} pc=${liveOut.pc})\n") {
+              liveOut.exit shouldBe copyOut.exit
+              liveOut.gasRemaining shouldBe copyOut.gasRemaining
+              liveOut.pc shouldBe copyOut.pc
+              liveRegs.toSeq shouldBe copyRegs.toSeq
+            }
+          info("H0 live-segment parity (arithmetic, register-only): 5000 programs, executeLive == execute")
+        finally rc.close()
+  }
+
+  it should "produce identical results via executeLive and execute on permission-aware memory programs (RO/RW/stack)" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x11EE0001L)
+          for _ <- 0 until 3000 do
+            val prog = genMemProgram(rng)
+            val initRegs = Array.fill(13)(rng.nextLong())
+            initRegs(0) = RW_BASE.toLong
+            val gas = prog.length.toLong + rng.nextInt(50)
+            val roData = Array.fill(64)(rng.nextInt(256).toByte)
+            val rwData = new Array[Byte](RW_LEN); rng.nextBytes(rwData)
+
+            val (interp, described) = setupRegionRun(prog, initRegs, gas, roData, rwData, 0)
+
+            val pp = toRawColumns(prog)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blkA.isValid shouldBe true
+            val copyRegs = initRegs.clone()
+            val copyBacking = described.backing.clone()
+            val copyRegions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
+            val copyOut = try rc.execute(blkA, copyRegs, gas, copyRegions, copyBacking, described.pageShift, 0) finally blkA.close()
+
+            val (liveOut, liveRegs, liveBacking) = runLiveWithMemory(rc, prog, initRegs, gas, described)
+
+            withClue(s"program=$prog gas=$gas\n copy(exit=${copyOut.exit} gas=${copyOut.gasRemaining} pc=${copyOut.pc})\n" +
+              s"live(exit=${liveOut.exit} gas=${liveOut.gasRemaining} pc=${liveOut.pc})\n" +
+              s"interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc})\n") {
+              liveOut.exit shouldBe copyOut.exit
+              liveOut.exit shouldBe interp.exit
+              liveOut.gasRemaining shouldBe copyOut.gasRemaining
+              liveOut.pc shouldBe copyOut.pc
+              liveRegs.toSeq shouldBe copyRegs.toSeq
+              liveBacking.toSeq shouldBe copyBacking.toSeq
+            }
+          info("H0 live-segment parity (permission-aware memory): 3000 programs, executeLive == execute == interpreter")
+        finally rc.close()
+  }
+
+  it should "produce identical results via executeLive and execute across OOG and backward-loop gas edges" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val rng = new Random(0x11EE0002L)
+          for _ <- 0 until 5000 do
+            val prog = genLoopProgram(rng)
+            val gas = (5 + rng.nextInt(60)).toLong
+            val initRegs = Array.fill(13)(rng.nextLong())
+
+            val pp = toRawColumns(prog)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            blkA.isValid shouldBe true
+            val copyRegs = initRegs.clone()
+            val copyOut = try rc.execute(blkA, copyRegs, gas) finally blkA.close()
+
+            val (liveOut, liveRegs) = runLiveRegsOnly(rc, prog, initRegs, gas)
+
+            withClue(s"program=$prog gas=$gas\n copy(exit=${copyOut.exit} gas=${copyOut.gasRemaining} pc=${copyOut.pc})\n" +
+              s"live(exit=${liveOut.exit} gas=${liveOut.gasRemaining} pc=${liveOut.pc})\n") {
+              copyOut.exit shouldBe PvmRecompiler.EXIT_OOG
+              liveOut.exit shouldBe copyOut.exit
+              liveOut.gasRemaining shouldBe copyOut.gasRemaining
+              liveOut.pc shouldBe copyOut.pc
+              liveRegs.toSeq shouldBe copyRegs.toSeq
+            }
+          info("H0 live-segment parity (backward-loop OOG): 5000 programs, executeLive == execute")
+        finally rc.close()
+  }
+
+  it should "expose live regs/gas segments BEFORE run() that reflect the copied-in initial state" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val prog = Seq(LoadImm64(3, 0x1122334455667788L), Trap)
+          val pp = toRawColumns(prog)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          blk.isValid shouldBe true
+          try
+            val initRegs = Array.tabulate(13)(i => (i + 1) * 111L)
+            val live = rc.executeLive(blk, initRegs.clone(), 1000L, new Array[PvmRecompiler.Region](0), new Array[Byte](0), 12, 0)
+            try
+              // Pre-run(): the live regs segment must already reflect copy-in
+              // (this is the plumbing H1's upcall handler depends on — the
+              // handler observes state as of THIS point, before any native
+              // instruction executes).
+              for i <- 0 until 13 do
+                live.regsSegment().getAtIndex(ValueLayout.JAVA_LONG, i) shouldBe initRegs(i)
+              live.gasSegment().get(ValueLayout.JAVA_LONG, 0) shouldBe 1000L
+              val out = live.run()
+              // Trap (opcode 0) panics (InterruptKind.Panic -> EXIT_PANIC) —
+              // the point of this test is the pre/post-run segment exposure,
+              // not the exit kind, so any deterministic terminal exit works.
+              out.exit shouldBe PvmRecompiler.EXIT_PANIC
+              // Post-run(), pre-close(): the live segment already reflects the
+              // native write to r3 — proving the segment IS the state the
+              // native code wrote, not a separate buffer close() diffs against.
+              live.regsSegment().getAtIndex(ValueLayout.JAVA_LONG, 3) shouldBe 0x1122334455667788L
+            finally live.close()
+          finally blk.close()
+        finally rc.close()
+  }
+
+  it should "reject a second run() call on the same LiveExecution and be idempotent on repeated close()" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val prog = Seq(Trap)
+          val pp = toRawColumns(prog)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          blk.isValid shouldBe true
+          try
+            val regs = Array.fill(13)(0L)
+            val live = rc.executeLive(blk, regs, 100L, new Array[PvmRecompiler.Region](0), new Array[Byte](0), 12, 0)
+            live.run()
+            an[IllegalStateException] should be thrownBy live.run()
+            live.close()
+            noException should be thrownBy live.close() // idempotent
+          finally blk.close()
         finally rc.close()
   }
