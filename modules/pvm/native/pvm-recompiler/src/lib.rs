@@ -35,6 +35,7 @@ pub struct ExecOut {
 
 pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
 pub const OP_FALLTHROUGH: u32 = 1; // no-op block terminator; falls through to the next instruction
+pub const OP_ECALLI: u32 = 10;
 pub const OP_LOAD_IMM64: u32 = 20; // reg[a] = imm
 pub const OP_JUMP: u32 = 40; // pc = imm (instruction index)
 pub const OP_JUMP_INDIRECT: u32 = 50; // indirect: target = (reg[a]+imm) & 0xFFFFFFFF
@@ -183,8 +184,9 @@ pub const EXIT_HALT: u32 = 0; // clean exit (djump to the halt sentinel)
 pub const EXIT_PANIC: u32 = 1; // trap, or djump to a non-jump-table target
 pub const EXIT_OOG: u32 = 2;
 pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
-
-/// The recompiled block: owns its executable memory
+pub const HOST_CONTINUE: i64 = 0;
+pub const HOST_PANIC: i64 = 1;
+pub const HOST_OOG: i64 = 2;
 pub struct CompiledBlock {
     mem: ExecMem,
     instruction_count: u32,
@@ -208,6 +210,7 @@ pub enum Op {
     Store { dst: u8, src: u8, imm: u64, width: u8 },
     /// Basic-block terminator: end execution with EXIT_PANIC.
     Trap,
+    Ecalli { host_id: u64 },
     /// No-op basic-block terminator: falls through to the next instruction
     Fallthrough,
     /// Unconditional jump to instruction index `target`.
@@ -391,6 +394,7 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
     for ins in instrs {
         match ins.opcode {
             OP_PANIC => ops.push(Op::Trap),
+            OP_ECALLI => ops.push(Op::Ecalli { host_id: ins.imm as u64 }),
             OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.a as u8, imm: ins.imm as u64 }),
             OP_ADD_IMM64 => ops.push(Op::AddImm64 {
                 dst: ins.a as u8,
@@ -596,6 +600,7 @@ pub unsafe extern "C" fn pvm_compile(
     };
     Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt }))
 }
+pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
 
 /// Execute a compiled block over the caller's register file, gas cell, and
 /// permission-aware guest memory
@@ -620,6 +625,8 @@ pub unsafe extern "C" fn pvm_execute(
     page_shift: u32,
     entry_index: u32,
     out: *mut ExecOut,
+    host_fn: Option<HostFn>,
+    host_ctx: *mut std::ffi::c_void,
 ) -> u32 {
     if block.is_null() || regs.is_null() || gas.is_null() || out.is_null() {
         return EXIT_PANIC;
@@ -630,9 +637,19 @@ pub unsafe extern "C" fn pvm_execute(
         return EXIT_PANIC;
     }
     let base = block.mem.as_ptr();
-    let f: extern "C" fn(*mut u64, *mut i64, *const Region, u64, *mut u8, u32, *mut ExecOut, u32) -> u32 =
-        std::mem::transmute(base);
-    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index)
+    let f: extern "C" fn(
+        *mut u64,
+        *mut i64,
+        *const Region,
+        u64,
+        *mut u8,
+        u32,
+        *mut ExecOut,
+        u32,
+        Option<HostFn>,
+        *mut std::ffi::c_void,
+    ) -> u32 = std::mem::transmute(base);
+    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -687,6 +704,22 @@ mod tests {
         entry_index: u32,
         code_len: u32,
     ) -> (u32, ExecOut) {
+        run_full_with_host(instrs, regs, gas, regions, backing, jt, entry_index, code_len, None, std::ptr::null_mut())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_full_with_host(
+        instrs: &[RawInstr],
+        regs: &mut [u64; 13],
+        gas: &mut i64,
+        regions: &[Region],
+        backing: &mut [u8],
+        jt: &[u32],
+        entry_index: u32,
+        code_len: u32,
+        host_fn: Option<HostFn>,
+        host_ctx: *mut std::ffi::c_void,
+    ) -> (u32, ExecOut) {
         unsafe {
             let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len(), code_len);
             assert!(!blk.is_null(), "compile returned null");
@@ -701,6 +734,8 @@ mod tests {
                 12, // page_shift: 4096-byte pages in these tests
                 entry_index,
                 &mut out as *mut ExecOut,
+                host_fn,
+                host_ctx,
             );
             pvm_free(blk);
             (ex, out)
@@ -3518,5 +3553,210 @@ mod tests {
         let mut gas = 100i64;
         let (exit, _out) = run_mem(&prog, &mut regs, &mut gas, &regions, &mut mem);
         assert_eq!(exit, EXIT_FAULT);
+    }
+    mod ecalli_tests {
+        use super::*;
+        #[repr(C)]
+        struct TestHostCtx {
+            regs: *mut u64,
+            gas: *mut i64,
+            calls: *mut Vec<(u64, u32)>,
+        }
+
+        extern "C" fn test_host_fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64 {
+            unsafe {
+                let ctx = &*(ctx as *mut TestHostCtx);
+                (*ctx.calls).push((host_call_id, pc));
+                match host_call_id {
+                    0 => {
+                        let r7 = *ctx.regs.add(7);
+                        *ctx.regs.add(7) = r7 + 1000;
+                        let g = *ctx.gas;
+                        *ctx.gas = g - 5; // handler-side extra gas charge, visible via the cell
+                        HOST_CONTINUE
+                    }
+                    1 => HOST_CONTINUE,
+                    2 => HOST_PANIC,
+                    3 => {
+                        *ctx.gas = -1;
+                        HOST_OOG
+                    }
+                    4 => {
+                        std::arch::asm!(
+                            "mov x8, {p}", "mov x9, {p}", "mov x10, {p}",
+                            "mov x13, {p}", "mov x14, {p}", "mov x15, {p}",
+                            "mov x16, {p}", "mov x17, {p}",
+                            p = in(reg) 0xDEADBEEFu64,
+                            out("x8") _, out("x9") _, out("x10") _,
+                            out("x13") _, out("x14") _, out("x15") _,
+                            out("x16") _, out("x17") _,
+                        );
+                        HOST_CONTINUE
+                    }
+                    _ => HOST_PANIC,
+                }
+            }
+        }
+
+        fn ecalli_then_trap(host_id: i64) -> Vec<RawInstr> {
+            with_pcs(vec![ri(OP_ECALLI, 0, 0, 0, host_id), ri(OP_PANIC, 0, 0, 0, 0)])
+        }
+
+        fn run_with_ctx(
+            prog: &[RawInstr],
+            regs: &mut [u64; 13],
+            gas: &mut i64,
+            host_fn: Option<HostFn>,
+            calls: &mut Vec<(u64, u32)>,
+        ) -> (u32, ExecOut) {
+            let mut ctx = TestHostCtx { regs: regs.as_mut_ptr(), gas: gas as *mut i64, calls: calls as *mut _ };
+            run_full_with_host(
+                prog,
+                regs_unsafe_alias(regs),
+                gas,
+                &[],
+                &mut [],
+                &[],
+                0,
+                (prog.len() as u32) * 4,
+                host_fn,
+                &mut ctx as *mut TestHostCtx as *mut std::ffi::c_void,
+            )
+        }
+
+        fn regs_unsafe_alias(regs: &mut [u64; 13]) -> &mut [u64; 13] {
+            unsafe { &mut *(regs as *mut [u64; 13]) }
+        }
+
+        #[test]
+        fn continue_status_falls_through_and_the_handlers_register_write_is_visible() {
+            let prog = ecalli_then_trap(0);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(0u64, 0u32)]); // called once, at the Ecalli's own pc
+            assert_eq!(exit, EXIT_PANIC); // fell through into the Panic at instruction 1
+            assert_eq!(out.pc, 4); // the SECOND instruction's pc, not the Ecalli's — proves fallthrough
+            assert_eq!(regs[7], 1000); // the handler's register write survived the upcall
+            assert_eq!(gas, 100 - 7);
+        }
+
+        #[test]
+        fn panic_status_exits_panic_at_the_ecalli_instructions_own_pc() {
+            let prog = ecalli_then_trap(2);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(2u64, 0u32)]);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0);
+            assert_eq!(gas, 100 - 1);
+        }
+
+        #[test]
+        fn oog_status_exits_oog_with_the_handlers_gas_cell_write_preserved() {
+            let prog = ecalli_then_trap(3);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(3u64, 0u32)]);
+            assert_eq!(exit, EXIT_OOG);
+            assert_eq!(out.pc, 0); // same PC MODEL as the panic case
+            assert_eq!(gas, -1);
+        }
+
+        #[test]
+        fn null_host_fn_would_be_a_bug_but_a_program_with_no_ecalli_is_unaffected() {
+            let prog = with_pcs(vec![
+                ri(OP_LOAD_IMM64, 3, 0, 0, 0x1122334455667788u64 as i64),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            let (exit, out) = run_full_with_host(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, 8, None, std::ptr::null_mut());
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 4);
+            assert_eq!(regs[3], 0x1122334455667788u64);
+            assert_eq!(gas, 100 - 2);
+        }
+
+        #[test]
+        fn gas_cell_integrity_handler_charge_is_visible_to_a_subsequent_ecalli_in_the_same_program() {
+            let prog = with_pcs(vec![
+                ri(OP_ECALLI, 0, 0, 0, 0),
+                ri(OP_ECALLI, 0, 0, 0, 1),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(0u64, 0u32), (1u64, 4u32)]);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 8);
+            // 1 (ecalli0) + 5 (handler charge) + 1 (ecalli1) + 1 (panic) = 8.
+            assert_eq!(gas, 100 - 8);
+        }
+
+        #[test]
+        fn register_file_integrity_all_regs_preserved_across_upcall_unless_the_handler_writes_them() {
+            let prog = ecalli_then_trap(1); // host_id=1: CONTINUE, no-op — touches nothing
+            let mut regs: [u64; 13] = std::array::from_fn(|i| 0x1000_0000_0000_0000u64 + i as u64);
+            let expected = regs;
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, _out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(regs, expected, "a no-op handler must leave every one of the 13 registers untouched");
+        }
+
+        #[test]
+        fn register_file_integrity_survives_a_handler_that_clobbers_every_scratch_register() {
+            let prog = ecalli_then_trap(4); // host_id=4: CONTINUE, clobbers x8-x17 with poison
+            let mut regs: [u64; 13] = std::array::from_fn(|i| 0x2000_0000_0000_0000u64 + i as u64 * 7);
+            let expected = regs;
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 4);
+            assert_eq!(regs, expected, "a scratch-register-clobbering handler must not corrupt the PVM register file");
+        }
+
+        #[test]
+        fn stack_alignment_smoke_many_ecallis_in_a_loop_do_not_crash_or_corrupt_state() {
+            let prog = with_pcs(vec![
+                ri(OP_ECALLI, 0, 0, 0, 1), // no-op CONTINUE, cheap
+                ri(OP_JUMP, 0, 0, 0, 0),   // loop back to instruction 0
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 10_000i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(exit, EXIT_OOG);
+            assert_eq!(calls.len(), 5000); // 10000 gas / 2 gas-per-iteration (ecalli+jump)
+            assert_eq!(gas, -1);
+            assert_eq!(out.pc, 0); // OOG always attributes to the Ecalli (charged first each iteration)
+        }
+
+        #[test]
+        fn a_call_log_static_thread_local_style_context_round_trips_pc_across_many_distinct_sites() {
+            let prog = with_pcs(vec![
+                ri(OP_ECALLI, 0, 0, 0, 1),
+                ri(OP_ECALLI, 0, 0, 0, 1),
+                ri(OP_ECALLI, 0, 0, 0, 1),
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 12);
+            assert_eq!(calls, vec![(1u64, 0u32), (1u64, 4u32), (1u64, 8u32)]);
+        }
     }
 }

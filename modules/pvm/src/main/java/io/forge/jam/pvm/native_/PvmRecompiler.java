@@ -2,6 +2,8 @@ package io.forge.jam.pvm.native_;
 
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.nio.file.Path;
 
 /**
@@ -49,6 +51,9 @@ public final class PvmRecompiler implements AutoCloseable {
     public static final int EXIT_PANIC = 1;
     public static final int EXIT_OOG = 2;
     public static final int EXIT_FAULT = 3;
+    public static final long HOST_CONTINUE = 0L;
+    public static final long HOST_PANIC = 1L;
+    public static final long HOST_OOG = 2L;
 
     public static final int REG_COUNT = 13;
 
@@ -71,11 +76,22 @@ public final class PvmRecompiler implements AutoCloseable {
     private final MethodHandle execute;
     private final MethodHandle free;
     private final Arena arena;
+    private final Linker linker;
+    private static final FunctionDescriptor HOST_FN_DESCRIPTOR = FunctionDescriptor.of(
+            ValueLayout.JAVA_LONG, // return: HOST_CONTINUE/HOST_PANIC/HOST_OOG
+            ValueLayout.ADDRESS,   // ctx (host_ctx, round-tripped opaquely)
+            ValueLayout.JAVA_LONG, // host_call_id
+            ValueLayout.JAVA_INT   // pc
+    );
+
+    public interface HostCallHandler {
+        long onHostCall(long hostCallId, int pc);
+    }
 
     /** Open the binding against the recompiler shared library at {@code libPath}. */
     public PvmRecompiler(Path libPath) {
         this.arena = Arena.ofShared();
-        Linker linker = Linker.nativeLinker();
+        this.linker = Linker.nativeLinker();
         SymbolLookup lookup = SymbolLookup.libraryLookup(libPath, arena);
 
         this.compile = linker.downcallHandle(
@@ -98,7 +114,9 @@ public final class PvmRecompiler implements AutoCloseable {
                         ValueLayout.ADDRESS,   // backing
                         ValueLayout.JAVA_INT,  // page_shift
                         ValueLayout.JAVA_INT,  // entry_index
-                        ValueLayout.ADDRESS    // out (ExecOut*)
+                        ValueLayout.ADDRESS,   // out (ExecOut*)
+                        ValueLayout.ADDRESS,   // host_fn (Option<HostFn> — null means None)
+                        ValueLayout.ADDRESS    // host_ctx
                 ));
         this.free = linker.downcallHandle(
                 lookup.find("pvm_free").orElseThrow(() -> missing("pvm_free")),
@@ -107,6 +125,59 @@ public final class PvmRecompiler implements AutoCloseable {
 
     private static IllegalStateException missing(String sym) {
         return new IllegalStateException("recompiler symbol not found: " + sym);
+    }
+
+    private static final MethodHandle UPCALL_TARGET_MH;
+    static {
+        try {
+            UPCALL_TARGET_MH = MethodHandles.lookup().findStatic(
+                    PvmRecompiler.class, "upcallTarget",
+                    MethodType.methodType(long.class, UpcallState.class, MemorySegment.class, long.class, int.class));
+        } catch (NoSuchMethodException | IllegalAccessException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    private static final class UpcallState {
+        final HostCallHandler handler;
+        Throwable pending;
+
+        UpcallState(HostCallHandler handler) {
+            this.handler = handler;
+        }
+    }
+
+    private static long upcallTarget(UpcallState state, MemorySegment ctxIgnored, long hostCallId, int pc) {
+        try {
+            return state.handler.onHostCall(hostCallId, pc);
+        } catch (Throwable t) {
+            state.pending = t;
+            return HOST_PANIC;
+        }
+    }
+
+    private UpcallStub newUpcallStub(HostCallHandler handler, Arena stubArena) {
+        UpcallState state = new UpcallState(handler);
+        java.lang.invoke.MethodHandle bound = UPCALL_TARGET_MH.bindTo(state);
+        MemorySegment stub = linker.upcallStub(bound, HOST_FN_DESCRIPTOR, stubArena);
+        return new UpcallStub(stub, state);
+    }
+
+    /** {@code host_fn} native pointer + the mutable state to check for a
+     *  stashed exception after the call returns. */
+    private record UpcallStub(MemorySegment fnPointer, UpcallState state) {
+        /** Rethrow the handler's exception if one occurred, wrapped so the
+         *  original stack trace is preserved as the cause. Idempotent to
+         *  call when {@code state.pending == null} (no-op). */
+        void rethrowIfPending() {
+            if (state.pending != null) {
+                Throwable t = state.pending;
+                state.pending = null;
+                if (t instanceof RuntimeException re) throw re;
+                if (t instanceof Error err) throw err;
+                throw new RuntimeException("host call handler threw a checked exception", t);
+            }
+        }
     }
 
     /** A compiled block handle. Null native pointer means the program had an
@@ -217,7 +288,8 @@ public final class PvmRecompiler implements AutoCloseable {
             MemorySegment outSeg = call.allocate(EXEC_OUT_SIZE);
 
             int exit = (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
-                    (long) regions.length, backingSeg, pageShift, entryIndex, outSeg);
+                    (long) regions.length, backingSeg, pageShift, entryIndex, outSeg,
+                    MemorySegment.NULL, MemorySegment.NULL);
 
             for (int i = 0; i < REG_COUNT; i++) {
                 regs[i] = regSeg.getAtIndex(ValueLayout.JAVA_LONG, i);
@@ -241,6 +313,11 @@ public final class PvmRecompiler implements AutoCloseable {
 
     public LiveExecution executeLive(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
                                       int pageShift, int entryIndex) {
+        return executeLive(block, regs, gas, regions, backing, pageShift, entryIndex, null);
+    }
+
+    public LiveExecution executeLive(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
+                                      int pageShift, int entryIndex, HostCallHandler hostCallHandler) {
         if (regs.length != REG_COUNT) {
             throw new IllegalArgumentException("regs must have length " + REG_COUNT);
         }
@@ -274,8 +351,12 @@ public final class PvmRecompiler implements AutoCloseable {
 
             MemorySegment outSeg = call.allocate(EXEC_OUT_SIZE);
 
+            UpcallStub stub = hostCallHandler == null ? null : newUpcallStub(hostCallHandler, call);
+            MemorySegment hostFnSeg = stub == null ? MemorySegment.NULL : stub.fnPointer();
+            MemorySegment hostCtxSeg = MemorySegment.NULL;
+
             return new LiveExecution(call, block, regSeg, gasSeg, regionsSeg, regions.length,
-                    backingSeg, pageShift, entryIndex, outSeg, regs, backing);
+                    backingSeg, pageShift, entryIndex, outSeg, regs, backing, hostFnSeg, hostCtxSeg, stub);
         } catch (Throwable t) {
             call.close();
             throw new RuntimeException("executeLive setup failed", t);
@@ -295,13 +376,17 @@ public final class PvmRecompiler implements AutoCloseable {
         private final MemorySegment outSeg;
         private final long[] regsOut;
         private final byte[] backingOut;
+        private final MemorySegment hostFnSeg;
+        private final MemorySegment hostCtxSeg;
+        private final UpcallStub upcallStub; // null when no HostCallHandler was supplied
         private boolean closed = false;
         private boolean ran = false;
 
         private LiveExecution(Arena call, Block block, MemorySegment regSeg, MemorySegment gasSeg,
                                MemorySegment regionsSeg, long nRegions, MemorySegment backingSeg,
                                int pageShift, int entryIndex, MemorySegment outSeg,
-                               long[] regsOut, byte[] backingOut) {
+                               long[] regsOut, byte[] backingOut,
+                               MemorySegment hostFnSeg, MemorySegment hostCtxSeg, UpcallStub upcallStub) {
             this.call = call;
             this.block = block;
             this.regSeg = regSeg;
@@ -314,6 +399,9 @@ public final class PvmRecompiler implements AutoCloseable {
             this.outSeg = outSeg;
             this.regsOut = regsOut;
             this.backingOut = backingOut;
+            this.hostFnSeg = hostFnSeg;
+            this.hostCtxSeg = hostCtxSeg;
+            this.upcallStub = upcallStub;
         }
 
         /** The live 13-register segment ({@code long[13]}, matches emitted
@@ -344,12 +432,17 @@ public final class PvmRecompiler implements AutoCloseable {
             ran = true;
             try {
                 int exit = (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
-                        nRegions, backingSeg, pageShift, entryIndex, outSeg);
+                        nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg);
+                if (upcallStub != null) {
+                    upcallStub.rethrowIfPending();
+                }
                 long gasRemaining = gasSeg.get(ValueLayout.JAVA_LONG, 0);
                 long pc = Integer.toUnsignedLong(outSeg.get(ValueLayout.JAVA_INT, 0));
                 long faultPage = Integer.toUnsignedLong(outSeg.get(ValueLayout.JAVA_INT, 4));
                 return new ExecResult(exit, gasRemaining, pc, faultPage);
             } catch (Throwable t) {
+                if (t instanceof RuntimeException re) throw re;
+                if (t instanceof Error err) throw err;
                 throw new RuntimeException("pvm_execute failed", t);
             }
         }
