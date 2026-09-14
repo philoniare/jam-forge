@@ -178,6 +178,24 @@ object RecompilerThroughputBench:
     val n = sorted.length
     if n % 2 == 1 then sorted(n / 2) else (sorted(n / 2 - 1) + sorted(n / 2)) / 2.0
 
+  private def assertEngineParity(label: String, interp: InterpOutcome, recomp: RecompOutcome): Unit =
+    val interpExitAsExit = interp.exitKind match
+      case "Finished" | "Halt" => PvmRecompiler.EXIT_HALT
+      case "Panic" => PvmRecompiler.EXIT_PANIC
+      case "OutOfGas" => PvmRecompiler.EXIT_OOG
+      case "Fault" => PvmRecompiler.EXIT_FAULT
+      case other => sys.error(s"[$label] unexpected interpreter exit kind: $other")
+    if interpExitAsExit != recomp.exit then
+      sys.error(s"[$label] engine DIVERGED on exit — interpreter=${interp.exitKind} recompiler=${recomp.exit}")
+    if interp.gasRemaining != recomp.gasRemaining then
+      sys.error(s"[$label] engine DIVERGED on gas — interpreter=${interp.gasRemaining} recompiler=${recomp.gasRemaining}")
+    if (interp.pc.toLong & 0xFFFFFFFFL) != recomp.pc then
+      sys.error(s"[$label] engine DIVERGED on pc — interpreter=${interp.pc} recompiler=${recomp.pc}")
+    interp.regs.indices.foreach { r =>
+      if interp.regs(r) != recomp.regs(r) then
+        sys.error(s"[$label] engine DIVERGED on reg $r — interpreter=${interp.regs(r)} recompiler=${recomp.regs(r)}")
+    }
+
   // ==========================================================================
   // Loop-workload driver: build blob, compile once, warm up, time both
   // engines, assert result equality on EVERY accepted timing.
@@ -221,24 +239,7 @@ object RecompilerThroughputBench:
         val interp = runInterpreterTimed(module, initRegs, gasBudget)
         val recomp = runRecompilerTimed(rc, block, module, initRegs, gasBudget)
 
-        // Result-equality gate: both engines must agree on exit condition,
-        // remaining gas, final PC, and every register — otherwise this run
-        // measured DIVERGENT executions and is not a valid data point.
-        val interpExitAsExit = interp.exitKind match
-          case "Finished" => PvmRecompiler.EXIT_HALT
-          case "Panic" => PvmRecompiler.EXIT_PANIC
-          case "OutOfGas" => PvmRecompiler.EXIT_OOG
-          case other => sys.error(s"[$name] unexpected interpreter exit kind: $other")
-        if interpExitAsExit != recomp.exit then
-          sys.error(s"[$name] run $i: engine DIVERGED on exit — interpreter=${interp.exitKind} recompiler=${recomp.exit}")
-        if interp.gasRemaining != recomp.gasRemaining then
-          sys.error(s"[$name] run $i: engine DIVERGED on gas — interpreter=${interp.gasRemaining} recompiler=${recomp.gasRemaining}")
-        if (interp.pc.toLong & 0xFFFFFFFFL) != recomp.pc then
-          sys.error(s"[$name] run $i: engine DIVERGED on pc — interpreter=${interp.pc} recompiler=${recomp.pc}")
-        interp.regs.indices.foreach { r =>
-          if interp.regs(r) != recomp.regs(r) then
-            sys.error(s"[$name] run $i: engine DIVERGED on reg $r — interpreter=${interp.regs(r)} recompiler=${recomp.regs(r)}")
-        }
+        assertEngineParity(s"$name run $i", interp, recomp)
 
         interpSeconds += interp.seconds
         recompSeconds += recomp.seconds
@@ -340,8 +341,10 @@ object RecompilerThroughputBench:
           case Right(InterruptKind.Ecalli(_)) => sys.error(s"[${tc.name}] unexpected ecalli")
           case Left(err) => sys.error(s"[${tc.name}] interpreter execution error: $err")
       val it1 = System.nanoTime()
-      interpExecNanos += (it1 - it0)
-      interpInstrsExecuted += (tc.initialGas - interpInstance.gas)
+      val interpElapsedSeconds = (it1 - it0) / 1e9
+      val interpRegsOut = Array.tabulate(13)(interpInstance.reg)
+      val interpPcOut = interpInstance.programCounter.map(_.toInt).getOrElse(-1)
+      val interpOutcome = InterpOutcome(interpExit, interpInstance.gas, interpRegsOut, interpPcOut, interpElapsedSeconds)
 
       // ---- recompiler compile (timed separately) + execute (timed) ----
       val ct0 = System.nanoTime()
@@ -352,6 +355,8 @@ object RecompilerThroughputBench:
       try
         if !block.isValid then
           deoptCount += 1
+          interpExecNanos += (it1 - it0)
+          interpInstrsExecuted += (tc.initialGas - interpInstance.gas)
         else
           compiledCount += 1
           val regs = tc.initialRegs.clone()
@@ -360,19 +365,15 @@ object RecompilerThroughputBench:
           val et0 = System.nanoTime()
           val out = rc.execute(block, regs, tc.initialGas, regions, backing, pv.initRegions.pageShift, pv.entryIndex)
           val et1 = System.nanoTime()
+          val recompElapsedSeconds = (et1 - et0) / 1e9
+          val recompOutcome = RecompOutcome(out.exit, out.gasRemaining, regs, out.pc, recompElapsedSeconds)
+          assertEngineParity(tc.name, interpOutcome, recompOutcome)
+
+          // Only counted once the vector has passed the strict gate above.
+          interpExecNanos += (it1 - it0)
+          interpInstrsExecuted += (tc.initialGas - interpInstance.gas)
           recompExecNanos += (et1 - et0)
           recompInstrsExecuted += (tc.initialGas - out.gasRemaining)
-
-          // ---- oracle-parity gate: only an equal-result run counts ----
-          val recompExitName = out.exit match
-            case PvmRecompiler.EXIT_HALT => "Halt"
-            case PvmRecompiler.EXIT_PANIC => "Panic"
-            case PvmRecompiler.EXIT_OOG => "OutOfGas"
-            case PvmRecompiler.EXIT_FAULT => "Fault"
-            case other => s"Unknown($other)"
-          if recompExitName != interpExit then
-            sys.error(s"[${tc.name}] vector-replay DIVERGED on exit — interpreter=$interpExit recompiler=$recompExitName " +
-              "(this vector should already be covered by VectorConformanceSpec's hard gate; investigate before trusting this bench)")
       finally
         block.close()
     }
