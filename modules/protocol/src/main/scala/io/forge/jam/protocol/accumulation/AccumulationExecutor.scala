@@ -46,7 +46,7 @@ class AccumulationExecutor(val config: ChainConfig):
       gasLimit: Long,
       entropy: JamBytes,
       operands: List[AccumulationOperand],
-      executionMode: ExecutionMode = ExecutionMode.Interpreted
+      executionMode: ExecutionMode = ExecutionMode.default
   ): AccumulationOneResult =
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
@@ -140,7 +140,7 @@ class AccumulationExecutor(val config: ChainConfig):
       gasLimit: Long,
       operands: List[AccumulationOperand],
       codeHash: JamBytes,
-      executionMode: ExecutionMode = ExecutionMode.Interpreted
+      executionMode: ExecutionMode = ExecutionMode.default
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++

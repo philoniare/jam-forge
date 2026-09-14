@@ -96,7 +96,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       workPackage: WorkPackage,
       coreIndex: Int,
       accounts: HistoricalLookupService,
-      executionMode: ExecutionMode = ExecutionMode.Interpreted
+      executionMode: ExecutionMode = ExecutionMode.default
   ): IsAuthorizedResult =
     val hostService = workPackage.authCodeHost.value.toLong
     val lookupAnchorTimeslot =

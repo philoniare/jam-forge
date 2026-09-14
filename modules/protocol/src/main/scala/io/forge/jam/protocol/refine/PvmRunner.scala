@@ -28,7 +28,7 @@ object PvmRunner:
       gasLimit: Long,
       entryPc: Int,
       hostCalls: HostCallDispatcher,
-      executionMode: ExecutionMode = ExecutionMode.Interpreted
+      executionMode: ExecutionMode = ExecutionMode.default
   ): (PvmExit, Long, Array[Byte]) =
     val instance = InterpretedInstance.fromModule(
       module,
