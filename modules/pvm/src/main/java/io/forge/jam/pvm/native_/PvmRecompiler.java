@@ -239,6 +239,137 @@ public final class PvmRecompiler implements AutoCloseable {
         return execute(block, regs, gas, new Region[0], new byte[0], 12, 0);
     }
 
+    public LiveExecution executeLive(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
+                                      int pageShift, int entryIndex) {
+        if (regs.length != REG_COUNT) {
+            throw new IllegalArgumentException("regs must have length " + REG_COUNT);
+        }
+        Arena call = Arena.ofConfined();
+        try {
+            MemorySegment regSeg = call.allocate(ValueLayout.JAVA_LONG, REG_COUNT);
+            for (int i = 0; i < REG_COUNT; i++) {
+                regSeg.setAtIndex(ValueLayout.JAVA_LONG, i, regs[i]);
+            }
+            MemorySegment gasSeg = call.allocate(ValueLayout.JAVA_LONG);
+            gasSeg.set(ValueLayout.JAVA_LONG, 0, gas);
+
+            MemorySegment regionsSeg = regions.length == 0
+                    ? MemorySegment.NULL
+                    : call.allocate(REGION_SIZE * regions.length);
+            for (int i = 0; i < regions.length; i++) {
+                long off = i * REGION_SIZE;
+                Region r = regions[i];
+                regionsSeg.set(ValueLayout.JAVA_INT, off, (int) r.base());
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) r.len());
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) r.bufOffset());
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
+            }
+
+            MemorySegment backingSeg = backing.length == 0
+                    ? MemorySegment.NULL
+                    : call.allocate(backing.length);
+            if (backing.length > 0) {
+                MemorySegment.copy(backing, 0, backingSeg, ValueLayout.JAVA_BYTE, 0, backing.length);
+            }
+
+            MemorySegment outSeg = call.allocate(EXEC_OUT_SIZE);
+
+            return new LiveExecution(call, block, regSeg, gasSeg, regionsSeg, regions.length,
+                    backingSeg, pageShift, entryIndex, outSeg, regs, backing);
+        } catch (Throwable t) {
+            call.close();
+            throw new RuntimeException("executeLive setup failed", t);
+        }
+    }
+
+    public final class LiveExecution implements AutoCloseable {
+        private final Arena call;
+        private final Block block;
+        private final MemorySegment regSeg;
+        private final MemorySegment gasSeg;
+        private final MemorySegment regionsSeg;
+        private final long nRegions;
+        private final MemorySegment backingSeg;
+        private final int pageShift;
+        private final int entryIndex;
+        private final MemorySegment outSeg;
+        private final long[] regsOut;
+        private final byte[] backingOut;
+        private boolean closed = false;
+        private boolean ran = false;
+
+        private LiveExecution(Arena call, Block block, MemorySegment regSeg, MemorySegment gasSeg,
+                               MemorySegment regionsSeg, long nRegions, MemorySegment backingSeg,
+                               int pageShift, int entryIndex, MemorySegment outSeg,
+                               long[] regsOut, byte[] backingOut) {
+            this.call = call;
+            this.block = block;
+            this.regSeg = regSeg;
+            this.gasSeg = gasSeg;
+            this.regionsSeg = regionsSeg;
+            this.nRegions = nRegions;
+            this.backingSeg = backingSeg;
+            this.pageShift = pageShift;
+            this.entryIndex = entryIndex;
+            this.outSeg = outSeg;
+            this.regsOut = regsOut;
+            this.backingOut = backingOut;
+        }
+
+        /** The live 13-register segment ({@code long[13]}, matches emitted
+         *  code's {@code [x0 + i*8]} register-file layout). */
+        public MemorySegment regsSegment() { return regSeg; }
+
+        /** The live single-{@code long} gas cell. */
+        public MemorySegment gasSegment() { return gasSeg; }
+
+        /** The live region table ({@code REGION_SIZE}-byte records: base,
+         *  len, bufOffset, writable), {@link #regionCount()} entries. */
+        public MemorySegment regionsSegment() { return regionsSeg; }
+
+        /** Number of entries in {@link #regionsSegment()}. */
+        public long regionCount() { return nRegions; }
+
+        /** The live packed backing buffer all regions' bytes are stored in,
+         *  addressed via each region's {@code bufOffset}. */
+        public MemorySegment backingSegment() { return backingSeg; }
+
+        /** {@code log2(pageSize)}, as passed to {@code pvm_execute}. */
+        public int pageShift() { return pageShift; }
+
+        public ExecResult run() {
+            if (ran) {
+                throw new IllegalStateException("LiveExecution.run() already called");
+            }
+            ran = true;
+            try {
+                int exit = (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
+                        nRegions, backingSeg, pageShift, entryIndex, outSeg);
+                long gasRemaining = gasSeg.get(ValueLayout.JAVA_LONG, 0);
+                long pc = Integer.toUnsignedLong(outSeg.get(ValueLayout.JAVA_INT, 0));
+                long faultPage = Integer.toUnsignedLong(outSeg.get(ValueLayout.JAVA_INT, 4));
+                return new ExecResult(exit, gasRemaining, pc, faultPage);
+            } catch (Throwable t) {
+                throw new RuntimeException("pvm_execute failed", t);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            for (int i = 0; i < REG_COUNT; i++) {
+                regsOut[i] = regSeg.getAtIndex(ValueLayout.JAVA_LONG, i);
+            }
+            if (backingOut.length > 0) {
+                MemorySegment.copy(backingSeg, ValueLayout.JAVA_BYTE, 0, backingOut, 0, backingOut.length);
+            }
+            call.close();
+        }
+    }
+
     @Override
     public void close() {
         arena.close();
