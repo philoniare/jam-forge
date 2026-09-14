@@ -147,25 +147,25 @@ public final class PvmRecompiler implements AutoCloseable {
      */
     public Block compile(int[] opcodes, int[] a, int[] b, int[] c, int[] pc, long[] imm, long[] imm2, int[] jumpTable, int codeLen) {
         int n = opcodes.length;
-        MemorySegment buf = arena.allocate(RAW_INSTR_SIZE * n);
-        for (int i = 0; i < n; i++) {
-            long base = i * RAW_INSTR_SIZE;
-            buf.set(ValueLayout.JAVA_INT, base, opcodes[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 4, a[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 8, b[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 12, c[i]);
-            buf.set(ValueLayout.JAVA_INT, base + 16, pc[i]);
-            // bytes [20,24) are the explicit RAW_INSTR padding — left zeroed.
-            buf.set(ValueLayout.JAVA_LONG, base + 24, imm[i]);
-            buf.set(ValueLayout.JAVA_LONG, base + 32, imm2[i]);
-        }
-        MemorySegment jt = jumpTable.length == 0
-                ? MemorySegment.NULL
-                : arena.allocate(ValueLayout.JAVA_INT, jumpTable.length);
-        for (int i = 0; i < jumpTable.length; i++) {
-            jt.setAtIndex(ValueLayout.JAVA_INT, i, jumpTable[i]);
-        }
-        try {
+        try (Arena call = Arena.ofConfined()) {
+            MemorySegment buf = call.allocate(RAW_INSTR_SIZE * n);
+            for (int i = 0; i < n; i++) {
+                long base = i * RAW_INSTR_SIZE;
+                buf.set(ValueLayout.JAVA_INT, base, opcodes[i]);
+                buf.set(ValueLayout.JAVA_INT, base + 4, a[i]);
+                buf.set(ValueLayout.JAVA_INT, base + 8, b[i]);
+                buf.set(ValueLayout.JAVA_INT, base + 12, c[i]);
+                buf.set(ValueLayout.JAVA_INT, base + 16, pc[i]);
+                // bytes [20,24) are the explicit RAW_INSTR padding — left zeroed.
+                buf.set(ValueLayout.JAVA_LONG, base + 24, imm[i]);
+                buf.set(ValueLayout.JAVA_LONG, base + 32, imm2[i]);
+            }
+            MemorySegment jt = jumpTable.length == 0
+                    ? MemorySegment.NULL
+                    : call.allocate(ValueLayout.JAVA_INT, jumpTable.length);
+            for (int i = 0; i < jumpTable.length; i++) {
+                jt.setAtIndex(ValueLayout.JAVA_INT, i, jumpTable[i]);
+            }
             MemorySegment h = (MemorySegment) compile.invoke(buf, (long) n, jt, (long) jumpTable.length, codeLen);
             return new Block(h);
         } catch (Throwable t) {
