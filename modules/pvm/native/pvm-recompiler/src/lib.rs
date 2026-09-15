@@ -595,6 +595,9 @@ pub unsafe extern "C" fn pvm_compile(
         std::slice::from_raw_parts(jump_table, jt_n).to_vec().into_boxed_slice()
     };
     let jt_ptr = jt.as_ptr();
+    if ops.len() >= 4096 {
+        return std::ptr::null_mut();
+    }
     let backend = aarch64::Aarch64Backend;
     let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt, jt_ptr, code_len);
     let mem = match ExecMem::from_code(&code) {
@@ -4104,5 +4107,49 @@ mod tests {
             assert_eq!(regions[0].len, 4096); // region untouched
             assert_eq!(gas, 100 - 1); // only the Sbrk's own per-instruction charge
         }
+    }
+}
+
+#[cfg(test)]
+mod compile_reject_tests {
+    use super::*;
+
+    /// Programs at/over the dispatch-chain imm12 limit must REJECT (null
+    /// compile -> caller deopts), never panic: panic="abort" in the release
+    /// dylib turns a panic into a host-process kill (observed with real
+    /// service programs under Recompiled mode).
+    #[test]
+    fn oversized_program_compile_rejects_instead_of_panicking() {
+        let n = 5000usize;
+        let mut prog: Vec<RawInstr> = (0..n - 1)
+            .map(|i| RawInstr {
+                opcode: OP_ADD_IMM64,
+                a: 1,
+                b: 1,
+                c: 0,
+                pc: (i * 3) as u32,
+                imm: 1,
+                imm2: 0,
+            })
+            .collect();
+        prog.push(RawInstr {
+            opcode: OP_PANIC,
+            a: 0,
+            b: 0,
+            c: 0,
+            pc: ((n - 1) * 3) as u32,
+            imm: 0,
+            imm2: 0,
+        });
+        let blk = unsafe {
+            pvm_compile(
+                prog.as_ptr(),
+                prog.len(),
+                std::ptr::null(),
+                0,
+                (n * 3) as u32,
+            )
+        };
+        assert!(blk.is_null(), "oversized program must null-compile, not panic");
     }
 }
