@@ -63,11 +63,8 @@ object NativeRunner extends StrictLogging:
         val blob = instance.module.blob
 
         val unsupported = scanUnsupportedOpcodes(blob.code, blob.bitmask)
-        if unsupported.hasSbrk then
-          logger.debug("NativeRunner: deopt to interpreter — program contains Sbrk (no heap-growth support in the recompiler yet)")
-          None
-        else if unsupported.hasEcalli && hostCalls.isEmpty then
-          logger.debug("NativeRunner: deopt to interpreter — program contains Ecalli and no HostCallDispatcher was supplied")
+        if (unsupported.hasEcalli || unsupported.hasSbrk) && hostCalls.isEmpty then
+          logger.debug("NativeRunner: deopt to interpreter — program contains Ecalli/Sbrk and no HostCallDispatcher was supplied")
           None
         else
           val prepared = RecompilerAbi.prepareProgram(blob)
@@ -85,16 +82,23 @@ object NativeRunner extends StrictLogging:
                   logger.debug("NativeRunner: deopt to interpreter — pvm_compile returned an invalid block (unsupported opcode)")
                   None
                 else
-                  val described = RecompilerMemory.describe(instance)
+                  val describedWithHeap =
+                    if unsupported.hasSbrk then Some(RecompilerMemory.describeWithHeapSlack(instance))
+                    else None
+                  val described = describedWithHeap.map(_.described).getOrElse(RecompilerMemory.describe(instance))
                   val regs = Array.tabulate(13)(instance.reg)
                   val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
                   val backing = described.backing.clone()
 
-                  val out = hostCalls match
+                  val (out, finalRegionLens) = hostCalls match
                     case None =>
-                      rc.execute(blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex)
+                      val r = rc.execute(blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex)
+                      (r, described.regions.map(_.len))
                     case Some((dispatcher, preDispatch)) =>
-                      executeWithHostCalls(rc, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex, dispatcher, preDispatch)
+                      executeWithHostCalls(
+                        rc, instance, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex,
+                        dispatcher, preDispatch, describedWithHeap
+                      )
 
                   // Write registers back onto the instance (callers read via instance.reg).
                   for i <- 0 until 13 do instance.setReg(i, regs(i))
@@ -111,9 +115,9 @@ object NativeRunner extends StrictLogging:
                   // Write only WRITABLE regions' bytes back — RO regions (RO data, aux/args)
                   // are never mutated by a correct program, and BasicMemory.setMemorySlice
                   // rejects writes to read-only ranges outright.
-                  described.regions.foreach { region =>
+                  described.regions.zip(finalRegionLens).foreach { case (region, finalLen) =>
                     if region.writable then
-                      val slice = backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + region.len.toInt)
+                      val slice = backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + finalLen.toInt)
                       instance.basicMemory.setMemorySlice(UInt(region.base.toInt), slice)
                   }
 
@@ -128,6 +132,7 @@ object NativeRunner extends StrictLogging:
 
   private def executeWithHostCalls(
       rc: PvmRecompiler,
+      instance: InterpretedInstance,
       blk: PvmRecompiler#Block,
       regs: Array[Long],
       gas: Long,
@@ -136,8 +141,9 @@ object NativeRunner extends StrictLogging:
       pageShift: Int,
       entryIndex: Int,
       dispatcher: HostCallDispatcher,
-      preDispatch: Option[() => Unit]
-  ): PvmRecompiler.ExecResult =
+      preDispatch: Option[() => Unit],
+      heapTracking: Option[RecompilerMemory.DescribedWithHeap]
+  ): (PvmRecompiler.ExecResult, Array[Long]) =
     var wrapperRef: NativeInstanceWrapper = null
     val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _pc: Int) =>
       val wrapper = wrapperRef
@@ -153,17 +159,74 @@ object NativeRunner extends StrictLogging:
         catch
           case _: RuntimeException => PvmRecompiler.HOST_PANIC
 
-    val live = rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler)
+    def exceedsSlackCap(ht: RecompilerMemory.DescribedWithHeap, newHeapEndCandidate: Long): Boolean =
+      val pageSize = 1L << ht.described.pageShift
+      val newRegionLenAligned = alignUpLong(newHeapEndCandidate, pageSize) - ht.heapBase
+      val initialHeapRegionLen = regions(ht.heapRegionIndex).len
+      val backingCapacity = initialHeapRegionLen + slackReservedFor(ht)
+      newRegionLenAligned > backingCapacity
+
+    val sbrkHandler: Option[PvmRecompiler.SbrkCallHandler] = heapTracking.map { ht =>
+      (dst: Int, size: Long, _pc: Int) =>
+        val wrapper = wrapperRef
+        val sizeU32 = UInt((size & 0xFFFFFFFFL).toInt)
+        val curHeapSize = instance.basicMemory.heapSize.signed.toLong & 0xFFFFFFFFL
+        val newHeapSizeLong = curHeapSize + (sizeU32.signed.toLong & 0xFFFFFFFFL)
+        val slackCapExceeded =
+          sizeU32 != UInt(0) &&
+            newHeapSizeLong <= 0xFFFFFFFFL &&
+            newHeapSizeLong <= ht.maxHeapSize &&
+            exceedsSlackCap(ht, ht.heapBase + newHeapSizeLong)
+
+        if slackCapExceeded then
+          logger.warn(
+            s"NativeRunner: SBRK SLACK-CAP EXCEEDED (divergence guard) — " +
+              s"heapBase=0x${ht.heapBase.toHexString} requestedNewHeapSize=$newHeapSizeLong " +
+              s"maxHeapSize=${ht.maxHeapSize}. This is a documented native-recompiler " +
+              "limitation (256 MiB slack cap), NOT an interpreter-parity failure — see " +
+              "docs/superpowers/specs/2026-07-03-recompiler-host-calls-plan.md 'Sbrk memory model'."
+          )
+          PvmRecompiler.HOST_PANIC
+        else
+          instance.basicMemory.sbrk(sizeU32) match
+            case None =>
+              PvmRecompiler.HOST_PANIC
+            case Some(oldHeapEnd) =>
+              val newHeapEndAuthoritative = instance.basicMemory.heapEnd.toLong & 0xFFFFFFFFL
+              val pageSize = 1L << ht.described.pageShift
+              val newRegionLenAligned = alignUpLong(newHeapEndAuthoritative, pageSize) - ht.heapBase
+              if sizeU32 != UInt(0) then wrapper.growRegion(ht.heapRegionIndex, newRegionLenAligned)
+              wrapper.setReg(dst, oldHeapEnd.toLong & 0xFFFFFFFFL)
+              PvmRecompiler.HOST_CONTINUE
+    }
+
+    val live = sbrkHandler match
+      case Some(sh) => rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler, sh)
+      case None => rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler)
     wrapperRef = new NativeInstanceWrapper(live)
-    try live.run()
+    try
+      val result = live.run()
+      // Final region lengths, read from the LIVE region-table segment (which
+      // an Sbrk upcall may have mutated) BEFORE close() releases it.
+      val finalLens = Array.tabulate(regions.length) { i =>
+        if heapTracking.isDefined && i == heapTracking.get.heapRegionIndex then
+          Integer.toUnsignedLong(live.regionsSegment().get(java.lang.foreign.ValueLayout.JAVA_INT, i * 16L + 4))
+        else regions(i).len
+      }
+      (result, finalLens)
     finally live.close()
+
+  private def alignUpLong(v: Long, pageSize: Long): Long =
+    val rem = v % pageSize
+    if rem == 0 then v else v + (pageSize - rem)
+
+  private def slackReservedFor(ht: RecompilerMemory.DescribedWithHeap): Long =
+    val room = math.max(0L, ht.maxHeapSize - (ht.initialHeapEnd - ht.heapBase))
+    val pageSize = 1L << ht.described.pageShift
+    alignUpLong(math.min(room, RecompilerMemory.MaxHeapSlackBytes), pageSize)
 
   private final case class UnsupportedOpcodeScan(hasEcalli: Boolean, hasSbrk: Boolean)
 
-  /** Scans the decoded program for `Ecalli`/`Sbrk` — the two opcodes the
-    * recompiler cannot execute unconditionally (brief H0: "any Ecalli (10)
-    * or Sbrk (101)"; H1 narrows this to "Ecalli is fine WITH a dispatcher,
-    * Sbrk always deopts" — see `runRecompiled`). */
   private def scanUnsupportedOpcodes(code: Array[Byte], bitmask: Array[Byte]): UnsupportedOpcodeScan =
     var off = 0
     var hasEcalli = false
