@@ -19,25 +19,50 @@ object RecompilerMemory:
       * power of two per `MemoryMap.Builder.build`'s own validation. */
     def pageShift: Int = java.lang.Integer.numberOfTrailingZeros(pageSize.signed)
 
+  final case class DescribedWithHeap(
+    described: Described,
+    heapRegionIndex: Int,
+    heapBase: Long,
+    initialHeapEnd: Long,
+    maxHeapSize: Long
+  )
+
   /**
    * Build the region table + backing bytes for `instance`'s CURRENT memory
    * state
    */
   def describe(instance: InterpretedInstance): Described =
+    describeInternal(instance, heapSlackBytes = 0)._1
+
+  val MaxHeapSlackBytes: Long = 256L * 1024 * 1024
+
+  def describeWithHeapSlack(instance: InterpretedInstance): DescribedWithHeap =
+    val memoryMap = instance.module.memoryMap
+    val pageSize = memoryMap.pageSize.signed
+    val currentHeapSize = instance.basicMemory.heapSize.signed.toLong & 0xFFFFFFFFL
+    val maxHeapSize = memoryMap.maxHeapSize.signed.toLong & 0xFFFFFFFFL
+    val room = math.max(0L, maxHeapSize - currentHeapSize)
+    val slackBytes = AlignmentOps.alignUp(math.min(room, MaxHeapSlackBytes), pageSize.toLong)
+
+    val (described, heapRegionIndex) = describeInternal(instance, slackBytes)
+    val heapBase = memoryMap.heapBase.toLong & 0xFFFFFFFFL
+    val initialHeapEnd = heapBase + currentHeapSize // mirrors basicMemory.heapEnd == memoryMap.heapBase + _heapSize
+    DescribedWithHeap(described, heapRegionIndex, heapBase, initialHeapEnd, maxHeapSize)
+
+  private def describeInternal(instance: InterpretedInstance, heapSlackBytes: Long): (Described, Int) =
     val memoryMap = instance.module.memoryMap
     val pageMap = instance.basicMemory.pageMap
     val pageSize = memoryMap.pageSize
 
-    val regions = scala.collection.mutable.ArrayBuffer.empty[RegionDesc]
-    val backing = scala.collection.mutable.ArrayBuffer.empty[Byte]
+    final case class PendingRegion(base: UInt, bytes: Array[Byte], writable: Boolean, extraSlack: Long)
+    val pending = scala.collection.mutable.ArrayBuffer.empty[PendingRegion]
+    var heapRegionIndex = -1
 
-    def appendRegion(base: UInt, len: Int, writable: Boolean): Unit =
+    def appendRegion(base: UInt, len: Int, writable: Boolean, extraBackingSlack: Long = 0L): Unit =
       if len > 0 then
-        val bufOffset = backing.length
         instance.basicMemory.getMemorySlice(base, len) match
           case MemoryResult.Success(bytes) =>
-            backing ++= bytes
-            regions += RegionDesc(base.toLong & 0xFFFFFFFFL, len.toLong, bufOffset.toLong, writable)
+            pending += PendingRegion(base, bytes, writable, extraBackingSlack)
           case _ =>
             () // unreadable despite being a declared region: skip (defensive; should not happen)
 
@@ -47,7 +72,9 @@ object RecompilerMemory:
     // RW data — ReadWrite
     val rwEffectiveLen = math.max(memoryMap.rwDataSize.signed, instance.basicMemory.heapSize.signed)
     val rwEffectiveLenAligned = AlignmentOps.alignUp(rwEffectiveLen, pageSize.signed)
-    appendRegion(memoryMap.rwDataAddress, rwEffectiveLenAligned, writable = true)
+    heapRegionIndex = pending.length
+    appendRegion(memoryMap.rwDataAddress, rwEffectiveLenAligned, writable = true, extraBackingSlack = heapSlackBytes)
+    if pending.length <= heapRegionIndex then heapRegionIndex = -1 // rwEffectiveLenAligned was 0 (unmapped): no heap region exists
 
     // Stack — ReadWrite.
     appendRegion(memoryMap.stackAddressLow, memoryMap.stackSize.signed, writable = true)
@@ -56,7 +83,18 @@ object RecompilerMemory:
     val auxMappedLen = mappedPrefixLength(pageMap, memoryMap.auxDataAddress, memoryMap.auxDataSize.signed, pageSize)
     appendRegion(memoryMap.auxDataAddress, auxMappedLen, writable = false)
 
-    Described(regions.toArray, backing.toArray, pageSize)
+    val totalBackingSize = pending.foldLeft(0L)((acc, p) => acc + p.bytes.length + p.extraSlack)
+    val backing = new Array[Byte](totalBackingSize.toInt)
+    val regions = new Array[RegionDesc](pending.length)
+    var offset = 0L
+    pending.indices.foreach { i =>
+      val p = pending(i)
+      System.arraycopy(p.bytes, 0, backing, offset.toInt, p.bytes.length)
+      regions(i) = RegionDesc(p.base.toLong & 0xFFFFFFFFL, p.bytes.length.toLong, offset, p.writable)
+      offset += p.bytes.length.toLong + p.extraSlack // slack bytes stay zero-filled (Array[Byte] default)
+    }
+
+    (Described(regions, backing, pageSize), heapRegionIndex)
 
   private def mappedPrefixLength(pageMap: io.forge.jam.pvm.memory.PageMap, base: UInt, maxLen: Int, pageSize: UInt): Int =
     if maxLen <= 0 then 0

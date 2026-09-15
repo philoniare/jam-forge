@@ -38,6 +38,13 @@ final class NativeInstanceWrapper(live: PvmRecompiler#LiveExecution) extends Pvm
     RegionView(base, len, bufOffset, writable)
 
   private val regions: Array[RegionView] = Array.tabulate(nRegions.toInt)(i => regionAt(i.toLong))
+
+  def growRegion(regionIndex: Int, newLen: Long): Unit =
+    val off = regionIndex * REGION_SIZE
+    regionsSeg.set(ValueLayout.JAVA_INT, off + 4, newLen.toInt)
+    val old = regions(regionIndex)
+    regions(regionIndex) = old.copy(len = newLen)
+
   private def findRegion(addr: Long, length: Long, permitted: RegionView => Boolean): Option[RegionView] =
     var i = 0
     var found: Option[RegionView] = None
