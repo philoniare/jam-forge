@@ -24,7 +24,8 @@ object RecompilerMemory:
     heapRegionIndex: Int,
     heapBase: Long,
     initialHeapEnd: Long,
-    maxHeapSize: Long
+    maxHeapSize: Long,
+    slackBytes: Long
   )
 
   /**
@@ -47,7 +48,7 @@ object RecompilerMemory:
     val (described, heapRegionIndex) = describeInternal(instance, slackBytes)
     val heapBase = memoryMap.heapBase.toLong & 0xFFFFFFFFL
     val initialHeapEnd = heapBase + currentHeapSize // mirrors basicMemory.heapEnd == memoryMap.heapBase + _heapSize
-    DescribedWithHeap(described, heapRegionIndex, heapBase, initialHeapEnd, maxHeapSize)
+    DescribedWithHeap(described, heapRegionIndex, heapBase, initialHeapEnd, maxHeapSize, slackBytes)
 
   private def describeInternal(instance: InterpretedInstance, heapSlackBytes: Long): (Described, Int) =
     val memoryMap = instance.module.memoryMap
