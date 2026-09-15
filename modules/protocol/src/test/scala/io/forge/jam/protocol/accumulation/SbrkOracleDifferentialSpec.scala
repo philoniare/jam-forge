@@ -195,7 +195,7 @@ class SbrkOracleDifferentialSpec extends AnyFlatSpec with Matchers:
     genGrowThenStoreLoad(rng, pages * 4096 + rng.nextInt(4096))
 
   private def genSbrkOverflowFailure(rng: Random): Seq[AInstr] =
-    val sizeVal = 0xFFFFFFFFL - rng.nextInt(1_000_000)
+    val sizeVal = 0xFFFFFFFFL - rng.nextInt(4096)
     val sizeReg = 1 + rng.nextInt(12)
     val dst = 1 + rng.nextInt(12)
     Seq(LoadImm64(sizeReg, sizeVal), Sbrk(dst, sizeReg), Trap)
