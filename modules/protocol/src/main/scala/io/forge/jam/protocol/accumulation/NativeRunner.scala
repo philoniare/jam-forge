@@ -163,7 +163,7 @@ object NativeRunner extends StrictLogging:
       val pageSize = 1L << ht.described.pageShift
       val newRegionLenAligned = alignUpLong(newHeapEndCandidate, pageSize) - ht.heapBase
       val initialHeapRegionLen = regions(ht.heapRegionIndex).len
-      val backingCapacity = initialHeapRegionLen + slackReservedFor(ht)
+      val backingCapacity = initialHeapRegionLen + ht.slackBytes
       newRegionLenAligned > backingCapacity
 
     val sbrkHandler: Option[PvmRecompiler.SbrkCallHandler] = heapTracking.map { ht =>
@@ -219,11 +219,6 @@ object NativeRunner extends StrictLogging:
   private def alignUpLong(v: Long, pageSize: Long): Long =
     val rem = v % pageSize
     if rem == 0 then v else v + (pageSize - rem)
-
-  private def slackReservedFor(ht: RecompilerMemory.DescribedWithHeap): Long =
-    val room = math.max(0L, ht.maxHeapSize - (ht.initialHeapEnd - ht.heapBase))
-    val pageSize = 1L << ht.described.pageShift
-    alignUpLong(math.min(room, RecompilerMemory.MaxHeapSlackBytes), pageSize)
 
   private final case class UnsupportedOpcodeScan(hasEcalli: Boolean, hasSbrk: Boolean)
 

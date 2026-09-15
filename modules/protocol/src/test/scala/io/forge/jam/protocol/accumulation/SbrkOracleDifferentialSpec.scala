@@ -165,9 +165,17 @@ class SbrkOracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // Generators
   // ==========================================================================
 
-  /** sbrk(0): read the current heap end without growing. */
   private def genSbrkZero(rng: Random): Seq[AInstr] =
-    Seq(LoadImm64(5, 0L), Sbrk(3, 5), Trap)
+    val zeroReg = 1 + rng.nextInt(12) // avoid r0 as a destination for the immediate
+    val dst = 1 + rng.nextInt(12)
+    val precededByGrow = rng.nextBoolean()
+    val prefix =
+      if precededByGrow then
+        val growReg = 1 + rng.nextInt(12)
+        val growBytes = 8 + rng.nextInt(4089)
+        Seq(LoadImm64(growReg, growBytes.toLong), Sbrk(growReg, growReg))
+      else Seq.empty
+    prefix ++ Seq(LoadImm64(zeroReg, 0L), Sbrk(dst, zeroReg), Trap)
 
   /** Grow by `growBytes`, then store/load in the newly-covered page(s). */
   private def genGrowThenStoreLoad(rng: Random, growBytes: Int): Seq[AInstr] =
@@ -187,7 +195,10 @@ class SbrkOracleDifferentialSpec extends AnyFlatSpec with Matchers:
     genGrowThenStoreLoad(rng, pages * 4096 + rng.nextInt(4096))
 
   private def genSbrkOverflowFailure(rng: Random): Seq[AInstr] =
-    Seq(LoadImm64(5, 0xFFFFFFFFL), Sbrk(3, 5), Trap)
+    val sizeVal = 0xFFFFFFFFL - rng.nextInt(1_000_000)
+    val sizeReg = 1 + rng.nextInt(12)
+    val dst = 1 + rng.nextInt(12)
+    Seq(LoadImm64(sizeReg, sizeVal), Sbrk(dst, sizeReg), Trap)
 
   /** dst==src aliasing: the size register is overwritten with the sbrk result. */
   private def genDstEqualsSrcAliasing(rng: Random, growBytes: Int): Seq[AInstr] =
