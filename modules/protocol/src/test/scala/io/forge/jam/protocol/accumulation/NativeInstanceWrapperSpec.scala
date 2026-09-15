@@ -319,3 +319,32 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
             blk.close()
         finally rc.close()
   }
+  it should "throw IllegalStateException on any access after the owning LiveExecution is closed" in {
+    libPath match
+      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
+      case Some(lib) =>
+        val rc = new PvmRecompiler(lib)
+        try
+          val code = Array[Byte](0) // Trap
+          val bitmask = Array[Byte](1)
+          val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          try
+            blk.isValid shouldBe true
+            val regs = Array.fill(13)(0L)
+            val regions = Array(new PvmRecompiler.Region(0, 16, 0, true))
+            val backing = new Array[Byte](16)
+            val live = rc.executeLive(blk, regs, 100L, regions, backing, PAGE_SHIFT, 0)
+            val wrapper = new NativeInstanceWrapper(live)
+            live.run()
+            live.close()
+
+            an[IllegalStateException] should be thrownBy wrapper.reg(0)
+            an[IllegalStateException] should be thrownBy wrapper.setReg(0, 1L)
+            an[IllegalStateException] should be thrownBy wrapper.gas
+            an[IllegalStateException] should be thrownBy wrapper.setGas(1L)
+            an[IllegalStateException] should be thrownBy wrapper.readByte(0)
+            an[IllegalStateException] should be thrownBy wrapper.writeByte(0, 1.toByte)
+          finally blk.close()
+        finally rc.close()
+  }
