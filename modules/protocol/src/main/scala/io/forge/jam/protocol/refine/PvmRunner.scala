@@ -2,7 +2,7 @@ package io.forge.jam.protocol.refine
 
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
-import io.forge.jam.pvm.recompiler.NativeRunner
+import io.forge.jam.protocol.accumulation.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, PvmInstance}
 

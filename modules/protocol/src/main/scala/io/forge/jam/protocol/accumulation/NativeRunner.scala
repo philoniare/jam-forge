@@ -1,10 +1,12 @@
-package io.forge.jam.pvm.recompiler
+package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.pvm.{ExecutionMode, Instruction}
 import io.forge.jam.pvm.engine.InterpretedInstance
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.InstructionDecoder
+import io.forge.jam.pvm.recompiler.{RecompilerAbi, RecompilerMemory}
 import io.forge.jam.pvm.types.ProgramCounter
+import io.forge.jam.protocol.refine.HostCallDispatcher
 import com.typesafe.scalalogging.StrictLogging
 import spire.math.UInt
 
@@ -23,7 +25,18 @@ object NativeRunner extends StrictLogging:
   ): Option[RunOutcome] =
     mode match
       case ExecutionMode.Interpreted => None
-      case ExecutionMode.Recompiled => runRecompiled(instance, entryPc)
+      case ExecutionMode.Recompiled => runRecompiled(instance, entryPc, hostCalls = None)
+
+  def run(
+      instance: InterpretedInstance,
+      entryPc: Int,
+      mode: ExecutionMode,
+      dispatcher: HostCallDispatcher,
+      preDispatch: Option[() => Unit]
+  ): Option[RunOutcome] =
+    mode match
+      case ExecutionMode.Interpreted => None
+      case ExecutionMode.Recompiled => runRecompiled(instance, entryPc, hostCalls = Some((dispatcher, preDispatch)))
 
   private lazy val recompiler: Option[PvmRecompiler] =
     Option(System.getProperty("jam.pvm.recompiler.lib"))
@@ -37,15 +50,24 @@ object NativeRunner extends StrictLogging:
             None
       }
 
-  private def runRecompiled(instance: InterpretedInstance, entryPc: Int): Option[RunOutcome] =
+  private def runRecompiled(
+      instance: InterpretedInstance,
+      entryPc: Int,
+      hostCalls: Option[(HostCallDispatcher, Option[() => Unit])]
+  ): Option[RunOutcome] =
     recompiler match
       case None =>
         logger.debug("NativeRunner: deopt to interpreter — recompiler dylib not available (jam.pvm.recompiler.lib unset or file missing)")
         None
       case Some(rc) =>
         val blob = instance.module.blob
-        if containsUnsupportedOpcode(blob.code, blob.bitmask) then
-          logger.debug("NativeRunner: deopt to interpreter — program contains Ecalli and/or Sbrk (no host-call/heap-growth support in the recompiler yet)")
+
+        val unsupported = scanUnsupportedOpcodes(blob.code, blob.bitmask)
+        if unsupported.hasSbrk then
+          logger.debug("NativeRunner: deopt to interpreter — program contains Sbrk (no heap-growth support in the recompiler yet)")
+          None
+        else if unsupported.hasEcalli && hostCalls.isEmpty then
+          logger.debug("NativeRunner: deopt to interpreter — program contains Ecalli and no HostCallDispatcher was supplied")
           None
         else
           val prepared = RecompilerAbi.prepareProgram(blob)
@@ -68,7 +90,11 @@ object NativeRunner extends StrictLogging:
                   val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
                   val backing = described.backing.clone()
 
-                  val out = rc.execute(blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex)
+                  val out = hostCalls match
+                    case None =>
+                      rc.execute(blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex)
+                    case Some((dispatcher, preDispatch)) =>
+                      executeWithHostCalls(rc, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex, dispatcher, preDispatch)
 
                   // Write registers back onto the instance (callers read via instance.reg).
                   for i <- 0 until 13 do instance.setReg(i, regs(i))
@@ -100,16 +126,53 @@ object NativeRunner extends StrictLogging:
                   Some(outcome)
               finally blk.close()
 
+  private def executeWithHostCalls(
+      rc: PvmRecompiler,
+      blk: PvmRecompiler#Block,
+      regs: Array[Long],
+      gas: Long,
+      regions: Array[PvmRecompiler.Region],
+      backing: Array[Byte],
+      pageShift: Int,
+      entryIndex: Int,
+      dispatcher: HostCallDispatcher,
+      preDispatch: Option[() => Unit]
+  ): PvmRecompiler.ExecResult =
+    var wrapperRef: NativeInstanceWrapper = null
+    val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _pc: Int) =>
+      val wrapper = wrapperRef
+      val gasCost = dispatcher.getGasCost(hostCallId.toInt, wrapper)
+      val newGas = wrapper.gas - gasCost
+      wrapper.setGas(newGas)
+      if newGas < 0 then PvmRecompiler.HOST_OOG
+      else
+        try
+          preDispatch.foreach(_.apply())
+          dispatcher.dispatch(hostCallId.toInt, wrapper)
+          PvmRecompiler.HOST_CONTINUE
+        catch
+          case _: RuntimeException => PvmRecompiler.HOST_PANIC
+
+    val live = rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler)
+    wrapperRef = new NativeInstanceWrapper(live)
+    try live.run()
+    finally live.close()
+
+  private final case class UnsupportedOpcodeScan(hasEcalli: Boolean, hasSbrk: Boolean)
+
   /** Scans the decoded program for `Ecalli`/`Sbrk` — the two opcodes the
-    * recompiler cannot execute in a host-call context (brief: "any Ecalli
-    * (10) or Sbrk (101)"). */
-  private def containsUnsupportedOpcode(code: Array[Byte], bitmask: Array[Byte]): Boolean =
+    * recompiler cannot execute unconditionally (brief H0: "any Ecalli (10)
+    * or Sbrk (101)"; H1 narrows this to "Ecalli is fine WITH a dispatcher,
+    * Sbrk always deopts" — see `runRecompiled`). */
+  private def scanUnsupportedOpcodes(code: Array[Byte], bitmask: Array[Byte]): UnsupportedOpcodeScan =
     var off = 0
-    var found = false
-    while !found && off < code.length do
+    var hasEcalli = false
+    var hasSbrk = false
+    while off < code.length && !(hasEcalli && hasSbrk) do
       val (instr, skip) = InstructionDecoder.decode(code, bitmask, off)
       instr match
-        case _: Instruction.Ecalli | _: Instruction.Sbrk => found = true
+        case _: Instruction.Ecalli => hasEcalli = true
+        case _: Instruction.Sbrk => hasSbrk = true
         case _ => ()
       off += math.max(1, skip)
-    found
+    UnsupportedOpcodeScan(hasEcalli, hasSbrk)

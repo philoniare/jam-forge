@@ -6,7 +6,7 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind, MemoryResult}
 import io.forge.jam.pvm.memory.Memory.{isReadable, isWritable}
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
-import io.forge.jam.pvm.recompiler.NativeRunner
+import io.forge.jam.protocol.accumulation.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UByte}

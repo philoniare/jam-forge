@@ -90,20 +90,58 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       nativeOutput.toSeq shouldBe interpOutput.toSeq
   }
 
-  // ---- 2. Ecalli deopt: Recompiled falls back to the interpreter -------------
+  test("a program containing Ecalli run via NativeRunner with a dispatcher executes NATIVELY and matches the interpreter") {
+    if !canRunNative then
+      cancel("recompiler unavailable on this host (AArch64 dylib required) — this test specifically asserts NATIVE execution, not the deopt path")
+    else
+      import io.forge.jam.pvm.engine.InterpretedInstance
+      import io.forge.jam.pvm.types.ProgramCounter
+      import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
 
-  test("a program containing Ecalli run in Recompiled mode deopts and matches Interpreted mode") {
-    val module = moduleOf(ecalliThenHaltCode, ecalliThenHaltBitmask)
+      val module = moduleOf(ecalliThenHaltCode, ecalliThenHaltBitmask)
 
-    val (interpExit, interpGas, interpOutput) =
-      PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, GasOnlyHostCalls, ExecutionMode.Interpreted)
-    val (deoptExit, deoptGas, deoptOutput) =
-      PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, GasOnlyHostCalls, ExecutionMode.Recompiled)
+      def freshInstance(): InterpretedInstance =
+        val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+        inst.setGas(1000L)
+        inst.setNextProgramCounter(ProgramCounter(0))
+        inst.setReg(0, 0xffff0000L) // RA_INIT — same seeding PvmRunner.run does
+        inst
 
-    deoptExit shouldBe interpExit
-    deoptExit shouldBe PvmRunner.PvmExit.Halt
-    deoptGas shouldBe interpGas
-    deoptOutput.toSeq shouldBe interpOutput.toSeq
+      val interpInstance = freshInstance()
+      val interpWrapper = new InterpretedInstanceWrapper(interpInstance)
+      var interpExit: PvmRunner.PvmExit = PvmRunner.PvmExit.Halt
+      var running = true
+      while running do
+        interpInstance.run() match
+          case Right(io.forge.jam.pvm.InterruptKind.Finished) => interpExit = PvmRunner.PvmExit.Halt; running = false
+          case Right(io.forge.jam.pvm.InterruptKind.Panic) => interpExit = PvmRunner.PvmExit.Panic; running = false
+          case Right(io.forge.jam.pvm.InterruptKind.OutOfGas) => interpExit = PvmRunner.PvmExit.OutOfGas; running = false
+          case Right(io.forge.jam.pvm.InterruptKind.Ecalli(hostId)) =>
+            val gasCost = GasOnlyHostCalls.getGasCost(hostId.signed, interpWrapper)
+            interpInstance.setGas(interpInstance.gas - gasCost)
+            if interpInstance.gas < 0 then { interpExit = PvmRunner.PvmExit.OutOfGas; running = false }
+            else GasOnlyHostCalls.dispatch(hostId.signed, interpWrapper)
+          case Right(io.forge.jam.pvm.InterruptKind.Segfault(_)) => interpExit = PvmRunner.PvmExit.Panic; running = false
+          case Right(io.forge.jam.pvm.InterruptKind.Step) => ()
+          case Left(_) => interpExit = PvmRunner.PvmExit.Panic; running = false
+      val interpGas = interpInstance.gas
+      val interpReg7 = interpInstance.reg(7)
+
+      // Native run: NativeRunner.run's dispatcher-aware overload directly.
+      val nativeInstance = freshInstance()
+      val outcome = NativeRunner.run(nativeInstance, entryPc = 0, ExecutionMode.Recompiled, GasOnlyHostCalls, preDispatch = None)
+      outcome shouldBe defined // NATIVE execution, not a deopt (canRunNative guarantees this)
+
+      val nativeExit = outcome.get match
+        case NativeRunner.RunOutcome.Halt => PvmRunner.PvmExit.Halt
+        case NativeRunner.RunOutcome.Panic => PvmRunner.PvmExit.Panic
+        case NativeRunner.RunOutcome.OutOfGas => PvmRunner.PvmExit.OutOfGas
+        case NativeRunner.RunOutcome.PageFault(_) => PvmRunner.PvmExit.Panic
+
+      nativeExit shouldBe interpExit
+      nativeExit shouldBe PvmRunner.PvmExit.Halt
+      nativeInstance.gas shouldBe interpGas
+      nativeInstance.reg(7) shouldBe interpReg7 // the GAS host call's observable effect (r7 = remaining gas)
   }
 
   // ---- 3. missing dylib: Recompiled mode is safe, never crashes --------------

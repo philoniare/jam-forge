@@ -37,11 +37,12 @@ final class NativeInstanceWrapper(live: PvmRecompiler#LiveExecution) extends Pvm
     val writable = regionsSeg.get(ValueLayout.JAVA_INT, off + 12) != 0
     RegionView(base, len, bufOffset, writable)
 
+  private val regions: Array[RegionView] = Array.tabulate(nRegions.toInt)(i => regionAt(i.toLong))
   private def findRegion(addr: Long, length: Long, permitted: RegionView => Boolean): Option[RegionView] =
-    var i = 0L
+    var i = 0
     var found: Option[RegionView] = None
-    while found.isEmpty && i < nRegions do
-      val r = regionAt(i)
+    while found.isEmpty && i < regions.length do
+      val r = regions(i)
       if permitted(r) && r.contains(addr, length) then found = Some(r)
       i += 1
     found
