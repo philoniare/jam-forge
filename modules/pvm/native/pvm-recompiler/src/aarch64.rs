@@ -522,6 +522,65 @@ fn emit_shift_rotate(a: &mut Asm, kind: ShiftKind, width: Width, amount: ShiftAm
     }
 }
 
+fn emit_upcall_frame(
+    a: &mut Asm,
+    blr_reg: u8,
+    setup_args: impl FnOnce(&mut Asm),
+    panic_label: dynasmrt::DynamicLabel,
+    oog_label: Option<dynasmrt::DynamicLabel>,
+) {
+    dynasm!(a; .arch aarch64; str x11, [x1]);
+    dynasm!(a
+        ; .arch aarch64
+        ; sub sp, sp, #64
+        ; stp x0, x1, [sp]
+        ; stp x2, x3, [sp, #16]
+        ; stp x4, x5, [sp, #32]
+        ; stp x6, x12, [sp, #48]
+    );
+    setup_args(a);
+    dynasm!(a; .arch aarch64; blr X(blr_reg));
+    dynasm!(a
+        ; .arch aarch64
+        ; mov x9, x0          // x9 = upcall status (HOST_CONTINUE/PANIC/OOG)
+        ; ldp x0, x1, [sp]
+        ; ldp x2, x3, [sp, #16]
+        ; ldp x4, x5, [sp, #32]
+        ; ldp x6, x12, [sp, #48]
+        ; add sp, sp, #64
+    );
+    let not_panic = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; cmp x9, #HOST_PANIC as u32
+        ; b.ne =>not_panic
+        ; ldr x11, [x1]         // gas-cell double-write invariant: reload before the shared epilogue's store
+        ; b =>panic_label
+        ; =>not_panic
+    );
+    if let Some(oog_label) = oog_label {
+        let not_oog = a.new_dynamic_label();
+        dynasm!(a
+            ; .arch aarch64
+            ; cmp x9, #HOST_OOG as u32
+            ; b.ne =>not_oog
+            ; ldr x11, [x1]         // gas-cell double-write invariant: reload before the shared epilogue's store
+            ; b =>oog_label
+            ; =>not_oog
+        );
+    }
+    let is_continue = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; cmp x9, #HOST_CONTINUE as u32
+        ; b.eq =>is_continue
+        ; ldr x11, [x1]         // gas-cell double-write invariant: reload before the shared epilogue's store
+        ; b =>panic_label
+        ; =>is_continue
+        ; ldr x11, [x1]         // CONTINUE: reload gas (handler may have charged more / grown the heap), fall through
+    );
+}
+
 impl Backend for Aarch64Backend {
     fn emit_program(
         &self,
@@ -563,13 +622,14 @@ impl Backend for Aarch64Backend {
         dynasm!(a
             ; .arch aarch64
             ; sub sp, sp, #16
-            ; stp x19, x20, [sp]      // save caller's x19/x20 (x21 saved below, separate slot)
+            ; stp x19, x20, [sp]      // save caller's x19/x20 (x21/x22 saved below, separate slot)
             ; sub sp, sp, #16
-            ; str x21, [sp]           // save caller's x21
+            ; stp x21, x22, [sp]      // save caller's x21/x22 (x22: Task 18/H2 sbrk_fn)
             ; ldr x11, [x1]   // x11 = *gas (live throughout)
             ; mov x19, x30    // save the entry LR before any `bl` clobbers x30 (see LR NOTE)
             ; ldr x20, [sp, #32]        // x20 = host_fn (arg 9; may be the null pointer)
             ; ldr x21, [sp, #40]        // x21 = host_ctx (arg 10)
+            ; ldr x22, [sp, #48]        // x22 = sbrk_fn (arg 11; Task 18/H2; may be the null pointer)
         );
         assert!(ops.len() < 4096, "skeleton entry-index dispatch chain out of imm12 range");
         for i in 0..ops.len() {
@@ -699,49 +759,37 @@ impl Backend for Aarch64Backend {
                         );
                     }
                     Op::Ecalli { host_id } => {
-                        dynasm!(a; .arch aarch64; str x11, [x1]);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; sub sp, sp, #64
-                            ; stp x0, x1, [sp]
-                            ; stp x2, x3, [sp, #16]
-                            ; stp x4, x5, [sp, #32]
-                            ; stp x6, x12, [sp, #48]
+                        emit_upcall_frame(
+                            &mut a,
+                            20, // x20 = host_fn
+                            |a| {
+                                mov_imm64(a, 1, host_id);
+                                dynasm!(a
+                                    ; .arch aarch64
+                                    ; mov x0, x21        // host_ctx
+                                    ; mov x2, x12         // pc (zero-extended: x12 was set via mov_imm32, upper 32 bits already zero)
+                                );
+                            },
+                            panic_label,
+                            Some(oog_label),
                         );
-                        mov_imm64(&mut a, 1, host_id);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; mov x0, x21        // host_ctx
-                            ; mov x2, x12         // pc (zero-extended: x12 was set via mov_imm32, upper 32 bits already zero)
-                            ; blr x20
-                        );
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; mov x9, x0          // x9 = host status (HOST_CONTINUE/PANIC/OOG)
-                            ; ldp x0, x1, [sp]
-                            ; ldp x2, x3, [sp, #16]
-                            ; ldp x4, x5, [sp, #32]
-                            ; ldp x6, x12, [sp, #48]
-                            ; add sp, sp, #64
-                        );
-                        let not_panic = a.new_dynamic_label();
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x9, #HOST_PANIC as u32
-                            ; b.ne =>not_panic
-                            ; ldr x11, [x1]         // gas-cell double-write invariant: reload before the shared epilogue's store
-                            ; b =>panic_label
-                            ; =>not_panic
-                        );
-                        let not_oog = a.new_dynamic_label();
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x9, #HOST_OOG as u32
-                            ; b.ne =>not_oog
-                            ; ldr x11, [x1]         // gas-cell double-write invariant: reload before the shared epilogue's store
-                            ; b =>oog_label
-                            ; =>not_oog
-                            ; ldr x11, [x1]         // CONTINUE (or any other status, defensively treated as CONTINUE): reload gas, fall through
+                    }
+                    Op::Sbrk { dst, src } => {
+                        let (dst, src) = (dst as u32, src as u32);
+                        emit_upcall_frame(
+                            &mut a,
+                            22, // x22 = sbrk_fn
+                            |a| {
+                                dynasm!(a
+                                    ; .arch aarch64
+                                    ; ldr x2, [x0, #src * 8]  // size = reg[src], read while x0 still holds regs* (must precede the mov x0 below)
+                                    ; movz w1, #dst           // dst register index (0..12, fits imm16; zero-extended into x1)
+                                    ; mov x3, x12              // pc
+                                    ; mov x0, x21              // host_ctx (clobbers x0 LAST — every other arg already read from it)
+                                );
+                            },
+                            panic_label,
+                            None,
                         );
                     }
                     Op::Jump { target } => {
@@ -1428,7 +1476,7 @@ impl Backend for Aarch64Backend {
             ; str w12, [x6]      // out->pc = current instruction's pc
             ; str x11, [x1]      // gas is now -1 (the failing decrement)
             ; mov x30, x19
-            ; ldr x21, [sp]
+            ; ldp x21, x22, [sp]
             ; ldp x19, x20, [sp, #16]
             ; add sp, sp, #32
             ; movz w0, #EXIT_OOG as u32
@@ -1437,7 +1485,7 @@ impl Backend for Aarch64Backend {
             ; str w12, [x6]
             ; str x11, [x1]
             ; mov x30, x19
-            ; ldr x21, [sp]
+            ; ldp x21, x22, [sp]
             ; ldp x19, x20, [sp, #16]
             ; add sp, sp, #32
             ; movz w0, #EXIT_PANIC as u32
@@ -1446,7 +1494,7 @@ impl Backend for Aarch64Backend {
             ; str w12, [x6]
             ; str x11, [x1]
             ; mov x30, x19
-            ; ldr x21, [sp]
+            ; ldp x21, x22, [sp]
             ; ldp x19, x20, [sp, #16]
             ; add sp, sp, #32
             ; cbnz x16, =>fault_escalate_label
@@ -1460,7 +1508,7 @@ impl Backend for Aarch64Backend {
             ; str w12, [x6]
             ; str x11, [x1]
             ; mov x30, x19
-            ; ldr x21, [sp]
+            ; ldp x21, x22, [sp]
             ; ldp x19, x20, [sp, #16]
             ; add sp, sp, #32
             ; movz w0, #EXIT_HALT as u32

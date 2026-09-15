@@ -36,6 +36,7 @@ pub struct ExecOut {
 pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
 pub const OP_FALLTHROUGH: u32 = 1; // no-op block terminator; falls through to the next instruction
 pub const OP_ECALLI: u32 = 10;
+pub const OP_SBRK: u32 = 101;
 pub const OP_LOAD_IMM64: u32 = 20; // reg[a] = imm
 pub const OP_JUMP: u32 = 40; // pc = imm (instruction index)
 pub const OP_JUMP_INDIRECT: u32 = 50; // indirect: target = (reg[a]+imm) & 0xFFFFFFFF
@@ -211,6 +212,7 @@ pub enum Op {
     /// Basic-block terminator: end execution with EXIT_PANIC.
     Trap,
     Ecalli { host_id: u64 },
+    Sbrk { dst: u8, src: u8 },
     /// No-op basic-block terminator: falls through to the next instruction
     Fallthrough,
     /// Unconditional jump to instruction index `target`.
@@ -395,6 +397,7 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
         match ins.opcode {
             OP_PANIC => ops.push(Op::Trap),
             OP_ECALLI => ops.push(Op::Ecalli { host_id: ins.imm as u64 }),
+            OP_SBRK => ops.push(Op::Sbrk { dst: ins.a as u8, src: ins.b as u8 }),
             OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.a as u8, imm: ins.imm as u64 }),
             OP_ADD_IMM64 => ops.push(Op::AddImm64 {
                 dst: ins.a as u8,
@@ -601,9 +604,9 @@ pub unsafe extern "C" fn pvm_compile(
     Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt }))
 }
 pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
+pub type SbrkFn = extern "C" fn(ctx: *mut std::ffi::c_void, dst: u32, size: u64, pc: u32) -> i64;
 
 /// Execute a compiled block over the caller's register file, gas cell, and
-/// permission-aware guest memory
 ///
 /// `regs` points to 13 little-endian u64 PVM registers (read and written in
 /// place). `gas` points to a single i64 the block decrements by its cost.
@@ -627,6 +630,7 @@ pub unsafe extern "C" fn pvm_execute(
     out: *mut ExecOut,
     host_fn: Option<HostFn>,
     host_ctx: *mut std::ffi::c_void,
+    sbrk_fn: Option<SbrkFn>,
 ) -> u32 {
     if block.is_null() || regs.is_null() || gas.is_null() || out.is_null() {
         return EXIT_PANIC;
@@ -648,8 +652,9 @@ pub unsafe extern "C" fn pvm_execute(
         u32,
         Option<HostFn>,
         *mut std::ffi::c_void,
+        Option<SbrkFn>,
     ) -> u32 = std::mem::transmute(base);
-    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx)
+    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx, sbrk_fn)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -720,6 +725,24 @@ mod tests {
         host_fn: Option<HostFn>,
         host_ctx: *mut std::ffi::c_void,
     ) -> (u32, ExecOut) {
+        run_full_with_upcalls(instrs, regs, gas, regions, backing, jt, entry_index, code_len, 12, host_fn, host_ctx, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_full_with_upcalls(
+        instrs: &[RawInstr],
+        regs: &mut [u64; 13],
+        gas: &mut i64,
+        regions: &[Region],
+        backing: &mut [u8],
+        jt: &[u32],
+        entry_index: u32,
+        code_len: u32,
+        page_shift: u32,
+        host_fn: Option<HostFn>,
+        host_ctx: *mut std::ffi::c_void,
+        sbrk_fn: Option<SbrkFn>,
+    ) -> (u32, ExecOut) {
         unsafe {
             let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len(), code_len);
             assert!(!blk.is_null(), "compile returned null");
@@ -731,11 +754,12 @@ mod tests {
                 regions.as_ptr(),
                 regions.len() as u64,
                 backing.as_mut_ptr(),
-                12, // page_shift: 4096-byte pages in these tests
+                page_shift,
                 entry_index,
                 &mut out as *mut ExecOut,
                 host_fn,
                 host_ctx,
+                sbrk_fn,
             );
             pvm_free(blk);
             (ex, out)
@@ -3593,6 +3617,8 @@ mod tests {
                         );
                         HOST_CONTINUE
                     }
+                    5 => 3, // unrecognized positive status
+                    6 => -1, // unrecognized negative status
                     _ => HOST_PANIC,
                 }
             }
@@ -3666,6 +3692,32 @@ mod tests {
             assert_eq!(exit, EXIT_OOG);
             assert_eq!(out.pc, 0); // same PC MODEL as the panic case
             assert_eq!(gas, -1);
+        }
+
+        #[test]
+        fn unrecognized_positive_status_default_panics_carried_over_task_17_hardening() {
+            let prog = ecalli_then_trap(5);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(5u64, 0u32)]);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0); // the Ecalli's own pc, same PC MODEL as a real panic
+            assert_eq!(gas, 100 - 1); // only the Ecalli's own per-instruction charge — no stale/handler gas write on this path
+        }
+
+        #[test]
+        fn unrecognized_negative_status_default_panics_carried_over_task_17_hardening() {
+            let prog = ecalli_then_trap(6);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(6u64, 0u32)]);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0);
+            assert_eq!(gas, 100 - 1);
         }
 
         #[test]
@@ -3757,6 +3809,300 @@ mod tests {
             assert_eq!(exit, EXIT_PANIC);
             assert_eq!(out.pc, 12);
             assert_eq!(calls, vec![(1u64, 0u32), (1u64, 4u32), (1u64, 8u32)]);
+        }
+    }
+
+    mod sbrk_tests {
+        use super::*;
+
+        #[repr(C)]
+        struct TestSbrkCtx {
+            regs: *mut u64,
+            region: *mut Region,
+            heap_base: u32,
+            heap_end: u64, // current heap end (u32 value, widened)
+            max_heap_size: u32,
+            page_size: u32,
+            slack_cap: u32,
+            calls: *mut Vec<(u64, u32, u32)>, // (dst, size, pc)
+        }
+
+        fn align_up(v: u64, page_size: u32) -> u64 {
+            let p = page_size as u64;
+            (v + p - 1) / p * p
+        }
+
+        extern "C" fn test_sbrk_fn(ctx: *mut std::ffi::c_void, dst: u32, size: u64, pc: u32) -> i64 {
+            unsafe {
+                let ctx = &mut *(ctx as *mut TestSbrkCtx);
+                (*ctx.calls).push((dst as u64, size as u32, pc));
+
+                if size == u64::MAX {
+                    return 3; // neither HOST_CONTINUE, HOST_PANIC, nor HOST_OOG
+                }
+
+                // size==0: return current heap end WITHOUT growing (sbrk(0)
+                // reads heap end — BasicMemory.sbrk's very first check).
+                if size == 0 {
+                    *ctx.regs.add(dst as usize) = ctx.heap_end;
+                    return HOST_CONTINUE;
+                }
+
+                // Overflow check: heapSize (heap_end - heap_base) + size must
+                // not exceed u32::MAX (BasicMemory.sbrk: `_heapSize.toLong +
+                // size.toLong > 0xffffffffL`).
+                let cur_heap_size = ctx.heap_end - ctx.heap_base as u64;
+                let new_heap_size = cur_heap_size + (size & 0xFFFF_FFFF); // size truncated to u32 like `UInt(ctx.getReg(i.src).toInt)`
+                if new_heap_size > 0xFFFF_FFFF {
+                    return HOST_PANIC;
+                }
+                // maxHeapSize check.
+                if new_heap_size > ctx.max_heap_size as u64 {
+                    return HOST_PANIC;
+                }
+
+                let new_heap_end = ctx.heap_base as u64 + new_heap_size;
+                let new_region_len_aligned = align_up(new_heap_end, ctx.page_size) - ctx.heap_base as u64;
+
+                if new_region_len_aligned > ctx.slack_cap as u64 {
+                    return HOST_PANIC;
+                }
+
+                let old_heap_end = ctx.heap_end;
+                ctx.heap_end = new_heap_end;
+                (*ctx.region).len = new_region_len_aligned as u32;
+                *ctx.regs.add(dst as usize) = old_heap_end;
+                HOST_CONTINUE
+            }
+        }
+
+        fn sbrk_then_trap(dst: u32, src: u32) -> Vec<RawInstr> {
+            with_pcs(vec![ri(OP_SBRK, dst, src, 0, 0), ri(OP_PANIC, 0, 0, 0, 0)])
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn run_with_sbrk_ctx(
+            prog: &[RawInstr],
+            regs: &mut [u64; 13],
+            gas: &mut i64,
+            regions: &mut [Region],
+            backing: &mut [u8],
+            page_shift: u32,
+            ctx: &mut TestSbrkCtx,
+        ) -> (u32, ExecOut) {
+            ctx.regs = regs.as_mut_ptr();
+            ctx.region = regions.as_mut_ptr();
+            run_full_with_upcalls(
+                prog,
+                unsafe { &mut *(regs as *mut [u64; 13]) }, // same intentional aliasing as run_with_ctx (ecalli_tests)
+                gas,
+                regions,
+                backing,
+                &[],
+                0,
+                (prog.len() as u32) * 4,
+                page_shift,
+                None,
+                ctx as *mut TestSbrkCtx as *mut std::ffi::c_void,
+                Some(test_sbrk_fn),
+            )
+        }
+
+        fn standard_ctx() -> (TestSbrkCtx, Region, Vec<u8>) {
+            let base: u32 = 0x20000;
+            let page_size: u32 = 4096;
+            let max_heap_size: u32 = 64 * 1024;
+            let region = Region { base, len: page_size, buf_offset: 0, writable: 1 };
+            let backing = vec![0u8; max_heap_size as usize]; // enough backing for every non-slack-cap test
+            let ctx = TestSbrkCtx {
+                regs: std::ptr::null_mut(),
+                region: std::ptr::null_mut(),
+                heap_base: base,
+                heap_end: (base + page_size) as u64,
+                max_heap_size,
+                page_size,
+                slack_cap: max_heap_size,
+                calls: Box::into_raw(Box::new(Vec::new())),
+            };
+            (ctx, region, backing)
+        }
+
+        #[test]
+        fn sbrk_zero_reads_heap_end_without_growing() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let prog = sbrk_then_trap(3, 5); // dst=r3, src=r5 (size)
+            let mut regs = [0u64; 13];
+            regs[5] = 0; // size=0
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC); // fell through to the trailing Panic
+            assert_eq!(out.pc, 4);
+            assert_eq!(regs[3], (ctx.heap_base + 4096) as u64); // unchanged heap end (one page already mapped)
+            assert_eq!(regions[0].len, 4096); // region NOT grown
+        }
+
+        #[test]
+        fn sbrk_grows_dst_equals_old_heap_end_and_a_subsequent_store_to_the_freshly_grown_page_succeeds_natively() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let old_heap_end = ctx.heap_end;
+            let grow_size = 8192u64; // 2 pages
+            let prog = with_pcs(vec![
+                ri(OP_SBRK, 3, 5, 0, 0),                              // r3 = sbrk(r5)
+                ri(OP_STORE_INDIRECT_U64, 4, 3, 0, 0),                 // store r4 (8 bytes) at [r3 + 0] (the FIRST freshly-grown byte)
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            regs[5] = grow_size;
+            regs[4] = 0xCAFEBABEDEADBEEFu64;
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC); // fell through both instructions to the trailing Panic
+            assert_eq!(out.pc, 8);
+            assert_eq!(regs[3], old_heap_end); // dst := OLD heap end
+            let new_heap_end = old_heap_end + grow_size;
+            assert_eq!(ctx.heap_end, new_heap_end);
+            let expected_region_len = new_heap_end - ctx.heap_base as u64; // already page-aligned: 4096+8192=12288
+            assert_eq!(regions[0].len as u64, expected_region_len);
+            // The store landed at buf_offset + (old_heap_end - base) — verify
+            // the exact bytes, proving the store was NATIVELY accepted (not
+            // a fault) and wrote to the correct backing offset.
+            let store_off = (old_heap_end - ctx.heap_base as u64) as usize;
+            assert_eq!(&backing[store_off..store_off + 8], &0xCAFEBABEDEADBEEFu64.to_le_bytes());
+        }
+
+        #[test]
+        fn sbrk_growth_crossing_multiple_pages_aligns_region_len_up_to_the_page_boundary() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            // Grow by 1 byte past the current 1-page mapped extent — must
+            // still round the region's new len UP to a full page (4096),
+            // not just old_len + 1, mirroring AlignmentOps.alignUp.
+            let prog = sbrk_then_trap(3, 5);
+            let mut regs = [0u64; 13];
+            regs[5] = 4097; // heap_end (base+4096) + 4097 = base+8193 -> aligns up to base+12288 (3 pages)
+            let mut gas = 100i64;
+            let (exit, _out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(regions[0].len, 12288); // 3 pages, page-aligned up from 8193
+            assert_eq!(ctx.heap_end, (ctx.heap_base as u64) + 4096 + 4097); // heap_end itself is EXACT, not page-aligned
+        }
+
+        #[test]
+        fn sbrk_failure_past_max_heap_size_panics_at_the_sbrk_instructions_own_pc() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let prog = sbrk_then_trap(3, 5);
+            let mut regs = [7u64; 13];
+            regs[5] = (ctx.max_heap_size as u64) + 1; // exceeds maxHeapSize outright
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            // PC MODEL: a host-driven panic reports the Sbrk instruction's
+            // OWN pc (the trailing Panic at pc=4 never runs).
+            assert_eq!(out.pc, 0);
+            assert_eq!(regs[3], 7); // dst untouched — the handler never writes it on failure
+            assert_eq!(regions[0].len, 4096); // region untouched
+            assert_eq!(ctx.heap_end, (ctx.heap_base + 4096) as u64); // heap_end untouched
+            assert_eq!(gas, 100 - 1); // only the Sbrk's own per-instruction charge — gas-cell double-write invariant holds (Sbrk touches no gas)
+        }
+
+        #[test]
+        fn sbrk_u32_overflow_panics() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            ctx.max_heap_size = u32::MAX; // isolate the overflow check from the maxHeapSize check
+            ctx.slack_cap = u32::MAX;
+            let mut regions = [region];
+            let prog = sbrk_then_trap(3, 5);
+            let mut regs = [0u64; 13];
+            // heapSize (4096) + size must exceed u32::MAX. size is truncated
+            // to u32 by the handler (matches `UInt(ctx.getReg(i.src).toInt)`)
+            // — use a size whose LOW 32 BITS alone push heapSize over.
+            regs[5] = 0xFFFF_FFFFu64 - 4096 + 2; // (heapSize=4096) + (this truncated to u32) > u32::MAX
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0);
+            assert_eq!(regions[0].len, 4096);
+        }
+
+        #[test]
+        fn sbrk_dst_equals_src_aliasing_reads_size_before_overwriting_dst() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let prog = sbrk_then_trap(5, 5); // dst == src == r5
+            let mut regs = [0u64; 13];
+            let old_heap_end = ctx.heap_end;
+            regs[5] = 4096; // size
+            let mut gas = 100i64;
+            let (exit, _out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(regs[5], old_heap_end); // r5 now holds the OLD heap end, not a corrupted size-vs-result mix
+            assert_eq!(ctx.heap_end, old_heap_end + 4096);
+            assert_eq!(regions[0].len, 8192); // grew by exactly one more page (4096 requested, already page-aligned)
+        }
+
+        #[test]
+        fn sbrk_slack_cap_exceeded_panics_distinctly_from_ordinary_maxheapsize_failure() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            ctx.slack_cap = 8192; // much smaller than max_heap_size (64 KiB)
+            let mut regions = [region];
+            let prog = sbrk_then_trap(3, 5);
+            let mut regs = [0u64; 13];
+            regs[5] = 8192; // well within maxHeapSize, but new region len (12288) exceeds slack_cap (8192)
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0);
+            assert_eq!(regions[0].len, 4096); // untouched — the guard fires before any mutation
+            assert_eq!(ctx.heap_end, (ctx.heap_base + 4096) as u64);
+        }
+
+        #[test]
+        fn multiple_sbrks_in_sequence_each_return_the_immediately_preceding_heap_end() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let prog = with_pcs(vec![
+                ri(OP_SBRK, 3, 5, 0, 0), // r3 = sbrk(4096)
+                ri(OP_SBRK, 4, 5, 0, 0), // r4 = sbrk(4096) again
+                ri(OP_PANIC, 0, 0, 0, 0),
+            ]);
+            let mut regs = [0u64; 13];
+            regs[5] = 4096;
+            let mut gas = 100i64;
+            let base_heap_end = ctx.heap_end;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 8);
+            assert_eq!(regs[3], base_heap_end); // first sbrk returns the ORIGINAL heap end
+            assert_eq!(regs[4], base_heap_end + 4096); // second sbrk returns the FIRST grow's new heap end
+            assert_eq!(regions[0].len, 12288); // 3 pages total (1 initial + 2 grown)
+        }
+
+        #[test]
+        fn sbrk_unrecognized_status_default_panics_carried_over_task_17_hardening() {
+            let (mut ctx, region, mut backing) = standard_ctx();
+            let mut regions = [region];
+            let prog = sbrk_then_trap(3, 5);
+            let mut regs = [7u64; 13];
+            regs[5] = u64::MAX; // sentinel: test_sbrk_fn returns status 3
+            let mut gas = 100i64;
+            let (exit, out) =
+                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(out.pc, 0); // the Sbrk instruction's own pc, same PC MODEL as every other host-driven panic
+            assert_eq!(regs[3], 7); // dst untouched — the handler never writes it on this path
+            assert_eq!(regions[0].len, 4096); // region untouched
+            assert_eq!(gas, 100 - 1); // only the Sbrk's own per-instruction charge
         }
     }
 }
