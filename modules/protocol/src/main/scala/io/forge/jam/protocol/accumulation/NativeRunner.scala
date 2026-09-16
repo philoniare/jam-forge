@@ -96,12 +96,6 @@ object NativeRunner extends StrictLogging:
               logger.debug(s"NativeRunner: deopt to interpreter — entryPc=$entryPc is not a decoded instruction boundary")
               recordDeopt("invalid-entry-pc")
               None
-            case Some(_) if prepared.opcodes.length >= 4096 =>
-              logger.debug(
-                s"NativeRunner: deopt to interpreter — program too large for the skeleton dispatch chains (${prepared.opcodes.length} instructions >= 4096; lifted by the offsets-table dispatch rewrite)"
-              )
-              recordDeopt("program-too-large")
-              None
             case Some(entryIndex) =>
               val blk = rc.compile(
                 prepared.opcodes, prepared.a, prepared.b, prepared.c,
@@ -118,13 +112,13 @@ object NativeRunner extends StrictLogging:
                     else None
                   val described = describedWithHeap.map(_.described).getOrElse(RecompilerMemory.describe(instance))
                   val regs = Array.tabulate(13)(instance.reg)
-                  val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
+                  val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.nativeBufOffset, r.writable))
                   val backing = described.backing.clone()
 
-                  val (out, finalRegionLens) = hostCalls match
+                  val (out, finalRegionLens, grownHeapBytes) = hostCalls match
                     case None =>
                       val r = rc.execute(blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex)
-                      (r, described.regions.map(_.len))
+                      (r, described.regions.map(_.len), None)
                     case Some((dispatcher, preDispatch)) =>
                       executeWithHostCalls(
                         rc, instance, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex,
@@ -146,9 +140,13 @@ object NativeRunner extends StrictLogging:
                   // Write only WRITABLE regions' bytes back — RO regions (RO data, aux/args)
                   // are never mutated by a correct program, and BasicMemory.setMemorySlice
                   // rejects writes to read-only ranges outright.
-                  described.regions.zip(finalRegionLens).foreach { case (region, finalLen) =>
+                  described.regions.zip(finalRegionLens).zipWithIndex.foreach { case ((region, finalLen), idx) =>
                     if region.writable then
-                      val slice = backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + finalLen.toInt)
+                      val slice =
+                        if describedWithHeap.exists(_.heapRegionIndex == idx) && grownHeapBytes.isDefined then
+                          grownHeapBytes.get
+                        else
+                          backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + finalLen.toInt)
                       instance.basicMemory.setMemorySlice(UInt(region.base.toInt), slice)
                   }
 
@@ -175,7 +173,7 @@ object NativeRunner extends StrictLogging:
       dispatcher: HostCallDispatcher,
       preDispatch: Option[() => Unit],
       heapTracking: Option[RecompilerMemory.DescribedWithHeap]
-  ): (PvmRecompiler.ExecResult, Array[Long]) =
+  ): (PvmRecompiler.ExecResult, Array[Long], Option[Array[Byte]]) =
     var wrapperRef: NativeInstanceWrapper = null
     val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _pc: Int) =>
       val wrapper = wrapperRef
@@ -215,7 +213,9 @@ object NativeRunner extends StrictLogging:
             s"NativeRunner: SBRK SLACK-CAP EXCEEDED (divergence guard) — " +
               s"heapBase=0x${ht.heapBase.toHexString} requestedNewHeapSize=$newHeapSizeLong " +
               s"maxHeapSize=${ht.maxHeapSize}. This is a documented native-recompiler " +
-              "limitation (256 MiB slack cap), NOT an interpreter-parity failure — see " +
+              s"limitation (RecompilerMemory.MaxHeapSlackBytes=${RecompilerMemory.MaxHeapSlackBytes} " +
+              "slack cap, raised from 256 MiB in Task 19c after it fired on real fuzz traces), " +
+              "NOT an interpreter-parity failure — see " +
               "docs/superpowers/specs/2026-07-03-recompiler-host-calls-plan.md 'Sbrk memory model'."
           )
           PvmRecompiler.HOST_PANIC
@@ -232,8 +232,9 @@ object NativeRunner extends StrictLogging:
               PvmRecompiler.HOST_CONTINUE
     }
 
-    val live = sbrkHandler match
-      case Some(sh) => rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler, sh)
+    val live = sbrkHandler.zip(heapTracking) match
+      case Some((sh, ht)) =>
+        rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler, sh, ht.slackBytes)
       case None => rc.executeLive(blk, regs, gas, regions, backing, pageShift, entryIndex, handler)
     wrapperRef = new NativeInstanceWrapper(live)
     try
@@ -245,7 +246,21 @@ object NativeRunner extends StrictLogging:
           Integer.toUnsignedLong(live.regionsSegment().get(java.lang.foreign.ValueLayout.JAVA_INT, i * 16L + 4))
         else regions(i).len
       }
-      (result, finalLens)
+      val grownHeapBytes: Option[Array[Byte]] = heapTracking.flatMap { ht =>
+        val idx = ht.heapRegionIndex
+        val finalLen = finalLens(idx)
+        val snapshotLen = regions(idx).len
+        if finalLen > snapshotLen then
+          val nativeOff = regions(idx).bufOffset
+          val out = new Array[Byte](finalLen.toInt)
+          java.lang.foreign.MemorySegment.copy(
+            live.backingSegment(), java.lang.foreign.ValueLayout.JAVA_BYTE, nativeOff,
+            out, 0, finalLen.toInt
+          )
+          Some(out)
+        else None
+      }
+      (result, finalLens, grownHeapBytes)
     finally live.close()
 
   private def alignUpLong(v: Long, pageSize: Long): Long =

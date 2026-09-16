@@ -81,6 +81,72 @@ fn mov_imm32(a: &mut Asm, rd: u8, imm: u32) {
     );
 }
 
+fn emit_cbz_far(a: &mut Asm, reg: u8, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; cbnz W(reg), =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
+fn emit_cbnz_far(a: &mut Asm, reg: u8, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; cbz W(reg), =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
+/// `b.eq` -> far target, inverted to `b.ne` over a local skip + unconditional `b`.
+fn emit_beq_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; b.ne =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
+/// `b.ne` -> far target, inverted to `b.eq` over a local skip + unconditional `b`.
+fn emit_bne_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; b.eq =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
+/// `b.hs` (unsigned >=) -> far target, inverted to `b.lo` (unsigned <) over a
+/// local skip + unconditional `b`.
+fn emit_bhs_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; b.lo =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
+/// `b.lt` (signed <) -> far target, inverted to `b.ge` over a local skip +
+/// unconditional `b`.
+fn emit_blt_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
+    dynasm!(a
+        ; .arch aarch64
+        ; b.ge =>skip
+        ; b =>target
+        ; =>skip
+    );
+}
+
 fn emit_bounds_check_subroutine(a: &mut Asm, entry: dynasmrt::DynamicLabel) {
     // Loop over regions: x16 = region index, x17 = regions*[i] pointer.
     dynasm!(a
@@ -240,16 +306,22 @@ fn emit_store(a: &mut Asm, width: u8) {
 }
 
 fn emit_b_cond(a: &mut Asm, cond: CmpCond, target: dynasmrt::DynamicLabel) {
+    let skip = a.new_dynamic_label();
     match cond {
-        CmpCond::LtU => dynasm!(a; .arch aarch64; b.lo =>target),
-        CmpCond::LeU => dynasm!(a; .arch aarch64; b.ls =>target),
-        CmpCond::GeU => dynasm!(a; .arch aarch64; b.hs =>target),
-        CmpCond::GtU => dynasm!(a; .arch aarch64; b.hi =>target),
-        CmpCond::LtS => dynasm!(a; .arch aarch64; b.lt =>target),
-        CmpCond::LeS => dynasm!(a; .arch aarch64; b.le =>target),
-        CmpCond::GeS => dynasm!(a; .arch aarch64; b.ge =>target),
-        CmpCond::GtS => dynasm!(a; .arch aarch64; b.gt =>target),
+        CmpCond::LtU => dynasm!(a; .arch aarch64; b.hs =>skip),
+        CmpCond::LeU => dynasm!(a; .arch aarch64; b.hi =>skip),
+        CmpCond::GeU => dynasm!(a; .arch aarch64; b.lo =>skip),
+        CmpCond::GtU => dynasm!(a; .arch aarch64; b.ls =>skip),
+        CmpCond::LtS => dynasm!(a; .arch aarch64; b.ge =>skip),
+        CmpCond::LeS => dynasm!(a; .arch aarch64; b.gt =>skip),
+        CmpCond::GeS => dynasm!(a; .arch aarch64; b.lt =>skip),
+        CmpCond::GtS => dynasm!(a; .arch aarch64; b.le =>skip),
     }
+    dynasm!(a
+        ; .arch aarch64
+        ; b =>target
+        ; =>skip
+    );
 }
 
 fn emit_cset(a: &mut Asm, rd: u8, cond: CmpCond) {
@@ -588,8 +660,9 @@ impl Backend for Aarch64Backend {
         pcs: &[u32],
         jump_table: &[u32],
         jump_table_ptr: *const u32,
+        entry_offsets_ptr: *const u32,
         code_len: u32,
-    ) -> (Vec<u8>, u32) {
+    ) -> Option<(Vec<u8>, u32, Vec<u32>)> {
         let mut a = Asm::new().expect("dynasm assembler alloc");
 
         if ops.is_empty() {
@@ -601,8 +674,9 @@ impl Backend for Aarch64Backend {
                 ; movz w0, #EXIT_PANIC as u32
                 ; ret
             );
-            let buf = a.finalize().expect("finalize");
-            return (buf.to_vec(), 0);
+            a.commit().ok()?;
+            let buf = a.finalize().ok()?;
+            return Some((buf.to_vec(), 0, Vec::new()));
         }
 
         let blocks = analyze_blocks(ops, jump_table);
@@ -616,11 +690,14 @@ impl Backend for Aarch64Backend {
         let panic_label = a.new_dynamic_label();
         let halt_label = a.new_dynamic_label();
         let bounds_check_label = a.new_dynamic_label();
+        let func_start_label = a.new_dynamic_label();
+        let entry_offsets_len = ops.len() as u32;
         let dispatch_by_index_label = a.new_dynamic_label();
         let end_of_code_label = a.new_dynamic_label();
 
         dynasm!(a
             ; .arch aarch64
+            ; =>func_start_label     // offset 0: the `adrp` base for code-base derivation (see above)
             ; sub sp, sp, #16
             ; stp x19, x20, [sp]      // save caller's x19/x20 (x21/x22 saved below, separate slot)
             ; sub sp, sp, #16
@@ -631,26 +708,24 @@ impl Backend for Aarch64Backend {
             ; ldr x21, [sp, #40]        // x21 = host_ctx (arg 10)
             ; ldr x22, [sp, #48]        // x22 = sbrk_fn (arg 11; Task 18/H2; may be the null pointer)
         );
-        assert!(ops.len() < 4096, "skeleton entry-index dispatch chain out of imm12 range");
-        for i in 0..ops.len() {
-            dynasm!(a
-                ; .arch aarch64
-                ; cmp w7, #i as u32
-                ; b.eq =>instr_labels[i]
-            );
-        }
-        dynasm!(a; .arch aarch64; b =>panic_label);
+        dynasm!(a; .arch aarch64; b =>dispatch_by_index_label);
         dynasm!(a; .arch aarch64; =>dispatch_by_index_label);
-        assert!(ops.len() < 4096, "skeleton dispatch-by-index chain out of imm12 range");
-        for i in 0..ops.len() {
-            dynasm!(a
-                ; .arch aarch64
-                ; cmp w7, #i as u32
-                ; b.eq =>instr_labels[i]
-            );
-        }
-        dynasm!(a; .arch aarch64; b =>panic_label);
+        dynasm!(a; .arch aarch64; mov w7, w7);
+        mov_imm32(&mut a, 10, entry_offsets_len);
+        dynasm!(a; .arch aarch64; cmp w7, w10);
+        emit_bhs_far(&mut a, panic_label);   // idx >= entry_offsets_len (unsigned) -> panic
+        mov_imm64(&mut a, 13, entry_offsets_ptr as u64);
+        dynasm!(a
+            ; .arch aarch64
+            ; lsl x14, x7, #2       // byte offset into entry_offsets = idx * 4 (x7 now zero-extended, see above)
+            ; add x13, x13, x14
+            ; ldr w9, [x13]         // w9 = entry_offsets[idx] (bytes from function start)
+            ; adrp x8, =>func_start_label   // x8 = code_base (page-aligned == exact, see above)
+            ; add x8, x8, x9        // x8 = code_base + entry_offsets[idx]
+            ; br x8
+        );
 
+        let mut entry_offsets: Vec<u32> = vec![0u32; ops.len()];
         for b in 0..nblocks {
             dynasm!(a
                 ; .arch aarch64
@@ -665,13 +740,10 @@ impl Backend for Aarch64Backend {
                     ; .arch aarch64
                     ; =>instr_labels[pc]
                 );
+                entry_offsets[pc] = a.offset().0 as u32;
                 mov_imm32(&mut a, 12, pcs[pc]);
-                // charge 1 gas for this instruction; OOG (gas<0) before executing
-                dynasm!(a
-                    ; .arch aarch64
-                    ; subs x11, x11, #1
-                    ; b.lt =>oog_label
-                );
+                dynasm!(a; .arch aarch64; subs x11, x11, #1);
+                emit_blt_far(&mut a, oog_label);
                 match ops[pc] {
                     Op::LoadImm64 { dst, imm } => {
                         let dst = dst as u32;
@@ -730,7 +802,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #0            // load
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                         );
                         emit_load(&mut a, width, signed);
                         dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
@@ -747,7 +822,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #1            // store
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                             ; ldr x10, [x0, #dst * 8]
                         );
                         emit_store(&mut a, width);
@@ -804,8 +882,8 @@ impl Backend for Aarch64Backend {
                             ; ldr x8, [x0, #src * 8]
                             ; ldr x9, [x0, #src2 * 8]
                             ; cmp x8, x9
-                            ; b.eq =>tgt
                         );
+                        emit_beq_far(&mut a, tgt);
                         // not-taken: fall through to the next block (emitted next)
                     }
                     Op::BranchNe { src, src2, target } => {
@@ -816,8 +894,8 @@ impl Backend for Aarch64Backend {
                             ; ldr x8, [x0, #src * 8]
                             ; ldr x9, [x0, #src2 * 8]
                             ; cmp x8, x9
-                            ; b.ne =>tgt
                         );
+                        emit_bne_far(&mut a, tgt);
                     }
                     Op::Djump { src, imm } => {
                         let src = src as u32;
@@ -829,15 +907,12 @@ impl Backend for Aarch64Backend {
                             ; mov w8, w8      // mask to 32 bits (UXTW), addr now in x8/w8
                         );
                         mov_imm64(&mut a, 9, DJUMP_HALT);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x8, x9
-                            ; b.eq =>halt_label
-                            // invalid if addr == 0
-                            ; cbz w8, =>panic_label
-                            ; and w16, w8, #1
-                            ; cbnz w16, =>panic_label
-                        );
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_beq_far(&mut a, halt_label);
+                        // invalid if addr == 0
+                        emit_cbz_far(&mut a, 8, panic_label);
+                        dynasm!(a; .arch aarch64; and w16, w8, #1);
+                        emit_cbnz_far(&mut a, 16, panic_label);
                         // idx = addr/2 - 1 (addr already known even and nonzero)
                         dynasm!(a
                             ; .arch aarch64
@@ -845,11 +920,8 @@ impl Backend for Aarch64Backend {
                             ; sub w9, w9, #1
                         );
                         mov_imm32(&mut a, 10, jump_table.len() as u32);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp w9, w10
-                            ; b.hs =>panic_label   // idx >= table.len() (unsigned) -> panic
-                        );
+                        dynasm!(a; .arch aarch64; cmp w9, w10);
+                        emit_bhs_far(&mut a, panic_label);   // idx >= table.len() (unsigned) -> panic
                         mov_imm64(&mut a, 13, jump_table_ptr as u64);
                         dynasm!(a
                             ; .arch aarch64
@@ -859,9 +931,9 @@ impl Backend for Aarch64Backend {
                             ; mov w9, #0xFFFF
                             ; movk w9, #0xFFFF, lsl #16   // w9 = u32::MAX sentinel
                             ; cmp w7, w9
-                            ; b.eq =>panic_label
-                            ; bl =>dispatch_by_index_label
                         );
+                        emit_beq_far(&mut a, panic_label);
+                        dynasm!(a; .arch aarch64; bl =>dispatch_by_index_label);
                     }
                     Op::Fallthrough => {
                         if pc + 1 < ops.len() {
@@ -890,7 +962,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #8            // width
                             ; mov x15, #0            // load
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                         );
                         emit_load(&mut a, 8, false);
                         dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
@@ -904,7 +979,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #8
                             ; mov x15, #1            // store
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                             ; ldr x10, [x0, #src * 8]
                         );
                         emit_store(&mut a, 8);
@@ -979,11 +1057,8 @@ impl Backend for Aarch64Backend {
                         let tgt = block_labels[blocks.block_of[target as usize]];
                         dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
                         mov_imm64(&mut a, 9, imm);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x8, x9
-                            ; b.eq =>tgt
-                        );
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_beq_far(&mut a, tgt);
                         // not-taken: fall through to the next block (emitted next)
                     }
                     Op::BranchNeImm { src, imm, target } => {
@@ -991,11 +1066,8 @@ impl Backend for Aarch64Backend {
                         let tgt = block_labels[blocks.block_of[target as usize]];
                         dynasm!(a; .arch aarch64; ldr x8, [x0, #src * 8]);
                         mov_imm64(&mut a, 9, imm);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x8, x9
-                            ; b.ne =>tgt
-                        );
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_bne_far(&mut a, tgt);
                     }
                     Op::BranchCmpImm { src, imm, target, cond } => {
                         let src = src as u32;
@@ -1363,25 +1435,19 @@ impl Backend for Aarch64Backend {
                             ; str x13, [x0, #dstr * 8]
                         );
                         mov_imm64(&mut a, 9, DJUMP_HALT);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp x8, x9
-                            ; b.eq =>halt_label
-                            ; cbz w8, =>panic_label
-                            ; and w16, w8, #1
-                            ; cbnz w16, =>panic_label
-                        );
+                        dynasm!(a; .arch aarch64; cmp x8, x9);
+                        emit_beq_far(&mut a, halt_label);
+                        emit_cbz_far(&mut a, 8, panic_label);
+                        dynasm!(a; .arch aarch64; and w16, w8, #1);
+                        emit_cbnz_far(&mut a, 16, panic_label);
                         dynasm!(a
                             ; .arch aarch64
                             ; lsr w9, w8, #1
                             ; sub w9, w9, #1
                         );
                         mov_imm32(&mut a, 10, jump_table.len() as u32);
-                        dynasm!(a
-                            ; .arch aarch64
-                            ; cmp w9, w10
-                            ; b.hs =>panic_label
-                        );
+                        dynasm!(a; .arch aarch64; cmp w9, w10);
+                        emit_bhs_far(&mut a, panic_label);
                         mov_imm64(&mut a, 13, jump_table_ptr as u64);
                         dynasm!(a
                             ; .arch aarch64
@@ -1391,9 +1457,9 @@ impl Backend for Aarch64Backend {
                             ; mov w9, #0xFFFF
                             ; movk w9, #0xFFFF, lsl #16
                             ; cmp w7, w9
-                            ; b.eq =>panic_label
-                            ; bl =>dispatch_by_index_label
                         );
+                        emit_beq_far(&mut a, panic_label);
+                        dynasm!(a; .arch aarch64; bl =>dispatch_by_index_label);
                     }
                     Op::LoadAbs { dst, imm, width, signed } => {
                         let dst = dst as u32;
@@ -1404,7 +1470,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #0            // load
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                         );
                         emit_load(&mut a, width, signed);
                         dynasm!(a; .arch aarch64; str x8, [x0, #dst * 8]);
@@ -1418,7 +1487,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #1            // store
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                             ; ldr x10, [x0, #src * 8]
                         );
                         emit_store(&mut a, width);
@@ -1431,7 +1503,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #1            // store
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                         );
                         mov_imm64(&mut a, 10, value);
                         emit_store(&mut a, width);
@@ -1447,7 +1522,10 @@ impl Backend for Aarch64Backend {
                             ; mov x14, #width as u64
                             ; mov x15, #1            // store
                             ; bl =>bounds_check_label
-                            ; cbz w9, =>fault_label
+                        );
+                        emit_cbz_far(&mut a, 9, fault_label);
+                        dynasm!(a
+                            ; .arch aarch64
                         );
                         mov_imm64(&mut a, 10, value);
                         emit_store(&mut a, width);
@@ -1517,8 +1595,9 @@ impl Backend for Aarch64Backend {
 
         emit_bounds_check_subroutine(&mut a, bounds_check_label);
 
-        let buf = a.finalize().expect("finalize: unresolved labels or relocation range overflow");
+        a.commit().ok()?;
+        let buf = a.finalize().ok()?;
         let code = buf.to_vec();
-        (code, ops.len() as u32)
+        Some((code, ops.len() as u32, entry_offsets))
     }
 }

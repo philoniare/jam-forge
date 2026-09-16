@@ -12,8 +12,9 @@ object RecompilerMemory:
 
   /** One guest-memory region ready for `PvmRecompiler.Region` marshalling:
     * `[base, base+len)`, backed by `bufOffset` into the packed backing array
-    * returned alongside it by `describe`. */
-  final case class RegionDesc(base: Long, len: Long, bufOffset: Long, writable: Boolean)
+    * returned alongside it by `describe` */
+  final case class RegionDesc(base: Long, len: Long, bufOffset: Long, nativeBufOffset: Long, writable: Boolean)
+
   final case class Described(regions: Array[RegionDesc], backing: Array[Byte], pageSize: UInt):
     /** `log2(pageSize)`, the `page_shift` FFI parameter — pageSize is always a
       * power of two per `MemoryMap.Builder.build`'s own validation. */
@@ -35,7 +36,7 @@ object RecompilerMemory:
   def describe(instance: InterpretedInstance): Described =
     describeInternal(instance, heapSlackBytes = 0)._1
 
-  val MaxHeapSlackBytes: Long = 256L * 1024 * 1024
+  val MaxHeapSlackBytes: Long = 640L * 1024 * 1024
 
   def describeWithHeapSlack(instance: InterpretedInstance): DescribedWithHeap =
     val memoryMap = instance.module.memoryMap
@@ -45,7 +46,7 @@ object RecompilerMemory:
     val room = math.max(0L, maxHeapSize - currentHeapSize)
     val slackBytes = AlignmentOps.alignUp(math.min(room, MaxHeapSlackBytes), pageSize.toLong)
 
-    val (described, heapRegionIndex) = describeInternal(instance, slackBytes)
+    val (described, heapRegionIndex) = describeInternal(instance, heapSlackBytes = slackBytes)
     val heapBase = memoryMap.heapBase.toLong & 0xFFFFFFFFL
     val initialHeapEnd = heapBase + currentHeapSize // mirrors basicMemory.heapEnd == memoryMap.heapBase + _heapSize
     DescribedWithHeap(described, heapRegionIndex, heapBase, initialHeapEnd, maxHeapSize, slackBytes)
@@ -84,15 +85,17 @@ object RecompilerMemory:
     val auxMappedLen = mappedPrefixLength(pageMap, memoryMap.auxDataAddress, memoryMap.auxDataSize.signed, pageSize)
     appendRegion(memoryMap.auxDataAddress, auxMappedLen, writable = false)
 
-    val totalBackingSize = pending.foldLeft(0L)((acc, p) => acc + p.bytes.length + p.extraSlack)
-    val backing = new Array[Byte](totalBackingSize.toInt)
+    val totalCompactSize = pending.foldLeft(0L)((acc, p) => acc + p.bytes.length)
+    val backing = new Array[Byte](totalCompactSize.toInt)
     val regions = new Array[RegionDesc](pending.length)
-    var offset = 0L
+    var compactOffset = 0L
+    var nativeOffset = 0L
     pending.indices.foreach { i =>
       val p = pending(i)
-      System.arraycopy(p.bytes, 0, backing, offset.toInt, p.bytes.length)
-      regions(i) = RegionDesc(p.base.toLong & 0xFFFFFFFFL, p.bytes.length.toLong, offset, p.writable)
-      offset += p.bytes.length.toLong + p.extraSlack // slack bytes stay zero-filled (Array[Byte] default)
+      System.arraycopy(p.bytes, 0, backing, compactOffset.toInt, p.bytes.length)
+      regions(i) = RegionDesc(p.base.toLong & 0xFFFFFFFFL, p.bytes.length.toLong, compactOffset, nativeOffset, p.writable)
+      compactOffset += p.bytes.length.toLong
+      nativeOffset += p.bytes.length.toLong + p.extraSlack // slack bytes: not in `backing`, reserved natively only
     }
 
     (Described(regions, backing, pageSize), heapRegionIndex)

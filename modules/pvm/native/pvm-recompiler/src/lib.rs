@@ -193,6 +193,8 @@ pub struct CompiledBlock {
     instruction_count: u32,
     #[allow(dead_code)] // kept alive for its address, never read from Rust after compile
     jump_table: Box<[u32]>,
+    #[allow(dead_code)] // kept alive for its address, never read from Rust after compile
+    entry_offsets: Box<[u32]>,
 }
 
 /// The abstract op the backend emitter consumes (decoupled from the FFI struct).
@@ -385,8 +387,9 @@ pub trait Backend {
         pcs: &[u32],
         jump_table: &[u32],
         jump_table_ptr: *const u32,
+        entry_offsets_ptr: *const u32,
         code_len: u32,
-    ) -> (Vec<u8>, u32);
+    ) -> Option<(Vec<u8>, u32, Vec<u32>)>;
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -595,16 +598,24 @@ pub unsafe extern "C" fn pvm_compile(
         std::slice::from_raw_parts(jump_table, jt_n).to_vec().into_boxed_slice()
     };
     let jt_ptr = jt.as_ptr();
-    if ops.len() >= 4096 {
-        return std::ptr::null_mut();
-    }
     let backend = aarch64::Aarch64Backend;
-    let (code, instruction_count) = backend.emit_program(&ops, &pcs, &jt, jt_ptr, code_len);
+    let (_dry_code, _dry_count, entry_offsets_vec) =
+        match backend.emit_program(&ops, &pcs, &jt, jt_ptr, std::ptr::null(), code_len) {
+            Some(x) => x,
+            None => return std::ptr::null_mut(),
+        };
+    let entry_offsets: Box<[u32]> = entry_offsets_vec.into_boxed_slice();
+    let entry_offsets_ptr = entry_offsets.as_ptr();
+    let (code, instruction_count, _final_offsets) =
+        match backend.emit_program(&ops, &pcs, &jt, jt_ptr, entry_offsets_ptr, code_len) {
+            Some(x) => x,
+            None => return std::ptr::null_mut(),
+        };
     let mem = match ExecMem::from_code(&code) {
         Some(m) => m,
         None => return std::ptr::null_mut(),
     };
-    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt }))
+    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt, entry_offsets }))
 }
 pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
 pub type SbrkFn = extern "C" fn(ctx: *mut std::ffi::c_void, dst: u32, size: u64, pc: u32) -> i64;
@@ -4114,42 +4125,264 @@ mod tests {
 mod compile_reject_tests {
     use super::*;
 
-    /// Programs at/over the dispatch-chain imm12 limit must REJECT (null
-    /// compile -> caller deopts), never panic: panic="abort" in the release
-    /// dylib turns a panic into a host-process kill (observed with real
-    /// service programs under Recompiled mode).
-    #[test]
-    fn oversized_program_compile_rejects_instead_of_panicking() {
-        let n = 5000usize;
-        let mut prog: Vec<RawInstr> = (0..n - 1)
-            .map(|i| RawInstr {
-                opcode: OP_ADD_IMM64,
-                a: 1,
-                b: 1,
-                c: 0,
-                pc: (i * 3) as u32,
-                imm: 1,
-                imm2: 0,
-            })
-            .collect();
-        prog.push(RawInstr {
-            opcode: OP_PANIC,
-            a: 0,
-            b: 0,
-            c: 0,
-            pc: ((n - 1) * 3) as u32,
-            imm: 0,
-            imm2: 0,
-        });
+    fn run(prog: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64, jt: &[u32], entry_index: u32) -> (u32, ExecOut) {
+        let code_len = prog.iter().map(|i| i.pc).max().map(|m| m + 4).unwrap_or(0);
         let blk = unsafe {
             pvm_compile(
                 prog.as_ptr(),
                 prog.len(),
-                std::ptr::null(),
-                0,
-                (n * 3) as u32,
+                if jt.is_empty() { std::ptr::null() } else { jt.as_ptr() },
+                jt.len(),
+                code_len,
             )
         };
-        assert!(blk.is_null(), "oversized program must null-compile, not panic");
+        assert!(!blk.is_null(), "compile must succeed");
+        let mut out = ExecOut::default();
+        let exit = unsafe {
+            pvm_execute(
+                blk,
+                regs.as_mut_ptr(),
+                gas as *mut i64,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                12,
+                entry_index,
+                &mut out as *mut ExecOut,
+                None,
+                std::ptr::null_mut(),
+                None,
+            )
+        };
+        unsafe { pvm_free(blk) };
+        (exit, out)
+    }
+
+    fn build_add_chain(n: usize) -> Vec<RawInstr> {
+        let mut prog: Vec<RawInstr> = (0..n - 1)
+            .map(|i| RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 3) as u32, imm: 1, imm2: 0 })
+            .collect();
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((n - 1) * 3) as u32, imm: 0, imm2: 0 });
+        prog
+    }
+
+    #[test]
+    fn oversized_program_now_compiles_and_runs_correctly() {
+        let n = 5000usize;
+        let prog = build_add_chain(n);
+        let mut regs = [0u64; 13];
+        let mut gas = 1_000_000i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas, &[], 0);
+        assert_eq!(exit, EXIT_PANIC, "program ends in an explicit Panic terminator");
+        assert_eq!(regs[1], (n - 1) as u64, "r1 must have been incremented once per AddImm64 (n-1 of them)");
+        assert_eq!(out.pc, ((n - 1) * 3) as u32, "reported pc must be the trailing Panic's own pc");
+        assert_eq!(gas, 1_000_000 - n as i64, "1 gas charged per instruction, n instructions total");
+    }
+
+    #[test]
+    fn entry_index_deep_into_large_program_dispatches_correctly() {
+        let n = 6000usize;
+        let prog = build_add_chain(n);
+        let entry: u32 = 5500; // deep past the old 4096 imm12 ceiling
+        let mut regs = [0u64; 13];
+        let mut gas = 1_000_000i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas, &[], entry);
+        assert_eq!(exit, EXIT_PANIC);
+        let expected_increments = (n - 1 - entry as usize) as u64;
+        assert_eq!(regs[1], expected_increments, "must execute only the suffix starting at entry_index, not the whole program");
+        assert_eq!(out.pc, ((n - 1) * 3) as u32);
+        assert_eq!(gas, 1_000_000 - expected_increments as i64 - 1 /* the trailing Panic's own charge */);
+    }
+
+    #[test]
+    fn entry_index_one_on_large_program_dispatches_correctly() {
+        let n = 6000usize;
+        let prog = build_add_chain(n);
+        let mut regs = [0u64; 13];
+        let mut gas = 1_000_000i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas, &[], 1);
+        assert_eq!(exit, EXIT_PANIC);
+        let expected_increments = (n - 2) as u64; // instructions [1, n-1) execute
+        assert_eq!(regs[1], expected_increments, "entry_index=1 must skip only instruction 0, running [1..n-1)");
+        assert_eq!(out.pc, ((n - 1) * 3) as u32);
+        assert_eq!(gas, 1_000_000 - expected_increments as i64 - 1);
+    }
+
+    #[test]
+    fn djump_to_high_instruction_index_via_table() {
+        let target: usize = 5000;
+        let n = target + 2; // filler [2..target) skipped, target writes, target+1 = Panic
+        let mut prog: Vec<RawInstr> = Vec::with_capacity(n);
+        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc: 0, imm: 2, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc: 4, imm: 0, imm2: 0 });
+        for i in 2..target {
+            // filler: writes a sentinel this test asserts was NEVER executed
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (i * 4) as u32, imm: 999, imm2: 0 });
+        }
+        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (target * 4) as u32, imm: 7, imm2: 0 }); // target
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((target + 1) * 4) as u32, imm: 0, imm2: 0 });
+        let jt = vec![target as u32]; // table[0] = target
+        let mut regs = [0u64; 13];
+        let mut gas = 1_000_000i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas, &jt, 0);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 7, "djump must land on the high-index target, not fall through the filler (which would leave r2=999)");
+        assert_eq!(out.pc, ((target + 1) * 4) as u32);
+    }
+
+    #[test]
+    fn offsets_table_mixed_instruction_sizes_no_off_by_one() {
+        let n = 11usize; // 10 body instructions + Panic
+        let mut prog: Vec<RawInstr> = Vec::with_capacity(n);
+        for i in 0..10usize {
+            let reg = (i / 2 + 1) as u32; // pair p=i/2 writes reg[p+1]: regs 1,1,2,2,3,3,4,4,5,5
+            if i % 2 == 0 {
+                prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: reg, b: 0, c: 0, pc: (i * 4) as u32, imm: (1000 + i) as i64, imm2: 0 });
+            } else {
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: reg, b: reg, c: 0, pc: (i * 4) as u32, imm: (2000 + i) as i64, imm2: 0 });
+            }
+        }
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (10 * 4) as u32, imm: 0, imm2: 0 });
+
+        {
+            let mut regs = [0u64; 13];
+            let mut gas = 1_000_000i64;
+            let (exit, _out) = run(&prog, &mut regs, &mut gas, &[], 0);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(regs[1], 1000 + 2001, "index 0 (LoadImm64) then index 1 (AddImm64) on reg[1]");
+            assert_eq!(regs[2], 1002 + 2003, "index 2 then index 3 on reg[2]");
+            assert_eq!(regs[3], 1004 + 2005, "index 4 then index 5 on reg[3]");
+            assert_eq!(regs[4], 1006 + 2007, "index 6 then index 7 on reg[4]");
+            assert_eq!(regs[5], 1008 + 2009, "index 8 then index 9 on reg[5]");
+        }
+
+        {
+            let mut regs = [0u64; 13];
+            let mut gas = 1_000_000i64;
+            let (exit, _out) = run(&prog, &mut regs, &mut gas, &[], 6);
+            assert_eq!(exit, EXIT_PANIC);
+            for r in 1..=3 {
+                assert_eq!(regs[r], 0, "reg[{r}] is written only by skipped instructions [0..6) — entry_index=6 must not execute them");
+            }
+            assert_eq!(regs[4], 1006 + 2007, "reg[4]: index 6 (LoadImm64, entry point) then index 7 (AddImm64) — proves entry_offsets[6] points at instruction 6's OWN code, not a neighbor's");
+            assert_eq!(regs[5], 1008 + 2009, "index 8 then 9 on reg[5], unaffected by entry point");
+        }
+
+        {
+            let mut regs = [0u64; 13];
+            let mut gas = 1_000_000i64;
+            let (exit, _out) = run(&prog, &mut regs, &mut gas, &[], 7);
+            assert_eq!(exit, EXIT_PANIC);
+            assert_eq!(regs[4], 2007, "entry_index=7 must run ONLY AddImm64 (reg[4] = 0 + 2007), never index 6's LoadImm64 (which would make it 1006+2007)");
+            assert_eq!(regs[1], 0);
+            assert_eq!(regs[2], 0);
+            assert_eq!(regs[3], 0);
+            assert_eq!(regs[5], 1008 + 2009, "reg[5] (pair 4) is entirely after the entry point and must be unaffected");
+        }
+    }
+
+    #[test]
+    fn large_program_with_ecallis_gas_accounting_is_exact() {
+        #[repr(C)]
+        struct Ctx {
+            calls: u64,
+        }
+        extern "C" fn host_fn(ctx: *mut std::ffi::c_void, _host_call_id: u64, _pc: u32) -> i64 {
+            unsafe {
+                let ctx = &mut *(ctx as *mut Ctx);
+                ctx.calls += 1;
+            }
+            HOST_CONTINUE
+        }
+
+        let n = 10000usize; // well past the old 4096 cap and past 1MiB of code
+        let mut prog: Vec<RawInstr> = Vec::with_capacity(n + 1);
+        let mut ecalli_count = 0u64;
+        for i in 0..n {
+            if i % 7 == 0 {
+                prog.push(RawInstr { opcode: OP_ECALLI, a: 0, b: 0, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0 });
+                ecalli_count += 1;
+            } else {
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0 });
+            }
+        }
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (n * 4) as u32, imm: 0, imm2: 0 });
+        let code_len = ((n + 1) * 4) as u32;
+
+        let blk = unsafe { pvm_compile(prog.as_ptr(), prog.len(), std::ptr::null(), 0, code_len) };
+        assert!(!blk.is_null(), "large Ecalli-mixed program must compile (trampolines must prevent ImpossibleRelocation)");
+
+        let mut regs = [0u64; 13];
+        let mut gas: i64 = 1_000_000;
+        let mut out = ExecOut::default();
+        let mut ctx = Ctx { calls: 0 };
+        let exit = unsafe {
+            pvm_execute(
+                blk,
+                regs.as_mut_ptr(),
+                &mut gas as *mut i64,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                12,
+                0,
+                &mut out as *mut ExecOut,
+                Some(host_fn),
+                &mut ctx as *mut Ctx as *mut std::ffi::c_void,
+                None,
+            )
+        };
+        unsafe { pvm_free(blk) };
+
+        assert_eq!(exit, EXIT_PANIC, "program ends in an explicit Panic terminator");
+        assert_eq!(ctx.calls, ecalli_count, "every Ecalli site must have invoked the host handler exactly once");
+        // Gas: 1 charge per instruction, n instructions total (the trailing
+        // Panic is instruction n, charged too) plus n+1 for the panic itself.
+        assert_eq!(gas, 1_000_000 - (n as i64) - 1, "exactly n+1 gas charged (n body instructions + the trailing Panic), no more, no less — trampolines must not add or skip any gas charge");
+        // AddImm64 count = n - ecalli_count (non-Ecalli slots).
+        let add_count = (n as u64) - ecalli_count;
+        assert_eq!(regs[1], add_count, "r1 must equal exactly the number of AddImm64 instructions executed");
+    }
+
+    #[test]
+    fn large_program_many_djumps_through_large_jump_table_all_land_correctly() {
+        let jt_len: u32 = 1200;
+        let mut prog: Vec<RawInstr> = Vec::new();
+        let mut pc = 0u32;
+        let mut djump_site_of_slot: Vec<usize> = Vec::with_capacity(jt_len as usize);
+        for s in 0..jt_len {
+            for _ in 0..4 {
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 3, b: 3, c: 0, pc, imm: 1, imm2: 0 });
+                pc += 4;
+            }
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc, imm: ((s as i64) + 1) * 2, imm2: 0 });
+            pc += 4;
+            djump_site_of_slot.push(prog.len()); // index of the JumpIndirect instruction about to be pushed
+            prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc, imm: 0, imm2: 0 });
+            pc += 4;
+        }
+        let tail_start = prog.len() as u32;
+        let mut jt: Vec<u32> = Vec::with_capacity(jt_len as usize);
+        for s in 0..jt_len {
+            jt.push(tail_start + s * 2); // slot s -> its own LoadImm64;Panic pair
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc, imm: (10000 + s) as i64, imm2: 0 });
+            pc += 4;
+            prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc, imm: 0, imm2: 0 });
+            pc += 4;
+        }
+
+        let mut gas: i64 = 10_000_000;
+        for (slot, &djump_idx) in djump_site_of_slot.iter().enumerate() {
+            let entry = (djump_idx - 1) as u32;
+            let mut r = [0u64; 13];
+            let (exit, _out) = run(&prog, &mut r, &mut gas, &jt, entry);
+            assert_eq!(exit, EXIT_PANIC, "slot {slot} (entry={entry}) must reach its tail Panic");
+            let expected_tag = (10000 + slot) as u64;
+            assert_eq!(
+                r[2], expected_tag,
+                "slot {slot} (entry={entry}) djumped to the WRONG tail — expected tag {expected_tag}, got {} (jump table has {} entries, code_len driven by pc={pc})",
+                r[2], jt_len
+            );
+        }
     }
 }
