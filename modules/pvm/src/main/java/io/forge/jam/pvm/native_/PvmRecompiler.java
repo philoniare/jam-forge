@@ -143,7 +143,8 @@ public final class PvmRecompiler implements AutoCloseable {
     private static final int MMAP_PROT_READ = 0x1;
     private static final int MMAP_PROT_WRITE = 0x2;
     private static final int MMAP_MAP_PRIVATE = 0x0002;
-    private static final int MMAP_MAP_ANON = 0x1000; // MAP_ANONYMOUS on Linux glibc has the same value
+    private static final int MMAP_MAP_ANON =
+            System.getProperty("os.name").toLowerCase().contains("mac") ? 0x1000 : 0x20;
     private static final MemorySegment MMAP_FAILED = MemorySegment.ofAddress(-1L);
     private static final MethodHandle MMAP_MH;
     private static final MethodHandle MUNMAP_MH;
