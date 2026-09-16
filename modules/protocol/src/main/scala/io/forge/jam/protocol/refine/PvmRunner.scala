@@ -55,7 +55,7 @@ object PvmRunner:
     var exit = PvmExit.Halt
     var continueExecution = true
 
-    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode)
+    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode, hostCalls, preDispatch = None)
     nativeOutcome match
       case Some(outcome) =>
         exit = outcome match

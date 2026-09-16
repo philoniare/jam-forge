@@ -11,12 +11,33 @@ import com.typesafe.scalalogging.StrictLogging
 import spire.math.UInt
 
 import java.nio.file.{Files, Path}
+import java.util.concurrent.atomic.{AtomicLong, LongAdder}
+import scala.jdk.CollectionConverters.*
 
 object NativeRunner extends StrictLogging:
 
   enum RunOutcome:
     case Halt, Panic, OutOfGas
     case PageFault(pageFaultAddress: Long)
+
+  private val nativeRuns = new AtomicLong(0)
+  private val deoptRuns = new AtomicLong(0)
+  private val deoptByReason = new java.util.concurrent.ConcurrentHashMap[String, LongAdder]()
+
+  private def recordNative(): Unit = nativeRuns.incrementAndGet()
+  private def recordDeopt(reason: String): Unit =
+    deoptRuns.incrementAndGet()
+    deoptByReason.computeIfAbsent(reason, _ => new LongAdder()).increment()
+
+  def nativeCount: Long = nativeRuns.get()
+  def deoptCount: Long = deoptRuns.get()
+  def deoptReasons: Map[String, Long] =
+    deoptByReason.asScala.view.mapValues(_.sum()).toMap
+
+  def logSummary(): Unit =
+    logger.info(
+      s"NativeRunner: ${nativeCount} native, ${deoptCount} deopt (reasons: ${deoptReasons.mkString(", ")})"
+    )
 
   def run(
       instance: InterpretedInstance,
@@ -58,6 +79,7 @@ object NativeRunner extends StrictLogging:
     recompiler match
       case None =>
         logger.debug("NativeRunner: deopt to interpreter — recompiler dylib not available (jam.pvm.recompiler.lib unset or file missing)")
+        recordDeopt("no-dylib")
         None
       case Some(rc) =>
         val blob = instance.module.blob
@@ -65,12 +87,20 @@ object NativeRunner extends StrictLogging:
         val unsupported = scanUnsupportedOpcodes(blob.code, blob.bitmask)
         if (unsupported.hasEcalli || unsupported.hasSbrk) && hostCalls.isEmpty then
           logger.debug("NativeRunner: deopt to interpreter — program contains Ecalli/Sbrk and no HostCallDispatcher was supplied")
+          recordDeopt("ecalli-sbrk-no-dispatcher")
           None
         else
           val prepared = RecompilerAbi.prepareProgram(blob)
           prepared.byteOffsetToIndex.get(entryPc) match
             case None =>
               logger.debug(s"NativeRunner: deopt to interpreter — entryPc=$entryPc is not a decoded instruction boundary")
+              recordDeopt("invalid-entry-pc")
+              None
+            case Some(_) if prepared.opcodes.length >= 4096 =>
+              logger.debug(
+                s"NativeRunner: deopt to interpreter — program too large for the skeleton dispatch chains (${prepared.opcodes.length} instructions >= 4096; lifted by the offsets-table dispatch rewrite)"
+              )
+              recordDeopt("program-too-large")
               None
             case Some(entryIndex) =>
               val blk = rc.compile(
@@ -79,7 +109,8 @@ object NativeRunner extends StrictLogging:
               )
               try
                 if !blk.isValid then
-                  logger.debug("NativeRunner: deopt to interpreter — pvm_compile returned an invalid block (unsupported opcode)")
+                  logger.debug("NativeRunner: deopt to interpreter — pvm_compile rejected the program (null block)")
+                  recordDeopt("compile-null")
                   None
                 else
                   val describedWithHeap =
@@ -127,6 +158,7 @@ object NativeRunner extends StrictLogging:
                     case PvmRecompiler.EXIT_OOG => RunOutcome.OutOfGas
                     case PvmRecompiler.EXIT_FAULT => RunOutcome.PageFault(out.faultPage)
                     case other => throw new IllegalStateException(s"NativeRunner: unrecognized recompiler exit code $other")
+                  recordNative()
                   Some(outcome)
               finally blk.close()
 

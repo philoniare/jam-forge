@@ -1,6 +1,8 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.protocol.accumulation.NativeRunner
+import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -23,7 +25,9 @@ import java.nio.file.{Files, Paths}
  * 3. Import block using BlockImporter
  * 4. Compare actual post_state root with expected
  */
-class FuzzReportTraceSpec extends AnyFunSpec with Matchers:
+class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAll:
+  override def afterAll(): Unit =
+    NativeRunner.logSummary()
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
