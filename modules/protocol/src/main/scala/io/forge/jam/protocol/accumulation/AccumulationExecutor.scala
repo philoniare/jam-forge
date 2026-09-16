@@ -192,7 +192,13 @@ class AccumulationExecutor(val config: ChainConfig):
     // Execute loop
     var exitReason = ExitReason.HALT
     var continueExecution = true
-    val nativeOutcome = NativeRunner.run(instance, entryPointPc.toInt, executionMode)
+    val nativeOutcome = NativeRunner.run(
+      instance,
+      entryPointPc.toInt,
+      executionMode,
+      hostCalls,
+      preDispatch = Some(() => context.captureCheckpointIfPending())
+    )
     nativeOutcome match
       case Some(outcome) =>
         exitReason = outcome match

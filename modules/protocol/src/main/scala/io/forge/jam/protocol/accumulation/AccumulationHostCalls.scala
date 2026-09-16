@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.protocol.refine.HostCallDispatcher
 
 /** Handles host calls during accumulation PVM execution: the single dispatch
   * surface over the cohesion-based host-call families —
@@ -12,7 +13,7 @@ class AccumulationHostCalls(
     val context: AccumulationContext,
     val operands: List[AccumulationOperand],
     val config: ChainConfig
-) extends StorageHostCalls, PrivilegedHostCalls:
+) extends StorageHostCalls, PrivilegedHostCalls, HostCallDispatcher:
 
   /** Get gas cost for a host call without executing it. Gas is charged BEFORE
     * the host call implementation runs.
