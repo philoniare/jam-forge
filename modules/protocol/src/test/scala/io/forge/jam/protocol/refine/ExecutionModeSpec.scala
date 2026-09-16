@@ -164,6 +164,48 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       original.foreach(p => System.setProperty("jam.pvm.recompiler.lib", p))
   }
 
+  private def longLE(v: Long): Array[Byte] = Array.tabulate(8)(i => ((v >>> (i * 8)) & 0xff).toByte)
+  private val sbrkNoHeapRegionCode: Array[Byte] =
+    Array[Byte](20, 5) ++ longLE(64L) ++ Array[Byte](101.toByte, ((3 & 0xf) | ((5 & 0xf) << 4)).toByte) ++ Array[Byte](50, 0)
+  private val sbrkNoHeapRegionBitmask: Array[Byte] = Array[Byte](0x01, 0x14)
+
+  test("Sbrk on a module with no initial RW/heap region deopts to the interpreter instead of crashing") {
+    if !libPath.isEmpty && !isAarch64Host then
+      cancel("recompiler dylib staged but host isn't AArch64 — Recompiled mode would only exercise the no-dylib deopt path here")
+    else
+      import io.forge.jam.pvm.engine.InterpretedInstance
+      import io.forge.jam.pvm.types.ProgramCounter
+      import io.forge.jam.protocol.accumulation.NativeRunner
+
+      val module = moduleOf(sbrkNoHeapRegionCode, sbrkNoHeapRegionBitmask)
+
+      def freshInstance(): InterpretedInstance =
+        val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+        inst.setGas(1000L)
+        inst.setNextProgramCounter(ProgramCounter(0))
+        inst.setReg(0, 0xffff0000L) // RA_INIT
+        inst
+
+      val (interpExit, interpGas, interpOutput) =
+        PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Interpreted)
+
+      val nativeInstance = freshInstance()
+      noException should be thrownBy {
+        NativeRunner.run(nativeInstance, entryPc = 0, ExecutionMode.Recompiled, NoHostCalls, preDispatch = None)
+      }
+
+      val (fallbackExit, fallbackGas, fallbackOutput) =
+        PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
+
+      fallbackExit shouldBe interpExit
+      fallbackExit shouldBe PvmRunner.PvmExit.Halt
+      fallbackGas shouldBe interpGas
+      fallbackOutput.toSeq shouldBe interpOutput.toSeq
+
+      if canRunNative then
+        NativeRunner.deoptReasons.get("sbrk-no-heap-region") shouldBe defined
+  }
+
   private val authCodeHash = Hash(Array.fill[Byte](32)(0x21))
 
   private def preimageOf(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =

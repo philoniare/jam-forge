@@ -96,6 +96,10 @@ object NativeRunner extends StrictLogging:
               logger.debug(s"NativeRunner: deopt to interpreter — entryPc=$entryPc is not a decoded instruction boundary")
               recordDeopt("invalid-entry-pc")
               None
+            case Some(entryIndex) if unsupported.hasSbrk && RecompilerMemory.describeWithHeapSlack(instance).heapRegionIndex == -1 =>
+              logger.debug("NativeRunner: deopt to interpreter — program contains Sbrk but the module has no initial RW/heap region (describeWithHeapSlack.heapRegionIndex == -1)")
+              recordDeopt("sbrk-no-heap-region")
+              None
             case Some(entryIndex) =>
               val blk = rc.compile(
                 prepared.opcodes, prepared.a, prepared.b, prepared.c,
