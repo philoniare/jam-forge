@@ -189,7 +189,7 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
     val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
     val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
-    val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.bufOffset, r.writable))
+    val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.nativeBufOffset, r.writable))
     val backing = described.backing.clone()
     val live = rc.executeLive(blk, Array.fill(13)(0L), 100L, regions, backing, described.pageShift, 0)
     (new NativeInstanceWrapper(live), live, blk)

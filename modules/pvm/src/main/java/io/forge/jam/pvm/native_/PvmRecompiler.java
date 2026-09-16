@@ -140,6 +140,65 @@ public final class PvmRecompiler implements AutoCloseable {
         return new IllegalStateException("recompiler symbol not found: " + sym);
     }
 
+    private static final int MMAP_PROT_READ = 0x1;
+    private static final int MMAP_PROT_WRITE = 0x2;
+    private static final int MMAP_MAP_PRIVATE = 0x0002;
+    private static final int MMAP_MAP_ANON = 0x1000; // MAP_ANONYMOUS on Linux glibc has the same value
+    private static final MemorySegment MMAP_FAILED = MemorySegment.ofAddress(-1L);
+    private static final MethodHandle MMAP_MH;
+    private static final MethodHandle MUNMAP_MH;
+    static {
+        Linker sysLinker = Linker.nativeLinker();
+        SymbolLookup stdlib = sysLinker.defaultLookup();
+        MMAP_MH = sysLinker.downcallHandle(
+                stdlib.find("mmap").orElseThrow(() -> missing("mmap")),
+                FunctionDescriptor.of(ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,   // addr
+                        ValueLayout.JAVA_LONG, // length
+                        ValueLayout.JAVA_INT,  // prot
+                        ValueLayout.JAVA_INT,  // flags
+                        ValueLayout.JAVA_INT,  // fd
+                        ValueLayout.JAVA_LONG  // offset
+                ));
+        MUNMAP_MH = sysLinker.downcallHandle(
+                stdlib.find("munmap").orElseThrow(() -> missing("munmap")),
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+    }
+
+    private static MemorySegment mmapAnonRw(long length, Arena confinedArena) {
+        if (length == 0) {
+            return MemorySegment.NULL;
+        }
+        try {
+            MemorySegment addr = (MemorySegment) MMAP_MH.invokeExact(
+                    MemorySegment.NULL, length, MMAP_PROT_READ | MMAP_PROT_WRITE,
+                    MMAP_MAP_PRIVATE | MMAP_MAP_ANON, -1, 0L);
+            if (addr.address() == MMAP_FAILED.address()) {
+                throw new RuntimeException("mmap(" + length + ") failed (MAP_FAILED)");
+            }
+            return addr.reinterpret(length, confinedArena, seg -> munmapChecked(seg, length));
+        } catch (Throwable t) {
+            if (t instanceof RuntimeException re) throw re;
+            throw new RuntimeException("mmap(" + length + ") failed", t);
+        }
+    }
+
+    /** Release a segment obtained from {@link #mmapAnonRw}. No-op on {@code MemorySegment.NULL}. */
+    private static void munmapChecked(MemorySegment seg, long length) {
+        if (seg == MemorySegment.NULL || length == 0) {
+            return;
+        }
+        try {
+            int rc = (int) MUNMAP_MH.invokeExact(seg, length);
+            if (rc != 0) {
+                throw new RuntimeException("munmap(" + length + ") failed, rc=" + rc);
+            }
+        } catch (Throwable t) {
+            if (t instanceof RuntimeException re) throw re;
+            throw new RuntimeException("munmap(" + length + ") failed", t);
+        }
+    }
+
     private static final MethodHandle UPCALL_TARGET_MH;
     private static final MethodHandle UPCALL_SBRK_TARGET_MH;
     static {
@@ -379,10 +438,20 @@ public final class PvmRecompiler implements AutoCloseable {
     public LiveExecution executeLive(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
                                       int pageShift, int entryIndex, HostCallHandler hostCallHandler,
                                       SbrkCallHandler sbrkCallHandler) {
+        return executeLive(block, regs, gas, regions, backing, pageShift, entryIndex, hostCallHandler, sbrkCallHandler, 0L);
+    }
+
+    public LiveExecution executeLive(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
+                                      int pageShift, int entryIndex, HostCallHandler hostCallHandler,
+                                      SbrkCallHandler sbrkCallHandler, long extraBackingSlack) {
         if (regs.length != REG_COUNT) {
             throw new IllegalArgumentException("regs must have length " + REG_COUNT);
         }
+        if (extraBackingSlack < 0) {
+            throw new IllegalArgumentException("extraBackingSlack must be >= 0");
+        }
         Arena call = Arena.ofConfined();
+        long mmapTotalLen = backing.length + extraBackingSlack;
         try {
             MemorySegment regSeg = call.allocate(ValueLayout.JAVA_LONG, REG_COUNT);
             for (int i = 0; i < REG_COUNT; i++) {
@@ -397,17 +466,29 @@ public final class PvmRecompiler implements AutoCloseable {
             for (int i = 0; i < regions.length; i++) {
                 long off = i * REGION_SIZE;
                 Region r = regions[i];
+                if (r.bufOffset() < 0 || r.bufOffset() > 0xFFFFFFFFL) {
+                    throw new IllegalArgumentException("Region.bufOffset() " + r.bufOffset() + " does not fit in u32 (region base=" + r.base() + ")");
+                }
+                if (r.base() < 0 || r.base() > 0xFFFFFFFFL) {
+                    throw new IllegalArgumentException("Region.base() " + r.base() + " does not fit in u32");
+                }
+                if (r.len() < 0 || r.len() > 0xFFFFFFFFL) {
+                    throw new IllegalArgumentException("Region.len() " + r.len() + " does not fit in u32 (region base=" + r.base() + ")");
+                }
                 regionsSeg.set(ValueLayout.JAVA_INT, off, (int) r.base());
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) r.len());
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) r.bufOffset());
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
             }
 
-            MemorySegment backingSeg = backing.length == 0
-                    ? MemorySegment.NULL
-                    : call.allocate(backing.length);
-            if (backing.length > 0) {
-                MemorySegment.copy(backing, 0, backingSeg, ValueLayout.JAVA_BYTE, 0, backing.length);
+            MemorySegment backingSeg = mmapAnonRw(mmapTotalLen, call);
+            long compactOff = 0L;
+            for (Region r : regions) {
+                long len = r.len();
+                if (len > 0) {
+                    MemorySegment.copy(backing, (int) compactOff, backingSeg, ValueLayout.JAVA_BYTE, r.bufOffset(), (int) len);
+                }
+                compactOff += len;
             }
 
             MemorySegment outSeg = call.allocate(EXEC_OUT_SIZE);
@@ -420,7 +501,7 @@ public final class PvmRecompiler implements AutoCloseable {
 
             return new LiveExecution(call, block, regSeg, gasSeg, regionsSeg, regions.length,
                     backingSeg, pageShift, entryIndex, outSeg, regs, backing, hostFnSeg, hostCtxSeg, stub,
-                    sbrkFnSeg, sbrkStub);
+                    sbrkFnSeg, sbrkStub, regions);
         } catch (Throwable t) {
             call.close();
             throw new RuntimeException("executeLive setup failed", t);
@@ -445,6 +526,7 @@ public final class PvmRecompiler implements AutoCloseable {
         private final UpcallStub upcallStub; // null when no HostCallHandler was supplied
         private final MemorySegment sbrkFnSeg;
         private final SbrkUpcallStub sbrkUpcallStub; // null when no SbrkCallHandler was supplied (Task 18/H2)
+        private final Region[] regionsForCopy;
         private boolean closed = false;
         private boolean ran = false;
 
@@ -453,7 +535,8 @@ public final class PvmRecompiler implements AutoCloseable {
                                int pageShift, int entryIndex, MemorySegment outSeg,
                                long[] regsOut, byte[] backingOut,
                                MemorySegment hostFnSeg, MemorySegment hostCtxSeg, UpcallStub upcallStub,
-                               MemorySegment sbrkFnSeg, SbrkUpcallStub sbrkUpcallStub) {
+                               MemorySegment sbrkFnSeg, SbrkUpcallStub sbrkUpcallStub,
+                               Region[] regionsForCopy) {
             this.call = call;
             this.block = block;
             this.regSeg = regSeg;
@@ -462,6 +545,7 @@ public final class PvmRecompiler implements AutoCloseable {
             this.nRegions = nRegions;
             this.backingSeg = backingSeg;
             this.pageShift = pageShift;
+            this.regionsForCopy = regionsForCopy;
             this.entryIndex = entryIndex;
             this.outSeg = outSeg;
             this.regsOut = regsOut;
@@ -528,8 +612,13 @@ public final class PvmRecompiler implements AutoCloseable {
             for (int i = 0; i < REG_COUNT; i++) {
                 regsOut[i] = regSeg.getAtIndex(ValueLayout.JAVA_LONG, i);
             }
-            if (backingOut.length > 0) {
-                MemorySegment.copy(backingSeg, ValueLayout.JAVA_BYTE, 0, backingOut, 0, backingOut.length);
+            long compactOff = 0L;
+            for (Region r : regionsForCopy) {
+                long len = r.len();
+                if (len > 0) {
+                    MemorySegment.copy(backingSeg, ValueLayout.JAVA_BYTE, r.bufOffset(), backingOut, (int) compactOff, (int) len);
+                }
+                compactOff += len;
             }
             call.close();
         }
