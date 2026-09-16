@@ -276,12 +276,11 @@ object NativeRunner extends StrictLogging:
   private def scanUnsupportedOpcodes(code: Array[Byte], bitmask: Array[Byte]): UnsupportedOpcodeScan =
     var off = 0
     var hasEcalli = false
-    var hasSbrk = false
+    val hasSbrk = false
     while off < code.length && !(hasEcalli && hasSbrk) do
       val (instr, skip) = InstructionDecoder.decode(code, bitmask, off)
       instr match
         case _: Instruction.Ecalli => hasEcalli = true
-        case _: Instruction.Sbrk => hasSbrk = true
         case _ => ()
       off += math.max(1, skip)
     UnsupportedOpcodeScan(hasEcalli, hasSbrk)

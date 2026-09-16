@@ -11,8 +11,7 @@ import io.forge.jam.pvm.types.*
   * [[InterpreterCore]] (shared with [[InterpretedInstance]]); this class
   * contributes memory operations over [[GuestRam]] — a fully dynamic
   * page-granular memory whose access rights are controlled by the `pages`
-  * host call — always-on gas metering, and `sbrk` panicking (guests have no
-  * heap).
+  * host call — and always-on gas metering.
   */
 final class GuestInstance private (
     module: InterpretedModule,
@@ -149,10 +148,6 @@ final class GuestInstance private (
     storeImpl(pc, address, value.toLong & 0xffffffffL, 4)
   override def storeImmU64Int(pc: ProgramCounter, address: Int, value: Long): Int =
     storeImpl(pc, address, value, 8)
-
-  /** Guests have no heap: sbrk panics. */
-  override def sbrk(dst: Int, size: UInt): Int =
-    panic(_programCounter)
 
 object GuestInstance:
   /** Create a guest instance over `ram` for one `invoke`: registers, gas and

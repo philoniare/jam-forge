@@ -17,12 +17,12 @@ object InstructionDecoder:
 
   private val arglessOpcodes: Map[Opcode, Instruction] = Map(
     Opcode.Panic -> Instruction.Panic,
-    Opcode.Fallthrough -> Instruction.Fallthrough
+    Opcode.Fallthrough -> Instruction.Fallthrough,
+    Opcode.Unlikely -> Instruction.Unlikely
   )
 
   private val regs2Opcodes: Map[Opcode, (Int, Int) => Instruction] = Map(
     Opcode.MoveReg -> Instruction.MoveReg.apply,
-    Opcode.Sbrk -> Instruction.Sbrk.apply,
     Opcode.CountSetBits32 -> Instruction.CountSetBits32.apply,
     Opcode.CountSetBits64 -> Instruction.CountSetBits64.apply,
     Opcode.CountLeadingZeroBits32 -> Instruction.CountLeadingZeroBits32.apply,

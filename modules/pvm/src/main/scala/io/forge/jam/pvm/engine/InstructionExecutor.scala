@@ -32,6 +32,7 @@ object InstructionExecutor:
     arr(Opcode.Panic.value) = (_, ctx, pc, _) => ctx.panic(pc)
     arr(Opcode.Fallthrough.value) = (_, ctx, _, nextPc) =>
       ctx.resolveFallthrough(nextPc)
+    arr(Opcode.Unlikely.value) = (_, ctx, _, _) => ctx.advance()
 
     // ========================================================================
     // Jump Instructions
@@ -235,11 +236,6 @@ object InstructionExecutor:
       val i = expect[Instruction.MoveReg](instr)
       ctx.setReg64(i.dst, ctx.getReg(i.src))
       ctx.advance()
-
-    arr(Opcode.Sbrk.value) = (instr, ctx, _, _) =>
-      val i = expect[Instruction.Sbrk](instr)
-      val size = UInt(ctx.getReg(i.src).toInt)
-      ctx.sbrk(i.dst, size)
 
     // ========================================================================
     // Bit Counting Instructions

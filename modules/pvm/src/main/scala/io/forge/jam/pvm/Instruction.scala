@@ -4,7 +4,7 @@ package io.forge.jam.pvm
  * Sealed trait hierarchy for PVM instructions.
  *
  * Instructions are organized by operand pattern:
- * - Argless: no operands (Panic, Fallthrough)
+ * - Argless: no operands (Panic, Fallthrough, Unlikely)
  * - RegImm: register + immediate
  * - RegRegImm: two registers + immediate
  * - RegRegReg: three registers
@@ -33,6 +33,9 @@ object Instruction:
   /** Fallthrough - explicit basic block boundary */
   case object Fallthrough extends Instruction:
     def opcode: Opcode = Opcode.Fallthrough
+
+  case object Unlikely extends Instruction:
+    def opcode: Opcode = Opcode.Unlikely
 
   /** Invalid - represents an invalid/unknown instruction */
   case object Invalid extends Instruction:
@@ -205,10 +208,6 @@ object Instruction:
   /** MoveReg - copy value from one register to another */
   final case class MoveReg(dst: Int, src: Int) extends Instruction:
     def opcode: Opcode = Opcode.MoveReg
-
-  /** Sbrk - extend heap, dst = old heap pointer, size from src */
-  final case class Sbrk(dst: Int, src: Int) extends Instruction:
-    def opcode: Opcode = Opcode.Sbrk
 
   /** CountLeadingZeroBits32 - count leading zeros 32-bit */
   final case class CountLeadingZeroBits32(dst: Int, src: Int) extends Instruction:

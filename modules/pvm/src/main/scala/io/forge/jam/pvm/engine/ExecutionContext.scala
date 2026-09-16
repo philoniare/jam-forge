@@ -123,13 +123,6 @@ trait MemoryStoreOps:
  */
 trait MemoryOps extends MemoryLoadOps, MemoryStoreOps
 
-/**
- * Heap operations (sbrk syscall).
- */
-trait HeapOps:
-  /** Extends the heap (sbrk syscall) */
-  def sbrk(dst: Int, size: UInt): Int
-
 // ============================================================================
 // Combined ExecutionContext
 // ============================================================================
@@ -139,7 +132,7 @@ trait HeapOps:
  * This is the main trait that instruction executors use.
  */
 trait ExecutionContext
-    extends RegisterOps, ControlFlowOps, InterruptOps, MemoryOps, HeapOps:
+    extends RegisterOps, ControlFlowOps, InterruptOps, MemoryOps:
 
   // ============================================================================
   // Helper Operations (with default implementations)

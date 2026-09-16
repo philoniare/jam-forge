@@ -23,6 +23,7 @@ enum Opcode(val value: Int):
 
   /** Fallthrough - explicit basic block boundary */
   case Fallthrough extends Opcode(1)
+  case Unlikely extends Opcode(2)
 
   /** Ecalli - host call instruction */
   case Ecalli extends Opcode(10)
@@ -144,38 +145,43 @@ enum Opcode(val value: Int):
   /** MoveReg - move value between registers */
   case MoveReg extends Opcode(100)
 
-  /** Sbrk - extend heap */
-  case Sbrk extends Opcode(101)
+  // NOTE (gp 0.8.0 / PR #508): the `sbrk` PVM INSTRUCTION (formerly opcode
+  // 101) is removed from the ISA entirely; the two-register family below
+  // shifted down by one to close the hole (102-111 -> 101-110). The
+  // low-level heap-grow primitive (`BasicMemory.sbrk`) is unaffected and is
+  // reused by the upcoming `grow_heap` HOST CALL (a separate task) — only
+  // the opcode/instruction/executor surface for the old PVM instruction is
+  // gone.
 
   /** CountSetBits64 - population count 64-bit */
-  case CountSetBits64 extends Opcode(102)
+  case CountSetBits64 extends Opcode(101)
 
   /** CountSetBits32 - population count 32-bit */
-  case CountSetBits32 extends Opcode(103)
+  case CountSetBits32 extends Opcode(102)
 
   /** CountLeadingZeroBits64 - count leading zeros 64-bit */
-  case CountLeadingZeroBits64 extends Opcode(104)
+  case CountLeadingZeroBits64 extends Opcode(103)
 
   /** CountLeadingZeroBits32 - count leading zeros 32-bit */
-  case CountLeadingZeroBits32 extends Opcode(105)
+  case CountLeadingZeroBits32 extends Opcode(104)
 
   /** CountTrailingZeroBits64 - count trailing zeros 64-bit */
-  case CountTrailingZeroBits64 extends Opcode(106)
+  case CountTrailingZeroBits64 extends Opcode(105)
 
   /** CountTrailingZeroBits32 - count trailing zeros 32-bit */
-  case CountTrailingZeroBits32 extends Opcode(107)
+  case CountTrailingZeroBits32 extends Opcode(106)
 
   /** SignExtend8 - sign-extend byte to word */
-  case SignExtend8 extends Opcode(108)
+  case SignExtend8 extends Opcode(107)
 
   /** SignExtend16 - sign-extend halfword to word */
-  case SignExtend16 extends Opcode(109)
+  case SignExtend16 extends Opcode(108)
 
   /** ZeroExtend16 - zero-extend halfword to word */
-  case ZeroExtend16 extends Opcode(110)
+  case ZeroExtend16 extends Opcode(109)
 
   /** ReverseByte - reverse byte order */
-  case ReverseByte extends Opcode(111)
+  case ReverseByte extends Opcode(110)
 
   // ============================================================================
   // Indirect Memory Operations (120-130)
@@ -484,6 +490,11 @@ enum Opcode(val value: Int):
    *
    * Control flow instructions (jumps, branches) terminate the current
    * basic block and start a new one.
+   *
+   * gp 0.8.0: `Unlikely` (opcode 2) is intentionally ABSENT from this list —
+   * it is a branch-prediction hint, not a terminator, so it falls through
+   * like any ordinary instruction. Per spec, the only no-arg basic-block
+   * terminators are `Panic` (trap) and `Fallthrough`.
    */
   def startsNewBasicBlock: Boolean = this match
     case Panic | Fallthrough | Jump | JumpIndirect |
