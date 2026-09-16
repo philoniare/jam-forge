@@ -476,6 +476,12 @@ public final class PvmRecompiler implements AutoCloseable {
                 if (r.len() < 0 || r.len() > 0xFFFFFFFFL) {
                     throw new IllegalArgumentException("Region.len() " + r.len() + " does not fit in u32 (region base=" + r.base() + ")");
                 }
+                if (r.bufOffset() + r.len() > mmapTotalLen) {
+                    throw new IllegalArgumentException("Region[" + i + "] extent (bufOffset=" + r.bufOffset()
+                            + ", len=" + r.len() + ", end=" + (r.bufOffset() + r.len())
+                            + ") exceeds the mmap'd backing segment's total length (" + mmapTotalLen
+                            + " = backing.length=" + backing.length + " + extraBackingSlack=" + extraBackingSlack + ")");
+                }
                 regionsSeg.set(ValueLayout.JAVA_INT, off, (int) r.base());
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) r.len());
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) r.bufOffset());
