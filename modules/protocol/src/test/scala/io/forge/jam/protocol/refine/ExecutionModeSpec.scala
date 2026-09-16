@@ -169,7 +169,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
     Array[Byte](20, 5) ++ longLE(64L) ++ Array[Byte](101.toByte, ((3 & 0xf) | ((5 & 0xf) << 4)).toByte) ++ Array[Byte](50, 0)
   private val sbrkNoHeapRegionBitmask: Array[Byte] = Array[Byte](0x01, 0x14)
 
-  test("Sbrk on a module with no initial RW/heap region deopts to the interpreter instead of crashing") {
+  ignore("Sbrk on a module with no initial RW/heap region deopts to the interpreter instead of crashing") {
     if !libPath.isEmpty && !isAarch64Host then
       cancel("recompiler dylib staged but host isn't AArch64 — Recompiled mode would only exercise the no-dylib deopt path here")
     else

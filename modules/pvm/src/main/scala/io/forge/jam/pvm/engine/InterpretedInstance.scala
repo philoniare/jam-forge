@@ -239,14 +239,6 @@ final class InterpretedInstance private (
       case BasicMemory.FastSegfault => segfault(pc, basicMemory.fastFaultPage)
       case _ => panic(pc)
 
-  override def sbrk(dst: Int, size: UInt): Int =
-    basicMemory.sbrk(size) match
-      case Some(prevHeap) =>
-        setReg32(dst, prevHeap)
-        advance()
-      case None =>
-        panic(_programCounter)
-
 object InterpretedInstance:
   /**
    * Creates an instance from a module with specific argument data.

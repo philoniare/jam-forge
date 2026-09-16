@@ -51,7 +51,7 @@ object RecompilerAbi:
       // ==========================================================================
       // Argless
       // ==========================================================================
-      case Instruction.Panic | Instruction.Fallthrough | Instruction.Invalid =>
+      case Instruction.Panic | Instruction.Fallthrough | Instruction.Invalid | Instruction.Unlikely =>
         RawInstr(op, 0, 0, 0, 0L, 0L)
 
       // ==========================================================================
@@ -126,7 +126,6 @@ object RecompilerAbi:
       // Two Register
       // ==========================================================================
       case Instruction.MoveReg(dst, src) => RawInstr(op, dst, src, 0, 0L, 0L)
-      case Instruction.Sbrk(dst, src) => RawInstr(op, dst, src, 0, 0L, 0L)
       case Instruction.CountLeadingZeroBits32(dst, src) => RawInstr(op, dst, src, 0, 0L, 0L)
       case Instruction.CountLeadingZeroBits64(dst, src) => RawInstr(op, dst, src, 0, 0L, 0L)
       case Instruction.CountTrailingZeroBits32(dst, src) => RawInstr(op, dst, src, 0, 0L, 0L)
