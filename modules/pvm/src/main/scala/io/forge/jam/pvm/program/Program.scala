@@ -123,6 +123,32 @@ object Program:
               case None => false
               case Some(opcode) => opcode.startsNewBasicBlock
 
+  def isValidInstructionBoundary(code: Array[Byte], bitmask: Array[Byte], imath: Int): Boolean =
+    imath >= 0 && imath < code.length &&
+      getBitForOffset(bitmask, code.length, imath) &&
+      Opcode.fromByte(code(imath) & 0xFF).isDefined
+
+  def isValidBlob(code: Array[Byte], bitmask: Array[Byte]): Boolean =
+    val codeLen = code.length
+    if codeLen == 0 then false
+    else
+      var i = 0
+      var result = false
+      var done = false
+      while !done do
+        val skip = InstructionDecoder.getSkip(bitmask, codeLen, i)
+        val next = i + skip
+        if next == codeLen then
+          result = isValidInstructionBoundary(code, bitmask, i) &&
+            Opcode.fromByte(code(i) & 0xFF).exists(_.startsNewBasicBlock)
+          done = true
+        else if isValidInstructionBoundary(code, bitmask, i) then
+          i = next
+        else
+          result = false
+          done = true
+      result
+
   /**
    * Find the start of the basic block containing the given offset.
    *

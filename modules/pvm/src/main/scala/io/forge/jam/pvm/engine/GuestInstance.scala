@@ -158,7 +158,8 @@ object GuestInstance:
       ram: GuestRam,
       registers: Array[Long],
       gas: Long,
-      entryPc: ProgramCounter
+      entryPc: ProgramCounter,
+      gasChargedFlag: Boolean = false
   ): GuestInstance =
     val (sharedInstructions, sharedOffsetMap) = module.compiledState()
     val instance = new GuestInstance(
@@ -170,4 +171,5 @@ object GuestInstance:
       sharedOffsetMap = sharedOffsetMap
     )
     instance.setNextProgramCounter(entryPc)
+    instance.setGasChargedFlag(gasChargedFlag)
     instance

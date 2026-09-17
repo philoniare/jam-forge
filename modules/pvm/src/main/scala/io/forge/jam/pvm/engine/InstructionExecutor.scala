@@ -30,8 +30,9 @@ object InstructionExecutor:
     // Argless Instructions
     // ========================================================================
     arr(Opcode.Panic.value) = (_, ctx, pc, _) => ctx.panic(pc)
-    arr(Opcode.Fallthrough.value) = (_, ctx, _, nextPc) =>
-      ctx.resolveFallthrough(nextPc)
+    arr(Opcode.Fallthrough.value) = (_, ctx, pc, nextPc) =>
+      val r = ctx.resolveJump(nextPc)
+      if r < 0 then ctx.panic(pc) else r
     arr(Opcode.Unlikely.value) = (_, ctx, _, _) => ctx.advance()
 
     // ========================================================================

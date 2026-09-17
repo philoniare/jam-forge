@@ -4,7 +4,7 @@ import scala.collection.mutable.ArrayBuffer
 import spire.math.UInt
 import io.forge.jam.pvm.{MemoryMap, Abi, Instruction}
 import io.forge.jam.pvm.types.ProgramCounter
-import io.forge.jam.pvm.program.ProgramBlob
+import io.forge.jam.pvm.program.{Program, ProgramBlob}
 
 /**
  * Holds the static module data for an interpreted PVM instance.
@@ -45,6 +45,21 @@ final class InterpretedModule private (
    * For now, we use basic memory mode.
    */
   def isDynamicPaging: Boolean = false
+
+  lazy val isBlobStructurallyValid: Boolean = Program.isValidBlob(blob.code, blob.bitmask)
+  private val blockGasCosts = scala.collection.mutable.LongMap.empty[Long]
+
+  def blockGasCostAt(chargePc: Int): Long =
+    blockGasCosts.synchronized {
+      blockGasCosts.getOrElseUpdate(
+        chargePc.toLong, {
+          val start = Program
+            .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
+            .getOrElse(chargePc)
+          BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
+        }
+      )
+    }
 
   private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
   private var _compiledOffsetForBlock: Array[Int] = null

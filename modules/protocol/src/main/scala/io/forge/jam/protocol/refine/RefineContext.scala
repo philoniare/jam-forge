@@ -12,7 +12,8 @@ final class InnerPvm(
     val code: Array[Byte],
     val module: InterpretedModule,
     val ram: GuestRam,
-    var pc: Long
+    var pc: Long,
+    var gasChargedFlag: Boolean = false
 )
 
 trait HistoricalLookupService:
