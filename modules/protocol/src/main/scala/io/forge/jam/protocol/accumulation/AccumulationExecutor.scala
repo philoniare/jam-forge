@@ -96,7 +96,7 @@ class AccumulationExecutor(val config: ChainConfig):
     // Create accumulation context with dual state
     val context = new AccumulationContext(
       x = postTransferState,
-      y = postTransferState.deepCopy(),
+      initialY = null,
       serviceIndex = serviceId,
       timeslot = timeslot,
       entropy = entropy,
@@ -236,6 +236,7 @@ class AccumulationExecutor(val config: ChainConfig):
             exitReason = ExitReason.OUT_OF_GAS
             continueExecution = false
           else
+            context.captureCheckpointIfPending()
             try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
               case e: RuntimeException =>

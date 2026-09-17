@@ -237,6 +237,7 @@ object AccumulationTransition:
 
     // 10. Update statistics
     val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
+    val transferStatsPerService: Map[Long, (Long, Long)] = Map.empty
     val newStatistics = updateStatistics(
       gasUsedPerService,
       workItemsPerService,

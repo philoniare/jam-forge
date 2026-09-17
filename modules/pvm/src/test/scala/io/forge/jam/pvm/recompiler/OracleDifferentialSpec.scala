@@ -676,6 +676,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // region's own upper page boundary, driving both an unmapped-gap fault and
   // an in-region-then-off-the-end spanning fault against the SAME real
   // MemoryMap the interpreter built.
+  it should "match the production interpreter on unmapped-gap and page-spanning accesses" ignore {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>

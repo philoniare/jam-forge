@@ -154,6 +154,7 @@ class RecompilerAbiSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "keep a jump-table entry valid when it lands right after a branch (a real basic-block leader)" in {
+    val branchDisp = intLE(0) // target = offset 0 (itself); value doesn't matter here
     val code = Array[Byte](170.toByte, regByte(0, 1)) ++ branchDisp ++ Array[Byte](0)
     val bitmask = bitmaskFor(Seq(0, 6), code.length)
     val jt = JumpTable(Array[Byte](6, 0, 0, 0), entrySize = 4)
