@@ -7,7 +7,7 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
-import io.forge.jam.protocol.accumulation.{ConstantsBlob, HostCall, HostCallResult, PvmInstance}
+import io.forge.jam.protocol.accumulation.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallResult, PvmInstance}
 import io.forge.jam.pvm.InterruptKind
 import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.GuestRam
@@ -65,11 +65,13 @@ class RefineHostCalls(
 
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
-      case _ => 10L
+      case HostCall.GROW_HEAP => 0L
+      case _                  => 10L
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
       case HostCall.GAS               => handleGas(instance)
+      case HostCall.GROW_HEAP         => GrowHeapHostCall.handle(instance)
       case HostCall.FETCH             => handleFetch(instance)
       case HostCall.HISTORICAL_LOOKUP => handleHistoricalLookup(instance)
       case HostCall.EXPORT            => handleExport(instance)

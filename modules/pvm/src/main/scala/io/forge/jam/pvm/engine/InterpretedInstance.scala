@@ -3,7 +3,7 @@ package io.forge.jam.pvm.engine
 import scala.collection.mutable.ArrayBuffer
 import spire.math.UInt
 import io.forge.jam.pvm.types.*
-import io.forge.jam.pvm.{Instruction, InterruptKind}
+import io.forge.jam.pvm.{Abi, Instruction, InterruptKind, PvmConstants}
 import io.forge.jam.pvm.memory.BasicMemory
 
 /**
@@ -81,6 +81,16 @@ final class InterpretedInstance private (
   def consumeGas(amount: Long): Unit = _gas -= amount
 
   def heapSize: UInt = basicMemory.heapSize
+
+  def growHeapPageBounds: (Long, Long) =
+    val ps = pageSize.signed.toLong & 0xFFFFFFFFL
+    val heapEndU = basicMemory.heapEnd.signed.toLong & 0xFFFFFFFFL
+    val h = heapEndU / ps
+    val stackSizeU = module.memoryMap.stackSize.signed.toLong & 0xFFFFFFFFL
+    val zoneU = PvmConstants.ZZ.signed.toLong & 0xFFFFFFFFL
+    val inputSizeU = PvmConstants.ZI.signed.toLong & 0xFFFFFFFFL
+    val b = (Abi.AddressSpaceSize.toLong - 3L * zoneU - inputSizeU - stackSizeU) / ps
+    (h, b)
 
   // ============================================================================
   // Memory Operations (UInt address versions for API compatibility)

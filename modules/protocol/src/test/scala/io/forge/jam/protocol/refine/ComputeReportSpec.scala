@@ -27,9 +27,9 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
 
   // JumpIndirect r0 + 0 → halt with the args echoed as output.
   private val haltEcho = preimageOf(Array[Byte](50, 0), Array[Byte](1))
-  // ecalli 7 (EXPORT of the args buffer), then halt.
+  // ecalli 8 (EXPORT of the args buffer), then halt.
   private val exportThenHalt =
-    preimageOf(Array[Byte](10, 7, 50, 0), Array[Byte](5))
+    preimageOf(Array[Byte](10, 8, 50, 0), Array[Byte](5))
 
   private class TwoServiceLookup(
       services: Map[Long, Map[Hash, Array[Byte]]]

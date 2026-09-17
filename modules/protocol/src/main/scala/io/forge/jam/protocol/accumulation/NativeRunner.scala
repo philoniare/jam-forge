@@ -96,6 +96,13 @@ object NativeRunner extends StrictLogging:
               logger.debug(s"NativeRunner: deopt to interpreter — entryPc=$entryPc is not a decoded instruction boundary")
               recordDeopt("invalid-entry-pc")
               None
+            case Some(_) if unsupported.hasGrowHeapEcalli =>
+              logger.debug(
+                "NativeRunner: deopt to interpreter — program contains Ecalli(GROW_HEAP=1) " +
+                  "and the native wrapper has no heap-page-growth support (gp-0.8)"
+              )
+              recordDeopt("grow-heap-native-unsupported")
+              None
             case Some(entryIndex) if unsupported.hasSbrk && RecompilerMemory.describeWithHeapSlack(instance).heapRegionIndex == -1 =>
               logger.debug("NativeRunner: deopt to interpreter — program contains Sbrk but the module has no initial RW/heap region (describeWithHeapSlack.heapRegionIndex == -1)")
               recordDeopt("sbrk-no-heap-region")
@@ -271,16 +278,23 @@ object NativeRunner extends StrictLogging:
     val rem = v % pageSize
     if rem == 0 then v else v + (pageSize - rem)
 
-  private final case class UnsupportedOpcodeScan(hasEcalli: Boolean, hasSbrk: Boolean)
+  private final case class UnsupportedOpcodeScan(
+      hasEcalli: Boolean,
+      hasSbrk: Boolean,
+      hasGrowHeapEcalli: Boolean
+  )
 
   private def scanUnsupportedOpcodes(code: Array[Byte], bitmask: Array[Byte]): UnsupportedOpcodeScan =
     var off = 0
     var hasEcalli = false
     val hasSbrk = false
-    while off < code.length && !(hasEcalli && hasSbrk) do
+    var hasGrowHeapEcalli = false
+    while off < code.length && !(hasEcalli && hasSbrk && hasGrowHeapEcalli) do
       val (instr, skip) = InstructionDecoder.decode(code, bitmask, off)
       instr match
-        case _: Instruction.Ecalli => hasEcalli = true
+        case e: Instruction.Ecalli =>
+          hasEcalli = true
+          if e.hostId == HostCall.GROW_HEAP.toLong then hasGrowHeapEcalli = true
         case _ => ()
       off += math.max(1, skip)
-    UnsupportedOpcodeScan(hasEcalli, hasSbrk)
+    UnsupportedOpcodeScan(hasEcalli, hasSbrk, hasGrowHeapEcalli)

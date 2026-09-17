@@ -12,91 +12,93 @@ object HostCall:
   /** gas (0): Returns remaining gas in register r7 */
   val GAS: Int = 0
 
-  /** fetch (1): Fetch various data based on selector */
-  val FETCH: Int = 1
+  val GROW_HEAP: Int = 1
 
-  /** lookup (2): Look up preimage by hash */
-  val LOOKUP: Int = 2
+  /** fetch (2): Fetch various data based on selector */
+  val FETCH: Int = 2
 
-  /** read (3): Read from service storage */
-  val READ: Int = 3
+  /** lookup (3): Look up preimage by hash */
+  val LOOKUP: Int = 3
 
-  /** write (4): Write to service storage */
-  val WRITE: Int = 4
+  /** read (4): Read from service storage */
+  val READ: Int = 4
 
-  /** info (5): Get service account info (96 bytes) */
-  val INFO: Int = 5
+  /** write (5): Write to service storage */
+  val WRITE: Int = 5
 
-  // ===========================================================================
-  // Refine-Only Host Calls (6-13)
-  // ===========================================================================
-
-  /** historical_lookup (6): Look up historical preimage data */
-  val HISTORICAL_LOOKUP: Int = 6
-
-  /** export (7): Export a segment to the work report output */
-  val EXPORT: Int = 7
-
-  /** machine (8): Create a new inner PVM instance */
-  val MACHINE: Int = 8
-
-  /** peek (9): Read memory from an inner PVM instance */
-  val PEEK: Int = 9
-
-  /** poke (10): Write memory to an inner PVM instance */
-  val POKE: Int = 10
-
-  /** pages (11): Modify page access rights of an inner PVM instance */
-  val PAGES: Int = 11
-
-  /** invoke (12): Execute an inner PVM instance */
-  val INVOKE: Int = 12
-
-  /** expunge (13): Remove an inner PVM instance */
-  val EXPUNGE: Int = 13
+  /** info (6): Get service account info (96 bytes) */
+  val INFO: Int = 6
 
   // ===========================================================================
-  // Accumulate-Specific Host Calls (14-26)
+  // Refine-Only Host Calls (7-14)
   // ===========================================================================
 
-  /** bless (14): Set privileged services (manager, assigners, delegator, registrar, always-acc) */
-  val BLESS: Int = 14
+  /** historical_lookup (7): Look up historical preimage data */
+  val HISTORICAL_LOOKUP: Int = 7
 
-  /** assign (15): Set core assigner and authorization queue (privileged) */
-  val ASSIGN: Int = 15
+  /** export (8): Export a segment to the work report output */
+  val EXPORT: Int = 8
 
-  /** designate (16): Set validator queue (privileged) */
-  val DESIGNATE: Int = 16
+  /** machine (9): Create a new inner PVM instance */
+  val MACHINE: Int = 9
 
-  /** checkpoint (17): Save current state x to checkpoint y */
-  val CHECKPOINT: Int = 17
+  /** peek (10): Read memory from an inner PVM instance */
+  val PEEK: Int = 10
 
-  /** new (18): Create new service account */
-  val NEW: Int = 18
+  /** poke (11): Write memory to an inner PVM instance */
+  val POKE: Int = 11
 
-  /** upgrade (19): Upgrade service code hash */
-  val UPGRADE: Int = 19
+  /** pages (12): Modify page access rights of an inner PVM instance */
+  val PAGES: Int = 12
 
-  /** transfer (20): Queue a deferred transfer */
-  val TRANSFER: Int = 20
+  /** invoke (13): Execute an inner PVM instance */
+  val INVOKE: Int = 13
 
-  /** eject (21): Eject (remove) another service account */
-  val EJECT: Int = 21
+  /** expunge (14): Remove an inner PVM instance */
+  val EXPUNGE: Int = 14
 
-  /** query (22): Query preimage request status */
-  val QUERY: Int = 22
+  // ===========================================================================
+  // Accumulate-Specific Host Calls (15-27)
+  // ===========================================================================
 
-  /** solicit (23): Request a preimage */
-  val SOLICIT: Int = 23
+  /** bless (15): Set privileged services (manager, assigners, delegator, registrar, always-acc) */
+  val BLESS: Int = 15
 
-  /** forget (24): Forget a preimage request */
-  val FORGET: Int = 24
+  /** assign (16): Set core assigner and authorization queue (privileged) */
+  val ASSIGN: Int = 16
 
-  /** yield (25): Set accumulation output hash */
-  val YIELD: Int = 25
+  /** designate (17): Set validator queue (privileged) */
+  val DESIGNATE: Int = 17
 
-  /** provide (26): Provide a preimage for another service */
-  val PROVIDE: Int = 26
+  /** checkpoint (18): Save current state x to checkpoint y */
+  val CHECKPOINT: Int = 18
+
+  /** new (19): Create new service account */
+  val NEW: Int = 19
+
+  /** upgrade (20): Upgrade service code hash */
+  val UPGRADE: Int = 20
+
+  /** transfer (21): Queue a deferred transfer */
+  val TRANSFER: Int = 21
+
+  /** eject (22): Eject (remove) another service account */
+  val EJECT: Int = 22
+
+  /** query (23): Query preimage request status */
+  val QUERY: Int = 23
+
+  /** solicit (24): Request a preimage */
+  val SOLICIT: Int = 24
+
+  /** forget (25): Forget a preimage request */
+  val FORGET: Int = 25
+
+  /** yield (26): Set accumulation output hash */
+  val YIELD: Int = 26
+
+  /** provide (27): Provide a preimage for another service */
+  val PROVIDE: Int = 27
 
   // ===========================================================================
   // Debug Host Call
@@ -108,6 +110,7 @@ object HostCall:
   /** Get human-readable name for host call ID */
   def name(id: Int): String = id match
     case GAS => "GAS"
+    case GROW_HEAP => "GROW_HEAP"
     case FETCH => "FETCH"
     case LOOKUP => "LOOKUP"
     case READ => "READ"

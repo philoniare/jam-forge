@@ -703,3 +703,24 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     hc.dispatch(77, instance)
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
   }
+
+  test("GROW_HEAP (1) dispatches to the shared grow_heap handler in the refine context") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val instance = newInstance()
+    instance.configureGrowHeap(hInitial = 48L, maxPage = 1044431L)
+
+    instance.setReg(7, 50L) // grow by 2 pages
+    hc.dispatch(HostCall.GROW_HEAP, instance)
+
+    instance.reg(7) shouldBe 50L
+    instance.gas shouldBe (1_000_000L - (275L + 2L * 121L))
+    instance.growHeapPagesGrown shouldBe 2L
+  }
+
+  test("GROW_HEAP is excluded from the refine flat pre-charge (self-meters)") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val instance = newInstance()
+    hc.getGasCost(HostCall.GROW_HEAP, instance) shouldBe 0L
+  }
