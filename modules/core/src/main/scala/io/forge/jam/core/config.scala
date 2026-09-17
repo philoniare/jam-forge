@@ -64,6 +64,9 @@ final case class ChainConfig(
   /** One-third threshold */
   val oneThird: Int = validatorCount / 3
 
+  def isValidValidatorCount(z: Int): Boolean =
+    z >= 6 && z % 3 == 0 && z <= 3 * coresCount
+
 object ChainConfig:
   /**
    * Tiny configuration for fast testing with 6 validators.

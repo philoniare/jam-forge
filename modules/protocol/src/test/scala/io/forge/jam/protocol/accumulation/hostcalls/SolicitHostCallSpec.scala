@@ -132,3 +132,21 @@ class SolicitHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHO
   }
+
+  test("SOLICIT: returns HUH when z >= 2^32, even with an unreadable hash pointer") {
+    val context = createTestContext(balance = 10000000L)
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    // No hash written at hashAddr, and hashAddr is out of the mapped memory
+    // range -- if the HUH-z guard did not run FIRST, this would panic.
+    val hashAddr = 0x7fffffff
+    instance.setReg(7, hashAddr)
+    instance.setReg(8, 0x100000000L) // z = 2^32, not in bloblength
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.SOLICIT, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+    // No preimage request should have been created.
+    context.x.accounts(100L).preimageRequests shouldBe empty
+  }

@@ -86,3 +86,19 @@ class QueryHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHO
   }
+
+  test("QUERY: returns HUH when z >= 2^32, even with an unreadable hash pointer") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    // No hash written at hashAddr, and hashAddr itself is out of the mapped
+    // memory range -- if the HUH-z guard did not run FIRST, this would panic.
+    val hashAddr = 0x7fffffff
+    instance.setReg(7, hashAddr)
+    instance.setReg(8, 0x100000000L) // z = 2^32, not in bloblength
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.QUERY, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+  }

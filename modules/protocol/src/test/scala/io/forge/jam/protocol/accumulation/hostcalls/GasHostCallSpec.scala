@@ -18,10 +18,10 @@ class GasHostCallSpec extends HostCallTestBase:
     instance.reg(7) shouldBe 75000L
   }
 
-  test("GAS: gas cost is 10") {
+  test("GAS: gas cost is 48") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.GAS, instance) shouldBe 10L
+    hostCalls.getGasCost(HostCall.GAS, instance) shouldBe 48L
   }

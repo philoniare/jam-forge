@@ -10,7 +10,7 @@ import spire.math.ULong
 class BlessHostCallSpec extends HostCallTestBase:
 
   test("BLESS: updates privileges successfully") {
-    val context = createTestContext()
+    val context = createTestContext(serviceIndex = 0L)
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
@@ -43,7 +43,8 @@ class BlessHostCallSpec extends HostCallTestBase:
   }
 
   test("BLESS: returns WHO when manager exceeds UInt32 max") {
-    val context = createTestContext()
+    // Caller must be manager (0L) to get past the new HUH guard and reach WHO.
+    val context = createTestContext(serviceIndex = 0L)
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
@@ -64,7 +65,8 @@ class BlessHostCallSpec extends HostCallTestBase:
   }
 
   test("BLESS: returns WHO when delegator exceeds UInt32 max") {
-    val context = createTestContext()
+    // Caller must be manager (0L) to get past the new HUH guard and reach WHO.
+    val context = createTestContext(serviceIndex = 0L)
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
@@ -82,4 +84,37 @@ class BlessHostCallSpec extends HostCallTestBase:
     hostCalls.dispatch(HostCall.BLESS, instance)
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHO
+  }
+
+  test("BLESS: returns HUH and mutates no privilege field when caller is not manager") {
+    // createTestContext defaults serviceIndex=100L, manager=0L -> not manager.
+    val context = createTestContext()
+    val (origManager, origDelegator, origRegistrar) =
+      (context.x.manager, context.x.delegator, context.x.registrar)
+    val origAssigners = context.x.assigners.toList
+    val origAlwaysAcc = context.x.alwaysAccers.toMap
+
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    val assignersAddr = 0x10000
+    val assignersBytes = new Array[Byte](4 * testConfig.coresCount)
+    for i <- 0 until testConfig.coresCount do assignersBytes(i * 4) = 42.toByte
+    instance.writeBytes(assignersAddr, assignersBytes)
+
+    instance.setReg(7, 1L) // new manager
+    instance.setReg(8, assignersAddr)
+    instance.setReg(9, 2L) // new delegator
+    instance.setReg(10, 3L) // new registrar
+    instance.setReg(11, 0) // alwaysAccPtr
+    instance.setReg(12, 0) // alwaysAccCount
+
+    hostCalls.dispatch(HostCall.BLESS, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+    context.x.manager shouldBe origManager
+    context.x.delegator shouldBe origDelegator
+    context.x.registrar shouldBe origRegistrar
+    context.x.assigners.toList shouldBe origAssigners
+    context.x.alwaysAccers.toMap shouldBe origAlwaysAcc
   }

@@ -90,3 +90,5 @@ trait PvmInstance:
 
   def growHeapPageBounds: Option[(Long, Long)] = None
   def growHeapPages(deltaPages: Long): Unit = ()
+  def forceOutOfGas(): Unit = ()
+  def isForcedOutOfGas: Boolean = false

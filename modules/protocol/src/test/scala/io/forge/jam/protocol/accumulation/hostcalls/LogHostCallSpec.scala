@@ -18,6 +18,5 @@ class LogHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
 
-    // Gas cost should be 10
     hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 10L
   }

@@ -331,7 +331,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleQuery(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
-    val length = getReg(instance, 8).toInt
+    val zFull = getReg(instance, 8)
+    if zFull > ULong(0xffffffffL) then
+      setReg(instance, 7, HostCallResult.HUH)
+      return
+    val length = zFull.toInt
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -388,7 +392,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleSolicit(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
-    val length = (getReg(instance, 8) & ULong(0xffffffffL)).toInt
+    val zFull = getReg(instance, 8)
+    if zFull > ULong(0xffffffffL) then
+      setReg(instance, 7, HostCallResult.HUH)
+      return
+    val length = zFull.toInt
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -488,7 +496,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleForget(instance: PvmInstance): Unit =
     val hashAddr = getReg(instance, 7).toInt
-    val length = getReg(instance, 8).toInt
+    val zFull = getReg(instance, 8)
+    if zFull > ULong(0xffffffffL) then
+      setReg(instance, 7, HostCallResult.HUH)
+      return
+    val length = zFull.toInt
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -598,6 +610,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   /** provide (26): Provide a preimage for another service.
     */
   protected def handleProvide(instance: PvmInstance): Unit =
+    val zFull = getReg(instance, 9)
+    if zFull > ULong(0xffffffffL) then
+      setReg(instance, 7, HostCallResult.HUH)
+      return
+
     // Spec: s = imX_id when registers_7 = 2^64-1 (self-provide sentinel),
     // otherwise s = registers_7.
     val r7 = getReg(instance, 7)
@@ -605,7 +622,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       if r7 == ULong(0xffffffffffffffffL) then context.serviceIndex
       else r7.toLong
     val blobAddr = getReg(instance, 8).toInt
-    val blobLen = getReg(instance, 9).toInt
+    val blobLen = zFull.toInt
 
     // Read blob from memory - PANIC on failure
     val blobBuffer = readGuestBytes(instance, blobAddr, blobLen, "Provide")
