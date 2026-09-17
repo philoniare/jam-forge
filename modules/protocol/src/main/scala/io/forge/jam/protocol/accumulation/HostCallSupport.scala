@@ -122,6 +122,21 @@ private[accumulation] trait HostCallSupport:
       i += 1
     result
 
+  protected def isRangeReadable(
+      instance: PvmInstance,
+      startAddr: Int,
+      totalLength: Long
+  ): Boolean =
+    var offset = 0L
+    var allReadable = true
+    while allReadable && offset < totalLength do
+      val remaining = totalLength - offset
+      val chunkLen = math.min(remaining, Int.MaxValue.toLong).toInt
+      val chunkAddr = (startAddr.toLong + offset).toInt
+      if !instance.isMemoryReadable(chunkAddr, chunkLen) then allReadable = false
+      offset += chunkLen
+    allReadable
+
   /** Check if memory is writable at the given address and length.
     *
     * Tests the page write-permission bit (PvmInstance.isMemoryWritable), not

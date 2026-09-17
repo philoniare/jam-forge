@@ -104,7 +104,7 @@ object HostCall:
   // Debug Host Call
   // ===========================================================================
 
-  /** log (100): Debug logging (JIP-1), gas cost = 0 */
+  /** log (100): Debug logging (JIP-1) */
   val LOG: Int = 100
 
   /** Get human-readable name for host call ID */

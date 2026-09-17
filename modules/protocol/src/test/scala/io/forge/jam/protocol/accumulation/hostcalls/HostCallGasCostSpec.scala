@@ -232,10 +232,10 @@ class HostCallGasCostSpec extends HostCallTestBase:
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
   }
 
-  test("LOG (100) keeps its pre-existing flat cost of 10") {
+  test("LOG (100) costs 0 gas") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 10L
+    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
   }

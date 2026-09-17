@@ -214,7 +214,7 @@ abstract class InterpreterCore protected (
             _programCounter = pc
             _programCounterValid = true
             _nextProgramCounter = None
-            _nextProgramCounterChanged = false
+            _nextProgramCounterChanged = true
             _interrupt = InterruptKind.Panic
             return _interrupt
           _programCounter = pc
