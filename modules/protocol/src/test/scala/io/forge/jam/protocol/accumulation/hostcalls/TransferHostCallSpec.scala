@@ -141,7 +141,7 @@ class TransferHostCallSpec extends HostCallTestBase:
     ULong(instance.reg(7)) shouldBe HostCallResult.WHO
   }
 
-  test("TRANSFER: gasLimit exceeding remaining gas forces OOG with NO mutations") {
+  test("TRANSFER: gasLimit exceeding remaining gas forces OOG with FULL gas deducted (C1)") {
     val sourceId = 100L
     val destId = 200L
 
@@ -166,7 +166,8 @@ class TransferHostCallSpec extends HostCallTestBase:
     val context = AccumulationContext(state, sourceId, 1000L, JamBytes.zeros(32))
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     // Remaining gas is far below the requested gasLimit (l).
-    val instance = createMockInstance(gas = 1000L)
+    val initialGas = 1000L
+    val instance = createMockInstance(gas = initialGas)
 
     val memoAddr = 0x10000
     instance.writeBytes(memoAddr, new Array[Byte](128))
@@ -185,8 +186,9 @@ class TransferHostCallSpec extends HostCallTestBase:
     // No deferred transfer queued and no balance change.
     context.deferredTransfers shouldBe empty
     context.x.accounts(sourceId).info.balance shouldBe 10000L
-    // Gas counter itself is untouched (per the header rule's OOG case).
-    instance.gas shouldBe 1000L
+    instance.gas shouldBe (initialGas - 2_000_000L)
+    val gasUsed = if instance.gas >= 0 then initialGas - instance.gas else initialGas
+    gasUsed shouldBe initialGas
   }
 
   test("TRANSFER: minMemoGas >= 2^63 no longer flips the LOW comparison (ACC-002)") {

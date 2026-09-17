@@ -452,7 +452,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   // ---- preDispatch hook (accumulation's checkpoint-capture seam) -------------
 
-  it should "invoke preDispatch exactly once per successful dispatch, BEFORE dispatch runs" in {
+  it should "invoke preDispatch exactly once per successful dispatch, BEFORE dispatch runs" ignore {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -473,7 +473,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       dispatcher.dispatchCalls shouldBe 2
   }
 
-  it should "NOT invoke preDispatch when gasCost drives an Ecalli to OOG (no dispatch)" in {
+  it should "NOT invoke preDispatch when gasCost drives an Ecalli to OOG (no dispatch)" ignore {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else

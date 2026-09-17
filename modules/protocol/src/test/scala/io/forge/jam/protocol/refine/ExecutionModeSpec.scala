@@ -89,6 +89,20 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       nativeOutput.toSeq shouldBe interpOutput.toSeq
   }
 
+  test("NativeRunner.run deopts with the gp-0.8 kill-switch reason even for an otherwise native-eligible program") {
+    import io.forge.jam.protocol.accumulation.NativeRunner
+
+    val module = moduleOf(haltCode, haltBitmask)
+    val reasonKey = "gp-0.8-recompiler-not-migrated"
+    val before = NativeRunner.deoptReasons.getOrElse(reasonKey, 0L)
+
+    val (nativeExit, _, _) =
+      PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
+
+    nativeExit shouldBe PvmRunner.PvmExit.Halt
+    NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
+  }
+
   ignore("a program containing Ecalli run via NativeRunner with a dispatcher executes NATIVELY and matches the interpreter") {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required) — this test specifically asserts NATIVE execution, not the deopt path")
@@ -168,7 +182,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       inst.setReg(0, 0xffff0000L) // RA_INIT
       inst
 
-    val reasonKey = "grow-heap-native-unsupported"
+    val reasonKey = "gp-0.8-recompiler-not-migrated"
     val before = NativeRunner.deoptReasons.getOrElse(reasonKey, 0L)
     val nativeInstance = freshInstance()
     val outcome = NativeRunner.run(
@@ -179,8 +193,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       preDispatch = None
     )
     outcome shouldBe None // deopt — never a native grow_heap dispatch
-    if canRunNative then
-      NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
+    NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
 
     val interpInstance = freshInstance()
     val interpWrapper = new InterpretedInstanceWrapper(interpInstance)

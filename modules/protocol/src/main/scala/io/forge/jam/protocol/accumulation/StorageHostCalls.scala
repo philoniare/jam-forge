@@ -688,8 +688,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     context.yieldHash = Some(JamBytes(hashBuffer))
     setReg(instance, 7, HostCallResult.OK)
 
-  /** log (100): Debug logging host call (JIP-1) Gas cost: 10, always returns
-    * WHAT
+  /** log (100): Debug logging host call (JIP-1)
     */
   protected def handleLog(instance: PvmInstance): Unit =
     setReg(instance, 7, HostCallResult.WHAT)

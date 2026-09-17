@@ -71,12 +71,18 @@ object NativeRunner extends StrictLogging:
             None
       }
 
+  private val Gp08RecompilerMigrated: Boolean = false
+
   private def runRecompiled(
       instance: InterpretedInstance,
       entryPc: Int,
       hostCalls: Option[(HostCallDispatcher, Option[() => Unit])]
   ): Option[RunOutcome] =
-    recompiler match
+    if !Gp08RecompilerMigrated then
+      logger.debug("NativeRunner: deopt to interpreter")
+      recordDeopt("gp-0.8-recompiler-not-migrated")
+      None
+    else recompiler match
       case None =>
         logger.debug("NativeRunner: deopt to interpreter — recompiler dylib not available (jam.pvm.recompiler.lib unset or file missing)")
         recordDeopt("no-dylib")
@@ -99,7 +105,7 @@ object NativeRunner extends StrictLogging:
             case Some(_) if unsupported.hasGrowHeapEcalli =>
               logger.debug(
                 "NativeRunner: deopt to interpreter — program contains Ecalli(GROW_HEAP=1) " +
-                  "and the native wrapper has no heap-page-growth support (gp-0.8)"
+                  "and the native wrapper has no heap-page-growth support"
               )
               recordDeopt("grow-heap-native-unsupported")
               None

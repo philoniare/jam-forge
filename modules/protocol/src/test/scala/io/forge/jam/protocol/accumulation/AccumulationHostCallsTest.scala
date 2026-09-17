@@ -206,12 +206,12 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     hostCalls.getGasCost(HostCall.CHECKPOINT, instance) shouldBe 103L
   }
 
-  test("gas cost for LOG") {
+  test("gas cost for LOG is 0 (JIP-1 convention, jam-forge debug extension, not a gp host call)") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 10L
+    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
   }
 
   test("gas cost for TRANSFER") {

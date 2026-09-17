@@ -153,16 +153,20 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val validatorKeySize = 336L
     val zFull = getReg(instance, 8)
 
-    val maxSafeZ = ULong(Int.MaxValue.toLong / validatorKeySize)
-    val zInRange = zFull <= maxSafeZ
-    val totalLength = if zInRange then (validatorKeySize * zFull.toLong).toInt else -1
-
-    if !zInRange || !instance.isMemoryReadable(startAddr, totalLength) then
+    val maxWindowZ = ULong(0xffffffffL) / ULong(validatorKeySize)
+    if zFull > maxWindowZ then
       throw new RuntimeException(
-        s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len ${if zInRange then totalLength.toString else "z out of range"}"
+        s"Designate PANIC: z=$zFull makes 336z >= 2^32 (unreadable in any 32-bit address space)"
       )
 
-    val z = zFull.toInt // safe: zInRange guarantees zFull <= maxSafeZ < Int.MaxValue
+    val totalLength = validatorKeySize * zFull.toLong
+
+    if !isRangeReadable(instance, startAddr, totalLength) then
+      throw new RuntimeException(
+        s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength"
+      )
+
+    val z = zFull.toInt // safe: zFull <= maxWindowZ (~12.78M), well within Int range
 
     if !config.isValidValidatorCount(z) || context.serviceIndex != context.x.delegator then
       setReg(instance, 7, HostCallResult.HUH)
@@ -512,6 +516,10 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
       return
 
     if ULong(instance.gas) < gasLimitU then
+      val newGas =
+        if gasLimitU > ULong(Long.MaxValue) then Long.MinValue
+        else instance.gas - gasLimitU.toLong
+      instance.setGas(newGas)
       instance.forceOutOfGas()
       return
 

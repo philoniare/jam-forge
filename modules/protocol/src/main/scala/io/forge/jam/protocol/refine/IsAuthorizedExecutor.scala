@@ -42,6 +42,7 @@ private final class IsAuthorizedHostCalls(
       case HostCall.GAS => HostCallGas.CgasG
       case HostCall.FETCH =>
         HostCallGas.fetchGas(ULong(instance.reg(10)), ULong(instance.reg(9)))
+      case HostCall.LOG => 0L
       case _ => HostCallGas.Cgasunknown
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
