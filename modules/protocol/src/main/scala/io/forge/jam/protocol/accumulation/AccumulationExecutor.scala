@@ -369,6 +369,8 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
     instance.setReg(regIdx, value)
   override def gas: Long = instance.gas
   override def setGas(value: Long): Unit = instance.setGas(value)
+  override def forceOutOfGas(): Unit = instance.forceOutOfGas()
+  override def isForcedOutOfGas: Boolean = instance.isForcedOutOfGas
 
   override def readByte(address: Int): Option[Byte] =
     instance.basicMemory.loadU8(UInt(address)) match

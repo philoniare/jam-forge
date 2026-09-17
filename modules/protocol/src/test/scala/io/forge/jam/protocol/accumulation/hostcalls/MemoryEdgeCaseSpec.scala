@@ -344,6 +344,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     val instance = createSmallMemoryInstance()
 
     instance.setReg(7, 0x10000) // validator keys address OUT OF BOUNDS
+    instance.setReg(8, testConfig.validatorCount)
 
     val exception = intercept[RuntimeException] {
       hostCalls.dispatch(HostCall.DESIGNATE, instance)

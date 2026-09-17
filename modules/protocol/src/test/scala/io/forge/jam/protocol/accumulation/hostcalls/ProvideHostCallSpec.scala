@@ -250,3 +250,24 @@ class ProvideHostCallSpec extends HostCallTestBase:
     ULong(instance.reg(7)) shouldBe HostCallResult.OK
     context.provisions.contains((selfId, JamBytes(blob))) shouldBe true
   }
+
+  test("PROVIDE: returns HUH when z >= 2^32, even with an unreadable blob pointer") {
+    val targetId = 200L
+    val context = createTestContext()
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
+
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    // No blob written, and blobAddr is out of the mapped memory range -- if
+    // the HUH-z guard did not run FIRST, this would panic.
+    val blobAddr = 0x7fffffff
+    instance.setReg(7, targetId)
+    instance.setReg(8, blobAddr)
+    instance.setReg(9, 0x100000000L) // z = 2^32, not in bloblength
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.PROVIDE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+    context.provisions shouldBe empty
+  }

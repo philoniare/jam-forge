@@ -130,7 +130,7 @@ class BlockGasWiringSpec extends AnyFlatSpec with Matchers:
     instance.gas shouldBe 75L // ...with NO additional charge
   }
 
-  it should "OOG on the very next step when a self-metered host call drives gas negative mid-block" in {
+  it should "OOG on the very next step when a self-metered host call signals forced OOG mid-block" in {
     val code = Array[Byte](10, 1, 1, 0) // [ecalli 1; fallthrough] | [trap]
     val bitmask = Array[Byte](0x0d)
     val instance = instanceFor(code, bitmask)
@@ -139,11 +139,11 @@ class BlockGasWiringSpec extends AnyFlatSpec with Matchers:
 
     instance.run() shouldBe Right(InterruptKind.Ecalli(spire.math.UInt(1)))
     instance.gas shouldBe 50L
-    // The "host call" overdrafts (grow_heap-style sentinel).
-    instance.setGas(-1L)
+    instance.forceOutOfGas()
 
     instance.run() shouldBe Right(InterruptKind.OutOfGas)
-    instance.gas shouldBe -1L // sentinel preserved -> executors forfeit all gas
+    instance.gas shouldBe 50L 
+    instance.isForcedOutOfGas shouldBe true
     // OOG fired AT the resume pc (the fallthrough, offset 2): it never ran.
     instance.programCounter.map(_.value.toInt) shouldBe Some(2)
   }

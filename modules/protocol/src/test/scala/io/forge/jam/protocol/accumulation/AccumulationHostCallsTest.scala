@@ -106,6 +106,9 @@ class MockPvmInstance(
   override def growHeapPages(deltaPages: Long): Unit =
     _growHeapPagesGrown += deltaPages
 
+  private var _forcedOutOfGas: Boolean = false
+  override def forceOutOfGas(): Unit = _forcedOutOfGas = true
+  override def isForcedOutOfGas: Boolean = _forcedOutOfGas
 /**
  * Tests for AccumulationHostCalls
  *
@@ -188,27 +191,30 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     instance.reg(7) shouldBe 50000L
   }
 
-  test("gas cost should be 10 for most host calls") {
+  test("gas cost") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.GAS, instance) shouldBe 10L
-    hostCalls.getGasCost(HostCall.READ, instance) shouldBe 10L
-    hostCalls.getGasCost(HostCall.WRITE, instance) shouldBe 10L
-    hostCalls.getGasCost(HostCall.CHECKPOINT, instance) shouldBe 10L
+    hostCalls.getGasCost(HostCall.GAS, instance) shouldBe 48L
+    instance.setReg(9, 0L)
+    instance.setReg(12, 0L)
+    hostCalls.getGasCost(HostCall.READ, instance) shouldBe 2407L
+    instance.setReg(8, 0L)
+    instance.setReg(10, 0L)
+    hostCalls.getGasCost(HostCall.WRITE, instance) shouldBe 2442L
+    hostCalls.getGasCost(HostCall.CHECKPOINT, instance) shouldBe 103L
   }
 
-  test("gas cost for LOG should be 10 (v0.7.2)") {
+  test("gas cost for LOG") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    // v0.7.2: LOG now has standard gas cost of 10
     hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 10L
   }
 
-  test("gas cost for TRANSFER should be 10 upfront (v0.7.2)") {
+  test("gas cost for TRANSFER") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -217,8 +223,83 @@ class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
     val gasLimit = 5000L
     instance.setReg(9, gasLimit)
 
-    // v0.7.2: TRANSFER only charges 10 upfront; additional gasLimit charged on success
-    hostCalls.getGasCost(HostCall.TRANSFER, instance) shouldBe 10L
+    hostCalls.getGasCost(HostCall.TRANSFER, instance) shouldBe 575L
+  }
+
+  test("TRANSFER") {
+    val sourceId = 100L
+    val destId = 200L
+    val sourceAccount = createTestAccount(10000L)
+    val destInfo = ServiceInfo(
+      version = 0,
+      codeHash = Hash(JamBytes.zeros(32).toArray),
+      balance = 1000L,
+      minItemGas = 10L,
+      minMemoGas = 50L,
+      bytesUsed = 100L,
+      depositOffset = 0L,
+      items = 5,
+      creationSlot = 0L,
+      lastAccumulationSlot = 0L,
+      parentService = 0L
+    )
+    val destAccount = ServiceAccount(destInfo, Map.empty, Map.empty, Map.empty)
+    val state = PartialState(
+      accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
+      stagingSet = mutable.ListBuffer.empty,
+      authQueue = mutable.ListBuffer.empty,
+      manager = 0L,
+      assigners = mutable.ListBuffer.empty,
+      delegator = 0L,
+      registrar = 0L,
+      alwaysAccers = mutable.Map.empty
+    )
+
+    def freshContext(): AccumulationContext = AccumulationContext(
+      initialState = state,
+      serviceIndex = sourceId,
+      timeslot = 1000L,
+      entropy = JamBytes.zeros(32)
+    )
+
+    val memoAddr = 0x10000
+    val initialGas = 9999L
+
+    def runTransfer(
+        dest: Long,
+        amount: Long,
+        gasLimit: Long
+    ): (ULong, Long) =
+      val hostCalls = new AccumulationHostCalls(freshContext(), List.empty, testConfig)
+      val instance = createMockInstance(initialGas)
+      instance.writeBytes(memoAddr, new Array[Byte](128))
+      instance.setReg(7, dest)
+      instance.setReg(8, amount)
+      instance.setReg(9, gasLimit)
+      instance.setReg(10, memoAddr)
+      val preCharge = hostCalls.getGasCost(HostCall.TRANSFER, instance)
+      instance.setGas(instance.gas - preCharge)
+      hostCalls.dispatch(HostCall.TRANSFER, instance)
+      (ULong(instance.reg(7)), initialGas - instance.gas)
+
+    // OK: t = l = 50 -> net 575 + 50.
+    val (okResult, okConsumed) = runTransfer(destId, amount = 100L, gasLimit = 50L)
+    okResult shouldBe HostCallResult.OK
+    okConsumed shouldBe (575L + 50L)
+
+    // WHO (destination missing): t = 0 -> net exactly 575, r9 NOT charged.
+    val (whoResult, whoConsumed) = runTransfer(999L, amount = 100L, gasLimit = 50L)
+    whoResult shouldBe HostCallResult.WHO
+    whoConsumed shouldBe 575L
+
+    // LOW (gasLimit < destination.minMemoGas): t = 0 -> net exactly 575.
+    val (lowResult, lowConsumed) = runTransfer(destId, amount = 100L, gasLimit = 5L)
+    lowResult shouldBe HostCallResult.LOW
+    lowConsumed shouldBe 575L
+
+    val (cashResult, cashConsumed) = runTransfer(destId, amount = 999999999L, gasLimit = 50L)
+    cashResult shouldBe HostCallResult.CASH
+    cashConsumed shouldBe 575L
   }
 
   // ===========================================================================

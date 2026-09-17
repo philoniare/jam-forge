@@ -7,7 +7,7 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
-import io.forge.jam.protocol.accumulation.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallResult, PvmInstance}
+import io.forge.jam.protocol.accumulation.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
 import io.forge.jam.pvm.InterruptKind
 import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.GuestRam
@@ -66,7 +66,32 @@ class RefineHostCalls(
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
       case HostCall.GROW_HEAP => 0L
-      case _                  => 10L
+      case HostCall.GAS => HostCallGas.CgasG
+      case HostCall.FETCH =>
+        HostCallGas.fetchGas(getReg(instance, 10), getReg(instance, 9))
+      case HostCall.HISTORICAL_LOOKUP =>
+        HostCallGas.historicalLookupGas(getReg(instance, 11))
+      case HostCall.EXPORT => HostCallGas.CgasE
+      case HostCall.MACHINE =>
+        HostCallGas.machineGas(getReg(instance, 8))
+      case HostCall.PEEK =>
+        HostCallGas.peekGas(getReg(instance, 10))
+      case HostCall.POKE =>
+        HostCallGas.pokeGas(getReg(instance, 10))
+      case HostCall.PAGES =>
+        HostCallGas.pagesGas(getReg(instance, 10), getReg(instance, 9))
+      case HostCall.INVOKE =>
+        HostCallGas.invokeGasUpfront(invokeInnerGasLimit(instance))
+      case HostCall.EXPUNGE => HostCallGas.CgasX
+      case HostCall.LOG => 10L
+      case _ => HostCallGas.Cgasunknown
+
+  private def invokeInnerGasLimit(instance: PvmInstance): ULong =
+    val o = getReg(instance, 8).toInt
+    if !instance.isMemoryWritable(o, 112) then ULong(0L)
+    else
+      val buf = new Array[Byte](8)
+      if readMemory(instance, o, buf) then ULong(decodeLE8(buf, 0)) else ULong(0L)
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match

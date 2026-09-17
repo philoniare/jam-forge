@@ -28,7 +28,35 @@ class AccumulationHostCalls(
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
       case HostCall.GROW_HEAP => 0L
-      case _                  => 10L
+      case HostCall.GAS   => HostCallGas.CgasG
+      case HostCall.FETCH =>
+        HostCallGas.fetchGas(getReg(instance, 10), getReg(instance, 9))
+      case HostCall.LOOKUP =>
+        HostCallGas.lookupGas(getReg(instance, 11))
+      case HostCall.READ =>
+        HostCallGas.readGas(getReg(instance, 9), getReg(instance, 12))
+      case HostCall.WRITE =>
+        HostCallGas.writeGas(getReg(instance, 8), getReg(instance, 10))
+      case HostCall.INFO => HostCallGas.CgasI
+      case HostCall.BLESS =>
+        HostCallGas.blessGas(getReg(instance, 12))
+      case HostCall.ASSIGN => HostCallGas.CgasA
+      case HostCall.DESIGNATE =>
+        HostCallGas.designateGas(getReg(instance, 8))
+      case HostCall.CHECKPOINT => HostCallGas.CgasC
+      case HostCall.NEW        => HostCallGas.CgasN
+      case HostCall.UPGRADE    => HostCallGas.CgasU
+      case HostCall.TRANSFER =>
+        HostCallGas.CgasT
+      case HostCall.EJECT   => HostCallGas.CgasJ
+      case HostCall.QUERY   => HostCallGas.CgasQ
+      case HostCall.SOLICIT => HostCallGas.CgasS
+      case HostCall.FORGET  => HostCallGas.CgasF
+      case HostCall.YIELD   => HostCallGas.CgasTaurus
+      case HostCall.PROVIDE =>
+        HostCallGas.provideGas(getReg(instance, 9))
+      case HostCall.LOG => 10L
+      case _ => HostCallGas.Cgasunknown
 
   /** Dispatch a host call based on its identifier. Gas should be charged BEFORE
     * calling this method.

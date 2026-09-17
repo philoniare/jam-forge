@@ -396,7 +396,7 @@ object AccumulationTransition:
   /** Outer accumulation function. Recursively processes work reports and
     * deferred transfers.
     */
-  private def outerAccumulate(
+  private[accumulation] def outerAccumulate(
       partialState: PartialState,
       transfers: List[DeferredTransfer],
       workReports: List[WorkReport],
@@ -409,7 +409,7 @@ object AccumulationTransition:
   ): OuterAccumulationResult =
     // Count how many reports can fit in gas budget
     var i = 0
-    var sumGasRequired = 0L
+    var sumGasRequired = transfers.map(_.gasLimit).sum + alwaysAccers.values.sum
 
     val reportIterator = workReports.iterator
     var continue = true
@@ -446,7 +446,7 @@ object AccumulationTransition:
     )
 
     val parallelGasUsed = parallelResult.gasUsedMap.values.sum
-    val transfersGas = transfers.map(_.gasLimit).sum
+    val transfersGas = parallelResult.deferredTransfers.map(_.gasLimit).sum
 
     // Recursively process remaining reports with new deferred transfers
     val remainingReports = workReports.drop(i)

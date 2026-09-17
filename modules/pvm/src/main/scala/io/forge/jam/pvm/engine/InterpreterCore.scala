@@ -31,6 +31,7 @@ abstract class InterpreterCore protected (
   protected var _compiledOffsetInt: Int = 0
   private val TargetOutOfRange: UInt = UInt(0)
   protected var _gasChargedFlag: Boolean = false
+  protected var _forcedOutOfGas: Boolean = false
 
   // ==========================================================================
   // Variation points
@@ -82,6 +83,8 @@ abstract class InterpreterCore protected (
   final def setGas(value: Long): Unit = _gas = value
   final def gasChargedFlag: Boolean = _gasChargedFlag
   final def setGasChargedFlag(value: Boolean): Unit = _gasChargedFlag = value
+  final def forceOutOfGas(): Unit = _forcedOutOfGas = true
+  final def isForcedOutOfGas: Boolean = _forcedOutOfGas
 
   final def programCounter: Option[ProgramCounter] =
     if _programCounterValid then Some(_programCounter) else None
@@ -239,7 +242,7 @@ abstract class InterpreterCore protected (
       val compiled = instructions(offset)
 
       if isGasMetered then
-        if _gas < 0 then
+        if _forcedOutOfGas then
           outOfGas(compiled.pc)
           _compiledOffsetInt = offset
           return _interrupt

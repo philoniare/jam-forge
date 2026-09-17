@@ -65,6 +65,10 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
         alwaysAccMap(serviceId) = gas
         j += 1
 
+    if context.serviceIndex != context.x.manager then
+      setReg(instance, 7, HostCallResult.HUH)
+      return
+
     // Validate service indices
     val maxUInt = 0xffffffffL
     if newManager < 0 || newManager > maxUInt ||
@@ -142,30 +146,33 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     setReg(instance, 7, HostCallResult.OK)
 
-  /** designate (16): Set validator queue (privileged). Panics if memory is not
-    * readable. Returns HUH if caller is not the delegator. Returns OK on
-    * success and updates stagingSet with the new validator keys.
+  /** designate (16): Set validator queue (privileged).
     */
   protected def handleDesignate(instance: PvmInstance): Unit =
     val startAddr = getReg(instance, 7).toInt
-    val validatorKeySize = 336
-    val totalLength = validatorKeySize * config.validatorCount
+    val validatorKeySize = 336L
+    val zFull = getReg(instance, 8)
 
-    if !instance.isMemoryReadable(startAddr, totalLength) then
+    val maxSafeZ = ULong(Int.MaxValue.toLong / validatorKeySize)
+    val zInRange = zFull <= maxSafeZ
+    val totalLength = if zInRange then (validatorKeySize * zFull.toLong).toInt else -1
+
+    if !zInRange || !instance.isMemoryReadable(startAddr, totalLength) then
       throw new RuntimeException(
-        s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength"
+        s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len ${if zInRange then totalLength.toString else "z out of range"}"
       )
 
-    // Check if caller is the delegator
-    if context.serviceIndex != context.x.delegator then
+    val z = zFull.toInt // safe: zInRange guarantees zFull <= maxSafeZ < Int.MaxValue
+
+    if !config.isValidValidatorCount(z) || context.serviceIndex != context.x.delegator then
       setReg(instance, 7, HostCallResult.HUH)
       return
 
     // Read validator keys from memory and update stagingSet
     val newStagingSet = mutable.ListBuffer[JamBytes]()
-    for i <- 0 until config.validatorCount do
-      val offset = i * validatorKeySize
-      val keyBuffer = new Array[Byte](validatorKeySize)
+    for i <- 0 until z do
+      val offset = i * validatorKeySize.toInt
+      val keyBuffer = new Array[Byte](validatorKeySize.toInt)
       if !readMemory(instance, startAddr + offset, keyBuffer) then
         throw new RuntimeException(
           s"Designate PANIC: Failed to read validator key $i from memory"
@@ -458,7 +465,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
   protected def handleTransfer(instance: PvmInstance): Unit =
     val destination = argServiceId(instance, 7).toLong
     val amount = getReg(instance, 8).toLong
-    val gasLimit = getReg(instance, 9).toLong
+    val gasLimitU = getReg(instance, 9)
     val memoAddr = getReg(instance, 10).toInt
 
     val account = context.x.accounts.get(context.serviceIndex)
@@ -479,7 +486,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     // 3. Check if gasLimit >= destination.minMemoGas (LOW)
     val destAccount = accounts(destination)
-    if gasLimit < destAccount.info.minMemoGas then
+    if gasLimitU < ULong(destAccount.info.minMemoGas) then
       setReg(instance, 7, HostCallResult.LOW)
       return
 
@@ -504,7 +511,11 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
       setReg(instance, 7, HostCallResult.CASH)
       return
 
-    // 5. Success - charge additional gas on success
+    if ULong(instance.gas) < gasLimitU then
+      instance.forceOutOfGas()
+      return
+
+    val gasLimit = gasLimitU.toLong
     instance.setGas(instance.gas - gasLimit)
 
     // 6. Deduct balance and queue transfer

@@ -77,7 +77,8 @@ class GrowHeapHostCallSpec extends HostCallTestBase:
     instance.setReg(7, 50L)
     hostCalls.dispatch(HostCall.GROW_HEAP, instance)
 
-    instance.gas should be < 0L
+    instance.gas shouldBe 300L // unchanged — NOT decremented, NOT negative
+    instance.isForcedOutOfGas shouldBe true
     instance.growHeapPagesGrown shouldBe 0L // no pages marked
   }
 
