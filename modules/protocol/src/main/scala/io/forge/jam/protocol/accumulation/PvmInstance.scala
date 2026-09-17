@@ -87,3 +87,6 @@ trait PvmInstance:
    * @return true if memory is writable
    */
   def isMemoryWritable(address: Int, length: Int): Boolean
+
+  def growHeapPageBounds: Option[(Long, Long)] = None
+  def growHeapPages(deltaPages: Long): Unit = ()

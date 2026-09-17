@@ -41,6 +41,14 @@ class HostCallGasCostSpec extends HostCallTestBase:
       hostCalls.getGasCost(id, instance) shouldBe 10L
   }
 
+  test("GROW_HEAP is excluded from the flat 10 pre-charge") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    hostCalls.getGasCost(HostCall.GROW_HEAP, instance) shouldBe 0L
+  }
+
   test("unknown host call returns WHAT") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)

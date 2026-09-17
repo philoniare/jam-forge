@@ -86,15 +86,35 @@ class MockPvmInstance(
       i += 1
     Some(result)
 
+  private var _growHeapBase: Long = 0L
+  private var _growHeapMaxPage: Long = 0L
+  private var _growHeapConfigured: Boolean = false
+  private var _growHeapPagesGrown: Long = 0L
+
+  def configureGrowHeap(hInitial: Long, maxPage: Long): Unit =
+    _growHeapBase = hInitial
+    _growHeapMaxPage = maxPage
+    _growHeapConfigured = true
+    _growHeapPagesGrown = 0L
+
+  def growHeapPagesGrown: Long = _growHeapPagesGrown
+
+  override def growHeapPageBounds: Option[(Long, Long)] =
+    if _growHeapConfigured then Some((_growHeapBase + _growHeapPagesGrown, _growHeapMaxPage))
+    else None
+
+  override def growHeapPages(deltaPages: Long): Unit =
+    _growHeapPagesGrown += deltaPages
+
 /**
  * Tests for AccumulationHostCalls
  *
  * - gas(0): Returns remaining gas in r7
- * - read(3)/write(4): Storage operations with balance threshold
- * - checkpoint(17): State is properly saved and restored on panic
- * - transfer(20): Deferred transfer queuing with validation
- * - new(18): Service creation with index calculation
- * - query(22)/solicit(23)/forget(24): Preimage lifecycle
+ * - read(4)/write(5): Storage operations with balance threshold
+ * - checkpoint(18): State is properly saved and restored on panic
+ * - transfer(21): Deferred transfer queuing with validation
+ * - new(19): Service creation with index calculation
+ * - query(23)/solicit(24)/forget(25): Preimage lifecycle
  */
 class AccumulationHostCallsTest extends AnyFunSuite with Matchers:
 

@@ -7,6 +7,7 @@ import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.protocol.accumulation.{
+  GrowHeapHostCall,
   HostCall,
   HostCallResult,
   PvmInstance,
@@ -34,12 +35,17 @@ private final class IsAuthorizedHostCalls(
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
-  def getGasCost(hostCallId: Int, instance: PvmInstance): Long = 10L
+  def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
+    hostCallId match
+      case HostCall.GROW_HEAP => 0L
+      case _                  => 10L
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
       case HostCall.GAS =>
         setReg(instance, 7, ULong(instance.gas))
+      case HostCall.GROW_HEAP =>
+        GrowHeapHostCall.handle(instance)
       case HostCall.FETCH =>
         handleFetch(instance)
       case _ =>

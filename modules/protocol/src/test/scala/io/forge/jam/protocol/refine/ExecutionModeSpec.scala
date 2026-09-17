@@ -144,6 +144,66 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       nativeInstance.reg(7) shouldBe interpReg7 // the GAS host call's observable effect (r7 = remaining gas)
   }
 
+  private val growHeapThenHaltCode = Array[Byte](10, 1, 50, 0)
+
+  private object GrowHeapCapableHostCalls extends HostCallDispatcher:
+    def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
+      if hostCallId == HostCall.GROW_HEAP then 0L else 10L
+    def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
+      hostCallId match
+        case HostCall.GROW_HEAP =>
+          io.forge.jam.protocol.accumulation.GrowHeapHostCall.handle(instance)
+        case _ => instance.setReg(7, HostCallResult.WHAT.signed)
+
+  test("a program containing Ecalli(GROW_HEAP) deopts to the interpreter, which grows/reports the heap for real") {
+    import io.forge.jam.pvm.engine.InterpretedInstance
+    import io.forge.jam.pvm.types.ProgramCounter
+    import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
+
+    val module = moduleOf(growHeapThenHaltCode, ecalliThenHaltBitmask)
+
+    def freshInstance(): InterpretedInstance =
+      val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
+      inst.setGas(1000L)
+      inst.setNextProgramCounter(ProgramCounter(0))
+      inst.setReg(0, 0xffff0000L) // RA_INIT
+      inst
+
+    val reasonKey = "grow-heap-native-unsupported"
+    val before = NativeRunner.deoptReasons.getOrElse(reasonKey, 0L)
+    val nativeInstance = freshInstance()
+    val outcome = NativeRunner.run(
+      nativeInstance,
+      entryPc = 0,
+      ExecutionMode.Recompiled,
+      GrowHeapCapableHostCalls,
+      preDispatch = None
+    )
+    outcome shouldBe None // deopt — never a native grow_heap dispatch
+    if canRunNative then
+      NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
+
+    val interpInstance = freshInstance()
+    val interpWrapper = new InterpretedInstanceWrapper(interpInstance)
+    interpWrapper.growHeapPageBounds.map(_._1) shouldBe Some(32L) // real h, not a fabricated 0
+    var exit: Option[PvmRunner.PvmExit] = None
+    while exit.isEmpty do
+      interpInstance.run() match
+        case Right(io.forge.jam.pvm.InterruptKind.Finished) => exit = Some(PvmRunner.PvmExit.Halt)
+        case Right(io.forge.jam.pvm.InterruptKind.Ecalli(hostId)) =>
+          val gasCost = GrowHeapCapableHostCalls.getGasCost(hostId.signed, interpWrapper)
+          interpInstance.setGas(interpInstance.gas - gasCost)
+          if interpInstance.gas < 0 then exit = Some(PvmRunner.PvmExit.OutOfGas)
+          else GrowHeapCapableHostCalls.dispatch(hostId.signed, interpWrapper)
+        case Right(io.forge.jam.pvm.InterruptKind.Step) => ()
+        case _ => exit = Some(PvmRunner.PvmExit.Panic)
+
+    exit shouldBe Some(PvmRunner.PvmExit.Halt)
+    interpInstance.reg(7) shouldBe 32L // the REAL heap pointer h
+    // 1000 - 2 instruction gas (Ecalli + JumpIndirect) - 275 self-metered.
+    interpInstance.gas shouldBe (1000L - 2L - 275L)
+  }
+
   // ---- 3. missing dylib: Recompiled mode is safe, never crashes --------------
 
   test("Recompiled mode with an unset/missing dylib property falls back to interpreter results without crashing") {

@@ -37,8 +37,8 @@ class RefineExecutorSpec extends AnyFunSuite with Matchers:
   private val panicCode = Array[Byte](0)
   private val panicBitmask = Array[Byte](1)
 
-  // ecalli 7 (EXPORT with r7 = input address, r8 = input length), then halt.
-  private val exportThenHaltCode = Array[Byte](10, 7, 50, 0)
+  // ecalli 8 (EXPORT with r7 = input address, r8 = input length), then halt.
+  private val exportThenHaltCode = Array[Byte](10, 8, 50, 0)
   private val exportThenHaltBitmask = Array[Byte](5) // instr at offsets 0 and 2
 
   private val codeHash = Hash(Array.fill[Byte](32)(0x42))

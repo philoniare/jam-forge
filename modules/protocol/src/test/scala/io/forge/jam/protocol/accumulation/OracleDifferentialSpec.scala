@@ -32,7 +32,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       hostCallId match
         case 0 =>
           instance.setReg(7, instance.reg(7) + instance.reg(6))
-        case 1 =>
+        case 4 =>
           val addr = instance.reg(5).toInt
           val len = instance.reg(8).toInt
           if len > 0 && len <= 256 then
@@ -265,7 +265,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     for b <- 0 until k do
       for _ <- 0 until bodyLens(b) do
         out += (rng.nextInt(4) match
-          case 0 => Ecalli(rng.nextInt(2))
+          case 0 => Ecalli(rng.nextInt(2) * 4) // 0 or 4 (id 1 is grow_heap in gp-0.8: deopts)
           case 1 => randMem(rng)
           case _ => randArith(rng))
       if b == k - 1 then out += Trap
@@ -280,7 +280,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   // ---- the differential ---------------------------------------------------------
 
-  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=10000 mixed programs (host ids 0/1, CONTINUE-only)" in {
+  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=10000 mixed programs (host ids 0/4, CONTINUE-only)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -342,7 +342,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"oracle differential (Task 17/H1, throw->PANIC): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter on host id 1 (memory write) mixed into the program" in {
+  it should "match the interpreter on host id 4 (memory write) mixed into the program" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -356,7 +356,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           LoadImm64(5, RW_BASE.toLong + rng.nextInt(RW_LEN - 256)),
           LoadImm64(6, byteVal.toLong),
           LoadImm64(8, len.toLong),
-          Ecalli(1),
+          Ecalli(4),
           Trap
         )
         val initRegs = Array.fill(13)(0L)
@@ -458,7 +458,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
-      val prog = Seq(Ecalli(0), Ecalli(1), Trap)
+      val prog = Seq(Ecalli(0), Ecalli(4), Trap)
       val initRegs = Array.fill(13)(0L)
       initRegs(6) = 5L
       initRegs(7) = 100L
@@ -471,7 +471,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       val (native, _) = runNative(prog, initRegs, gas, new Array[Byte](RW_LEN), dispatcher, Some(preDispatch))
 
       native.exit shouldBe PvmRecompiler.EXIT_PANIC // Trap, after two successful Ecallis
-      preDispatchCalls shouldBe 2 // once per Ecalli — both succeeded (host ids 0 and 1 never throw/OOG here)
+      preDispatchCalls shouldBe 2 // once per Ecalli — both succeeded (host ids 0 and 4 never throw/OOG here)
       dispatcher.dispatchCalls shouldBe 2
   }
 

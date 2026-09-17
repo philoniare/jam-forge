@@ -95,10 +95,30 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
 
   test("fetch during is-authorized serves the work package but not refine data") {
     val wp = workPackage(5L)
-    // ecalli 1 (FETCH: r7 dest = input addr works? use r7 register default) —
-    // simpler to exercise the dispatcher directly:
+    // ecalli 2 (FETCH: r7 dest = input addr works? use
+    // r7 register default) — simpler to exercise the dispatcher directly:
     val hc = new IsAuthorizedHostCallsProbe(config, wp)
     hc.probe()
+  }
+
+  test("GROW_HEAP (1) dispatches to the shared grow_heap handler in the is-authorized context") {
+    val wp = workPackage(5L)
+    val hc = new IsAuthorizedHostCalls(config, wp)
+    val instance = new io.forge.jam.protocol.accumulation.MockPvmInstance(
+      memorySize = 0x100000,
+      initialGas = 1_000_000L
+    )
+    instance.configureGrowHeap(hInitial = 48L, maxPage = 1044431L)
+
+    instance.setReg(7, 50L) // grow by 2 pages
+    hc.dispatch(io.forge.jam.protocol.accumulation.HostCall.GROW_HEAP, instance)
+
+    instance.reg(7) shouldBe 50L
+    instance.gas shouldBe (1_000_000L - (275L + 2L * 121L))
+    instance.growHeapPagesGrown shouldBe 2L
+
+    // Self-metered: excluded from the flat pre-charge.
+    hc.getGasCost(io.forge.jam.protocol.accumulation.HostCall.GROW_HEAP, instance) shouldBe 0L
   }
 
   test("authorizerHash is blake(authCodeHash ++ authorizerConfig)") {

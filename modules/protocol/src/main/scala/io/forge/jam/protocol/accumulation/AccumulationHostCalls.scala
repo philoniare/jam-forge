@@ -27,7 +27,8 @@ class AccumulationHostCalls(
     */
   def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
     hostCallId match
-      case _ => 10L
+      case HostCall.GROW_HEAP => 0L
+      case _                  => 10L
 
   /** Dispatch a host call based on its identifier. Gas should be charged BEFORE
     * calling this method.
@@ -40,6 +41,7 @@ class AccumulationHostCalls(
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
       case HostCall.GAS        => handleGas(instance)
+      case HostCall.GROW_HEAP  => GrowHeapHostCall.handle(instance)
       case HostCall.FETCH      => handleFetch(instance)
       case HostCall.LOOKUP     => handleLookup(instance)
       case HostCall.READ       => handleRead(instance)

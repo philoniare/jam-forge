@@ -410,3 +410,19 @@ class InterpretedInstanceWrapper(instance: InterpretedInstance)
   override def isMemoryWritable(address: Int, length: Int): Boolean =
     length >= 0 && instance.basicMemory.isWritable(UInt(address), length)
 
+  override def growHeapPageBounds: Option[(Long, Long)] =
+    Some(instance.growHeapPageBounds)
+
+  override def growHeapPages(deltaPages: Long): Unit =
+    if deltaPages > 0 then
+      val pageBytes = instance.pageSize.signed.toLong & 0xFFFFFFFFL
+      val growBytes = deltaPages * pageBytes
+      instance.basicMemory.sbrk(UInt(growBytes.toInt)) match
+        case Some(_) => ()
+        case None =>
+          throw new IllegalStateException(
+            s"grow_heap invariant violated: BasicMemory.sbrk($growBytes) failed after the " +
+              "spec bound b was already checked (r7 <= b) — page-domain bound and " +
+              "maxHeapSize have diverged"
+          )
+
