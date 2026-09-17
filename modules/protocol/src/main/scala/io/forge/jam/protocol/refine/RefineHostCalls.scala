@@ -375,7 +375,8 @@ class RefineHostCalls(
           guest.ram,
           guestRegs,
           guestGas,
-          ProgramCounter(guest.pc.toInt)
+          ProgramCounter(guest.pc.toInt),
+          gasChargedFlag = guest.gasChargedFlag
         )
 
         var outcome: InterruptKind = InterruptKind.Panic
@@ -411,6 +412,7 @@ class RefineHostCalls(
               .map(_.value.toLong)
               .getOrElse(guest.pc)
         guest.pc = pcNow
+        guest.gasChargedFlag = guestInstance.gasChargedFlag
 
         outcome match
           case InterruptKind.Ecalli(hostId) =>

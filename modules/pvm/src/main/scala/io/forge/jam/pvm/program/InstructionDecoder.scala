@@ -234,7 +234,7 @@ object InstructionDecoder:
     while i < 8 && start + i < code.length do { result |= (code(start + i).toLong & 0xFF) << (i * 8); i += 1 }
     result
 
-  private def getSkip(bitmask: Array[Byte], codeLength: Int, offset: Int): Int =
+  private[program] def getSkip(bitmask: Array[Byte], codeLength: Int, offset: Int): Int =
     var cur = offset + 1; var skip = 1
     while cur < codeLength && skip <= MaxInstructionSize do
       val byteIdx = cur >> 3; val bitIdx = cur & 7

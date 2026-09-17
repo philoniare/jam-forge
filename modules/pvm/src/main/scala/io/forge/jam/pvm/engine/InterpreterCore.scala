@@ -30,6 +30,7 @@ abstract class InterpreterCore protected (
   protected val _is64Bit: Boolean = module.is64Bit
   protected var _compiledOffsetInt: Int = 0
   private val TargetOutOfRange: UInt = UInt(0)
+  protected var _gasChargedFlag: Boolean = false
 
   // ==========================================================================
   // Variation points
@@ -79,6 +80,8 @@ abstract class InterpreterCore protected (
 
   final def gas: Long = _gas
   final def setGas(value: Long): Unit = _gas = value
+  final def gasChargedFlag: Boolean = _gasChargedFlag
+  final def setGasChargedFlag(value: Boolean): Unit = _gasChargedFlag = value
 
   final def programCounter: Option[ProgramCounter] =
     if _programCounterValid then Some(_programCounter) else None
@@ -132,13 +135,6 @@ abstract class InterpreterCore protected (
       if !isJumpTargetValid(pc) then panic(pc)
       else compileBlock(pc)
 
-  override def resolveFallthrough(pc: ProgramCounter): Int =
-    val packed = targetAt(pc.value)
-    if packed != TargetAbsent then
-      packed & 0x7fffffff
-    else
-      compileBlock(pc)
-
   override def jumpIndirect(pc: ProgramCounter, address: UInt): Int =
     jumpIndirectInt(pc, address.signed)
 
@@ -153,12 +149,14 @@ abstract class InterpreterCore protected (
         case None => panic(pc)
 
   override def branch(condition: Boolean, pc: ProgramCounter, target: Int, nextPc: ProgramCounter): Int =
-    if condition then
-      val targetPc = ProgramCounter(target)
+    val targetPc = ProgramCounter(target)
+    if !isJumpTargetValid(targetPc) || !isJumpTargetValid(nextPc) then panic(pc)
+    else if condition then
       val r = resolveJump(targetPc)
       if r < 0 then panic(pc) else r
     else
-      resolveFallthrough(nextPc)
+      val r = resolveJump(nextPc)
+      if r < 0 then panic(pc) else r
 
   override def panic(pc: ProgramCounter): Int =
     _programCounter = pc
@@ -209,6 +207,13 @@ abstract class InterpreterCore protected (
         case None =>
           throw new IllegalStateException("Failed to run: next program counter is not set")
         case Some(pc) =>
+          if !module.isBlobStructurallyValid || !isValidEntryPoint(pc) then
+            _programCounter = pc
+            _programCounterValid = true
+            _nextProgramCounter = None
+            _nextProgramCounterChanged = false
+            _interrupt = InterruptKind.Panic
+            return _interrupt
           _programCounter = pc
           _nextProgramCounter = None
           val resolved = resolveArbitraryJump(pc)
@@ -233,13 +238,19 @@ abstract class InterpreterCore protected (
       // Get compiled instruction - ArrayBuffer.apply is O(1)
       val compiled = instructions(offset)
 
-      // Gas metering check
       if isGasMetered then
-        _gas -= 1
         if _gas < 0 then
           outOfGas(compiled.pc)
           _compiledOffsetInt = offset
           return _interrupt
+        if !_gasChargedFlag then
+          val blockCost = module.blockGasCostAt(compiled.pc.toInt)
+          if _gas < blockCost then
+            outOfGas(compiled.pc)
+            _compiledOffsetInt = offset
+            return _interrupt
+          _gas -= blockCost
+          _gasChargedFlag = true
 
       // Update state for instruction execution.
       _compiledOffsetInt = offset
@@ -254,6 +265,8 @@ abstract class InterpreterCore protected (
         // Interrupt occurred - exit loop
         return _interrupt
       else
+        if BlockGasModel.isTerminatorOpcodeValue(compiled.opcodeValue) then
+          _gasChargedFlag = false
         offset = next
         if next >= instructionsSize then
           instructionsSize = instructions.size
@@ -279,6 +292,9 @@ abstract class InterpreterCore protected (
 
   private def isJumpTargetValid(pc: ProgramCounter): Boolean =
     Program.isJumpTargetValid(module.blob.code, module.blob.bitmask, pc.toInt)
+
+  private def isValidEntryPoint(pc: ProgramCounter): Boolean =
+    Program.isValidInstructionBoundary(module.blob.code, module.blob.bitmask, pc.toInt)
 
   private def findStartOfBasicBlock(pc: ProgramCounter): Option[ProgramCounter] =
     Program.findStartOfBasicBlock(module.blob.code, module.blob.bitmask, pc.toInt)

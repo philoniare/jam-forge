@@ -44,9 +44,6 @@ trait ControlFlowOps:
   /** Resolves a jump to a program counter */
   def resolveJump(pc: ProgramCounter): Int
 
-  /** Resolves a fallthrough to the next instruction */
-  def resolveFallthrough(pc: ProgramCounter): Int
-
   /** Handles indirect jump via jump table */
   def jumpIndirect(pc: ProgramCounter, address: UInt): Int
 

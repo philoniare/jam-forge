@@ -578,7 +578,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.HALT
     val (gasAfter, regsAfter) = readInvokeBlock(instance, 0x8000)
-    gasAfter shouldBe 98L // two instructions, 1 gas each
+    gasAfter shouldBe 78L
     regsAfter(7) shouldBe 42L
     regsAfter(0) shouldBe 0xffff0000L
   }
@@ -613,9 +613,8 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
-    // LoadU8 r7 ← mem[0x10000]; no guest pages granted → page fault.
-    val code = Array[Byte](52, 7, 0, 0, 1)
-    val bitmask = Array[Byte](1)
+    val code = Array[Byte](52, 7, 0, 0, 1, 0)
+    val bitmask = Array[Byte](33) // bits 0 and 5 set
     createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
 
     val instance = newInstance()
@@ -632,9 +631,8 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
-    // LoadU8 r7 ← mem[0x10000]; page granted and poked this time.
-    val code = Array[Byte](52, 7, 0, 0, 1)
-    val bitmask = Array[Byte](1)
+    val code = Array[Byte](52, 7, 0, 0, 1, 0)
+    val bitmask = Array[Byte](33) // bits 0 and 5 set
     createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
 
     val setup = newInstance()
@@ -656,8 +654,6 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     instance.setReg(8, 0x8000L)
     hc.dispatch(HostCall.INVOKE, instance)
 
-    // Guest ran off the end of the single-instruction program → panic, but the
-    // load itself succeeded and r7 was written back as 0x5a.
     val (_, regsAfter) = readInvokeBlock(instance, 0x8000)
     regsAfter(7) shouldBe 0x5aL
   }
