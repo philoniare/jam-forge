@@ -1,6 +1,8 @@
 package io.forge.jam.pvm.engine
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
+import com.typesafe.scalalogging.Logger
 import spire.math.UInt
 import io.forge.jam.pvm.{Abi, Instruction, InterruptKind, SegfaultInfo}
 import io.forge.jam.pvm.program.{InstructionDecoder, Program}
@@ -14,6 +16,9 @@ import io.forge.jam.pvm.types.*
   * the run-loop knobs — everything else lives here so a PVM semantics fix
   * lands exactly once.
   */
+object InterpreterCore:
+  private val logger: Logger = Logger(classOf[InterpreterCore])
+
 abstract class InterpreterCore protected (
     val module: InterpretedModule,
     val regs: Array[Long],
@@ -96,9 +101,15 @@ abstract class InterpreterCore protected (
     _nextProgramCounter = Some(pc)
     _nextProgramCounterChanged = true
 
-  final def run(): Either[String, InterruptKind] =
+  final def run(): Either[PvmInternalError, InterruptKind] =
     try Right(runImpl())
-    catch case e: Exception => Left(e.getMessage)
+    catch
+      case NonFatal(e) =>
+        InterpreterCore.logger.error(
+          "PVM interpreter threw — this is an implementation bug, mapping to PANIC for consensus safety",
+          e
+        )
+        Left(PvmInternalError(e))
 
   // ==========================================================================
   // ExecutionContext — registers

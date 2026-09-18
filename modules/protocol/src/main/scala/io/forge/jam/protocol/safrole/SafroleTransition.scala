@@ -74,8 +74,8 @@ object SafroleTransition extends StrictLogging:
         processValidSlot(input, preState, config)
     catch
       case e: SafroleCryptoFailure => throw e
-      case e: Exception =>
-        logger.error(s"swallowed exception, reporting Reserved: $e", e)
+      case e @ (_: io.forge.jam.core.scodec.CodecDecodingException | _: IllegalArgumentException) =>
+        logger.error("safrole input/state rejected, reporting Reserved", e)
         (preState, StfResult.error(SafroleErrorCode.Reserved))
 
   /** Epoch timing context extracted from slot values */

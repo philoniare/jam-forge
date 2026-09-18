@@ -93,3 +93,51 @@ class WriteHostCallSpec extends HostCallTestBase:
     // New value should be stored
     context.x.accounts(100L).storage.get(key) shouldBe Some(JamBytes(newValue))
   }
+
+  test("WRITE: value length of exactly 2^32 truncates to 0 (delete), never PANICs") {
+    val context = createTestContext(balance = 10000000L)
+    val key = JamBytes(Array[Byte](7, 7, 7, 7))
+    val oldValue = JamBytes(Array.fill[Byte](12)(0x5a.toByte))
+    context.x.accounts = context.x.accounts.updated(
+      100L,
+      context.x.accounts(100L).copy(storage =
+        context.x.accounts(100L).storage.updated(key, oldValue)
+      )
+    )
+
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val keyAddr = 0x10000
+    instance.writeBytes(keyAddr, key.toArray)
+
+    instance.setReg(7, keyAddr)
+    instance.setReg(8, key.length)
+    instance.setReg(9, 0x10100)
+    instance.setReg(10, 0x100000000L) // 2^32 -> low-32 is 0 -> delete
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.WRITE, instance)
+
+    // Old value length is returned, and the key is gone (the delete branch).
+    instance.reg(7) shouldBe 12L
+    context.x.accounts(100L).storage.get(key) shouldBe None
+  }
+
+  test("WRITE: key length of exactly 2^32 truncates to 0 (empty key), never PANICs") {
+    val context = createTestContext(balance = 10000000L)
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+
+    val value = Array[Byte](1, 2, 3)
+    val valueAddr = 0x10100
+    instance.writeBytes(valueAddr, value)
+
+    instance.setReg(7, 0x10000)
+    instance.setReg(8, 0x100000000L) // 2^32 -> low-32 is 0 -> empty key
+    instance.setReg(9, valueAddr)
+    instance.setReg(10, value.length)
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.WRITE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.NONE
+    context.x.accounts(100L).storage.get(JamBytes(Array.empty[Byte])) shouldBe Some(JamBytes(value))
+  }
