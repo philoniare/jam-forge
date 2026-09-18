@@ -24,19 +24,18 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val newDelegator = getReg(instance, 9).toLong
     val newRegistrar = getReg(instance, 10).toLong
     val alwaysAccPtr = getReg(instance, 11).toInt
-    val alwaysAccCount = argU32(instance, 12)
+    val alwaysAccCount: Long = argU32(instance, 12)
       .getOrElse(
-        throw new RuntimeException(
+        panic(
           "Bless PANIC: always-acc count out of 32-bit range"
         )
       )
-      .toInt
 
     // Read assigners array (4 bytes per core)
     val coresCount = config.coresCount
     val assignersBytes = new Array[Byte](4 * coresCount)
     if !readMemory(instance, assignersPtr, assignersBytes) then
-      throw new RuntimeException(
+      panic(
         "Bless PANIC: Failed to read assigners from memory"
       )
 
@@ -50,16 +49,24 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     // Read always-acc pairs (12 bytes each: 4 service + 8 gas)
     val alwaysAccMap = mutable.Map.empty[Long, Long]
-    if alwaysAccCount > 0 then
-      val alwaysAccBytes = new Array[Byte](12 * alwaysAccCount)
-      if !readMemory(instance, alwaysAccPtr, alwaysAccBytes) then
-        throw new RuntimeException(
+    if alwaysAccCount > 0L then
+      val alwaysAccTotal = 12L * alwaysAccCount
+      if alwaysAccTotal > Int.MaxValue.toLong ||
+        !isRangeReadable(instance, alwaysAccPtr, alwaysAccTotal)
+      then
+        panic(
           "Bless PANIC: Failed to read always-acc from memory"
         )
 
-      var j = 0
+      val alwaysAccBytes = new Array[Byte](alwaysAccTotal.toInt)
+      if !readMemory(instance, alwaysAccPtr, alwaysAccBytes) then
+        panic(
+          "Bless PANIC: Failed to read always-acc from memory"
+        )
+
+      var j = 0L
       while j < alwaysAccCount do
-        val off = j * 12
+        val off = (j * 12L).toInt
         val serviceId = decodeLE(alwaysAccBytes, off, 4)
         val gas = decodeLE(alwaysAccBytes, off + 4, 8)
         alwaysAccMap(serviceId) = gas
@@ -102,7 +109,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val queueBuffer = new Array[Byte](queueLength)
     if !readMemory(instance, startAddr, queueBuffer) then
       // PANIC if memory is not readable
-      throw new RuntimeException(
+      panic(
         s"Assign PANIC: Failed to read authorization queue from memory at $startAddr"
       )
 
@@ -155,14 +162,14 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     val maxWindowZ = ULong(0xffffffffL) / ULong(validatorKeySize)
     if zFull > maxWindowZ then
-      throw new RuntimeException(
+      panic(
         s"Designate PANIC: z=$zFull makes 336z >= 2^32 (unreadable in any 32-bit address space)"
       )
 
     val totalLength = validatorKeySize * zFull.toLong
 
     if !isRangeReadable(instance, startAddr, totalLength) then
-      throw new RuntimeException(
+      panic(
         s"Designate PANIC: Memory not readable at 0x${startAddr.toHexString} len $totalLength"
       )
 
@@ -178,7 +185,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
       val offset = i * validatorKeySize.toInt
       val keyBuffer = new Array[Byte](validatorKeySize.toInt)
       if !readMemory(instance, startAddr + offset, keyBuffer) then
-        throw new RuntimeException(
+        panic(
           s"Designate PANIC: Failed to read validator key $i from memory"
         )
       newStagingSet += JamBytes(keyBuffer)
@@ -210,7 +217,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     // Read new code hash from memory
     val codeHashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, codeHashAddr, codeHashBuffer) then
-      throw new RuntimeException(
+      panic(
         s"Upgrade PANIC: Failed to read code hash from memory at address $codeHashAddr (0x${codeHashAddr.toHexString})"
       )
 
@@ -235,7 +242,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val codeHashAddr = getReg(instance, 7).toInt
     val codeHashLength = argU32(instance, 8)
       .getOrElse(
-        throw new RuntimeException(
+        panic(
           "New PANIC: preimage length out of 32-bit range"
         )
       )
@@ -248,7 +255,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     // Read code hash from memory - PANIC if not readable
     val codeHashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, codeHashAddr, codeHashBuffer) then
-      throw new RuntimeException(
+      panic(
         s"New PANIC: Failed to read code hash from memory at $codeHashAddr"
       )
 
@@ -261,7 +268,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     val currentAccount = context.x.accounts.get(context.serviceIndex)
     if currentAccount.isEmpty then
-      throw new RuntimeException("New PANIC: Current service account not found")
+      panic("New PANIC: Current service account not found")
 
     val acc = currentAccount.get
 
@@ -359,7 +366,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, preimageHashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         "Eject PANIC: Failed to read preimage hash from memory"
       )
 
@@ -405,7 +412,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
         )
         context.readRawDataFor(ejectServiceId, expectedKey) match
           case Some(infoValue) =>
-            StateKey.decodePreimageInfoValue(infoValue)
+            decodePreimageInfoOrPanic("Eject", infoValue)
           case None =>
             setReg(instance, 7, HostCallResult.HUH)
             return List.empty
@@ -478,7 +485,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     // 1. Read memo from memory (128 bytes) - PANIC if fails
     val memoBuffer = new Array[Byte](DeferredTransfer.MEMO_SIZE)
     if !readMemory(instance, memoAddr, memoBuffer) then
-      throw new RuntimeException(
+      panic(
         s"Transfer PANIC: Failed to read memo from memory at $memoAddr"
       )
 

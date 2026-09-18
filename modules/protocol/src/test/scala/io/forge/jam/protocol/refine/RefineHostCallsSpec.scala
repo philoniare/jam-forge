@@ -17,6 +17,7 @@ import io.forge.jam.protocol.accumulation.{
 import spire.math.{ULong, UShort}
 
 import scala.collection.mutable
+import io.forge.jam.protocol.HostCallPanic
 
 class RefineHostCallsSpec extends AnyFunSuite with Matchers:
 
@@ -472,6 +473,32 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     ULong(instance.reg(7)) shouldBe HostCallResult.OOB
   }
 
+  test("PAGES: a mode register >= 2^63 is HUH, not a signed-negative fall-through") {
+    // gp Omega_Z: r >= 5 => HUH. `getReg(10).toLong` narrows the u64 mode
+    // register to a SIGNED Long, so r = 2^63 became negative, `r > 4` was
+    // false, and the call fell through to `guest.ram.applyPages(p, c, r)`
+    // where `variant match { case _ => AccessWrite }` silently granted write
+    // access. Compare unsigned so every r >= 5 is HUH.
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val instance = newInstance()
+    createMachine(hc) shouldBe 0L
+
+    for r <- Seq(5L, 0x7fffffffffffffffL, 0x8000000000000000L, -1L /* 2^64-1 */ ) do
+      withClue(s"r=0x${r.toHexString}: ") {
+        instance.setReg(7, 0L); instance.setReg(8, 16L)
+        instance.setReg(9, 1L); instance.setReg(10, r)
+        hc.dispatch(HostCall.PAGES, instance)
+        ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+      }
+
+    // and the granted access must still be revoked (no write bit leaked in)
+    instance.setReg(7, 0L); instance.setReg(8, 16L)
+    instance.setReg(9, 0x10000L); instance.setReg(10, 1L)
+    hc.dispatch(HostCall.POKE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.OOB
+  }
+
   test("PAGES variant 0 revokes access; variants < 3 zero the contents") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
@@ -687,7 +714,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
 
     instance.setReg(7, 0L)
     instance.setReg(8, 0x100000L - 10L) // 112-byte block does not fit
-    intercept[RuntimeException] {
+    intercept[HostCallPanic] {
       hc.dispatch(HostCall.INVOKE, instance)
     }
   }

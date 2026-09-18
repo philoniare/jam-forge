@@ -12,7 +12,7 @@ object GrowHeapHostCall:
 
     instance.growHeapPageBounds match
       case None =>
-        throw new RuntimeException(
+        throw new io.forge.jam.protocol.HostCallPanic(
           "GrowHeap PANIC: dispatched on a PvmInstance without heap-page-growth support " +
             "(growHeapPageBounds = None) — the native path must deopt to the interpreter " +
             "before dispatching grow_heap, and test doubles must configureGrowHeap"

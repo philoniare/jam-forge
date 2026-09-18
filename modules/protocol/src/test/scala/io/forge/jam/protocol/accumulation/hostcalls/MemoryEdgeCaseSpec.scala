@@ -2,6 +2,7 @@ package io.forge.jam.protocol.accumulation.hostcalls
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.accumulation._
 
 import scala.collection.mutable
@@ -35,7 +36,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 32) // length
 
     // Should throw PANIC (RuntimeException) for inaccessible memory
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.FETCH, instance)
     }
     exception.getMessage should include("PANIC")
@@ -54,7 +55,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 32) // request 32 bytes which extends past 0x1000
 
     // Should throw PANIC for memory not writable
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.FETCH, instance)
     }
     exception.getMessage should include("PANIC")
@@ -76,7 +77,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(10, 0) // offset
     instance.setReg(11, 100) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.LOOKUP, instance)
     }
     exception.getMessage should include("PANIC")
@@ -107,7 +108,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(11, 100) // length
 
     // Implementation throws PANIC when output memory is not writable
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.LOOKUP, instance)
     }
     exception.getMessage should include("PANIC")
@@ -129,7 +130,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(11, 0) // offset
     instance.setReg(12, 100) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.READ, instance)
     }
     exception.getMessage should include("PANIC")
@@ -149,7 +150,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 0x100) // value address (valid)
     instance.setReg(10, 10) // value length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.WRITE, instance)
     }
     exception.getMessage should include("PANIC")
@@ -170,7 +171,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 0x10000) // value address OUT OF BOUNDS
     instance.setReg(10, 10) // value length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.WRITE, instance)
     }
     exception.getMessage should include("PANIC")
@@ -190,7 +191,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 0) // offset
     instance.setReg(10, 96) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.INFO, instance)
     }
     exception.getMessage should include("PANIC")
@@ -208,7 +209,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(7, 0x10000) // hash address OUT OF BOUNDS
     instance.setReg(8, 100) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.QUERY, instance)
     }
     exception.getMessage should include("PANIC")
@@ -226,7 +227,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(7, 0x10000) // hash address OUT OF BOUNDS
     instance.setReg(8, 100) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.SOLICIT, instance)
     }
     exception.getMessage should include("PANIC")
@@ -244,7 +245,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(7, 0x10000) // hash address OUT OF BOUNDS
     instance.setReg(8, 100) // length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.FORGET, instance)
     }
     exception.getMessage should include("PANIC")
@@ -261,7 +262,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
 
     instance.setReg(7, 0x10000) // hash address OUT OF BOUNDS
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.YIELD, instance)
     }
     exception.getMessage should include("PANIC")
@@ -283,7 +284,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(8, 0x10000) // blob address OUT OF BOUNDS
     instance.setReg(9, 50) // blob length
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.PROVIDE, instance)
     }
     exception.getMessage should include("PANIC")
@@ -305,7 +306,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(11, 0) // alwaysAccPtr
     instance.setReg(12, 0) // alwaysAccCount
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.BLESS, instance)
     }
     exception.getMessage should include("PANIC")
@@ -326,7 +327,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(8, 0x10000) // auth queue address OUT OF BOUNDS
     instance.setReg(9, 42L) // new assigner
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.ASSIGN, instance)
     }
     exception.getMessage should include("PANIC")
@@ -346,7 +347,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(7, 0x10000) // validator keys address OUT OF BOUNDS
     instance.setReg(8, testConfig.validatorCount)
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.DESIGNATE, instance)
     }
     exception.getMessage should include("PANIC")
@@ -368,7 +369,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(11, 0L) // gratisStorage
     instance.setReg(12, 0L) // requestedServiceId
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.NEW, instance)
     }
     exception.getMessage should include("PANIC")
@@ -387,7 +388,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(8, 200L) // minAccumulateGas
     instance.setReg(9, 100L) // minMemoGas
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.UPGRADE, instance)
     }
     exception.getMessage should include("PANIC")
@@ -429,7 +430,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(9, 100L) // gasLimit
     instance.setReg(10, 0x10000) // memo address OUT OF BOUNDS
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.TRANSFER, instance)
     }
     exception.getMessage should include("PANIC")
@@ -447,7 +448,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     instance.setReg(7, 200L) // target service
     instance.setReg(8, 0x10000) // preimage hash address OUT OF BOUNDS
 
-    val exception = intercept[RuntimeException] {
+    val exception = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.EJECT, instance)
     }
     exception.getMessage should include("PANIC")

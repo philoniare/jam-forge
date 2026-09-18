@@ -6,6 +6,7 @@ import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.InstructionDecoder
 import io.forge.jam.pvm.recompiler.{RecompilerAbi, RecompilerMemory}
 import io.forge.jam.pvm.types.ProgramCounter
+import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.refine.HostCallDispatcher
 import com.typesafe.scalalogging.StrictLogging
 import spire.math.UInt
@@ -204,7 +205,7 @@ object NativeRunner extends StrictLogging:
           dispatcher.dispatch(hostCallId.toInt, wrapper)
           PvmRecompiler.HOST_CONTINUE
         catch
-          case _: RuntimeException => PvmRecompiler.HOST_PANIC
+          case _: HostCallPanic => PvmRecompiler.HOST_PANIC
 
     def exceedsSlackCap(ht: RecompilerMemory.DescribedWithHeap, newHeapEndCandidate: Long): Boolean =
       val pageSize = 1L << ht.described.pageShift

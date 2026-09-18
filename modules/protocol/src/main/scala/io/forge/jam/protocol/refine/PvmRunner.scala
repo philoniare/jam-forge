@@ -1,5 +1,6 @@
 package io.forge.jam.protocol.refine
 
+import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.protocol.accumulation.NativeRunner
@@ -90,7 +91,7 @@ object PvmRunner:
           else
             try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
-              case _: RuntimeException =>
+              case _: HostCallPanic =>
                 exit = PvmExit.Panic
                 continueExecution = false
 

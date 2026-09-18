@@ -239,3 +239,21 @@ class HostCallGasCostSpec extends HostCallTestBase:
 
     hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
   }
+
+  test("fetchGas is total for every guest-suppliable selector 0-255") {
+    for selector <- 0 to 255 do
+      noException should be thrownBy HostCallGas.fetchGas(ULong(selector.toLong), ULong(0L))
+  }
+
+  test("fetchGas is total for the full-width unsigned selector boundaries") {
+    noException should be thrownBy HostCallGas.fetchGas(ULong(Long.MinValue), ULong(-1L))
+    noException should be thrownBy HostCallGas.fetchGas(ULong(-1L), ULong(-1L))
+    HostCallGas.fetchGas(ULong(-1L), ULong(0L)) shouldBe 80L
+  }
+
+  test("pagesGas is total for every guest-suppliable mode r, including r >= 2^63") {
+    for r <- 0 to 255 do
+      noException should be thrownBy HostCallGas.pagesGas(ULong(r.toLong), ULong(1L))
+    noException should be thrownBy HostCallGas.pagesGas(ULong(Long.MinValue), ULong(-1L))
+    noException should be thrownBy HostCallGas.pagesGas(ULong(-1L), ULong(-1L))
+  }

@@ -3,6 +3,7 @@ package io.forge.jam.protocol.accumulation.hostcalls
 import io.forge.jam.protocol.accumulation._
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.program.{JumpTable, ProgramBlob}
+import io.forge.jam.protocol.HostCallPanic
 
 class GrowHeapHostCallSpec extends HostCallTestBase:
 
@@ -88,7 +89,7 @@ class GrowHeapHostCallSpec extends HostCallTestBase:
     val instance = createMockInstance(gas = 100000L) // configureGrowHeap NOT called
 
     instance.setReg(7, 999L)
-    val ex = intercept[RuntimeException] {
+    val ex = intercept[HostCallPanic] {
       hostCalls.dispatch(HostCall.GROW_HEAP, instance)
     }
     ex.getMessage should include("GrowHeap PANIC")

@@ -156,8 +156,6 @@ class ProvideHostCallSpec extends HostCallTestBase:
     val blob = Array.fill[Byte](50)(0xab.toByte)
     val blobHash = io.forge.jam.core.Hashing.blake2b256(blob)
 
-    // Target service exists but the solicited (empty) request lives ONLY in raw
-    // state, not in the in-memory preimageRequests map (cross-block solicit).
     context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
     val infoStateKey = StateKey.computePreimageInfoStateKey(
       targetId,
@@ -270,4 +268,139 @@ class ProvideHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.HUH
     context.provisions shouldBe empty
+  }
+
+  private class PageMapLikeInstance extends MockPvmInstance(0x100000):
+    override def isMemoryReadable(address: Int, length: Int): Boolean =
+      if length < 0 then super.isMemoryReadable(address, 1)
+      else super.isMemoryReadable(address, length)
+
+  test("PageMap (unit): isReadable answers true for a negative length - a PageMap-level invariant currently masked by every production PvmInstance wrapper") {
+    import io.forge.jam.pvm.memory.{PageAccess, PageMap}
+    import spire.math.UInt
+    val pm = new PageMap(UInt(4096))
+    pm.setPageAccess(UInt(0x10), PageAccess.ReadWrite) // page containing 0x10000
+
+    pm.isReadable(UInt(0x10000), 16)._1 shouldBe true
+    pm.isReadable(UInt(0x10000), -1)._1 shouldBe true
+    pm.isReadable(UInt(0x10005), -1)._1 shouldBe true
+  }
+
+  test("PROVIDE: PANICs (not NegativeArraySizeException) when z = 0xFFFFFFFF") {
+    val targetId = 200L
+    val context = createTestContext()
+    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
+
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = new PageMapLikeInstance
+
+    instance.setReg(7, targetId)
+    instance.setReg(8, 0x10000)
+    instance.setReg(9, 0xffffffffL) // passes the `z > 2^32-1` HUH guard; .toInt = -1
+
+    val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
+      hostCalls.dispatch(HostCall.PROVIDE, instance)
+    }
+    ex.getMessage should include("Provide PANIC")
+    context.provisions shouldBe empty
+  }
+
+  test("PROVIDE: PANICs for every z that narrows to a negative Int") {
+    val targetId = 200L
+    for z <- Seq(0x80000000L, 0xc0000000L, 0xfffffffeL, 0xffffffffL) do
+      val context = createTestContext()
+      context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
+      val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+      val instance = new PageMapLikeInstance
+
+      instance.setReg(7, targetId)
+      instance.setReg(8, 0x10000)
+      instance.setReg(9, z)
+
+      withClue(s"z=0x${z.toHexString}: ") {
+        intercept[io.forge.jam.protocol.HostCallPanic] {
+          hostCalls.dispatch(HostCall.PROVIDE, instance)
+        }
+      }
+  }
+
+  test("READ: PANICs when the key length narrows to a negative Int") {
+    for keyLen <- Seq(0x80000000L, 0xfffffffeL, 0xffffffffL, 0x1_80000000L) do
+      val context = createTestContext()
+      val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+      val instance = new PageMapLikeInstance
+
+      instance.setReg(7, 0xffffffffffffffffL) // self
+      instance.setReg(8, 0x10000)
+      instance.setReg(9, keyLen)
+      instance.setReg(10, 0x20000)
+
+      withClue(s"keyLen=0x${keyLen.toHexString}: ") {
+        val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
+          hostCalls.dispatch(HostCall.READ, instance)
+        }
+        ex.getMessage should include("Read PANIC")
+      }
+  }
+
+  test("READ: a key length of exactly 2^32 truncates to 0, not to a panic") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = new PageMapLikeInstance
+
+    instance.setReg(7, 0xffffffffffffffffL)
+    instance.setReg(8, 0x10000)
+    instance.setReg(9, 0x1_00000000L)
+    instance.setReg(10, 0x20000)
+
+    noException should be thrownBy hostCalls.dispatch(HostCall.READ, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.NONE
+  }
+
+  test("WRITE: PANICs when the key or value length narrows to a negative Int") {
+    for (keyLen, valueLen) <- Seq(
+        (0xffffffffL, 4L),
+        (0x80000000L, 4L),
+        (4L, 0xffffffffL),
+        (4L, 0x80000000L)
+      )
+    do
+      val context = createTestContext()
+      val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+      val instance = new PageMapLikeInstance
+
+      instance.writeBytes(0x10000, Array.fill[Byte](8)(1))
+      instance.writeBytes(0x20000, Array.fill[Byte](8)(2))
+      instance.setReg(7, 0x10000) // key addr
+      instance.setReg(8, keyLen)
+      instance.setReg(9, 0x20000) // value addr
+      instance.setReg(10, valueLen)
+
+      withClue(s"keyLen=0x${keyLen.toHexString} valueLen=0x${valueLen.toHexString}: ") {
+        val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
+          hostCalls.dispatch(HostCall.WRITE, instance)
+        }
+        ex.getMessage should include("Write PANIC")
+      }
+  }
+
+  test("BLESS: PANICs instead of allocating when 12*n overflows or is unreadable") {
+    for n <- Seq(0x20000000L, 0x30000000L, 0x0fffffffL, 100000000L) do
+      val context = createTestContext()
+      val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+      val instance = createMockInstance()
+
+      instance.setReg(7, 1L) // manager
+      instance.setReg(8, 0x10000) // assigners ptr
+      instance.setReg(9, 1L)
+      instance.setReg(10, 1L)
+      instance.setReg(11, 0x20000) // always-acc ptr
+      instance.setReg(12, n)
+
+      withClue(s"n=0x${n.toHexString}: ") {
+        val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
+          hostCalls.dispatch(HostCall.BLESS, instance)
+        }
+        ex.getMessage should include("Bless PANIC")
+      }
   }

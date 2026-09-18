@@ -24,10 +24,6 @@ class RefineHostCalls(
     val context: RefineContext
 ) extends HostCallDispatcher:
   private val config: ChainConfig = context.config
-
-  /** Cmaxpackageexports (gp 0.7.2 definitions.tex): maximum exported segments
-    * per work package.
-    */
   private val MaxPackageExports: Long = 3072L
 
   private def getReg(instance: PvmInstance, reg: Int): ULong =
@@ -36,9 +32,6 @@ class RefineHostCalls(
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
-  /** min(register, available) in unsigned-64 arithmetic, narrowed only after
-    * the clamp (same helper as the accumulate dispatcher).
-    */
   private def argClampedLen(
       instance: PvmInstance,
       reg: Int,
@@ -47,7 +40,7 @@ class RefineHostCalls(
     RefineFetch.argClampedLen(instance, reg, available)
 
   private def panic(message: String): Nothing =
-    throw new RuntimeException(message)
+    throw new io.forge.jam.protocol.HostCallPanic(message)
 
   private def readMemory(
       instance: PvmInstance,
@@ -112,12 +105,6 @@ class RefineHostCalls(
   /** gas (0): remaining gas (already net of this call's cost). */
   private def handleGas(instance: PvmInstance): Unit =
     setReg(instance, 7, ULong(instance.gas))
-
-  // ===========================================================================
-  // fetch (1) — Omega_Y with the refine parameterisation:
-  // p = work package, n = zerohash, r = authorizer trace, i = item index,
-  // ī = import segments, x̄ = extrinsic data, operands = none.
-  // ===========================================================================
 
   private lazy val zeroEntropy: Array[Byte] = new Array[Byte](32)
 
@@ -250,8 +237,6 @@ class RefineHostCalls(
     if !readMemory(instance, codeAddr.toInt, code) then
       panic(s"Machine PANIC: failed to read code")
 
-    // deblob validation: the guest blob is the raw jumptable+bitmask+code
-    // format (no SPI memory header).
     val parsed = getOrCompileMachineModule(code)
 
     parsed match
@@ -267,7 +252,6 @@ class RefineHostCalls(
   ): Option[InterpretedModule] =
     context.machineModuleCache match
       case None =>
-        // No cache configured (e.g. a bare test context) — compile directly.
         compileMachineModule(code)
       case Some(cache) =>
         val key = JamBytes(Hashing.blake2b256(code).bytes.toArray)
@@ -349,19 +333,18 @@ class RefineHostCalls(
     val n = getReg(instance, 7)
     val p = getReg(instance, 8).toLong
     val c = getReg(instance, 9).toLong
-    val r = getReg(instance, 10).toLong
+    val rU = getReg(instance, 10)
+    val r = rU.toLong
 
     context.innerPvms.get(n.toLong) match
       case None =>
         setReg(instance, 7, HostCallResult.WHO)
       case Some(guest) =>
-        // p and c are u64 naturals; anything ≥ the page-count bound is HUH, so
-        // the Long views are safe once past this check.
         val outOfBounds =
           getReg(instance, 8) + getReg(instance, 9) >= ULong(GuestRam.TotalPages) ||
             getReg(instance, 8) >= ULong(GuestRam.TotalPages) ||
             getReg(instance, 9) >= ULong(GuestRam.TotalPages)
-        if r > 4 || p < 16 || outOfBounds then
+        if rU > ULong(4L) || p < 16 || outOfBounds then
           setReg(instance, 7, HostCallResult.HUH)
         else if r > 2 && !guest.ram.pagesAccessible(p, c) then
           setReg(instance, 7, HostCallResult.HUH)
@@ -377,8 +360,6 @@ class RefineHostCalls(
     val n = getReg(instance, 7)
     val o = getReg(instance, 8).toInt
 
-    // The 112-byte block (encode8(gas) ++ 13 × encode8(reg)) must be WRITABLE
-    // (it is read now and written back after the run), else panic.
     if !instance.isMemoryWritable(o, 112) then
       panic(
         s"Invoke PANIC: gas/register block not writable at 0x${o.toHexString}"
@@ -416,8 +397,6 @@ class RefineHostCalls(
               outcome = InterruptKind.Panic
               running = false
 
-        // Write back gas' and registers' regardless of outcome (m* / mem* in
-        // Omega_K applies to every non-panic, non-WHO case).
         putLE8(block, 0, guestInstance.gas)
         var i = 0
         while i < 13 do
@@ -425,8 +404,6 @@ class RefineHostCalls(
           i += 1
         writeMemory(instance, o, block)
 
-        // Guest pc: past the ecalli on HOST, at the faulting/halting
-        // instruction otherwise.
         val pcNow: Long = outcome match
           case InterruptKind.Ecalli(_) =>
             guestInstance.nextProgramCounter
@@ -480,11 +457,6 @@ class RefineHostCalls(
         setReg(instance, 7, ULong(guest.pc))
         context.innerPvms.remove(n.toLong)
 
-/** Fetch-value resolution shared between the refine and is-authorized
-  * dispatchers. Absent inputs (`None`) make
-  * their selectors resolve to none → NONE, which is exactly how the
-  * is-authorized context (only the work package present) restricts fetch.
-  */
 object RefineFetch:
 
   /** min(register, available) in unsigned-64 arithmetic, narrowed only after
@@ -499,11 +471,6 @@ object RefineFetch:
     val cap = ULong(available)
     (if v < cap then v else cap).toLong.toInt
 
-  /** Writes `data` to guest memory at `address`, first checking writability.
-    * Returns false (OOB) on either a failed writability check or a failed
-    * write; callers panic separately when the *initial* Omega_Y writability
-    * check (against the full requested length) fails.
-    */
   def writeMemory(
       instance: PvmInstance,
       address: Int,
@@ -513,12 +480,6 @@ object RefineFetch:
       instance.writeBytes(address, data)
     else false
 
-  /** Shared fetch-result shell: resolves the selector via [[fetchValue]],
-    * then applies the common Omega_Y clamp/panic/write/OOB sequence used by
-    * both the refine and is-authorized dispatchers. `setReg7` is the
-    * caller's register-set hook (kept generic so this stays PvmInstance-only
-    * and free of per-dispatcher setReg boilerplate).
-    */
   def resolveFetch(
       instance: PvmInstance,
       selector: ULong,
@@ -557,7 +518,7 @@ object RefineFetch:
         val slice = bytes.slice(actualOffset, actualOffset + actualLength)
 
         if !instance.isMemoryWritable(outputAddr, actualLength) then
-          throw new RuntimeException(
+          throw new io.forge.jam.protocol.HostCallPanic(
             s"Fetch PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
           )
 
@@ -646,13 +607,8 @@ object RefineFetch:
     codec.encode(value) match
       case scodec.Attempt.Successful(bits) => bits.toByteArray
       case scodec.Attempt.Failure(err) =>
-        throw new RuntimeException(s"fetch encoding failed: $err")
+        throw new IllegalStateException(s"fetch encoding failed: $err")
 
-  /** Work-item summary S(w):
-    * encode4(service) ‖ codeHash ‖ encode8(refineGas) ‖ encode8(accGas) ‖
-    * encode2(exportCount) ‖ encode2(#imports) ‖ encode2(#extrinsics) ‖
-    * encode4(len(payload)).
-    */
   def workItemSummary(w: WorkItem): Array[Byte] =
     val out = new Array[Byte](4 + 32 + 8 + 8 + 2 + 2 + 2 + 4)
     var off = 0

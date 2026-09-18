@@ -5,10 +5,6 @@ import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import spire.math.ULong
 
-/** Storage, preimage and introspection host calls: GAS, FETCH (+ the cached constants/operand
-  * blobs), LOOKUP, READ, WRITE, INFO, QUERY, SOLICIT, FORGET, PROVIDE, YIELD
-  * and LOG. Dispatch lives in [[AccumulationHostCalls]].
-  */
 private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
   /** gas (0): Returns remaining gas in register r7.
@@ -54,7 +50,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
         // Check if output address is writable - PANIC if not
         if !isMemoryWritable(instance, outputAddr, actualLength) then
-          throw new RuntimeException(
+          panic(
             s"Fetch PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
           )
 
@@ -72,7 +68,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Read hash from memory - panic on OOB
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         s"Lookup PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
       )
 
@@ -106,7 +102,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
     // Check if output address is writable - PANIC if not
     if !isMemoryWritable(instance, outputAddr, actualLength) then
-      throw new RuntimeException(
+      panic(
         s"Lookup PANIC: Output memory not writable at 0x${outputAddr.toHexString} len $actualLength"
       )
 
@@ -132,7 +128,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleRead(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val keyAddr = getReg(instance, 8).toInt
-    val keyLen = getReg(instance, 9).toInt
+    val keyLen = getReg(instance, 9) & ULong(0xffffffffL)
     val outputAddr = getReg(instance, 10).toInt
 
     // Read key from memory - PANIC on memory failure
@@ -165,7 +161,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val slice = data.slice(actualOffset, actualOffset + actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
-      throw new RuntimeException(
+      panic(
         s"Read PANIC: Failed to write to output memory at 0x${outputAddr.toHexString}"
       )
 
@@ -178,23 +174,23 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleWrite(instance: PvmInstance): Unit =
     val keyAddr = getReg(instance, 7).toInt
     val valueAddr = getReg(instance, 9).toInt
-    val keyLen = argU32(instance, 8).getOrElse(
-      throw new RuntimeException("Write PANIC: key length out of 32-bit range")
-    ).toInt
-    val valueLen = argU32(instance, 10).getOrElse(
-      throw new RuntimeException("Write PANIC: value length out of 32-bit range")
-    ).toInt
+    val keyLen: Long = argU32(instance, 8).getOrElse(
+      panic("Write PANIC: key length out of 32-bit range")
+    )
+    val valueLen: Long = argU32(instance, 10).getOrElse(
+      panic("Write PANIC: value length out of 32-bit range")
+    )
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
-      throw new RuntimeException(
+      panic(
         "Write PANIC: Current service account not found"
       )
 
     val acc = account.get
 
     // Read key from memory
-    val keyBuffer = readGuestBytes(instance, keyAddr, keyLen, "Write")
+    val keyBuffer = readGuestBytes(instance, keyAddr, ULong(keyLen), "Write")
 
     val key = JamBytes(keyBuffer)
 
@@ -212,23 +208,23 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
     // Calculate new footprint to check threshold
     val newValue =
-      if valueLen == 0 then None
-      else Some(JamBytes(readGuestBytes(instance, valueAddr, valueLen, "Write")))
+      if valueLen == 0L then None
+      else Some(JamBytes(readGuestBytes(instance, valueAddr, ULong(valueLen), "Write")))
 
     // Calculate bytes/items delta for threshold check
     val (bytesDelta, itemsDelta): (Long, Int) = (valueLen, keyWasPresent) match
-      case (0, true) =>
+      case (0L, true) =>
         // Delete: decrement bytes (key + value + 34) and items
-        (-(keyLen.toLong + oldValueSize + 34), -1)
-      case (0, false) =>
+        (-(keyLen + oldValueSize + 34), -1)
+      case (0L, false) =>
         // Delete non-existent key: no change
         (0L, 0)
       case (_, true) =>
         // Update: only value size changes
-        ((valueLen - oldValueSize).toLong, 0)
+        (valueLen - oldValueSize, 0)
       case (_, false) =>
         // Insert: add key + value + 34 overhead
-        ((keyLen + valueLen + 34).toLong, 1)
+        (keyLen + valueLen + 34, 1)
 
     // Calculate new threshold balance and check against current balance
     val info = acc.info
@@ -248,7 +244,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Functional update of the (immutable) per-account storage map; the rebuilt
     // map replaces the prior one on the account written back below.
     val newStorage: Map[JamBytes, JamBytes] =
-      if valueLen == 0 then
+      if valueLen == 0L then
         // Delete key
         if keyWasPresent then
           if viewInstalled then
@@ -319,7 +315,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val slicedData = data.slice(first, first + len)
 
     if !writeMemory(instance, outputAddr, slicedData) then
-      throw new RuntimeException(
+      panic(
         s"Info PANIC: Failed to write to memory at $outputAddr"
       )
 
@@ -345,7 +341,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Read hash from memory
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         s"Query PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
       )
 
@@ -361,7 +357,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
         // Decode preimage info from raw state
-        val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
+        val timeslots = decodePreimageInfoOrPanic("Query", rawInfoData.get)
         request = Some(PreimageRequest(timeslots))
 
     if request.isEmpty then
@@ -408,7 +404,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         "Solicit PANIC: Failed to read hash from memory"
       )
 
@@ -423,7 +419,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
       val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
-        val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
+        val timeslots = decodePreimageInfoOrPanic("Solicit", rawInfoData.get)
         existingRequest = Some(PreimageRequest(timeslots))
 
     val notRequestedYet = existingRequest.isEmpty
@@ -512,7 +508,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         "Forget PANIC: Failed to read hash from memory"
       )
 
@@ -527,7 +523,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
       val rawInfoData = context.readRawData(infoStateKey)
       if rawInfoData.isDefined then
-        val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
+        val timeslots = decodePreimageInfoOrPanic("Forget", rawInfoData.get)
         existingRequest = Some(PreimageRequest(timeslots))
 
     if existingRequest.isEmpty then
@@ -622,10 +618,10 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       if r7 == ULong(0xffffffffffffffffL) then context.serviceIndex
       else r7.toLong
     val blobAddr = getReg(instance, 8).toInt
-    val blobLen = zFull.toInt
+    val blobBuffer = readGuestBytes(instance, blobAddr, zFull, "Provide")
 
-    // Read blob from memory - PANIC on failure
-    val blobBuffer = readGuestBytes(instance, blobAddr, blobLen, "Provide")
+    // Safe: readGuestBytes panicked unless zFull <= Int.MaxValue.
+    val blobLen = zFull.toInt
 
     val blob = JamBytes(blobBuffer)
 
@@ -652,7 +648,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
       val rawInfoData = context.readRawDataFor(targetServiceId, infoStateKey)
       if rawInfoData.isDefined then
-        val timeslots = StateKey.decodePreimageInfoValue(rawInfoData.get)
+        val timeslots = decodePreimageInfoOrPanic("Provide", rawInfoData.get)
         preimageRequest = Some(PreimageRequest(timeslots))
 
     // Spec OK path requires the request to be present with an empty timeslot
@@ -680,7 +676,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Read hash from memory
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, hashAddr, hashBuffer) then
-      throw new RuntimeException(
+      panic(
         s"Yield PANIC: Failed to read hash from memory at 0x${hashAddr.toHexString}"
       )
 

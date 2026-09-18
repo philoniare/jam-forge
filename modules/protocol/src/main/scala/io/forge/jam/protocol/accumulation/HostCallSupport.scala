@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.types.service.ServiceInfo
 import spire.math.ULong
 
@@ -62,19 +63,36 @@ private[accumulation] trait HostCallSupport:
     val v = getReg(instance, reg)
     if v > ULong(0xffffffffL) then None else Some(v.toLong)
 
+  protected def panic(message: String): Nothing =
+    throw new io.forge.jam.protocol.HostCallPanic(message)
+
+  protected def decodePreimageInfoOrPanic(
+      label: String,
+      raw: JamBytes
+  ): List[Long] =
+    try StateKey.decodePreimageInfoValue(raw)
+    catch
+      case scala.util.control.NonFatal(_) =>
+        panic(s"$label PANIC: malformed preimage-info value at guest-chosen state key")
+
   protected def readGuestBytes(
       instance: PvmInstance,
       address: Int,
-      length: Int,
+      lengthU: ULong,
       label: String
   ): Array[Byte] =
+    if lengthU > ULong(Int.MaxValue.toLong) then
+      panic(
+        s"$label PANIC: Failed to read from memory at 0x${address.toHexString} len $lengthU"
+      )
+    val length = lengthU.toInt
     if !instance.isMemoryReadable(address, length) then
-      throw new RuntimeException(
+      panic(
         s"$label PANIC: Failed to read from memory at 0x${address.toHexString} len $length"
       )
     val buf = new Array[Byte](length)
     if !readMemory(instance, address, buf) then
-      throw new RuntimeException(
+      panic(
         s"$label PANIC: Failed to read from memory at 0x${address.toHexString} len $length"
       )
     buf
