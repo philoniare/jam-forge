@@ -174,12 +174,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleWrite(instance: PvmInstance): Unit =
     val keyAddr = getReg(instance, 7).toInt
     val valueAddr = getReg(instance, 9).toInt
-    val keyLen: Long = argU32(instance, 8).getOrElse(
-      panic("Write PANIC: key length out of 32-bit range")
-    )
-    val valueLen: Long = argU32(instance, 10).getOrElse(
-      panic("Write PANIC: value length out of 32-bit range")
-    )
+    val keyLen: Long = (getReg(instance, 8) & ULong(0xffffffffL)).toLong
+    val valueLen: Long = (getReg(instance, 10) & ULong(0xffffffffL)).toLong
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then

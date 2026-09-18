@@ -72,7 +72,8 @@ private[accumulation] trait HostCallSupport:
   ): List[Long] =
     try StateKey.decodePreimageInfoValue(raw)
     catch
-      case scala.util.control.NonFatal(_) =>
+      case _: IllegalStateException | _: IndexOutOfBoundsException |
+          _: io.forge.jam.core.scodec.CodecDecodingException =>
         panic(s"$label PANIC: malformed preimage-info value at guest-chosen state key")
 
   protected def readGuestBytes(
