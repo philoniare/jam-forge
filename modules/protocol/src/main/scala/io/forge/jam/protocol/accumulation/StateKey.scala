@@ -115,7 +115,7 @@ object StateKey:
    */
   def encodePreimageInfoValue(timeslots: List[Long]): JamBytes =
     if timeslots.size > 3 then
-      throw new RuntimeException(
+      throw new IllegalStateException(
         s"Preimage info encode error: at most 3 timeslot entries allowed, got ${timeslots.size}"
       )
 
@@ -142,11 +142,11 @@ object StateKey:
     val (countLong, headerLen) = JamCodecs.decodeCompactInteger(bytes, 0)
     val count = countLong.toInt
     if count > 3 then
-      throw new RuntimeException(
+      throw new IllegalStateException(
         s"Preimage info decode error: at most 3 timeslot entries allowed, got count=$count"
       )
     if bytes.length != headerLen + count * 4 then
-      throw new RuntimeException(
+      throw new IllegalStateException(
         s"Preimage info decode error: expected ${headerLen + count * 4} bytes for count=$count, got ${bytes.length}"
       )
     if count == 0 then

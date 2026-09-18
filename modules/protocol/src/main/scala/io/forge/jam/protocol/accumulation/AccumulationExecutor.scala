@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind, MemoryResult}
@@ -239,7 +240,7 @@ class AccumulationExecutor(val config: ChainConfig):
             context.captureCheckpointIfPending()
             try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
-              case e: RuntimeException =>
+              case _: HostCallPanic =>
                 exitReason = ExitReason.PANIC
                 continueExecution = false
 
