@@ -93,55 +93,6 @@ final class InterpretedInstance private (
     (h, b)
 
   // ============================================================================
-  // Memory Operations (UInt address versions for API compatibility)
-  // ============================================================================
-
-  override def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadU8Int(pc, dst, address.signed)
-
-  override def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadI8Int(pc, dst, address.signed)
-
-  override def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadU16Int(pc, dst, address.signed)
-
-  override def loadI16(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadI16Int(pc, dst, address.signed)
-
-  override def loadU32(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadU32Int(pc, dst, address.signed)
-
-  override def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadI32Int(pc, dst, address.signed)
-
-  override def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadU64Int(pc, dst, address.signed)
-
-  override def storeU8(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeU8Int(pc, src, address.signed)
-
-  override def storeU16(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeU16Int(pc, src, address.signed)
-
-  override def storeU32(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeU32Int(pc, src, address.signed)
-
-  override def storeU64(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeU64Int(pc, src, address.signed)
-
-  override def storeImmU8(pc: ProgramCounter, address: UInt, value: Byte): Int =
-    storeImmU8Int(pc, address.signed, value)
-
-  override def storeImmU16(pc: ProgramCounter, address: UInt, value: Short): Int =
-    storeImmU16Int(pc, address.signed, value)
-
-  override def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Int =
-    storeImmU32Int(pc, address.signed, value)
-
-  override def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Int =
-    storeImmU64Int(pc, address.signed, value)
-
-  // ============================================================================
   // Memory Operations
   // ============================================================================
 
