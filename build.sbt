@@ -114,122 +114,35 @@ lazy val crypto = (project in file("modules/crypto"))
     scalacOptions ++= commonScalacOptions,
     buildNativeLib := {
       val baseDir = (ThisBuild / baseDirectory).value
-      val rustProjectDir = baseDir / "modules" / "crypto" / "native" / "bandersnatch-vrfs-wrapper"
-      val targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName
-      val libName = s"libbandersnatch_vrfs_wrapper.$libSuffix"
-
-      val targetLib = targetDir / libName
-      val sourceLib = rustProjectDir / "target" / "release" / libName
-
-      if (!targetLib.exists()) {
-        println(s"Building native library for $osDirName...")
-        targetDir.mkdirs()
-
-        val cargoPath =
-          try
-            if (osName.contains("win")) "where cargo".!!.trim
-            else "which cargo".!!.trim
-          catch {
-            case _: Exception => "cargo"
-          }
-
-        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
-        if (buildResult != 0) {
-          sys.error("Failed to build native library with cargo")
-        }
-
-        if (sourceLib.exists()) {
-          IO.copyFile(sourceLib, targetLib)
-          if (!osName.contains("win")) {
-            s"chmod +x ${targetLib.absolutePath}".!
-          }
-          println(s"Native library built: ${targetLib.absolutePath}")
-        } else {
-          sys.error(s"Native library not found at: ${sourceLib.absolutePath}")
-        }
-      } else {
-        println(s"Native library already exists: ${targetLib.absolutePath}")
-      }
+      NativeBuild.cargoLib(
+        rustProjectDir = baseDir / "modules" / "crypto" / "native" / "bandersnatch-vrfs-wrapper",
+        targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName,
+        libName = s"libbandersnatch_vrfs_wrapper.$libSuffix",
+        displayName = "Native library",
+        isWindows = osName.contains("win")
+      )
     },
     // Ed25519-Zebra native library build task
     buildEd25519ZebraLib := {
       val baseDir = (ThisBuild / baseDirectory).value
-      val rustProjectDir = baseDir / "modules" / "crypto" / "native" / "ed25519-zebra-wrapper"
-      val targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName
-      val libName = s"libed25519_zebra_wrapper.$libSuffix"
-
-      val targetLib = targetDir / libName
-      val sourceLib = rustProjectDir / "target" / "release" / libName
-
-      if (!targetLib.exists()) {
-        println(s"Building Ed25519-Zebra native library for $osDirName...")
-        targetDir.mkdirs()
-
-        val cargoPath =
-          try
-            if (osName.contains("win")) "where cargo".!!.trim
-            else "which cargo".!!.trim
-          catch {
-            case _: Exception => "cargo"
-          }
-
-        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
-        if (buildResult != 0) {
-          sys.error("Failed to build Ed25519-Zebra native library with cargo")
-        }
-
-        if (sourceLib.exists()) {
-          IO.copyFile(sourceLib, targetLib)
-          if (!osName.contains("win")) {
-            s"chmod +x ${targetLib.absolutePath}".!
-          }
-          println(s"Ed25519-Zebra native library built: ${targetLib.absolutePath}")
-        } else {
-          sys.error(s"Ed25519-Zebra native library not found at: ${sourceLib.absolutePath}")
-        }
-      } else {
-        println(s"Ed25519-Zebra native library already exists: ${targetLib.absolutePath}")
-      }
+      NativeBuild.cargoLib(
+        rustProjectDir = baseDir / "modules" / "crypto" / "native" / "ed25519-zebra-wrapper",
+        targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName,
+        libName = s"libed25519_zebra_wrapper.$libSuffix",
+        displayName = "Ed25519-Zebra native library",
+        isWindows = osName.contains("win")
+      )
     },
     // Erasure Coding native library build task
     buildErasureCodingLib := {
       val baseDir = (ThisBuild / baseDirectory).value
-      val rustProjectDir = baseDir / "modules" / "crypto" / "native" / "erasure-coding-wrapper"
-      val targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName
-      val libName = s"liberasure_coding_wrapper.$libSuffix"
-
-      val targetLib = targetDir / libName
-      val sourceLib = rustProjectDir / "target" / "release" / libName
-
-      if (!targetLib.exists()) {
-        println(s"Building Erasure Coding native library for $osDirName...")
-        targetDir.mkdirs()
-
-        val cargoPath =
-          try
-            if (osName.contains("win")) "where cargo".!!.trim
-            else "which cargo".!!.trim
-          catch {
-            case _: Exception => "cargo"
-          }
-
-        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
-        if (buildResult != 0) {
-          sys.error("Failed to build Erasure Coding native library with cargo")
-        }
-
-        if (sourceLib.exists()) {
-          IO.copyFile(sourceLib, targetLib)
-          if (!osName.contains("win")) {
-            s"chmod +x ${targetLib.absolutePath}".!
-          }
-          println(s"Erasure Coding native library built: ${targetLib.absolutePath}")
-        } else {
-          sys.error(s"Erasure Coding native library not found at: ${sourceLib.absolutePath}")
-        }
-      } else {
-        println(s"Erasure Coding native library already exists: ${targetLib.absolutePath}")
-      }
+      NativeBuild.cargoLib(
+        rustProjectDir = baseDir / "modules" / "crypto" / "native" / "erasure-coding-wrapper",
+        targetDir = baseDir / "modules" / "crypto" / "native" / "build" / osDirName,
+        libName = s"liberasure_coding_wrapper.$libSuffix",
+        displayName = "Erasure Coding native library",
+        isWindows = osName.contains("win")
+      )
     },
     // Run all native lib builds before compile
     Compile / compile := (Compile / compile).dependsOn(buildNativeLib, buildEd25519ZebraLib, buildErasureCodingLib).value,
@@ -261,24 +174,13 @@ lazy val pvm = (project in file("modules/pvm"))
     scalacOptions ++= commonScalacOptionsHK,
     buildPvmRecompilerLib := {
       val baseDir = (ThisBuild / baseDirectory).value
-      val rustProjectDir = baseDir / "modules" / "pvm" / "native" / "pvm-recompiler"
-      val targetDir = baseDir / "modules" / "pvm" / "native" / "build" / osDirName
-      val libName = s"libpvm_recompiler.$libSuffix"
-      val targetLib = targetDir / libName
-      val sourceLib = rustProjectDir / "target" / "release" / libName
-      if (!targetLib.exists()) {
-        targetDir.mkdirs()
-        val cargoPath =
-          try if (osName.contains("win")) "where cargo".!!.trim else "which cargo".!!.trim
-          catch { case _: Exception => "cargo" }
-        val buildResult = Process(Seq(cargoPath, "build", "--release"), rustProjectDir).!
-        if (buildResult != 0) sys.error("Failed to build pvm-recompiler with cargo")
-        if (sourceLib.exists()) {
-          IO.copyFile(sourceLib, targetLib)
-          if (!osName.contains("win")) s"chmod +x ${targetLib.absolutePath}".!
-          println(s"PVM recompiler native library built: ${targetLib.absolutePath}")
-        } else sys.error(s"PVM recompiler library not found at: ${sourceLib.absolutePath}")
-      } else println(s"PVM recompiler native library already exists: ${targetLib.absolutePath}")
+      NativeBuild.cargoLib(
+        rustProjectDir = baseDir / "modules" / "pvm" / "native" / "pvm-recompiler",
+        targetDir = baseDir / "modules" / "pvm" / "native" / "build" / osDirName,
+        libName = s"libpvm_recompiler.$libSuffix",
+        displayName = "PVM recompiler native library",
+        isWindows = osName.contains("win")
+      )
     },
     Compile / compile := (Compile / compile).dependsOn(buildPvmRecompilerLib).value,
     // The differential-oracle test forks a JVM that loads the recompiler dylib.
