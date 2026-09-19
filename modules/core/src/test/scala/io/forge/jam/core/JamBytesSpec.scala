@@ -62,17 +62,6 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  "JamBytes.concat" should "concatenate multiple JamBytes" in {
-    val a = JamBytes(Array[Byte](1))
-    val b = JamBytes(Array[Byte](2))
-    val c = JamBytes(Array[Byte](3))
-    JamBytes.concat(a, b, c).toArray shouldBe Array[Byte](1, 2, 3)
-  }
-
-  it should "handle empty parts" in {
-    JamBytes.concat().isEmpty shouldBe true
-  }
-
   "length and size" should "return correct values" in {
     val bytes = JamBytes(Array[Byte](1, 2, 3))
     bytes.length shouldBe 3

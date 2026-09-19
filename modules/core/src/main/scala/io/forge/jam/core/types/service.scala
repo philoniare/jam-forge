@@ -129,8 +129,6 @@ object service:
   )
 
   object ServiceAccount:
-    val Size: Int = 4 + ServiceData.Size
-
     given Codec[ServiceAccount] =
       (uint32L :: summon[Codec[ServiceData]]).xmap(
         { case (id, data) => ServiceAccount(id & 0xFFFFFFFFL, data) },

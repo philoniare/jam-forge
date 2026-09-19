@@ -22,8 +22,6 @@ object history:
   )
 
   object ReportedWorkPackage:
-    val Size: Int = Hash.Size * 2 // 64 bytes
-
     given Codec[ReportedWorkPackage] =
       (hashCodec :: hashCodec).xmap(
         { case (hash, exportsRoot) => ReportedWorkPackage(hash, exportsRoot) },

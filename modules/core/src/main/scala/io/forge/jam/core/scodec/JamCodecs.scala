@@ -3,7 +3,7 @@ package io.forge.jam.core.scodec
 import scodec.*
 import scodec.bits.*
 import scodec.codecs.*
-import spire.math.{UByte, UShort, UInt, ULong}
+import spire.math.{UByte, UInt}
 import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.JamBytes
@@ -32,19 +32,9 @@ object JamCodecs:
     u => u.toByte
   )
 
-  given ushortCodec: Codec[UShort] = uint16L.xmap(
-    i => UShort(i),
-    u => u.toInt
-  )
-
   given uintCodec: Codec[UInt] = uint32L.xmap(
     l => UInt(l.toInt),
     u => u.toLong & 0xffffffffL
-  )
-
-  given ulongCodec: Codec[ULong] = int64L.xmap(
-    l => ULong(l),
-    u => u.signed
   )
 
   given hashCodec: Codec[Hash] = fixedSizeBytes(Hash.Size.toLong, bytes).xmap(
@@ -192,9 +182,6 @@ object JamCodecs:
 
   def fixedSizeList[A](codec: Codec[A], size: Int): Codec[List[A]] =
     vectorOfN(provide(size), codec).xmap(_.toList, _.toVector)
-
-  def fixedSizeByteVector(size: Long): Codec[ByteVector] =
-    fixedSizeBytes(size, bytes)
 
   def stfResultCodec[A, E](using
       okCodec: Codec[A],

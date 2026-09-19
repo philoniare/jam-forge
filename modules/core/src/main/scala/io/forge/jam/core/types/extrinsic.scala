@@ -71,13 +71,6 @@ object extrinsic:
   )
 
   object AssuranceExtrinsic:
-    val SignatureSize: Int = 64 // Ed25519
-
-    /** Calculate size based on cores count */
-    def size(coresCount: Int): Int =
-      val bitfieldSize = (coresCount + 7) / 8
-      Hash.Size + bitfieldSize + 2 + SignatureSize
-
     /** Create a codec that knows the cores count */
     def codec(coresCount: Int): Codec[AssuranceExtrinsic] =
       val bitfieldSize = (coresCount + 7) / 8
@@ -117,10 +110,6 @@ object extrinsic:
   )
 
   object Verdict:
-    /** Calculate size based on votes count */
-    def size(votesPerVerdict: Int): Int =
-      Hash.Size + 4 + votesPerVerdict * Vote.Size
-
     /** Create a codec that knows the votes per verdict */
     def codec(votesPerVerdict: Int): Codec[Verdict] =
       import io.forge.jam.core.scodec.JamCodecs.fixedSizeList

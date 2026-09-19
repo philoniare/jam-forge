@@ -28,8 +28,6 @@ object workpackage:
   )
 
   object SegmentRootLookup:
-    val Size: Int = Hash.Size * 2 // 64 bytes
-
     given Codec[SegmentRootLookup] =
       (hashCodec :: hashCodec).xmap(
         { case (wpHash, segRoot) => SegmentRootLookup(wpHash, segRoot) },

@@ -32,9 +32,6 @@ object context:
   )
 
   object Context:
-    /** Fixed part size (without prerequisites) */
-    val FixedSize: Int = Hash.Size * 4 + 4 // 132 bytes
-
     given Codec[Context] =
       (hashCodec ::               // anchor
        hashCodec ::               // stateRoot

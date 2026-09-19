@@ -90,10 +90,6 @@ object JamBytes:
   def fromHexUnsafe(hex: String): JamBytes =
     fromHex(hex).fold(msg => throw new IllegalArgumentException(msg), identity)
 
-  def concat(parts: JamBytes*): JamBytes =
-    if parts.isEmpty then empty
-    else new JamBytes(parts.map(_.underlying).reduce(_ ++ _))
-
   def compareUnsigned(a: Array[Byte], b: Array[Byte]): Int =
     val len = math.min(a.length, b.length)
     var i = 0
