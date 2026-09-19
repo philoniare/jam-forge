@@ -3,7 +3,6 @@ package io.forge.jam.core.scodec
 import scodec.*
 import scodec.bits.*
 import scodec.codecs.*
-import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.*
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.epoch.ValidatorKey
@@ -21,7 +20,6 @@ object FullJamStateCodecs:
   val ValidatorKeySize: Int = 336
   val MetadataSize: Int = 128
   val TicketMarkSize: Int = Hash.Size + 1
-  val StatCountSize: Int = 24
 
   /** Codec for timeslot (tau) - 4 bytes little-endian uint32. */
   val timeslotCodec: Codec[Long] = uint32L.xmap(_.toLong, _ & 0xFFFFFFFFL)
@@ -90,116 +88,13 @@ object FullJamStateCodecs:
     val optionalAssignmentCodec = JamCodecs.optionCodec(assignmentCodec)
     JamCodecs.fixedSizeList(optionalAssignmentCodec, coresCount)
 
-  final case class StatCountData(
-    blocks: Long,
-    tickets: Long,
-    preImages: Long,
-    preImagesSize: Long,
-    guarantees: Long,
-    assurances: Long
-  )
-
-  object StatCountData:
-    def zero: StatCountData = StatCountData(0, 0, 0, 0, 0, 0)
-
-  final case class CoreStatisticsData(
-    daLoad: Long,
-    popularity: Long,
-    imports: Long,
-    extrinsicCount: Long,
-    extrinsicSize: Long,
-    exports: Long,
-    bundleSize: Long,
-    gasUsed: Long
-  )
-
-  object CoreStatisticsData:
-    def zero: CoreStatisticsData = CoreStatisticsData(0, 0, 0, 0, 0, 0, 0, 0)
-
-  final case class ServiceStatisticsData(
-    serviceId: Long,
-    preimagesCount: Long,
-    preimagesSize: Long,
-    refinesCount: Long,
-    refinesGas: Long,
-    importsCount: Long,
-    extrinsicsCount: Long,
-    extrinsicsSize: Long,
-    exportsCount: Long,
-    accumulatesCount: Long,
-    accumulatesGas: Long
-  )
-
-  final case class ActivityStatisticsData(
-    accumulator: List[StatCountData],
-    previous: List[StatCountData],
-    core: List[CoreStatisticsData],
-    service: List[ServiceStatisticsData]
-  )
-
-  private val statCountCodec: Codec[StatCountData] =
-    (uint32L :: uint32L :: uint32L :: uint32L :: uint32L :: uint32L).xmap(
-      { case (b, t, p, ps, g, a) =>
-        StatCountData(b.toLong, t.toLong, p.toLong, ps.toLong, g.toLong, a.toLong)
-      },
-      s => (
-        s.blocks & 0xFFFFFFFFL,
-        s.tickets & 0xFFFFFFFFL,
-        s.preImages & 0xFFFFFFFFL,
-        s.preImagesSize & 0xFFFFFFFFL,
-        s.guarantees & 0xFFFFFFFFL,
-        s.assurances & 0xFFFFFFFFL
-      )
-    )
-
-  private val coreStatisticsCodec: Codec[CoreStatisticsData] =
-    (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-      { case (d, p, i, xc, xs, e, b, g) =>
-        CoreStatisticsData(d, p, i, xc, xs, e, b, g)
-      },
-      c => (c.daLoad, c.popularity, c.imports, c.extrinsicCount,
-            c.extrinsicSize, c.exports, c.bundleSize, c.gasUsed)
-    )
-
-  private val serviceStatisticsCodec: Codec[ServiceStatisticsData] =
-    (uint32L ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-     JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-      { case (id, pc, ps, rc, rg, ic, xc, xs, ec, ac, ag) =>
-        ServiceStatisticsData(id.toLong, pc, ps, rc, rg, ic, xc, xs, ec, ac, ag)
-      },
-      s => (s.serviceId & 0xFFFFFFFFL, // Keep as Long for uint32L codec
-            s.preimagesCount, s.preimagesSize, s.refinesCount, s.refinesGas,
-            s.importsCount, s.extrinsicsCount, s.extrinsicsSize, s.exportsCount,
-            s.accumulatesCount, s.accumulatesGas)
-    )
-
-  /** Codec for activity statistics. */
-  def activityStatisticsCodec(validatorCount: Int, coresCount: Int): Codec[ActivityStatisticsData] =
-    val accumulatorCodec = JamCodecs.fixedSizeList(statCountCodec, validatorCount)
-    val previousCodec = JamCodecs.fixedSizeList(statCountCodec, validatorCount)
-    val coreCodec = JamCodecs.fixedSizeList(coreStatisticsCodec, coresCount)
-    val serviceCodec = JamCodecs.compactPrefixedList(serviceStatisticsCodec)
-
-    (accumulatorCodec :: previousCodec :: coreCodec :: serviceCodec).xmap(
-      { case (acc, prev, core, svc) =>
-        ActivityStatisticsData(acc, prev, core, svc)
-      },
-      s => (s.accumulator, s.previous, s.core, s.service)
-    )
-
   /** Use ServiceInfo codec from its companion object. */
   val serviceInfoCodec: Codec[ServiceInfo] = summon[Codec[ServiceInfo]]
 
   /**
    * Decode a state value and require it to be consumed exactly.
    */
-  private def decodeExact[A](codec: Codec[A], bytes: Array[Byte], label: String): A =
+  def decodeExact[A](codec: Codec[A], bytes: Array[Byte], label: String): A =
     codec.decode(BitVector(bytes)) match
       case Attempt.Successful(result) =>
         if result.remainder.nonEmpty then
@@ -215,13 +110,6 @@ object FullJamStateCodecs:
 
   def decodeAuthQueues(bytes: Array[Byte], coresCount: Int, queueSize: Int): List[List[Hash]] =
     decodeExact(authQueuesCodec(coresCount, queueSize), bytes, "decodeAuthQueues")
-
-  def decodeActivityStatistics(
-    bytes: Array[Byte],
-    validatorCount: Int,
-    coresCount: Int
-  ): ActivityStatisticsData =
-    decodeExact(activityStatisticsCodec(validatorCount, coresCount), bytes, "decodeActivityStatistics")
 
   def decodeAccumulationHistory(bytes: Array[Byte], epochLength: Int): List[List[ByteVector]] =
     decodeExact(accumulationHistoryCodec(epochLength), bytes, "decodeAccumulationHistory")
@@ -246,25 +134,3 @@ object FullJamStateCodecs:
     val sorted = outputs.sortBy(_._1)
     lastAccumulationOutputsCodec.encode(sorted).require.bytes
 
-  final case class FullJamStateCodecSet(
-    timeslot: Codec[Long],
-    entropyPool: Codec[List[Hash]],
-    validatorList: Codec[List[ValidatorKey]],
-    authPools: Codec[List[List[Hash]]],
-    authQueues: Codec[List[List[Hash]]],
-    accumulationHistory: Codec[List[List[ByteVector]]],
-    safroleGammaState: Codec[(List[ValidatorKey], ByteVector, TicketsOrKeysData, List[TicketMark])],
-    activityStatistics: Codec[ActivityStatisticsData]
-  )
-
-  def fromConfig(config: ChainConfig): FullJamStateCodecSet =
-    FullJamStateCodecSet(
-      timeslot = timeslotCodec,
-      entropyPool = entropyPoolCodec,
-      validatorList = validatorListCodec(config.validatorCount),
-      authPools = authPoolsCodec(config.coresCount),
-      authQueues = authQueuesCodec(config.coresCount, config.authQueueSize),
-      accumulationHistory = accumulationHistoryCodec(config.epochLength),
-      safroleGammaState = safroleGammaStateCodec(config.validatorCount, config.epochLength),
-      activityStatistics = activityStatisticsCodec(config.validatorCount, config.coresCount)
-    )

@@ -1,5 +1,3 @@
-import scala.sys.process._
-
 ThisBuild / scalaVersion := "3.3.7"
 ThisBuild / organization := "io.forge.jam"
 ThisBuild / version := "0.1.0-SNAPSHOT"
