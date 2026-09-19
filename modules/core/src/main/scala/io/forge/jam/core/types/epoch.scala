@@ -3,6 +3,7 @@ package io.forge.jam.core.types
 import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, blsPublicKeyCodec}
 import io.circe.Decoder
 import _root_.scodec.*
 import _root_.scodec.bits.*
@@ -12,30 +13,6 @@ import _root_.scodec.codecs.*
  * Epoch-related types
  */
 object epoch:
-
-  // Private codecs for primitive types
-  private val hashCodec: Codec[Hash] = fixedSizeBytes(32L, bytes).xmap(
-    bv => Hash.fromByteVectorUnsafe(bv),
-    h => h.toByteVector
-  )
-
-  private val bandersnatchKeyCodec: Codec[BandersnatchPublicKey] =
-    fixedSizeBytes(32L, bytes).xmap(
-      bv => BandersnatchPublicKey.fromByteVectorUnsafe(bv),
-      k => k.toByteVector
-    )
-
-  private val ed25519KeyCodec: Codec[Ed25519PublicKey] =
-    fixedSizeBytes(32L, bytes).xmap(
-      bv => Ed25519PublicKey.fromByteVectorUnsafe(bv),
-      k => k.toByteVector
-    )
-
-  private val blsKeyCodec: Codec[BlsPublicKey] =
-    fixedSizeBytes(144L, bytes).xmap(
-      bv => BlsPublicKey.fromByteVectorUnsafe(bv),
-      k => k.toByteVector
-    )
 
   /**
    * Short-form validator key used in EpochMark.
@@ -51,7 +28,7 @@ object epoch:
     val Size: Int = BandersnatchPublicKey.Size + Ed25519PublicKey.Size // 64 bytes
 
     given Codec[EpochValidatorKey] =
-      (bandersnatchKeyCodec :: ed25519KeyCodec).xmap(
+      (bandersnatchPublicKeyCodec :: ed25519PublicKeyCodec).xmap(
         { case (b, e) => EpochValidatorKey(b, e) },
         evk => (evk.bandersnatch, evk.ed25519)
       )
@@ -143,7 +120,7 @@ object epoch:
       )
 
     given Codec[ValidatorKey] =
-      (bandersnatchKeyCodec :: ed25519KeyCodec :: blsKeyCodec :: fixedSizeBytes(128L, bytes)).xmap(
+      (bandersnatchPublicKeyCodec :: ed25519PublicKeyCodec :: blsPublicKeyCodec :: fixedSizeBytes(128L, bytes)).xmap(
         { case (b, e, bls, meta) => ValidatorKey(b, e, bls, JamBytes.fromByteVector(meta)) },
         vk => (vk.bandersnatch, vk.ed25519, vk.bls, vk.metadata.toByteVector)
       )
