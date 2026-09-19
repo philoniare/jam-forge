@@ -12,6 +12,7 @@ import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.ReportBridge
+import io.forge.jam.protocol.statistics.StatsAggregation
 import io.forge.jam.crypto.Ed25519
 import spire.math.ULong
 
@@ -118,8 +119,8 @@ object ReportTransition:
       case Right((reports, packages, guarantors)) =>
         val postState = preState.copy(
           availAssignments = updateAvailAssignments(preState.availAssignments, reports, input.slot),
-          coresStatistics = updateCoreStatistics(input.guarantees, config.coresCount),
-          servicesStatistics = updateServiceStatistics(input.guarantees)
+          coresStatistics = StatsAggregation.coreStatsByCore(input.guarantees, config.coresCount),
+          servicesStatistics = StatsAggregation.serviceStatsFromGuarantees(input.guarantees)
         )
         val outputMarks = ReportOutputMarks(
           reported = packages.sortBy(_.workPackageHash),
@@ -509,84 +510,3 @@ object ReportTransition:
       case (existing, index) =>
         reportsByCore.get(index).map(AvailabilityAssignment(_, currentSlot)).orElse(existing)
     }
-
-  /**
-   * Update core statistics based on guarantees.
-   */
-  private def updateCoreStatistics(guarantees: List[GuaranteeExtrinsic], coresCount: Int): List[CoreStatisticsRecord] =
-    val statsByCore = guarantees
-      .groupMapReduce(_.report.coreIndex.toInt)(computeCoreStats)(mergeCoreStats)
-
-    (0 until coresCount).map(i => statsByCore.getOrElse(i, CoreStatisticsRecord())).toList
-
-  private def computeCoreStats(guarantee: GuaranteeExtrinsic): CoreStatisticsRecord =
-    val report = guarantee.report
-    val totals = report.results.foldLeft((0L, 0L, 0L, 0L, 0L)) {
-      case ((imports, extCount, extSize, exports, gas), result) =>
-        val load = result.refineLoad
-        (
-          imports + load.imports.toLong,
-          extCount + load.extrinsicCount.toLong,
-          extSize + load.extrinsicSize.toLong,
-          exports + load.exports.toLong,
-          gas + load.gasUsed.toLong
-        )
-    }
-    CoreStatisticsRecord(
-      imports = totals._1,
-      extrinsicCount = totals._2,
-      extrinsicSize = totals._3,
-      exports = totals._4,
-      bundleSize = report.packageSpec.length.toLong,
-      gasUsed = totals._5
-    )
-
-  private def mergeCoreStats(a: CoreStatisticsRecord, b: CoreStatisticsRecord): CoreStatisticsRecord =
-    CoreStatisticsRecord(
-      imports = a.imports + b.imports,
-      extrinsicCount = a.extrinsicCount + b.extrinsicCount,
-      extrinsicSize = a.extrinsicSize + b.extrinsicSize,
-      exports = a.exports + b.exports,
-      bundleSize = a.bundleSize + b.bundleSize,
-      gasUsed = a.gasUsed + b.gasUsed
-    )
-
-  /**
-   * Update service statistics based on guarantees.
-   */
-  private def updateServiceStatistics(guarantees: List[GuaranteeExtrinsic]): List[ServiceStatisticsEntry] =
-    if guarantees.isEmpty then return List.empty
-
-    val allResults =
-      for
-        guarantee <- guarantees
-        result <- guarantee.report.results
-      yield result
-
-    allResults
-      // Use & 0xFFFFFFFFL to preserve unsigned 32-bit service ID values
-      .groupMapReduce(r => r.serviceId.toInt.toLong & 0xffffffffL)(computeServiceStats)(mergeServiceStats)
-      .map { case (id, record) => ServiceStatisticsEntry(id, record) }
-      .toList
-      .sortBy(_.id)
-
-  private def computeServiceStats(result: io.forge.jam.core.types.workresult.WorkResult): ServiceActivityRecord =
-    val load = result.refineLoad
-    ServiceActivityRecord(
-      refinementCount = 1,
-      refinementGasUsed = load.gasUsed.toLong,
-      extrinsicCount = load.extrinsicCount.toLong,
-      extrinsicSize = load.extrinsicSize.toLong,
-      imports = load.imports.toLong,
-      exports = load.exports.toLong
-    )
-
-  private def mergeServiceStats(a: ServiceActivityRecord, b: ServiceActivityRecord): ServiceActivityRecord =
-    ServiceActivityRecord(
-      refinementCount = a.refinementCount + b.refinementCount,
-      refinementGasUsed = a.refinementGasUsed + b.refinementGasUsed,
-      extrinsicCount = a.extrinsicCount + b.extrinsicCount,
-      extrinsicSize = a.extrinsicSize + b.extrinsicSize,
-      imports = a.imports + b.imports,
-      exports = a.exports + b.exports
-    )

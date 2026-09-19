@@ -20,6 +20,7 @@ import io.forge.jam.protocol.history.HistoryTypes.*
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 import io.forge.jam.protocol.preimage.PreimageTypes.*
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
+import io.forge.jam.protocol.statistics.StatsAggregation
 import io.forge.jam.protocol.dispute.DisputeTypes.*
 import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
@@ -240,38 +241,7 @@ class BlockImporter(
       assurances: List[AssuranceExtrinsic],
       maxCores: Int
   ): List[CoreStatisticsRecord] =
-    val stats = Array.fill(maxCores)(CoreStatisticsRecord())
-
-    var gi = guarantees
-    while gi.nonEmpty do
-      val guarantee = gi.head
-      gi = gi.tail
-      val report = guarantee.report
-      val coreIdx = report.coreIndex.toInt
-      if coreIdx >= 0 && coreIdx < maxCores then
-        var imports = 0L
-        var extCount = 0L
-        var extSize = 0L
-        var exports = 0L
-        var gas = 0L
-        var rs = report.results
-        while rs.nonEmpty do
-          val load = rs.head.refineLoad
-          imports += load.imports.toLong
-          extCount += load.extrinsicCount.toLong
-          extSize += load.extrinsicSize.toLong
-          exports += load.exports.toLong
-          gas += load.gasUsed.toLong
-          rs = rs.tail
-        val cur = stats(coreIdx)
-        stats(coreIdx) = cur.copy(
-          imports = cur.imports + imports,
-          extrinsicCount = cur.extrinsicCount + extCount,
-          extrinsicSize = cur.extrinsicSize + extSize,
-          exports = cur.exports + exports,
-          bundleSize = cur.bundleSize + report.packageSpec.length.toLong,
-          gasUsed = cur.gasUsed + gas
-        )
+    val stats = StatsAggregation.coreStatsByCore(guarantees, maxCores).toArray
 
     var ari = availableReports
     while ari.nonEmpty do
@@ -329,25 +299,18 @@ class BlockImporter(
     def getOrEmpty(id: Long): ReportTypes.ServiceActivityRecord =
       stats.getOrElse(id, ReportTypes.ServiceActivityRecord())
 
-    var gi = guarantees
-    while gi.nonEmpty do
-      var rs = gi.head.report.results
-      while rs.nonEmpty do
-        val r = rs.head
-        val serviceId = r.serviceId.value.toLong
-        val refineLoad = r.refineLoad
-        val cur = getOrEmpty(serviceId)
-        stats(serviceId) = cur.copy(
-          refinementCount = cur.refinementCount + 1L,
-          refinementGasUsed = cur.refinementGasUsed + refineLoad.gasUsed.toLong,
-          imports = cur.imports + refineLoad.imports.toLong,
-          exports = cur.exports + refineLoad.exports.toLong,
-          extrinsicCount =
-            cur.extrinsicCount + refineLoad.extrinsicCount.toLong,
-          extrinsicSize = cur.extrinsicSize + refineLoad.extrinsicSize.toLong
-        )
-        rs = rs.tail
-      gi = gi.tail
+    StatsAggregation.serviceStatsFromGuarantees(guarantees).foreach { entry =>
+      val cur = getOrEmpty(entry.id)
+      val g = entry.record
+      stats(entry.id) = cur.copy(
+        refinementCount = cur.refinementCount + g.refinementCount,
+        refinementGasUsed = cur.refinementGasUsed + g.refinementGasUsed,
+        imports = cur.imports + g.imports,
+        exports = cur.exports + g.exports,
+        extrinsicCount = cur.extrinsicCount + g.extrinsicCount,
+        extrinsicSize = cur.extrinsicSize + g.extrinsicSize
+      )
+    }
 
     var pi = preimages
     while pi.nonEmpty do

@@ -123,6 +123,8 @@ class RefineExecutor(val config: ChainConfig):
         RefineResult(ExecutionResult.OOG, Nil, gasUsed)
       case PvmRunner.PvmExit.Panic =>
         RefineResult(ExecutionResult.Panic, Nil, gasUsed)
+      case PvmRunner.PvmExit.PageFault =>
+        RefineResult(ExecutionResult.Panic, Nil, gasUsed)
       case PvmRunner.PvmExit.Halt =>
         RefineResult(
           ExecutionResult.Ok(JamBytes(output)),
