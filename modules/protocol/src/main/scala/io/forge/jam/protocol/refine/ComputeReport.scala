@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.refine
 
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
+import io.forge.jam.core.constants
 import io.forge.jam.core.constants.Csegmentsize
 import io.forge.jam.core.primitives.{CoreIndex, Gas, Hash}
 import io.forge.jam.core.types.work.ExecutionResult
@@ -36,11 +37,6 @@ final case class ComputedReport(
   */
 class ComputeReport(val config: ChainConfig):
 
-  /** Cmaxreportvarsize: bound on the authorizer
-    * trace and the cumulative work-item output sizes.
-    */
-  private val MaxReportVarSize: Int = 48 * 1024
-
   private val isAuthorizedExecutor = new IsAuthorizedExecutor(config)
   private val refineExecutor = new RefineExecutor(config)
 
@@ -68,7 +64,7 @@ class ComputeReport(val config: ChainConfig):
       case ExecutionResult.Ok(trace) => trace.toArray
       case other => return Left(ComputeReportError.AuthorizationFailed(other))
 
-    if authTrace.length > MaxReportVarSize then
+    if authTrace.length > constants.Cmaxreportvarsize then
       return Left(ComputeReportError.AuthTraceOversize(authTrace.length))
     val digests = Vector.newBuilder[WorkResult]
     val allExports = Vector.newBuilder[Array[Byte]]
@@ -93,7 +89,7 @@ class ComputeReport(val config: ChainConfig):
 
       val (finalResult, exports) = refineResult.result match
         case ExecutionResult.Ok(output)
-            if cumulativeOutputSize + output.length > MaxReportVarSize =>
+            if cumulativeOutputSize + output.length > constants.Cmaxreportvarsize =>
           (ExecutionResult.Oversize, zeroSegments)
         case ExecutionResult.Ok(output)
             if refineResult.exports.length != declaredExports =>

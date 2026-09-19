@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.refine
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
@@ -86,12 +86,6 @@ private final class IsAuthorizedHostCalls(
   */
 class IsAuthorizedExecutor(val config: ChainConfig):
 
-  /** Cmaxauthcodesize (gp 0.7.2 definitions.tex). */
-  private val MAX_AUTH_CODE_SIZE: Int = 64_000
-
-  /** Cpackageauthgas (gp 0.7.2 definitions.tex). */
-  private val PACKAGE_AUTH_GAS: Long = 50_000_000L
-
   private val MAX_MODULE_CACHE_SIZE = 16
   private val moduleCache = new BoundedModuleCache(MAX_MODULE_CACHE_SIZE)
 
@@ -133,7 +127,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       case _ =>
         return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
 
-    if code.length > MAX_AUTH_CODE_SIZE then
+    if code.length > constants.Cmaxauthcodesize then
       return IsAuthorizedResult(ExecutionResult.CodeTooLarge, 0L)
 
     val module = getOrCompileModule(
@@ -152,7 +146,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
 
     val hostCalls = new IsAuthorizedHostCalls(config, workPackage)
     val (exit, gasUsed, output) =
-      PvmRunner.run(module, args, PACKAGE_AUTH_GAS, entryPc = 0, hostCalls, executionMode)
+      PvmRunner.run(module, args, constants.Cpackageauthgas, entryPc = 0, hostCalls, executionMode)
 
     exit match
       case PvmRunner.PvmExit.OutOfGas =>

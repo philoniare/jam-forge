@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.JamBytes
+import io.forge.jam.core.{JamBytes, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import spire.math.ULong
@@ -483,7 +483,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val accounts = context.x.accounts
 
     // 1. Read memo from memory (128 bytes) - PANIC if fails
-    val memoBuffer = new Array[Byte](DeferredTransfer.MEMO_SIZE)
+    val memoBuffer = new Array[Byte](constants.Cmemosize)
     if !readMemory(instance, memoAddr, memoBuffer) then
       panic(
         s"Transfer PANIC: Failed to read memo from memory at $memoAddr"

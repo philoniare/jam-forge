@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.JamBytes
+import io.forge.jam.core.{JamBytes, constants}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
@@ -58,9 +58,6 @@ final case class DeferredTransfer(
     memo: JamBytes,
     gasLimit: Long
 )
-
-object DeferredTransfer:
-  val MEMO_SIZE: Int = 128
 
 /** Accumulation input - union of OperandTuple or DeferredTransfer
   */
@@ -340,8 +337,8 @@ final class AccumulationContext(
     val provisionsCheckpoint: mutable.Set[(Long, JamBytes)] = mutable.Set.empty,
     var yieldHash: Option[JamBytes] = None,
     var yieldCheckpoint: Option[JamBytes] = None,
-    var nextAccountIndex: Long = 65536L,
-    val minPublicServiceIndex: Long = 65536L,
+    var nextAccountIndex: Long = constants.Cminpublicindex,
+    val minPublicServiceIndex: Long = constants.Cminpublicindex,
     val storageView: Option[ServiceStorageView] = None
 ):
 
@@ -472,8 +469,8 @@ object AccumulationContext:
       serviceIndex: Long,
       timeslot: Long,
       entropy: JamBytes,
-      nextAccountIndex: Long = 65536L,
-      minPublicServiceIndex: Long = 65536L
+      nextAccountIndex: Long = constants.Cminpublicindex,
+      minPublicServiceIndex: Long = constants.Cminpublicindex
   ): AccumulationContext =
     new AccumulationContext(
       x = initialState.deepCopy(),

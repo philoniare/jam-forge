@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.refine
 
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
@@ -23,9 +23,6 @@ final case class RefineResult(
   * the machine outcome to a work execution result.
   */
 class RefineExecutor(val config: ChainConfig):
-
-  // Cmaxservicecodesize
-  private val MAX_SERVICE_CODE_SIZE: Int = 4_000_000
 
   // LRU-bounded module cache keyed by the work item's code hash, mirroring the
   // accumulate executor's cache.
@@ -73,7 +70,7 @@ class RefineExecutor(val config: ChainConfig):
         return RefineResult(ExecutionResult.BadCode, Nil, 0L)
       case Some(bytes) =>
         // BIG: oversized code.
-        if bytes.length > MAX_SERVICE_CODE_SIZE then
+        if bytes.length > constants.Cmaxservicecodesize then
           return RefineResult(ExecutionResult.CodeTooLarge, Nil, 0L)
         bytes
 
