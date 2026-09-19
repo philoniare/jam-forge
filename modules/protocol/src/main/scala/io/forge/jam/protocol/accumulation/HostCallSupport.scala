@@ -2,6 +2,7 @@ package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.JamBytes
+import io.forge.jam.core.LittleEndian
 import io.forge.jam.core.types.service.ServiceInfo
 import spire.math.ULong
 
@@ -126,20 +127,17 @@ private[accumulation] trait HostCallSupport:
   protected def meetsThreshold(balance: Long, threshold: Long): Boolean =
     ULong(balance) >= ULong(threshold)
 
+  /** Encode a little-endian integer into a byte array. Forwarder to
+    * [[io.forge.jam.core.LittleEndian]], kept on the trait for the handler call sites.
+    */
   protected def putLE(buf: Array[Byte], offset: Int, value: Long, size: Int): Unit =
-    var i = 0
-    while i < size do
-      buf(offset + i) = ((value >> (i * 8)) & 0xff).toByte
-      i += 1
+    LittleEndian.put(buf, offset, value, size)
 
-  /** Decode a little-endian integer from a byte array */
+  /** Decode a little-endian integer from a byte array. Forwarder to
+    * [[io.forge.jam.core.LittleEndian]].
+    */
   protected def decodeLE(bytes: Array[Byte], offset: Int, size: Int): Long =
-    var result = 0L
-    var i = 0
-    while i < size do
-      result |= (bytes(offset + i).toLong & 0xff) << (i * 8)
-      i += 1
-    result
+    LittleEndian.get(bytes, offset, size)
 
   protected def isRangeReadable(
       instance: PvmInstance,

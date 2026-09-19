@@ -29,8 +29,6 @@ import spire.math.ULong
  */
 object ReportTransition:
 
-  private val MaxOutputSize: Int = 48 * 1024 // 48 KiB
-
   // Type alias for validation results
   private type ValidationResult = Either[ReportErrorCode, Unit]
 
@@ -411,7 +409,7 @@ object ReportTransition:
         case ExecutionResult.BadCode => 0
         case ExecutionResult.CodeTooLarge => 0
       ).sum
-    require(totalOutputSize <= MaxOutputSize, ReportErrorCode.WorkReportTooBig)
+    require(totalOutputSize <= constants.Cmaxreportvarsize, ReportErrorCode.WorkReportTooBig)
 
   private def validateAuthorizer(workReport: WorkReport, authPools: List[List[Hash]]): ValidationResult =
     val coreAuthPool = authPools.lift(workReport.coreIndex.toInt).getOrElse(List.empty)

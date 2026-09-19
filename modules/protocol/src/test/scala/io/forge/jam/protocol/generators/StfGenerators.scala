@@ -2,7 +2,7 @@ package io.forge.jam.protocol.generators
 
 import org.scalacheck.Gen
 import org.scalacheck.Arbitrary
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.primitives.{
   Hash,
   BandersnatchPublicKey,
@@ -386,7 +386,7 @@ object StfGenerators:
       source <- Gen.choose(0L, 100L)
       destination <- Gen.choose(0L, 100L)
       amount <- Gen.choose(1L, 10000L)
-      memo <- genJamBytes(DeferredTransfer.MEMO_SIZE)
+      memo <- genJamBytes(constants.Cmemosize)
       gasLimit <- Gen.choose(100L, 10000L)
     yield DeferredTransfer(source, destination, amount, memo, gasLimit)
 

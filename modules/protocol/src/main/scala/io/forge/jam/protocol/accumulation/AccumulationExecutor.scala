@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
@@ -35,7 +35,6 @@ class AccumulationExecutor(val config: ChainConfig):
       ): Boolean =
         size() > MAX_MODULE_CACHE_SIZE
     }
-  private val MAX_SERVICE_CODE_SIZE: Int = 4_000_000
 
   /** Execute accumulation for a single service. Implements the Psi_A function
     * from Gray Paper.
@@ -63,7 +62,7 @@ class AccumulationExecutor(val config: ChainConfig):
       return createEmptyResult(partialState, Some(serviceId), operands)
 
     val code = extractCodeBlob(preimage.get.toArray)
-    if code.isEmpty || code.get.isEmpty || code.get.length > MAX_SERVICE_CODE_SIZE
+    if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
     then return createEmptyResult(partialState, Some(serviceId), operands)
 
     // Apply incoming transfer balances before execution

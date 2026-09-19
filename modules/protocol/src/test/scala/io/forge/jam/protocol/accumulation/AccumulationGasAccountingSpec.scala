@@ -2,7 +2,7 @@ package io.forge.jam.protocol.accumulation
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Timeslot, Gas, CoreIndex}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.work.{ExecutionResult, PackageSpec}
@@ -19,7 +19,7 @@ class AccumulationGasAccountingSpec extends AnyFunSuite with Matchers:
 
   private def hashOf(b: Int): Hash = Hash(Array.fill(32)(b.toByte))
 
-  private def memo: JamBytes = JamBytes(new Array[Byte](DeferredTransfer.MEMO_SIZE))
+  private def memo: JamBytes = JamBytes(new Array[Byte](constants.Cmemosize))
 
   private def buildWorkReport(
       serviceId: Long,

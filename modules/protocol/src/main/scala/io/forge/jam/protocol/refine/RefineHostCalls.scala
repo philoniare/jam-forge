@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.refine
 
-import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
+import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, LittleEndian}
+import io.forge.jam.core.constants
 import io.forge.jam.core.constants.Csegmentsize
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
@@ -24,7 +25,6 @@ class RefineHostCalls(
     val context: RefineContext
 ) extends HostCallDispatcher:
   private val config: ChainConfig = context.config
-  private val MaxPackageExports: Long = 3072L
 
   private def getReg(instance: PvmInstance, reg: Int): ULong =
     ULong(instance.reg(reg))
@@ -32,6 +32,9 @@ class RefineHostCalls(
   private def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
+  /** min(register, available) in unsigned-64 arithmetic, narrowed only after
+    * the clamp (same helper as the accumulate dispatcher).
+    */
   private def argClampedLen(
       instance: PvmInstance,
       reg: Int,
@@ -84,7 +87,7 @@ class RefineHostCalls(
     if !instance.isMemoryWritable(o, 112) then ULong(0L)
     else
       val buf = new Array[Byte](8)
-      if readMemory(instance, o, buf) then ULong(decodeLE8(buf, 0)) else ULong(0L)
+      if readMemory(instance, o, buf) then ULong(LittleEndian.get(buf, 0, 8)) else ULong(0L)
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
@@ -105,6 +108,12 @@ class RefineHostCalls(
   /** gas (0): remaining gas (already net of this call's cost). */
   private def handleGas(instance: PvmInstance): Unit =
     setReg(instance, 7, ULong(instance.gas))
+
+  // ===========================================================================
+  // fetch (1) — Omega_Y with the refine parameterisation:
+  // p = work package, n = zerohash, r = authorizer trace, i = item index,
+  // ī = import segments, x̄ = extrinsic data, operands = none.
+  // ===========================================================================
 
   private lazy val zeroEntropy: Array[Byte] = new Array[Byte](32)
 
@@ -203,7 +212,7 @@ class RefineHostCalls(
         s"Export PANIC: failed to read memory at 0x${addr.toHexString} len $z"
       )
 
-    if context.exportSegmentOffset + context.exports.size >= MaxPackageExports
+    if context.exportSegmentOffset + context.exports.size >= constants.Cmaxpackageexports
     then setReg(instance, 7, HostCallResult.FULL)
     else
       val segment =
@@ -252,6 +261,7 @@ class RefineHostCalls(
   ): Option[InterpretedModule] =
     context.machineModuleCache match
       case None =>
+        // No cache configured (e.g. a bare test context) — compile directly.
         compileMachineModule(code)
       case Some(cache) =>
         val key = JamBytes(Hashing.blake2b256(code).bytes.toArray)
@@ -360,6 +370,8 @@ class RefineHostCalls(
     val n = getReg(instance, 7)
     val o = getReg(instance, 8).toInt
 
+    // The 112-byte block (encode8(gas) ++ 13 × encode8(reg)) must be WRITABLE
+    // (it is read now and written back after the run), else panic.
     if !instance.isMemoryWritable(o, 112) then
       panic(
         s"Invoke PANIC: gas/register block not writable at 0x${o.toHexString}"
@@ -373,8 +385,8 @@ class RefineHostCalls(
       case None =>
         setReg(instance, 7, HostCallResult.WHO)
       case Some(guest) =>
-        val guestGas = decodeLE8(block, 0)
-        val guestRegs = Array.tabulate(13)(i => decodeLE8(block, 8 + 8 * i))
+        val guestGas = LittleEndian.get(block, 0, 8)
+        val guestRegs = Array.tabulate(13)(i => LittleEndian.get(block, 8 + 8 * i, 8))
 
         val guestInstance = GuestInstance.create(
           guest.module,
@@ -397,10 +409,10 @@ class RefineHostCalls(
               outcome = InterruptKind.Panic
               running = false
 
-        putLE8(block, 0, guestInstance.gas)
+        LittleEndian.put(block, 0, guestInstance.gas, 8)
         var i = 0
         while i < 13 do
-          putLE8(block, 8 + 8 * i, guestInstance.regs(i))
+          LittleEndian.put(block, 8 + 8 * i, guestInstance.regs(i), 8)
           i += 1
         writeMemory(instance, o, block)
 
@@ -430,20 +442,6 @@ class RefineHostCalls(
           case _ =>
             setReg(instance, 7, HostCallResult.HALT)
 
-  private def decodeLE8(buf: Array[Byte], offset: Int): Long =
-    var v = 0L
-    var i = 0
-    while i < 8 do
-      v |= (buf(offset + i).toLong & 0xff) << (8 * i)
-      i += 1
-    v
-
-  private def putLE8(buf: Array[Byte], offset: Int, value: Long): Unit =
-    var i = 0
-    while i < 8 do
-      buf(offset + i) = ((value >> (8 * i)) & 0xff).toByte
-      i += 1
-
   // ===========================================================================
   // expunge (13) — Omega_X
   // ===========================================================================
@@ -457,6 +455,11 @@ class RefineHostCalls(
         setReg(instance, 7, ULong(guest.pc))
         context.innerPvms.remove(n.toLong)
 
+/** Fetch-value resolution shared between the refine and is-authorized
+  * dispatchers. Absent inputs (`None`) make
+  * their selectors resolve to none → NONE, which is exactly how the
+  * is-authorized context (only the work package present) restricts fetch.
+  */
 object RefineFetch:
 
   /** min(register, available) in unsigned-64 arithmetic, narrowed only after
@@ -471,6 +474,11 @@ object RefineFetch:
     val cap = ULong(available)
     (if v < cap then v else cap).toLong.toInt
 
+  /** Writes `data` to guest memory at `address`, first checking writability.
+    * Returns false (OOB) on either a failed writability check or a failed
+    * write; callers panic separately when the *initial* Omega_Y writability
+    * check (against the full requested length) fails.
+    */
   def writeMemory(
       instance: PvmInstance,
       address: Int,
@@ -480,6 +488,12 @@ object RefineFetch:
       instance.writeBytes(address, data)
     else false
 
+  /** Shared fetch-result shell: resolves the selector via [[fetchValue]],
+    * then applies the common Omega_Y clamp/panic/write/OOB sequence used by
+    * both the refine and is-authorized dispatchers. `setReg7` is the
+    * caller's register-set hook (kept generic so this stays PvmInstance-only
+    * and free of per-dispatcher setReg boilerplate).
+    */
   def resolveFetch(
       instance: PvmInstance,
       selector: ULong,
@@ -609,21 +623,21 @@ object RefineFetch:
       case scodec.Attempt.Failure(err) =>
         throw new IllegalStateException(s"fetch encoding failed: $err")
 
+  /** Work-item summary S(w):
+    * encode4(service) ‖ codeHash ‖ encode8(refineGas) ‖ encode8(accGas) ‖
+    * encode2(exportCount) ‖ encode2(#imports) ‖ encode2(#extrinsics) ‖
+    * encode4(len(payload)).
+    */
   def workItemSummary(w: WorkItem): Array[Byte] =
     val out = new Array[Byte](4 + 32 + 8 + 8 + 2 + 2 + 2 + 4)
     var off = 0
-    putLE(out, off, w.service.value.toLong, 4); off += 4
+    LittleEndian.put(out, off, w.service.value.toLong, 4); off += 4
     System.arraycopy(w.codeHash.bytes.toArray, 0, out, off, 32); off += 32
-    putLE(out, off, w.refineGasLimit.toLong, 8); off += 8
-    putLE(out, off, w.accumulateGasLimit.toLong, 8); off += 8
-    putLE(out, off, w.exportCount.toLong, 2); off += 2
-    putLE(out, off, w.importSegments.size.toLong, 2); off += 2
-    putLE(out, off, w.extrinsic.size.toLong, 2); off += 2
-    putLE(out, off, w.payload.length.toLong, 4)
+    LittleEndian.put(out, off, w.refineGasLimit.toLong, 8); off += 8
+    LittleEndian.put(out, off, w.accumulateGasLimit.toLong, 8); off += 8
+    LittleEndian.put(out, off, w.exportCount.toLong, 2); off += 2
+    LittleEndian.put(out, off, w.importSegments.size.toLong, 2); off += 2
+    LittleEndian.put(out, off, w.extrinsic.size.toLong, 2); off += 2
+    LittleEndian.put(out, off, w.payload.length.toLong, 4)
     out
 
-  private def putLE(buf: Array[Byte], offset: Int, value: Long, size: Int): Unit =
-    var i = 0
-    while i < size do
-      buf(offset + i) = ((value >>> (8 * i)) & 0xff).toByte
-      i += 1

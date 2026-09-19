@@ -117,3 +117,11 @@ object constants:
   /** Prefix for invalid vote signatures (disputes) */
   val JAM_INVALID: String = "jam_invalid"
   val JAM_INVALID_BYTES: Array[Byte] = JAM_INVALID.getBytes("UTF-8")
+  val Cmaxservicecodesize: Int = 4_000_000
+  val Cmaxpackageimports: Int = 3072
+  val Cmaxpackageexports: Int = 3072
+  val Cpackageauthgas: Long = 50_000_000L
+  val Cmaxreportvarsize: Int = 48 * 1024
+  val Cmaxauthcodesize: Int = 64_000
+  val Cmemosize: Int = 128
+  val Cminpublicindex: Long = 65536L
