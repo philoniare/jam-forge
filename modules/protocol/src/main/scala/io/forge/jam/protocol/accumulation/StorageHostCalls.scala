@@ -342,25 +342,23 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
 
     val key = PreimageKey(Hash(hashBuffer), length)
-    var request = account.flatMap(_.preimageRequests.get(key))
+    val timeslotsOpt = loadPreimageTimeslots(
+      existing = account.flatMap(_.preimageRequests.get(key)),
+      readRaw = context.readRawData(
+        StateKey.computePreimageInfoStateKey(
+          context.serviceIndex,
+          length,
+          JamBytes(hashBuffer)
+        )
+      ),
+      label = "Query"
+    )
 
-    if request.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(
-        context.serviceIndex,
-        length,
-        JamBytes(hashBuffer)
-      )
-      val rawInfoData = context.readRawData(infoStateKey)
-      if rawInfoData.isDefined then
-        // Decode preimage info from raw state
-        val timeslots = decodePreimageInfoOrPanic("Query", rawInfoData.get)
-        request = Some(PreimageRequest(timeslots))
-
-    if request.isEmpty then
+    if timeslotsOpt.isEmpty then
       setReg(instance, 7, HostCallResult.NONE)
       setReg(instance, 8, ULong(0))
     else
-      val history = request.get.requestedAt
+      val history = timeslotsOpt.get
       val count = history.size
       val r7Value: ULong = count match
         case 0 => ULong(0)
@@ -405,21 +403,20 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
 
     val key = PreimageKey(Hash(hashBuffer), length)
-    var existingRequest = acc.preimageRequests.get(key)
+    val existingTimeslots = loadPreimageTimeslots(
+      existing = acc.preimageRequests.get(key),
+      readRaw = context.readRawData(
+        StateKey.computePreimageInfoStateKey(
+          context.serviceIndex,
+          length,
+          JamBytes(hashBuffer)
+        )
+      ),
+      label = "Solicit"
+    )
 
-    if existingRequest.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(
-        context.serviceIndex,
-        length,
-        JamBytes(hashBuffer)
-      )
-      val rawInfoData = context.readRawData(infoStateKey)
-      if rawInfoData.isDefined then
-        val timeslots = decodePreimageInfoOrPanic("Solicit", rawInfoData.get)
-        existingRequest = Some(PreimageRequest(timeslots))
-
-    val notRequestedYet = existingRequest.isEmpty
-    val isPreviouslyAvailable = existingRequest.exists(_.requestedAt.size == 2)
+    val notRequestedYet = existingTimeslots.isEmpty
+    val isPreviouslyAvailable = existingTimeslots.exists(_.size == 2)
     val canSolicit = notRequestedYet || isPreviouslyAvailable
 
     if !canSolicit then
@@ -464,7 +461,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
     else if isPreviouslyAvailable then
       // Re-solicit: append current timeslot (requesting again)
-      val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
+      val newTimeslots = existingTimeslots.get :+ context.timeslot
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
       context.x.accounts = context.x.accounts.updated(
         context.serviceIndex,
@@ -509,33 +506,32 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
 
     val key = PreimageKey(Hash(hashBuffer), length)
-    var existingRequest = acc.preimageRequests.get(key)
+    val existingTimeslots = loadPreimageTimeslots(
+      existing = acc.preimageRequests.get(key),
+      readRaw = context.readRawData(
+        StateKey.computePreimageInfoStateKey(
+          context.serviceIndex,
+          length,
+          JamBytes(hashBuffer)
+        )
+      ),
+      label = "Forget"
+    )
 
-    if existingRequest.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(
-        context.serviceIndex,
-        length,
-        JamBytes(hashBuffer)
-      )
-      val rawInfoData = context.readRawData(infoStateKey)
-      if rawInfoData.isDefined then
-        val timeslots = decodePreimageInfoOrPanic("Forget", rawInfoData.get)
-        existingRequest = Some(PreimageRequest(timeslots))
-
-    if existingRequest.isEmpty then
+    if existingTimeslots.isEmpty then
       setReg(instance, 7, HostCallResult.HUH)
       return
 
-    val historyCount = existingRequest.get.requestedAt.size
+    val history = existingTimeslots.get
+    val historyCount = history.size
     val minHoldSlot =
       math.max(0L, context.timeslot - config.preimageExpungePeriod)
 
     val canExpunge =
-      historyCount == 0 || (historyCount == 2 && existingRequest.get
-        .requestedAt(1) < minHoldSlot)
+      historyCount == 0 || (historyCount == 2 && history(1) < minHoldSlot)
     val isAvailable1 = historyCount == 1
     val isAvailable3 =
-      historyCount == 3 && existingRequest.get.requestedAt(1) < minHoldSlot
+      historyCount == 3 && history(1) < minHoldSlot
 
     val canForget = canExpunge || isAvailable1 || isAvailable3
 
@@ -577,7 +573,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       )
     else if isAvailable1 then
       // Append current timeslot (marking as forgotten)
-      val newTimeslots = existingRequest.get.requestedAt :+ context.timeslot
+      val newTimeslots = history :+ context.timeslot
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
       context.x.accounts = context.x.accounts.updated(
         context.serviceIndex,
@@ -588,7 +584,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     else if isAvailable3 then
       // Update to [requestedAt[2], timeslot]
       val newTimeslots =
-        List(existingRequest.get.requestedAt(2), context.timeslot)
+        List(history(2), context.timeslot)
       context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
       context.x.accounts = context.x.accounts.updated(
         context.serviceIndex,
@@ -634,23 +630,23 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // trie (cross-block solicit), so fall back to a raw-state preimage-info
     // read when the in-memory request map misses.
     val preimageKey = PreimageKey(Hash(preimageHash.bytes.toArray), blobLen)
-    var preimageRequest = targetAccount.get.preimageRequests.get(preimageKey)
-
-    if preimageRequest.isEmpty then
-      val infoStateKey = StateKey.computePreimageInfoStateKey(
+    val requestTimeslots = loadPreimageTimeslots(
+      existing = targetAccount.get.preimageRequests.get(preimageKey),
+      readRaw = context.readRawDataFor(
         targetServiceId,
-        blobLen,
-        JamBytes(preimageHash.bytes)
-      )
-      val rawInfoData = context.readRawDataFor(targetServiceId, infoStateKey)
-      if rawInfoData.isDefined then
-        val timeslots = decodePreimageInfoOrPanic("Provide", rawInfoData.get)
-        preimageRequest = Some(PreimageRequest(timeslots))
+        StateKey.computePreimageInfoStateKey(
+          targetServiceId,
+          blobLen,
+          JamBytes(preimageHash.bytes)
+        )
+      ),
+      label = "Provide"
+    )
 
     // Spec OK path requires the request to be present with an empty timeslot
     // list (solicited but not yet provided): HUH when the request is absent or
     // its timeslot list is non-empty (a_requests[(blake(i), z)] != []).
-    if preimageRequest.isEmpty || preimageRequest.get.requestedAt.nonEmpty then
+    if requestTimeslots.isEmpty || requestTimeslots.get.nonEmpty then
       setReg(instance, 7, HostCallResult.HUH)
       return
 

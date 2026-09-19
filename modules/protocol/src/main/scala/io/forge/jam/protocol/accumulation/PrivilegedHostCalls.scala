@@ -399,23 +399,22 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val derivedLength = math.max(81L, octets) - 81L
     val preimageKey =
       PreimageKey(Hash(preimageHash.toArray), derivedLength.toInt)
-    val preimageRequest = acc.preimageRequests.get(preimageKey)
-
-    val timeslots: List[Long] = preimageRequest match
-      case Some(req) =>
-        req.requestedAt
-      case None =>
-        val expectedKey = StateKey.computePreimageInfoStateKey(
+    val timeslots: List[Long] = loadPreimageTimeslots(
+      existing = acc.preimageRequests.get(preimageKey),
+      readRaw = context.readRawDataFor(
+        ejectServiceId,
+        StateKey.computePreimageInfoStateKey(
           ejectServiceId,
           derivedLength.toInt,
           preimageHash
         )
-        context.readRawDataFor(ejectServiceId, expectedKey) match
-          case Some(infoValue) =>
-            decodePreimageInfoOrPanic("Eject", infoValue)
-          case None =>
-            setReg(instance, 7, HostCallResult.HUH)
-            return List.empty
+      ),
+      label = "Eject"
+    ) match
+      case Some(ts) => ts
+      case None =>
+        setReg(instance, 7, HostCallResult.HUH)
+        return
 
     if timeslots.size != 2 then
       setReg(instance, 7, HostCallResult.HUH)

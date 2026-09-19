@@ -77,6 +77,15 @@ private[accumulation] trait HostCallSupport:
           _: io.forge.jam.core.scodec.CodecDecodingException =>
         panic(s"$label PANIC: malformed preimage-info value at guest-chosen state key")
 
+  protected def loadPreimageTimeslots(
+      existing: Option[PreimageRequest],
+      readRaw: => Option[JamBytes],
+      label: String
+  ): Option[List[Long]] =
+    existing match
+      case Some(req) => Some(req.requestedAt)
+      case None      => readRaw.map(raw => decodePreimageInfoOrPanic(label, raw))
+
   protected def readGuestBytes(
       instance: PvmInstance,
       address: Int,
