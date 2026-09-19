@@ -1,14 +1,12 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
-import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.pvm.{ExecutionMode, InterruptKind, MemoryResult}
+import io.forge.jam.pvm.{ExecutionMode, MemoryResult}
 import io.forge.jam.pvm.memory.Memory.{isReadable, isWritable}
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
-import io.forge.jam.protocol.accumulation.NativeRunner
-import io.forge.jam.pvm.types.ProgramCounter
+import io.forge.jam.protocol.refine.PvmRunner
 import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UByte}
 
@@ -154,119 +152,30 @@ class AccumulationExecutor(val config: ChainConfig):
 
     val module = moduleOpt.get
 
-    val instance = InterpretedInstance.fromModule(
-      module,
-      inputData,
-      forceStepTracing = false
-    )
-
-    // Create PvmInstance wrapper for host calls
-    val pvmWrapper = new InterpretedInstanceWrapper(instance)
     val hostCalls = new AccumulationHostCalls(context, operands, config)
 
-    // Set initial gas
-    instance.setGas(gasLimit)
-    val initialGas = gasLimit
-
-    // Entry point is PC=5 for accumulate function
-    val entryPointPc = ProgramCounter(5)
-
-    // Standard register setup (using PVM ABI)
-    val RA_INIT = 0xffff0000L
-    val SP_INIT = 0xfefe0000L
-    val INPUT_ADDR = 0xfeff0000L
-
-    // Set registers
-    instance.setReg(0, RA_INIT) // RA = r0
-    instance.setReg(1, SP_INIT) // SP = r1
-    instance.setReg(7, INPUT_ADDR) // A0 = r7
-    instance.setReg(8, inputData.length.toLong) // A1 = r8
-    instance.setReg(9, 0L) // A2 = r9
-    instance.setReg(10, 0L) // A3 = r10
-    instance.setReg(11, 0L) // A4 = r11
-    instance.setReg(12, 0L) // A5 = r12
-
-    // Set initial PC
-    instance.setNextProgramCounter(entryPointPc)
-
-    // Execute loop
-    var exitReason = ExitReason.HALT
-    var continueExecution = true
-    val nativeOutcome = NativeRunner.run(
-      instance,
-      entryPointPc.toInt,
-      executionMode,
-      hostCalls,
+    val (exit, gasUsed, output) = PvmRunner.run(
+      module = module,
+      inputData = inputData,
+      gasLimit = gasLimit,
+      entryPc = 5,
+      hostCalls = hostCalls,
+      executionMode = executionMode,
       preDispatch = Some(() => context.captureCheckpointIfPending())
     )
-    nativeOutcome match
-      case Some(outcome) =>
-        exitReason = outcome match
-          case NativeRunner.RunOutcome.Halt => ExitReason.HALT
-          case NativeRunner.RunOutcome.Panic => ExitReason.PANIC
-          case NativeRunner.RunOutcome.OutOfGas => ExitReason.OUT_OF_GAS
-          case NativeRunner.RunOutcome.PageFault(_) => ExitReason.PAGE_FAULT
-        continueExecution = false
-      case None => ()
 
-    while continueExecution do
-      val result = instance.run()
+    val exitReason = exit match
+      case PvmRunner.PvmExit.Halt      => ExitReason.HALT
+      case PvmRunner.PvmExit.Panic     => ExitReason.PANIC
+      case PvmRunner.PvmExit.OutOfGas  => ExitReason.OUT_OF_GAS
+      case PvmRunner.PvmExit.PageFault => ExitReason.PAGE_FAULT
 
-      result match
-        case Right(InterruptKind.Finished) =>
-          exitReason = ExitReason.HALT
-          continueExecution = false
-
-        case Right(InterruptKind.Panic) =>
-          exitReason = ExitReason.PANIC
-          continueExecution = false
-
-        case Right(InterruptKind.OutOfGas) =>
-          exitReason = ExitReason.OUT_OF_GAS
-          continueExecution = false
-
-        case Right(InterruptKind.Ecalli(hostId)) =>
-          // Deduct host call gas cost BEFORE execution
-          val gasCost = hostCalls.getGasCost(hostId.signed, pvmWrapper)
-          val gasBefore = instance.gas
-          val newGas = gasBefore - gasCost
-          instance.setGas(newGas)
-
-          if newGas < 0 then
-            exitReason = ExitReason.OUT_OF_GAS
-            continueExecution = false
-          else
-            context.captureCheckpointIfPending()
-            try hostCalls.dispatch(hostId.signed, pvmWrapper)
-            catch
-              case _: HostCallPanic =>
-                exitReason = ExitReason.PANIC
-                continueExecution = false
-
-        case Right(InterruptKind.Segfault(_)) =>
-          exitReason = ExitReason.PAGE_FAULT
-          continueExecution = false
-
-        case Right(InterruptKind.Step) =>
-        // Continue for step tracing
-
-        case Left(_) =>
-          exitReason = ExitReason.PANIC
-          continueExecution = false
-
-    val finalGas = instance.gas
-    val gasUsed = if finalGas >= 0 then initialGas - finalGas else initialGas
-
-    // Extract output on halt
-    val output = if exitReason == ExitReason.HALT then
-      val addr = instance.reg(7).toInt
-      val len = instance.reg(8).toInt
-      if len >= 0 && instance.basicMemory.isReadable(spire.math.UInt(addr), len)
-      then readMemoryBulk(instance, addr, len)
-      else Some(Array.empty[Byte])
-    else None
-
-    PvmExecResult(exitReason, gasUsed, output)
+    // Output is only meaningful on HALT; every other exit yields None.
+    PvmExecResult(
+      exitReason,
+      gasUsed,
+      if exitReason == ExitReason.HALT then Some(output) else None
+    )
 
   /** Get or compile a module from code bytes.
     */
@@ -281,15 +190,6 @@ class AccumulationExecutor(val config: ChainConfig):
             Some(module)
           case Left(_) => None
       }
-
-  private def readMemoryBulk(
-      instance: InterpretedInstance,
-      address: Int,
-      length: Int
-  ): Option[Array[Byte]] =
-    instance.basicMemory.getMemorySlice(UInt(address), length) match
-      case MemoryResult.Success(data) => Some(data)
-      case _                          => None
 
   /** Extract code blob from preimage data
     */

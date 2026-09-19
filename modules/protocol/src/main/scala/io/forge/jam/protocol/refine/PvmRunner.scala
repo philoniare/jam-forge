@@ -16,8 +16,15 @@ trait HostCallDispatcher:
 
 object PvmRunner:
 
+  /** Outcome of a PVM run.
+    *
+    * `PageFault` is reported for `InterruptKind.Segfault` / a native
+    * `RunOutcome.PageFault`. Refine and is-authorized treat it exactly as
+    * `Panic` (their historic behaviour); accumulation maps it to
+    * `ExitReason.PAGE_FAULT`.
+    */
   enum PvmExit:
-    case Halt, Panic, OutOfGas
+    case Halt, Panic, OutOfGas, PageFault
 
   private val RA_INIT = 0xffff0000L
   private val SP_INIT = 0xfefe0000L
@@ -29,7 +36,8 @@ object PvmRunner:
       gasLimit: Long,
       entryPc: Int,
       hostCalls: HostCallDispatcher,
-      executionMode: ExecutionMode = ExecutionMode.default
+      executionMode: ExecutionMode = ExecutionMode.default,
+      preDispatch: Option[() => Unit] = None
   ): (PvmExit, Long, Array[Byte]) =
     val instance = InterpretedInstance.fromModule(
       module,
@@ -56,14 +64,14 @@ object PvmRunner:
     var exit = PvmExit.Halt
     var continueExecution = true
 
-    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode, hostCalls, preDispatch = None)
+    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode, hostCalls, preDispatch)
     nativeOutcome match
       case Some(outcome) =>
         exit = outcome match
           case NativeRunner.RunOutcome.Halt => PvmExit.Halt
           case NativeRunner.RunOutcome.Panic => PvmExit.Panic
           case NativeRunner.RunOutcome.OutOfGas => PvmExit.OutOfGas
-          case NativeRunner.RunOutcome.PageFault(_) => PvmExit.Panic
+          case NativeRunner.RunOutcome.PageFault(_) => PvmExit.PageFault
         continueExecution = false
       case None => ()
 
@@ -89,6 +97,7 @@ object PvmRunner:
             exit = PvmExit.OutOfGas
             continueExecution = false
           else
+            preDispatch.foreach(_())
             try hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
               case _: HostCallPanic =>
@@ -96,7 +105,7 @@ object PvmRunner:
                 continueExecution = false
 
         case Right(InterruptKind.Segfault(_)) =>
-          exit = PvmExit.Panic
+          exit = PvmExit.PageFault
           continueExecution = false
 
         case Right(InterruptKind.Step) =>

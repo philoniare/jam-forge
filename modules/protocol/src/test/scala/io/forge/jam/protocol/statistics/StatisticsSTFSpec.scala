@@ -7,6 +7,11 @@ import org.scalacheck.Gen
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.generators.StfGenerators.*
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
+import io.forge.jam.protocol.report.ReportTypes.{
+  CoreStatisticsRecord,
+  ServiceActivityRecord,
+  ServiceStatisticsEntry
+}
 
 /**
  * - Activity statistics tracking increments correctly
@@ -247,55 +252,59 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
     }
   }
 
-  test("property: CoreStatistics.zero returns all zeros") {
-    val zero = CoreStatistics.zero
+  test("property: CoreStatisticsRecord.zero returns all zeros") {
+    val zero = CoreStatisticsRecord.zero
 
     // Property: zero should have all zeros
-    zero.dataSize shouldBe 0L
-    zero.assuranceCount shouldBe 0L
-    zero.importsCount shouldBe 0L
-    zero.extrinsicsCount shouldBe 0L
-    zero.extrinsicsSize shouldBe 0L
-    zero.exportsCount shouldBe 0L
-    zero.packageSize shouldBe 0L
+    zero.daLoad shouldBe 0L
+    zero.popularity shouldBe 0L
+    zero.imports shouldBe 0L
+    zero.extrinsicCount shouldBe 0L
+    zero.extrinsicSize shouldBe 0L
+    zero.exports shouldBe 0L
+    zero.bundleSize shouldBe 0L
     zero.gasUsed shouldBe 0L
   }
 
-  test("property: ServiceStatistics.zero returns all zeros") {
-    val zero = ServiceStatistics.zero
+  test("property: ServiceActivityRecord default returns all zeros") {
+    val zero = ServiceActivityRecord()
 
     // Property: zero should have all zeros
-    zero.preimages.count shouldBe 0L
-    zero.preimages.size shouldBe 0L
-    zero.refines.count shouldBe 0L
-    zero.refines.gasUsed shouldBe 0L
-    zero.importsCount shouldBe 0L
-    zero.extrinsicsCount shouldBe 0L
-    zero.extrinsicsSize shouldBe 0L
-    zero.exportsCount shouldBe 0L
-    zero.accumulates.count shouldBe 0L
-    zero.accumulates.gasUsed shouldBe 0L
-    zero.transfers.count shouldBe 0L
-    zero.transfers.gasUsed shouldBe 0L
+    zero.providedCount shouldBe 0
+    zero.providedSize shouldBe 0L
+    zero.refinementCount shouldBe 0L
+    zero.refinementGasUsed shouldBe 0L
+    zero.imports shouldBe 0L
+    zero.extrinsicCount shouldBe 0L
+    zero.extrinsicSize shouldBe 0L
+    zero.exports shouldBe 0L
+    zero.accumulateCount shouldBe 0L
+    zero.accumulateGasUsed shouldBe 0L
   }
 
-  test("property: ActivityStatistics.empty creates correct structure") {
-    val empty = ActivityStatistics.empty(testConfig.validatorCount, testConfig.coresCount)
+  test("property: empty activity statistics round-trip through the canonical codecs") {
+    val accumulator = List.fill(testConfig.validatorCount)(StatCount.zero)
+    val previous = List.fill(testConfig.validatorCount)(StatCount.zero)
+    val core = List.fill(testConfig.coresCount)(CoreStatisticsRecord.zero)
+    val service = List.empty[ServiceStatisticsEntry]
 
-    // Property: accumulator should have correct size with all zeros
-    empty.accumulator.size shouldBe testConfig.validatorCount
-    empty.accumulator.foreach(stat => stat shouldBe StatCount.zero)
+    val codec =
+      ActivityStatisticsCodec.activityStatisticsCodec(testConfig.validatorCount, testConfig.coresCount)
+    val (decAcc, decPrev, decCore, decSvc) =
+      codec.decodeValue(codec.encode((accumulator, previous, core, service)).require).require
 
-    // Property: previous should have correct size with all zeros
-    empty.previous.size shouldBe testConfig.validatorCount
-    empty.previous.foreach(stat => stat shouldBe StatCount.zero)
+    // Property: accumulator/previous keep their size and stay zeroed
+    decAcc.size shouldBe testConfig.validatorCount
+    decAcc.foreach(stat => stat shouldBe StatCount.zero)
+    decPrev.size shouldBe testConfig.validatorCount
+    decPrev.foreach(stat => stat shouldBe StatCount.zero)
 
-    // Property: core should have correct size with all zeros
-    empty.core.size shouldBe testConfig.coresCount
-    empty.core.foreach(stat => stat shouldBe CoreStatistics.zero)
+    // Property: core keeps its size and stays zeroed
+    decCore.size shouldBe testConfig.coresCount
+    decCore.foreach(stat => stat shouldBe CoreStatisticsRecord.zero)
 
     // Property: service should be empty
-    empty.service shouldBe List.empty
+    decSvc shouldBe List.empty
   }
 
   test("GP: guarantee counter increments for each unique guarantor validator") {

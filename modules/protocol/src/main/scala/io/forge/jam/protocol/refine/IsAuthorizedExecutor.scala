@@ -153,6 +153,8 @@ class IsAuthorizedExecutor(val config: ChainConfig):
         IsAuthorizedResult(ExecutionResult.OOG, gasUsed)
       case PvmRunner.PvmExit.Panic =>
         IsAuthorizedResult(ExecutionResult.Panic, gasUsed)
+      case PvmRunner.PvmExit.PageFault =>
+        IsAuthorizedResult(ExecutionResult.Panic, gasUsed)
       case PvmRunner.PvmExit.Halt =>
         IsAuthorizedResult(ExecutionResult.Ok(JamBytes(output)), gasUsed)
 
