@@ -1,24 +1,22 @@
 package io.forge.jam.protocol.statistics
 
-import io.forge.jam.core.scodec.{CodecDecodingException, JamCodecs}
+import io.forge.jam.core.scodec.{FullJamStateCodecs, JamCodecs}
 import io.forge.jam.protocol.report.ReportTypes.{
   CoreStatisticsRecord,
   ServiceActivityRecord,
   ServiceStatisticsEntry
 }
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
-import _root_.scodec.{Attempt, Codec}
-import _root_.scodec.bits.BitVector
+import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 
 object ActivityStatisticsCodec:
 
-  /** (accumulator, previous, per-core, per-service) — the four components of pi. */
-  type ActivityStatistics = (
-    List[StatCount],
-    List[StatCount],
-    List[CoreStatisticsRecord],
-    List[ServiceStatisticsEntry]
+  final case class ActivityStatistics(
+      accumulator: List[StatCount],
+      previous: List[StatCount],
+      core: List[CoreStatisticsRecord],
+      service: List[ServiceStatisticsEntry]
   )
 
   /** Per-validator counters: 6 x u32 LE (24 bytes). */
@@ -76,22 +74,22 @@ object ActivityStatisticsCodec:
       JamCodecs.fixedSizeList(statCountCodec, validatorCount) ::
       JamCodecs.fixedSizeList(coreStatisticsCodec, coresCount) ::
       JamCodecs.compactPrefixedList(serviceStatisticsCodec)).xmap(
-      { case (acc, prev, core, svc) => (acc, prev, core, svc) },
-      s => (s._1, s._2, s._3, s._4)
+      { case (acc, prev, core, svc) =>
+        ActivityStatistics(accumulator = acc, previous = prev, core = core, service = svc)
+      },
+      s => (s.accumulator, s.previous, s.core, s.service)
     )
 
-  /** Decode the activity-statistics state item, rejecting trailing bytes. */
+  /**
+   * Decode the activity-statistics state item, rejecting trailing bytes.
+   */
   def decodeActivityStatistics(
       bytes: Array[Byte],
       validatorCount: Int,
       coresCount: Int
   ): ActivityStatistics =
-    activityStatisticsCodec(validatorCount, coresCount).decode(BitVector(bytes)) match
-      case Attempt.Successful(result) =>
-        if result.remainder.nonEmpty then
-          throw new CodecDecodingException(
-            s"decodeActivityStatistics: ${result.remainder.bytes.size} trailing byte(s) after a valid value"
-          )
-        result.value
-      case Attempt.Failure(err) =>
-        throw new CodecDecodingException(s"decodeActivityStatistics: ${err.messageWithContext}")
+    FullJamStateCodecs.decodeExact(
+      activityStatisticsCodec(validatorCount, coresCount),
+      bytes,
+      "decodeActivityStatistics"
+    )

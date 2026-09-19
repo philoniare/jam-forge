@@ -41,9 +41,6 @@ object constants:
   /** ZP = 2^12 = 4096: Standard page size */
   val ZP: Int = 4096
   
-  /** ZZ = 2^16 = 65536: Standard zone size */
-  val ZZ: Int = 65536
-  
   /** ZI = 2^24 = 16MB: Input data maximum size */
   val ZI: Int = 16777216
   
@@ -54,18 +51,6 @@ object constants:
   // Work Package Constants
   // ══════════════════════════════════════════════════════════════════════════
   
-  /** WB = 12MB: Maximum work package blob size */
-  val WB: Int = 12 * 1024 * 1024
-  
-  /** WR = 48KB: Maximum work report size */
-  val WR: Int = 48 * 1024
-  
-  /** WG = 5 * 10^9: Minimum accumulate gas */
-  val WG: Long = 5_000_000_000L
-  
-  /** WP = 10^10: Work package gas limit */
-  val WP: Long = 10_000_000_000L
-
   /** Csegmentsize = 4104: erasure-coded segment size in bytes */
   val Csegmentsize: Long = 4104L
 
@@ -117,11 +102,33 @@ object constants:
   /** Prefix for invalid vote signatures (disputes) */
   val JAM_INVALID: String = "jam_invalid"
   val JAM_INVALID_BYTES: Array[Byte] = JAM_INVALID.getBytes("UTF-8")
+
+  /** Cmaxservicecodesize: maximum size in bytes of a service's code blob. */
   val Cmaxservicecodesize: Int = 4_000_000
+
+  /** Cmaxpackageimports: maximum imported segments per work package. */
   val Cmaxpackageimports: Int = 3072
+
+  /** Cmaxpackageexports: maximum exported segments per work package. */
   val Cmaxpackageexports: Int = 3072
+
+  /** Cpackageauthgas: gas allotted to a work package's is-authorized call. */
   val Cpackageauthgas: Long = 50_000_000L
+
+  /**
+   * Cmaxreportvarsize: bound on the variable-size portion of a work report —
+   * the authorizer trace and the cumulative work-item output sizes.
+   */
   val Cmaxreportvarsize: Int = 48 * 1024
+
+  /** Cmaxauthcodesize: maximum size in bytes of an authorizer code blob. */
   val Cmaxauthcodesize: Int = 64_000
+
+  /** Cmemosize: fixed size in bytes of a deferred-transfer memo. */
   val Cmemosize: Int = 128
+
+  /**
+   * Cminpublicindex: lowest service index available to publicly-created
+   * services — indices below it are reserved.
+   */
   val Cminpublicindex: Long = 65536L

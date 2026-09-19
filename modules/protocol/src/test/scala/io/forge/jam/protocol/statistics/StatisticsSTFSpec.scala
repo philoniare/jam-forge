@@ -290,8 +290,19 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
 
     val codec =
       ActivityStatisticsCodec.activityStatisticsCodec(testConfig.validatorCount, testConfig.coresCount)
+    val encoded = codec
+      .encode(
+        ActivityStatisticsCodec.ActivityStatistics(
+          accumulator = accumulator,
+          previous = previous,
+          core = core,
+          service = service
+        )
+      )
+      .require
+    val decoded = codec.decodeValue(encoded).require
     val (decAcc, decPrev, decCore, decSvc) =
-      codec.decodeValue(codec.encode((accumulator, previous, core, service)).require).require
+      (decoded.accumulator, decoded.previous, decoded.core, decoded.service)
 
     // Property: accumulator/previous keep their size and stay zeroed
     decAcc.size shouldBe testConfig.validatorCount

@@ -8,12 +8,7 @@ import io.forge.jam.core.primitives.{
   BlsPublicKey
 }
 import io.forge.jam.core.scodec.{FullJamStateCodecs, JamCodecs}
-import io.forge.jam.core.scodec.FullJamStateCodecs.{
-  StatCountData,
-  CoreStatisticsData,
-  ServiceStatisticsData,
-  TicketsOrKeysData
-}
+import io.forge.jam.core.scodec.FullJamStateCodecs.TicketsOrKeysData
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
@@ -33,6 +28,7 @@ import io.forge.jam.protocol.report.ReportTypes.{
   ServiceStatisticsEntry
 }
 import io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys
+import io.forge.jam.protocol.statistics.ActivityStatisticsCodec
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import io.forge.jam.protocol.traces.{FullJamState, StateKeys}
 
@@ -420,12 +416,11 @@ final class TrieBackedJamState(
     _safroleLoaded = true
 
   private def loadActivityStats(): Unit =
-    val (cur, prev, core, svc) =
-      TrieBackedJamState.readActivityStats(trie, config)
-    _statsCurrent = cur
-    _statsLast = prev
-    _coreStatistics = core
-    _serviceStatistics = svc
+    val stats = TrieBackedJamState.readActivityStats(trie, config)
+    _statsCurrent = stats.accumulator
+    _statsLast = stats.previous
+    _coreStatistics = stats.core
+    _serviceStatistics = stats.service
     _activityStatsLoaded = true
 
   private def loadServiceAccounts(): Unit =
@@ -490,7 +485,11 @@ final class TrieBackedJamState(
     if _activityStatsDirty then
       updates += ((StateKeys.simpleKey(StateKeys.ACTIVITY_STATISTICS),
         Some(TrieBackedJamState.encodeActivityStats(
-          _statsCurrent, _statsLast, _coreStatistics, _serviceStatistics, config))))
+          cur = _statsCurrent,
+          prev = _statsLast,
+          core = _coreStatistics,
+          svc = _serviceStatistics,
+          config = config))))
     if _serviceAccountsDirty then
       val currIds = _serviceAccounts.iterator.map(_.id).toSet
       _serviceAccounts.foreach { item =>
@@ -718,67 +717,21 @@ object TrieBackedJamState:
   private def readActivityStats(
       trie: StateTrie,
       config: ChainConfig
-  ): (List[StatCount], List[StatCount], List[CoreStatisticsRecord], List[ServiceStatisticsEntry]) =
+  ): ActivityStatisticsCodec.ActivityStatistics =
     trie.read(StateKeys.simpleKey(StateKeys.ACTIVITY_STATISTICS)) match
       case None =>
-        (
-          List.fill(config.validatorCount)(StatCount.zero),
-          List.fill(config.validatorCount)(StatCount.zero),
-          List.fill(config.coresCount)(CoreStatisticsRecord.zero),
-          List.empty
+        ActivityStatisticsCodec.ActivityStatistics(
+          accumulator = List.fill(config.validatorCount)(StatCount.zero),
+          previous = List.fill(config.validatorCount)(StatCount.zero),
+          core = List.fill(config.coresCount)(CoreStatisticsRecord.zero),
+          service = List.empty
         )
       case Some(v) =>
-        val stats = FullJamStateCodecs.decodeActivityStatistics(
+        ActivityStatisticsCodec.decodeActivityStatistics(
           v.toArray,
           config.validatorCount,
           config.coresCount
         )
-        val cur = stats.accumulator.map(toStatCount)
-        val prev = stats.previous.map(toStatCount)
-        val core = stats.core.map(toCoreStatistics)
-        val svc = stats.service.map(toServiceStatistics)
-        (cur, prev, core, svc)
-
-  private def toStatCount(s: StatCountData): StatCount =
-    StatCount(
-      s.blocks,
-      s.tickets,
-      s.preImages,
-      s.preImagesSize,
-      s.guarantees,
-      s.assurances
-    )
-
-  private def toCoreStatistics(c: CoreStatisticsData): CoreStatisticsRecord =
-    CoreStatisticsRecord(
-      c.daLoad,
-      c.popularity,
-      c.imports,
-      c.extrinsicCount,
-      c.extrinsicSize,
-      c.exports,
-      c.bundleSize,
-      c.gasUsed
-    )
-
-  private def toServiceStatistics(
-      s: ServiceStatisticsData
-  ): ServiceStatisticsEntry =
-    ServiceStatisticsEntry(
-      id = s.serviceId,
-      record = io.forge.jam.protocol.report.ReportTypes.ServiceActivityRecord(
-        providedCount = s.preimagesCount.toInt,
-        providedSize = s.preimagesSize,
-        refinementCount = s.refinesCount,
-        refinementGasUsed = s.refinesGas,
-        extrinsicCount = s.extrinsicsCount,
-        extrinsicSize = s.extrinsicsSize,
-        imports = s.importsCount,
-        exports = s.exportsCount,
-        accumulateCount = s.accumulatesCount,
-        accumulateGasUsed = s.accumulatesGas
-      )
-    )
 
   private def readServiceAccounts(
       trie: StateTrie,
@@ -931,55 +884,15 @@ object TrieBackedJamState:
     val curPadded = cur.padTo(config.validatorCount, StatCount.zero)
     val prevPadded = prev.padTo(config.validatorCount, StatCount.zero)
     val corePadded = core.padTo(config.coresCount, CoreStatisticsRecord.zero)
-    val data = FullJamStateCodecs.ActivityStatisticsData(
-      accumulator = curPadded.map(fromStatCount),
-      previous = prevPadded.map(fromStatCount),
-      core = corePadded.map(fromCoreStatistics),
-      service = svc.map(fromServiceStatistics)
-    )
     encodeJB(
-      FullJamStateCodecs
+      ActivityStatisticsCodec
         .activityStatisticsCodec(config.validatorCount, config.coresCount),
-      data
-    )
-
-  private def fromStatCount(s: StatCount): StatCountData =
-    StatCountData(
-      s.blocks,
-      s.tickets,
-      s.preImages,
-      s.preImagesSize,
-      s.guarantees,
-      s.assurances
-    )
-
-  private def fromCoreStatistics(c: CoreStatisticsRecord): CoreStatisticsData =
-    CoreStatisticsData(
-      c.daLoad,
-      c.popularity,
-      c.imports,
-      c.extrinsicCount,
-      c.extrinsicSize,
-      c.exports,
-      c.bundleSize,
-      c.gasUsed
-    )
-
-  private def fromServiceStatistics(
-      e: ServiceStatisticsEntry
-  ): ServiceStatisticsData =
-    ServiceStatisticsData(
-      serviceId = e.id,
-      preimagesCount = e.record.providedCount.toLong,
-      preimagesSize = e.record.providedSize,
-      refinesCount = e.record.refinementCount,
-      refinesGas = e.record.refinementGasUsed,
-      importsCount = e.record.imports,
-      extrinsicsCount = e.record.extrinsicCount,
-      extrinsicsSize = e.record.extrinsicSize,
-      exportsCount = e.record.exports,
-      accumulatesCount = e.record.accumulateCount,
-      accumulatesGas = e.record.accumulateGasUsed
+      ActivityStatisticsCodec.ActivityStatistics(
+        accumulator = curPadded,
+        previous = prevPadded,
+        core = corePadded,
+        service = svc
+      )
     )
 
   private def encodeServiceInfo(info: ServiceInfo): JamBytes =
