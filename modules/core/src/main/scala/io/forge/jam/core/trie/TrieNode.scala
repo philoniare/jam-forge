@@ -69,8 +69,6 @@ object TrieNode:
         else Some(node.right.slice(0, len.toLong))
       case _ => None
 
-  val emptyHash: Hash = Hash.zero
-
   private def computeHash(t: TrieNodeType, left: JamBytes, right: JamBytes): Hash =
     val preimage = new Array[Byte](64)
     left.copyToArray(preimage, 0, 0, 32)

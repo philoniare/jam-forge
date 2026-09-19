@@ -24,8 +24,6 @@ object workitem:
   )
 
   object WorkItemImportSegment:
-    val Size: Int = Hash.Size + 2 // 34 bytes
-
     given Codec[WorkItemImportSegment] =
       (hashCodec :: uint16L).xmap(
         { case (root, index) => WorkItemImportSegment(root, UShort(index)) },
@@ -49,8 +47,6 @@ object workitem:
   )
 
   object WorkItemExtrinsic:
-    val Size: Int = Hash.Size + 4 // 36 bytes
-
     given Codec[WorkItemExtrinsic] =
       (hashCodec :: uint32L).xmap(
         { case (hash, len) => WorkItemExtrinsic(hash, UInt(len.toInt)) },

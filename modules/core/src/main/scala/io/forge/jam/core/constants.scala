@@ -9,20 +9,8 @@ object constants:
   // Time Constants
   // ══════════════════════════════════════════════════════════════════════════
   
-  /** P = 6: Slot duration in seconds */
-  val P: Int = 6
-  
-  /** E = 600: Epoch length in slots (1 hour) */
-  val E: Int = 600
-  
-  /** Y = 12: Rotation period for ticket accumulation */
-  val Y: Int = 12
-
   /** H = 8: Recent history length in blocks */
   val H: Int = 8
-
-  /** U = 10: Availability timeout in slots */
-  val U: Int = 10
 
   // ══════════════════════════════════════════════════════════════════════════
   // Authorization Constants
@@ -35,19 +23,6 @@ object constants:
   val Q: Int = 80
 
   // ══════════════════════════════════════════════════════════════════════════
-  // Memory and Size Constants
-  // ══════════════════════════════════════════════════════════════════════════
-  
-  /** ZP = 2^12 = 4096: Standard page size */
-  val ZP: Int = 4096
-  
-  /** ZI = 2^24 = 16MB: Input data maximum size */
-  val ZI: Int = 16777216
-  
-  /** ZA = 2: Dynamic page address alignment */
-  val ZA: Int = 2
-  
-  // ══════════════════════════════════════════════════════════════════════════
   // Work Package Constants
   // ══════════════════════════════════════════════════════════════════════════
   
@@ -58,30 +33,11 @@ object constants:
   def erasureExpandedPieces(n: Long): Long = (n * 65 + 63) / 64
 
   // ══════════════════════════════════════════════════════════════════════════
-  // Service Constants
-  // ══════════════════════════════════════════════════════════════════════════
-  
-  /** Maximum number of services per block */
-  val MaxServicesPerBlock: Int = 1024
-  
-  /** Maximum accumulation queue size */
-  val MaxAccumulationQueueSize: Int = 256
-  
-  // ══════════════════════════════════════════════════════════════════════════
   // Crypto Constants
   // ══════════════════════════════════════════════════════════════════════════
   
   /** Hash size in bytes (Blake2b-256) */
   val HashSize: Int = 32
-
-  /** Bandersnatch public key size */
-  val BandersnatchKeySize: Int = 32
-
-  /** Ed25519 public key size */
-  val Ed25519KeySize: Int = 32
-
-  /** BLS public key size */
-  val BlsKeySize: Int = 144
 
   // ══════════════════════════════════════════════════════════════════════════
   // Signature Prefixes (for Ed25519 message signing)
