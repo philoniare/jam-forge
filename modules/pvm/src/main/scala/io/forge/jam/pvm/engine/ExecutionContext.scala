@@ -76,13 +76,6 @@ trait InterruptOps:
  * Memory load operations.
  */
 trait MemoryLoadOps:
-  def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadI16(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadU32(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Int
-  def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Int
   def loadU8Int(pc: ProgramCounter, dst: Int, address: Int): Int
   def loadI8Int(pc: ProgramCounter, dst: Int, address: Int): Int
   def loadU16Int(pc: ProgramCounter, dst: Int, address: Int): Int
@@ -95,16 +88,6 @@ trait MemoryLoadOps:
  * Memory store operations.
  */
 trait MemoryStoreOps:
-  def storeU8(pc: ProgramCounter, src: Int, address: UInt): Int
-  def storeU16(pc: ProgramCounter, src: Int, address: UInt): Int
-  def storeU32(pc: ProgramCounter, src: Int, address: UInt): Int
-  def storeU64(pc: ProgramCounter, src: Int, address: UInt): Int
-
-  def storeImmU8(pc: ProgramCounter, address: UInt, value: Byte): Int
-  def storeImmU16(pc: ProgramCounter, address: UInt, value: Short): Int
-  def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Int
-  def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Int
-
   def storeU8Int(pc: ProgramCounter, src: Int, address: Int): Int
   def storeU16Int(pc: ProgramCounter, src: Int, address: Int): Int
   def storeU32Int(pc: ProgramCounter, src: Int, address: Int): Int

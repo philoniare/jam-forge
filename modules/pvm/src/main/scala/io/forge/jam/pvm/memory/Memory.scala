@@ -2,11 +2,9 @@ package io.forge.jam.pvm.memory
 
 import spire.math.{UByte, UShort, UInt, ULong}
 import io.forge.jam.pvm.MemoryResult
-import io.forge.jam.pvm.types.Width
-import io.forge.jam.pvm.WordOps
 
 /**
- * Memory trait with width-polymorphic load/store operations.
+ * Memory trait with load/store operations.
  *
  * Uses the MemoryResult ADT for error handling:
  * - Success: Operation completed successfully
@@ -140,28 +138,6 @@ trait Memory:
    * @return Some(previousHeapEnd) on success, None on failure (OOM)
    */
   def sbrk(size: UInt): Option[UInt]
-
-  // ============================================================================
-  // Width-Polymorphic Operations via WordOps
-  // ============================================================================
-
-  /**
-   * Loads a word of the given width from memory.
-   */
-  def loadWord[W <: Width](address: UInt)(using ops: WordOps[W]): MemoryResult[ops.Word] =
-    ops.byteCount match
-      case 4 => loadU32(address).map(v => ops.fromULong(ULong(v.toLong)))
-      case 8 => loadU64(address).map(v => ops.fromULong(v))
-      case _ => MemoryResult.OutOfBounds(address)
-
-  /**
-   * Stores a word of the given width to memory.
-   */
-  def storeWord[W <: Width](address: UInt, value: Long)(using ops: WordOps[W]): MemoryResult[Unit] =
-    ops.byteCount match
-      case 4 => storeU32(address, UInt(value.toInt))
-      case 8 => storeU64(address, ULong(value))
-      case _ => MemoryResult.OutOfBounds(address)
 
   // ============================================================================
   // Permission Checking Helpers

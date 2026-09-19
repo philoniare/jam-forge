@@ -83,21 +83,6 @@ final class GuestInstance private (
         ram.writeUnchecked(addr, buf)
         advance()
 
-  override def loadU8(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 1, signedLoad = false)
-  override def loadI8(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 1, signedLoad = true)
-  override def loadU16(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 2, signedLoad = false)
-  override def loadI16(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 2, signedLoad = true)
-  override def loadU32(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 4, signedLoad = false)
-  override def loadI32(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 4, signedLoad = true)
-  override def loadU64(pc: ProgramCounter, dst: Int, address: UInt): Int =
-    loadImpl(pc, dst, address.signed, 8, signedLoad = false)
-
   override def loadU8Int(pc: ProgramCounter, dst: Int, address: Int): Int =
     loadImpl(pc, dst, address, 1, signedLoad = false)
   override def loadI8Int(pc: ProgramCounter, dst: Int, address: Int): Int =
@@ -112,24 +97,6 @@ final class GuestInstance private (
     loadImpl(pc, dst, address, 4, signedLoad = true)
   override def loadU64Int(pc: ProgramCounter, dst: Int, address: Int): Int =
     loadImpl(pc, dst, address, 8, signedLoad = false)
-
-  override def storeU8(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeImpl(pc, address.signed, getReg(src), 1)
-  override def storeU16(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeImpl(pc, address.signed, getReg(src), 2)
-  override def storeU32(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeImpl(pc, address.signed, getReg(src), 4)
-  override def storeU64(pc: ProgramCounter, src: Int, address: UInt): Int =
-    storeImpl(pc, address.signed, getReg(src), 8)
-
-  override def storeImmU8(pc: ProgramCounter, address: UInt, value: Byte): Int =
-    storeImpl(pc, address.signed, value.toLong & 0xffL, 1)
-  override def storeImmU16(pc: ProgramCounter, address: UInt, value: Short): Int =
-    storeImpl(pc, address.signed, value.toLong & 0xffffL, 2)
-  override def storeImmU32(pc: ProgramCounter, address: UInt, value: Int): Int =
-    storeImpl(pc, address.signed, value.toLong & 0xffffffffL, 4)
-  override def storeImmU64(pc: ProgramCounter, address: UInt, value: Long): Int =
-    storeImpl(pc, address.signed, value, 8)
 
   override def storeU8Int(pc: ProgramCounter, src: Int, address: Int): Int =
     storeImpl(pc, address, getReg(src), 1)
