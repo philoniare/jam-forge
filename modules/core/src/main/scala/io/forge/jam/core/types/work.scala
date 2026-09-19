@@ -6,6 +6,7 @@ import _root_.scodec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519Signature}
 import io.forge.jam.core.scodec.JamCodecs.{compactInteger, hashCodec}
+import io.forge.jam.core.scodec.PrimitiveCodecs
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.{Decoder, DecodingFailure}
 import spire.math.{UShort, UInt}
@@ -14,13 +15,6 @@ import spire.math.{UShort, UInt}
  * Work-related simple types
  */
 object work:
-
-  // Helper codec for Ed25519Signature (64 bytes)
-  private val ed25519SigCodec: Codec[Ed25519Signature] =
-    fixedSizeBytes(Ed25519Signature.Size.toLong, bytes).xmap(
-      bv => Ed25519Signature(bv.toArray),
-      sig => ByteVector(sig.bytes)
-    )
 
   /**
    * Package specification containing hash, length, erasure root, exports root, and exports count.
@@ -181,7 +175,7 @@ object work:
     val Size: Int = 1 + 2 + Ed25519Signature.Size // 67 bytes
 
     given Codec[Vote] =
-      (byte :: uint16L :: ed25519SigCodec).xmap(
+      (byte :: uint16L :: PrimitiveCodecs.ed25519Signature).xmap(
         {
           case (voteByte, idx, sig) =>
             Vote(voteByte != 0, ValidatorIndex(idx), sig)

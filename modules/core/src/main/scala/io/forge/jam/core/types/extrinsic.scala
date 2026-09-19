@@ -1,11 +1,11 @@
 package io.forge.jam.core.types
 
 import _root_.scodec.*
-import _root_.scodec.bits.*
 import _root_.scodec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ServiceId, ValidatorIndex, Timeslot, Ed25519Signature}
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt, compactPrefixedList}
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactPrefixedList}
+import io.forge.jam.core.scodec.PrimitiveCodecs
 import io.forge.jam.core.types.work.Vote
 import io.forge.jam.core.types.dispute.{Culprit, Fault, GuaranteeSignature}
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -22,28 +22,10 @@ object extrinsic:
   // Private Codec Helpers
   // ============================================================================
 
-  private val ed25519SigCodec: Codec[Ed25519Signature] =
-    fixedSizeBytes(Ed25519Signature.Size.toLong, bytes).xmap(
-      bv => Ed25519Signature(bv.toArray),
-      sig => ByteVector(sig.bytes)
-    )
-
   private val serviceIdCodec: Codec[ServiceId] =
     uint32L.xmap(
       i => ServiceId(UInt(i.toInt)),
       sid => sid.value.toLong & 0xFFFFFFFFL
-    )
-
-  private val timeslotCodec: Codec[Timeslot] =
-    uint32L.xmap(
-      i => Timeslot(UInt(i.toInt)),
-      ts => ts.value.toLong & 0xFFFFFFFFL
-    )
-
-  private val validatorIndexCodec: Codec[ValidatorIndex] =
-    uint16L.xmap(
-      i => ValidatorIndex(i),
-      vi => vi.value.toInt
     )
 
   // ============================================================================
@@ -60,14 +42,8 @@ object extrinsic:
   )
 
   object Preimage:
-    private val jamBytesWithCompactPrefix: Codec[JamBytes] =
-      variableSizeBytes(compactInt, bytes).xmap(
-        bv => JamBytes.fromByteVector(bv),
-        jb => jb.toByteVector
-      )
-
     given Codec[Preimage] =
-      (serviceIdCodec :: jamBytesWithCompactPrefix).xmap(
+      (serviceIdCodec :: PrimitiveCodecs.compactBytes).xmap(
         { case (requester, blob) => Preimage(requester, blob) },
         p => (p.requester, p.blob)
       )
@@ -105,7 +81,7 @@ object extrinsic:
     /** Create a codec that knows the cores count */
     def codec(coresCount: Int): Codec[AssuranceExtrinsic] =
       val bitfieldSize = (coresCount + 7) / 8
-      (hashCodec :: fixedSizeBytes(bitfieldSize.toLong, bytes) :: validatorIndexCodec :: ed25519SigCodec).xmap(
+      (hashCodec :: fixedSizeBytes(bitfieldSize.toLong, bytes) :: PrimitiveCodecs.validatorIndex :: PrimitiveCodecs.ed25519Signature).xmap(
         { case (anchor, bitfield, idx, sig) =>
           AssuranceExtrinsic(anchor, JamBytes.fromByteVector(bitfield), idx, sig)
         },
@@ -148,7 +124,7 @@ object extrinsic:
     /** Create a codec that knows the votes per verdict */
     def codec(votesPerVerdict: Int): Codec[Verdict] =
       import io.forge.jam.core.scodec.JamCodecs.fixedSizeList
-      (hashCodec :: timeslotCodec :: fixedSizeList(summon[Codec[Vote]], votesPerVerdict)).xmap(
+      (hashCodec :: PrimitiveCodecs.timeslot :: fixedSizeList(summon[Codec[Vote]], votesPerVerdict)).xmap(
         { case (target, age, votes) =>
           Verdict(target, age, votes)
         },
@@ -212,7 +188,7 @@ object extrinsic:
 
   object GuaranteeExtrinsic:
     given Codec[GuaranteeExtrinsic] =
-      (summon[Codec[WorkReport]] :: timeslotCodec :: compactPrefixedList(summon[Codec[GuaranteeSignature]])).xmap(
+      (summon[Codec[WorkReport]] :: PrimitiveCodecs.timeslot :: compactPrefixedList(summon[Codec[GuaranteeSignature]])).xmap(
         { case (report, slot, signatures) =>
           GuaranteeExtrinsic(report, slot, signatures)
         },

@@ -1,28 +1,14 @@
 package io.forge.jam.core.types
 
 import scodec.*
-import scodec.codecs.*
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.hashCodec
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, optionCodec, compactPrefixedList}
 import io.circe.Decoder
 
 /**
  * Historical types.
  */
 object history:
-
-  // ============================================================================
-  // Private Codec Helpers
-  // ============================================================================
-
-  private def optionCodec[A](codec: Codec[A]): Codec[Option[A]] =
-    discriminated[Option[A]].by(byte)
-      .subcaseP(0) { case None => None }(provide(None))
-      .subcaseP(1) { case Some(v) => Some(v) }(codec.xmap(Some(_), _.get))
-
-  private def compactPrefixedList[A](codec: Codec[A]): Codec[List[A]] =
-    listOfN(JamCodecs.compactInt, codec)
 
   /**
    * A reported work package with its hash and exports root.

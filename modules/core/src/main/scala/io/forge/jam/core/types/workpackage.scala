@@ -5,6 +5,7 @@ import scodec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ServiceId, CoreIndex, Gas}
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactInt, compactPrefixedList}
+import io.forge.jam.core.scodec.PrimitiveCodecs
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workresult.WorkResult
@@ -63,18 +64,12 @@ object workpackage:
   )
 
   object WorkPackage:
-    private val jamBytesWithCompactPrefix: Codec[JamBytes] =
-      variableSizeBytesLong(compactInteger, bytes).xmap(
-        bv => JamBytes.fromByteVector(bv),
-        jb => jb.toByteVector
-      )
-
     given Codec[WorkPackage] =
       (uint32L ::                             // authCodeHost - 4 bytes unsigned
        hashCodec ::                           // authCodeHash - 32 bytes
        Codec[Context] ::                      // context - variable size
-       jamBytesWithCompactPrefix ::           // authorization - compact length + bytes
-       jamBytesWithCompactPrefix ::           // authorizerConfig - compact length + bytes
+       PrimitiveCodecs.compactBytes ::           // authorization - compact length + bytes
+       PrimitiveCodecs.compactBytes ::           // authorizerConfig - compact length + bytes
        compactPrefixedList(Codec[WorkItem])   // items - compact length + variable items
       ).xmap(
         { case (authCodeHost, authCodeHash, context, authorization, authorizerConfig, items) =>
@@ -133,19 +128,13 @@ object workpackage:
   )
 
   object WorkReport:
-    private val jamBytesWithCompactPrefix: Codec[JamBytes] =
-      variableSizeBytesLong(compactInteger, bytes).xmap(
-        bv => JamBytes.fromByteVector(bv),
-        jb => jb.toByteVector
-      )
-
     given Codec[WorkReport] =
       (Codec[PackageSpec] ::                           // packageSpec - 102 bytes
        Codec[Context] ::                               // context - variable size
        compactInt ::                                   // coreIndex - compact integer
        hashCodec ::                                    // authorizerHash - 32 bytes
        compactInteger ::                               // authGasUsed - compact integer
-       jamBytesWithCompactPrefix ::                    // authOutput - compact length + bytes
+       PrimitiveCodecs.compactBytes ::                    // authOutput - compact length + bytes
        compactPrefixedList(Codec[SegmentRootLookup]) :: // segmentRootLookup - compact length + items
        compactPrefixedList(Codec[WorkResult])          // results - compact length + items
       ).xmap(

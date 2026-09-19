@@ -7,6 +7,7 @@ import spire.math.{UShort, UInt}
 import io.forge.jam.core.{JamBytes, primitives}
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
+import io.forge.jam.core.scodec.PrimitiveCodecs
 
 /**
  * Work item related types.
@@ -88,19 +89,13 @@ object workitem:
   )
 
   object WorkItem:
-    private val jamBytesWithCompactLength: Codec[JamBytes] =
-      variableSizeBytes(compactInt, bytes).xmap(
-        bv => JamBytes.fromByteVector(bv),
-        jb => jb.toByteVector
-      )
-
     given Codec[WorkItem] =
       (uint32L ::                                             // service - 4 bytes
        hashCodec ::                                           // codeHash - 32 bytes
        int64L ::                                              // refineGasLimit - 8 bytes (signed for Gas)
        int64L ::                                              // accumulateGasLimit - 8 bytes (signed for Gas)
        uint16L ::                                             // exportCount - 2 bytes
-       jamBytesWithCompactLength ::                           // payload with compact length
+       PrimitiveCodecs.compactBytes ::                           // payload with compact length
        listOfN(compactInt, Codec[WorkItemImportSegment]) ::   // importSegments
        listOfN(compactInt, Codec[WorkItemExtrinsic])          // extrinsic
       ).xmap(

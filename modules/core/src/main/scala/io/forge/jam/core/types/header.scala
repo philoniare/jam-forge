@@ -7,10 +7,10 @@ import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.PrimitiveCodecs
 import _root_.scodec.*
 import _root_.scodec.bits.*
 import _root_.scodec.codecs.*
-import spire.math.{UInt, UShort}
 
 /**
  * Block header type.
@@ -22,17 +22,6 @@ object header:
 
   /** Seal size (Ed25519 signature 64 bytes + VRF output 32 bytes) */
   val SealSize: Int = 96
-
-  // Private codecs for primitive types
-  private val timeslotCodec: Codec[Timeslot] = uint32L.xmap(
-    v => Timeslot(UInt(v.toInt)),
-    ts => ts.value.toLong & 0xFFFFFFFFL
-  )
-
-  private val validatorIndexCodec: Codec[ValidatorIndex] = uint16L.xmap(
-    v => ValidatorIndex(UShort(v)),
-    vi => vi.value.toInt
-  )
 
   /**
    * Block header containing all block metadata.
@@ -83,10 +72,10 @@ object header:
       (JamCodecs.hashCodec ::
         JamCodecs.hashCodec ::
         JamCodecs.hashCodec ::
-        timeslotCodec ::
+        PrimitiveCodecs.timeslot ::
         epochMarkOpt ::
         ticketsMarkOpt ::
-        validatorIndexCodec ::
+        PrimitiveCodecs.validatorIndex ::
         fixedSizeBytes(EntropySourceSize.toLong, bytes) ::
         offendersCodec ::
         fixedSizeBytes(SealSize.toLong, bytes)).xmap(

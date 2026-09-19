@@ -1,22 +1,16 @@
 package io.forge.jam.core.types
 
 import scodec.*
-import scodec.bits.*
 import scodec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ed25519PublicKeyCodec}
+import io.forge.jam.core.scodec.PrimitiveCodecs
 import io.circe.Decoder
 
 /**
  * Dispute-related types
  */
 object dispute:
-
-  private val ed25519SigCodec: Codec[Ed25519Signature] =
-    fixedSizeBytes(Ed25519Signature.Size.toLong, bytes).xmap(
-      bv => Ed25519Signature(bv.toArray),
-      sig => ByteVector(sig.bytes)
-    )
 
   /**
    * A culprit in a dispute - a validator who made a false guarantee.
@@ -32,7 +26,7 @@ object dispute:
     val Size: Int = Hash.Size + Ed25519PublicKey.Size + Ed25519Signature.Size // 128 bytes
 
     given Codec[Culprit] =
-      (hashCodec :: ed25519PublicKeyCodec :: ed25519SigCodec).as[Culprit]
+      (hashCodec :: ed25519PublicKeyCodec :: PrimitiveCodecs.ed25519Signature).as[Culprit]
 
     given Decoder[Culprit] = Decoder.instance { cursor =>
       for
@@ -57,7 +51,7 @@ object dispute:
     val Size: Int = Hash.Size + 1 + Ed25519PublicKey.Size + Ed25519Signature.Size // 129 bytes
 
     given Codec[Fault] =
-      (hashCodec :: byte :: ed25519PublicKeyCodec :: ed25519SigCodec).xmap(
+      (hashCodec :: byte :: ed25519PublicKeyCodec :: PrimitiveCodecs.ed25519Signature).xmap(
         { case (target, voteByte, key, sig) =>
           Fault(target, voteByte != 0, key, sig)
         },
@@ -86,7 +80,7 @@ object dispute:
     val Size: Int = 2 + Ed25519Signature.Size // 66 bytes
 
     given Codec[GuaranteeSignature] =
-      (uint16L :: ed25519SigCodec).xmap(
+      (uint16L :: PrimitiveCodecs.ed25519Signature).xmap(
         { case (idx, sig) => GuaranteeSignature(ValidatorIndex(idx), sig) },
         gs => (gs.validatorIndex.value.toInt, gs.signature)
       )
