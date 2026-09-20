@@ -239,10 +239,7 @@ class BlockImporter(
   ): List[CoreStatisticsRecord] =
     val stats = StatsAggregation.coreStatsByCore(guarantees, maxCores).toArray
 
-    var ari = availableReports
-    while ari.nonEmpty do
-      val report = ari.head
-      ari = ari.tail
+    availableReports.foreach { report =>
       val coreIndex = report.coreIndex.toInt
       if coreIndex >= 0 && coreIndex < maxCores then
         val packageLength = report.packageSpec.length.toLong
@@ -252,11 +249,9 @@ class BlockImporter(
         val cur = stats(coreIndex)
         stats(coreIndex) =
           cur.copy(daLoad = cur.daLoad + packageLength + segmentsSize)
+    }
 
-    var asi = assurances
-    while asi.nonEmpty do
-      val assurance = asi.head
-      asi = asi.tail
+    assurances.foreach { assurance =>
       val bitfield = assurance.bitfield.toArray
       val bitfieldLen = bitfield.length
       var byteIndex = 0
@@ -272,6 +267,7 @@ class BlockImporter(
                 stats(coreIndex) = cur.copy(popularity = cur.popularity + 1)
             bit += 1
         byteIndex += 1
+    }
 
     stats.toList
 
@@ -308,16 +304,14 @@ class BlockImporter(
       )
     }
 
-    var pi = preimages
-    while pi.nonEmpty do
-      val p = pi.head
+    preimages.foreach { p =>
       val serviceId = p.requester.value.toLong
       val cur = getOrEmpty(serviceId)
       stats(serviceId) = cur.copy(
         providedCount = cur.providedCount + 1,
         providedSize = cur.providedSize + p.blob.length.toLong
       )
-      pi = pi.tail
+    }
 
     accumulationStats.foreach { case (serviceId, (gasUsed, count)) =>
       val cur = getOrEmpty(serviceId)
@@ -328,27 +322,11 @@ class BlockImporter(
     }
 
     // Sorted-by-service-id list, materialised once at the end.
-    val entries =
-      new Array[(Long, ReportTypes.ServiceActivityRecord)](stats.size)
-    var idx = 0
-    stats.foreachEntry { (id, rec) =>
-      entries(idx) = (id, rec); idx += 1
-    }
-    java.util.Arrays.sort(
-      entries,
-      (
-          a: (Long, ReportTypes.ServiceActivityRecord),
-          b: (Long, ReportTypes.ServiceActivityRecord)
-      ) => java.lang.Long.compare(a._1, b._1)
-    )
-    val out = scala.collection.mutable.ListBuffer
-      .empty[ReportTypes.ServiceStatisticsEntry]
-    var oi = 0
-    while oi < entries.length do
-      val (id, record) = entries(oi)
-      out += ReportTypes.ServiceStatisticsEntry(id = id, record = record)
-      oi += 1
-    out.toList
+    stats.toList
+      .sortBy(_._1)
+      .map { case (id, record) =>
+        ReportTypes.ServiceStatisticsEntry(id = id, record = record)
+      }
 
   def materializePostState(config: ChainConfig): RawState =
     val trie = trieStore.at(trieStore.currentRoot)

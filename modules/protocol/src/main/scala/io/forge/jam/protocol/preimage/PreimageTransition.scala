@@ -120,8 +120,9 @@ object PreimageTransition:
             case None        => false
     )
 
-    if validationResult.isLeft then
-      return StfResult.error(validationResult.left.toOption.get)
+    validationResult match
+      case Left(err) => return StfResult.error(err)
+      case Right(_)  => ()
 
     for submission <- input.preimages do
       val serviceId = submission.requester.value.toLong
@@ -170,8 +171,9 @@ object PreimageTransition:
         )
     )
 
-    if validationResult.isLeft then
-      return (preState, StfResult.error(validationResult.left.toOption.get))
+    validationResult match
+      case Left(err) => return (preState, StfResult.error(err))
+      case Right(_)  => ()
 
     // Track statistics updates by service ID
     val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)

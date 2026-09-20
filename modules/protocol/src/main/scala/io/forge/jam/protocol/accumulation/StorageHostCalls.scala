@@ -110,11 +110,12 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       setReg(instance, 7, HostCallResult.NONE)
       return
 
-    if preimage.isEmpty then
-      setReg(instance, 7, HostCallResult.NONE)
-      return
+    val data = preimage match
+      case Some(bytes) => bytes.toArray
+      case None        =>
+        setReg(instance, 7, HostCallResult.NONE)
+        return
 
-    val data = preimage.get.toArray
     val slice = data.slice(actualOffset, actualOffset + actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
@@ -151,11 +152,12 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       val stateKey = StateKey.computeStorageStateKey(targetServiceId, key)
       value = context.readRawDataFor(targetServiceId, stateKey)
 
-    if value.isEmpty then
-      setReg(instance, 7, HostCallResult.NONE)
-      return
+    val data = value match
+      case Some(bytes) => bytes.toArray
+      case None        =>
+        setReg(instance, 7, HostCallResult.NONE)
+        return
 
-    val data = value.get.toArray
     val actualOffset = argClampedLen(instance, 11, data.length.toLong)
     val actualLength = argClampedLen(instance, 12, data.length.toLong - actualOffset)
     val slice = data.slice(actualOffset, actualOffset + actualLength)
@@ -240,23 +242,24 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Functional update of the (immutable) per-account storage map; the rebuilt
     // map replaces the prior one on the account written back below.
     val newStorage: Map[JamBytes, JamBytes] =
-      if valueLen == 0L then
-        // Delete key
-        if keyWasPresent then
+      newValue match
+        case None =>
+          // Delete key
+          if keyWasPresent then
+            if viewInstalled then
+              context.storageView.foreach(_.delete(context.serviceIndex, key))
+            else
+              context.x.rawServiceDataByStateKey =
+                context.x.rawServiceDataByStateKey.removed(stateKey)
+            acc.storage.removed(key)
+          else acc.storage
+        case Some(v) =>
           if viewInstalled then
-            context.storageView.foreach(_.delete(context.serviceIndex, key))
+            context.storageView.foreach(_.put(context.serviceIndex, key, v))
           else
             context.x.rawServiceDataByStateKey =
-              context.x.rawServiceDataByStateKey.removed(stateKey)
-          acc.storage.removed(key)
-        else acc.storage
-      else
-        if viewInstalled then
-          context.storageView.foreach(_.put(context.serviceIndex, key, newValue.get))
-        else
-          context.x.rawServiceDataByStateKey =
-            context.x.rawServiceDataByStateKey.updated(stateKey, newValue.get)
-        acc.storage.updated(key, newValue.get)
+              context.x.rawServiceDataByStateKey.updated(stateKey, v)
+          acc.storage.updated(key, v)
 
     // Update account info with new bytes/items
     val updatedInfo = info.copy(
@@ -283,13 +286,12 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val outputAddr = getReg(instance, 8).toInt
     val targetServiceId =
       if serviceId == -1L then context.serviceIndex else serviceId
-    val account = context.x.accounts.get(targetServiceId)
+    val info = context.x.accounts.get(targetServiceId) match
+      case Some(acc) => acc.info
+      case None      =>
+        setReg(instance, 7, HostCallResult.NONE)
+        return
 
-    if account.isEmpty then
-      setReg(instance, 7, HostCallResult.NONE)
-      return
-
-    val info = account.get.info
     val thresholdBalance = calculateThreshold(info)
 
     val data = new Array[Byte](96)
@@ -354,23 +356,23 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       label = "Query"
     )
 
-    if timeslotsOpt.isEmpty then
-      setReg(instance, 7, HostCallResult.NONE)
-      setReg(instance, 8, ULong(0))
-    else
-      val history = timeslotsOpt.get
-      val count = history.size
-      val r7Value: ULong = count match
-        case 0 => ULong(0)
-        case _ => ULong(count) + (ULong(history.head) << 32)
+    timeslotsOpt match
+      case None =>
+        setReg(instance, 7, HostCallResult.NONE)
+        setReg(instance, 8, ULong(0))
+      case Some(history) =>
+        val count = history.size
+        val r7Value: ULong = count match
+          case 0 => ULong(0)
+          case _ => ULong(count) + (ULong(history.head) << 32)
 
-      val r8Value: ULong =
-        if count >= 3 then ULong(history(1)) + (ULong(history(2)) << 32)
-        else if count >= 2 then ULong(history(1))
-        else ULong(0)
+        val r8Value: ULong =
+          if count >= 3 then ULong(history(1)) + (ULong(history(2)) << 32)
+          else if count >= 2 then ULong(history(1))
+          else ULong(0)
 
-      setReg(instance, 7, r7Value)
-      setReg(instance, 8, r8Value)
+        setReg(instance, 7, r7Value)
+        setReg(instance, 8, r8Value)
 
   /** solicit (23): Request a preimage. Request that a preimage be made
     * available.
@@ -388,12 +390,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       return
     val length = zFull.toInt
 
-    val account = context.x.accounts.get(context.serviceIndex)
-    if account.isEmpty then
-      setReg(instance, 7, HostCallResult.WHO)
-      return
-
-    val acc = account.get
+    val acc = context.x.accounts.get(context.serviceIndex) match
+      case Some(a) => a
+      case None    =>
+        setReg(instance, 7, HostCallResult.WHO)
+        return
 
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](Hash.Size)
@@ -444,31 +445,33 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       JamBytes(hashBuffer)
     )
 
-    if notRequestedYet then
-      // New request: start with empty list (preimage not yet available)
-      val newTimeslots = List.empty[Long]
-      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
-      // Update footprint and the (immutable) preimageRequests map, written back
-      // as a single rebuilt account.
-      val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
-      context.x.accounts = context.x.accounts.updated(
-        context.serviceIndex,
-        acc.copy(
-          info = updatedInfo,
-          preimageRequests =
+    existingTimeslots match
+      case None =>
+        // New request: start with empty list (preimage not yet available)
+        val newTimeslots = List.empty[Long]
+        context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
+        // Update footprint and the (immutable) preimageRequests map, written back
+        // as a single rebuilt account.
+        val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
+        context.x.accounts = context.x.accounts.updated(
+          context.serviceIndex,
+          acc.copy(
+            info = updatedInfo,
+            preimageRequests =
+              acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+          )
+        )
+      case Some(prior) =>
+        // Re-solicit (prior.size == 2, established by `canSolicit`): append
+        // the current timeslot (requesting again).
+        val newTimeslots = prior :+ context.timeslot
+        context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
+        context.x.accounts = context.x.accounts.updated(
+          context.serviceIndex,
+          acc.copy(preimageRequests =
             acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
+          )
         )
-      )
-    else if isPreviouslyAvailable then
-      // Re-solicit: append current timeslot (requesting again)
-      val newTimeslots = existingTimeslots.get :+ context.timeslot
-      context.writeRawData(stateKey, StateKey.encodePreimageInfoValue(newTimeslots))
-      context.x.accounts = context.x.accounts.updated(
-        context.serviceIndex,
-        acc.copy(preimageRequests =
-          acc.preimageRequests.updated(key, PreimageRequest(newTimeslots))
-        )
-      )
 
     setReg(instance, 7, HostCallResult.OK)
 
@@ -491,12 +494,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       return
     val length = zFull.toInt
 
-    val account = context.x.accounts.get(context.serviceIndex)
-    if account.isEmpty then
-      setReg(instance, 7, HostCallResult.WHO)
-      return
-
-    val acc = account.get
+    val acc = context.x.accounts.get(context.serviceIndex) match
+      case Some(a) => a
+      case None    =>
+        setReg(instance, 7, HostCallResult.WHO)
+        return
 
     // Read hash from memory - PANIC if fails
     val hashBuffer = new Array[Byte](Hash.Size)
@@ -518,11 +520,12 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       label = "Forget"
     )
 
-    if existingTimeslots.isEmpty then
-      setReg(instance, 7, HostCallResult.HUH)
-      return
+    val history = existingTimeslots match
+      case Some(ts) => ts
+      case None     =>
+        setReg(instance, 7, HostCallResult.HUH)
+        return
 
-    val history = existingTimeslots.get
     val historyCount = history.size
     val minHoldSlot =
       math.max(0L, context.timeslot - config.preimageExpungePeriod)
@@ -618,10 +621,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val blob = JamBytes(blobBuffer)
 
     // Check if target account exists - WHO if not
-    val targetAccount = context.x.accounts.get(targetServiceId)
-    if targetAccount.isEmpty then
-      setReg(instance, 7, HostCallResult.WHO)
-      return
+    val targetAccount = context.x.accounts.get(targetServiceId) match
+      case Some(a) => a
+      case None    =>
+        setReg(instance, 7, HostCallResult.WHO)
+        return
 
     // Compute preimage hash
     val preimageHash = Hashing.blake2b256(blobBuffer)
@@ -631,7 +635,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // read when the in-memory request map misses.
     val preimageKey = PreimageKey(Hash(preimageHash.bytes.toArray), blobLen)
     val requestTimeslots = loadPreimageTimeslots(
-      existing = targetAccount.get.preimageRequests.get(preimageKey),
+      existing = targetAccount.preimageRequests.get(preimageKey),
       readRaw = context.readRawDataFor(
         targetServiceId,
         StateKey.computePreimageInfoStateKey(
@@ -646,9 +650,11 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Spec OK path requires the request to be present with an empty timeslot
     // list (solicited but not yet provided): HUH when the request is absent or
     // its timeslot list is non-empty (a_requests[(blake(i), z)] != []).
-    if requestTimeslots.isEmpty || requestTimeslots.get.nonEmpty then
-      setReg(instance, 7, HostCallResult.HUH)
-      return
+    requestTimeslots match
+      case Some(ts) if ts.isEmpty => () // solicited, not yet provided: the OK path
+      case _                      =>
+        setReg(instance, 7, HostCallResult.HUH)
+        return
 
     // Check if already in provisions set for this execution -> HUH
     val provisionEntry = (targetServiceId, blob)

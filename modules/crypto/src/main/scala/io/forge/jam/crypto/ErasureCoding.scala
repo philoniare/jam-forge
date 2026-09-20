@@ -150,14 +150,12 @@ object ErasureCoding:
       // Encode each group of original shards - returns originalCount + recoveryCount shards
       val encodedResults = originalShards.map(shards => encode(shards, recoveryCount))
 
-      // Check for errors
-      encodedResults.find(_.isLeft) match
-        case Some(Left(err)) => Left(err)
-        case _ =>
-          val result2d = encodedResults.map(_.toOption.get)
-          // Transpose back and join
-          val transposed = transpose(result2d)
-          Right(transposed.map(join))
+      val (errors, result2d) = encodedResults.partitionMap(identity)
+      if errors.nonEmpty then Left(errors.head)
+      else
+        // Transpose back and join
+        val transposed = transpose(result2d)
+        Right(transposed.map(join))
 
   /**
    * R_k: Erasure-code reconstruction function.
@@ -197,11 +195,10 @@ object ErasureCoding:
           recover(originalCount, recoveryCount, recoveryShards)
         }
 
-        // Check for errors
-        recoverResults.find(_.isLeft) match
-          case Some(Left(err)) => Left(err)
-          case _ =>
-            val result2d = recoverResults.map(_.toOption.get).toArray
-            // Transpose and join
-            val transposed = transpose(result2d)
-            Right(join(transposed.map(join)))
+        val (errors, recovered) = recoverResults.partitionMap(identity)
+        if errors.nonEmpty then Left(errors.head)
+        else
+          val result2d = recovered.toArray
+          // Transpose and join
+          val transposed = transpose(result2d)
+          Right(join(transposed.map(join)))

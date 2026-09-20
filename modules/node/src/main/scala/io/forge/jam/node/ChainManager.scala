@@ -93,7 +93,14 @@ final class ChainManager(
       var cursor = bestHead.hash
       var h = bestHeight
       while h > targetHeight do
-        decodeBlock(blockStore.getBlock(cursor).get) match
+        val cursorBytes = blockStore
+          .getBlock(cursor)
+          .getOrElse(
+            throw new IllegalStateException(
+              s"block store invariant: ancestor ${cursor.toHex} of best head is missing while finalizing at depth $depth"
+            )
+          )
+        decodeBlock(cursorBytes) match
           case Right(b) => cursor = b.header.parent
           case Left(_)  => return None
         h -= 1
@@ -134,7 +141,13 @@ final class ChainManager(
           .map(Hash(_))
           .getOrElse(throw new IllegalStateException("missing state_root meta"))
         trieStore.markCommitted(root)
-        val bestHash = blockStore.getHead(BlockStore.BestHead).get
+        val bestHash = blockStore
+          .getHead(BlockStore.BestHead)
+          .getOrElse(
+            throw new IllegalStateException(
+              "block store invariant: genesis head present but BestHead missing on restore"
+            )
+          )
         bestHead = Head(bestHash, metaLong("best_slot").getOrElse(0L), root)
         logger.info(
           s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
@@ -247,7 +260,12 @@ final class ChainManager(
             case Left(e)  => return Left(s"reorg: undecodable branch block: $e")
         case _ => return Left("reorg: branch block missing")
     val ancestor = cursor
-    val ancestorRoot = blockRoot(ancestor).get
+    // The loop above exits precisely when `blockRoot(cursor)` is defined.
+    val ancestorRoot = blockRoot(ancestor).getOrElse(
+      throw new IllegalStateException(
+        s"block store invariant: common ancestor ${ancestor.toHex} has no validated post-state root during reorg to ${tip.toHex}"
+      )
+    )
 
     // Never rewind at or below finality.
     val finalizedHeight =
@@ -261,7 +279,14 @@ final class ChainManager(
     var back = previousBest.hash
     while back != ancestor do
       abandoned += back
-      decodeBlock(blockStore.getBlock(back).get) match
+      val backBytes = blockStore
+        .getBlock(back)
+        .getOrElse(
+          throw new IllegalStateException(
+            s"block store invariant: main-chain block ${back.toHex} missing while rewinding to ${ancestor.toHex}"
+          )
+        )
+      decodeBlock(backBytes) match
         case Right(b) => back = b.header.parent
         case Left(e)  => return Left(s"reorg: undecodable main block: $e")
 
