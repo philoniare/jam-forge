@@ -13,6 +13,8 @@ import io.forge.jam.protocol.traces.KeyValue
 final case class Bootnode(ed25519Hex: String, host: String, port: Int):
   def address: InetSocketAddress = new InetSocketAddress(host, port)
 
+  def ed25519Key: Array[Byte] = JamBytes.fromHexUnsafe(ed25519Hex).toArray
+
 object Bootnode:
   /** Format: `<64-hex-ed25519>@host:port`. */
   def parse(s: String): Bootnode =

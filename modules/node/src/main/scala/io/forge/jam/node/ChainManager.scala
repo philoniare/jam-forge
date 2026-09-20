@@ -4,7 +4,7 @@ import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.encode
-import io.forge.jam.core.trie.StateTrieStore
+import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
@@ -330,14 +330,16 @@ final class ChainManager(
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */
-  def stateView(): TrieBackedJamState =
-    val trie = trieStore.at(bestHead.stateRoot)
+  def stateView(): TrieBackedJamState = synchronized {
+    val root = bestHead.stateRoot
+    val trie = StateTrie.at(trieStore.backend, root)
     new TrieBackedJamState(
       trie,
       config,
       new ServiceStorageView(trie),
       Some(trieStore)
     )
+  }
 
   /** Walk `max` blocks from `from` following parents (descending, inclusive).
     */
