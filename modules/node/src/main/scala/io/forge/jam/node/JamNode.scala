@@ -193,7 +193,7 @@ final class JamNode(
 
     spec.bootnodes.foreach { bn =>
       try
-        val conn = connectPeer(bn.address)
+        val conn = connectPeer(bn.address, Some(bn.ed25519Key))
         logger.info(s"connected bootnode ${bn.host}:${bn.port}")
       catch
         case e: Exception =>
@@ -211,9 +211,24 @@ final class JamNode(
 
   def listenPort: Int = network.boundPort
 
-  /** Connect to a peer and open the UP 0 announcement stream. */
-  def connectPeer(address: InetSocketAddress): JamnpConnection =
+  def connectPeer(
+      address: InetSocketAddress,
+      expectedEd25519: Option[Array[Byte]] = None
+  ): JamnpConnection =
     val conn = network.connect(address).get(15, java.util.concurrent.TimeUnit.SECONDS)
+    expectedEd25519.foreach { expected =>
+      JamNode.verifyPeerKey(expected, conn.peerKey) match
+        case Left(msg) =>
+          conn.close()
+          throw new SecurityException(msg)
+        case Right(()) => ()
+    }
+    val expectedAlpn = network.config.alpn
+    if conn.negotiatedAlpn != expectedAlpn then
+      conn.close()
+      throw new SecurityException(
+        s"ALPN mismatch: expected $expectedAlpn, got ${conn.negotiatedAlpn}"
+      )
     sync.openAnnouncementStream(conn)
     distribution.trackConnection(conn)
     conn
@@ -240,3 +255,12 @@ final class JamNode(
     blockStore.close()
     shardStore.close()
     trieBackend.close()
+
+object JamNode:
+
+  private def hex(bytes: Array[Byte]): String =
+    bytes.map(b => f"${b & 0xff}%02x").mkString
+    
+  def verifyPeerKey(expected: Array[Byte], actual: Array[Byte]): Either[String, Unit] =
+    if java.util.Arrays.equals(expected, actual) then Right(())
+    else Left(s"peer key mismatch: expected ${hex(expected)}, got ${hex(actual)}")

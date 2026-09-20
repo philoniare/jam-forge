@@ -2,13 +2,13 @@ package io.forge.jam.core.trie
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import scala.collection.mutable
+import java.util.concurrent.ConcurrentHashMap
 
 final class StateTrieStore(val backend: StateTrieBackend):
 
-  private var pinned: Hash = Hash.zero
-  private val serviceInfoCache = mutable.HashMap.empty[Long, JamBytes]
-  private var knownServiceIdsCache: Option[Set[Long]] = None
+  @volatile private var pinned: Hash = Hash.zero
+  private val serviceInfoCache = new ConcurrentHashMap[java.lang.Long, JamBytes]()
+  @volatile private var knownServiceIdsCache: Option[Set[Long]] = None
 
   def currentRoot: Hash = pinned
 
@@ -34,13 +34,16 @@ final class StateTrieStore(val backend: StateTrieBackend):
 
   def gc(): Unit = backend.gc()
 
-  def cachedServiceInfo(id: Long): Option[JamBytes] = serviceInfoCache.get(id)
+  def cachedServiceInfo(id: Long): Option[JamBytes] =
+    Option(serviceInfoCache.get(id))
 
   def putCachedServiceInfo(id: Long, encoded: JamBytes): Unit =
-    serviceInfoCache.update(id, encoded)
+    serviceInfoCache.put(id, encoded)
+    ()
 
   def evictCachedServiceInfo(id: Long): Unit =
     serviceInfoCache.remove(id)
+    ()
 
   def cachedServiceIds: Option[Set[Long]] = knownServiceIdsCache
 
