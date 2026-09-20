@@ -12,6 +12,7 @@ import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
 import scodec.bits.ByteVector
 
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.*
 
 /** Owns the canonical chain: the persistent state trie, block storage and the
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
@@ -39,6 +40,8 @@ final class ChainManager(
   final case class Head(hash: Hash, slot: Long, stateRoot: Hash)
 
   @volatile private var bestHead: Head = Head(Hash.zero, 0L, Hash.zero)
+
+  private val leafMap = new java.util.concurrent.ConcurrentHashMap[Hash, Head]()
 
   /** Listeners invoked after every successful import (assurers, watchers). */
   private val importListeners =
@@ -115,8 +118,10 @@ final class ChainManager(
         h -= 1
       finalize(cursor).toOption
 
-  /** Leaves of the (currently linear) chain: the best head. */
-  def leaves: List[Head] = List(bestHead)
+  def leaves: List[Head] =
+    val best = bestHead
+    val rest = leafMap.values().asScala.filterNot(_.hash == best.hash).toList
+    best :: rest
 
   private def metaLong(name: String): Option[Long] =
     blockStore.getMeta(name).map(b => java.nio.ByteBuffer.wrap(b).getLong)
@@ -138,6 +143,41 @@ final class ChainManager(
   private def putBlockHeight(h: Hash, height: Long): Unit =
     putMetaLong(s"height:${h.toHex}", height)
 
+  /** Slot of a stored block, decoded from its full block bytes; 0 when the
+    * block bytes are missing/empty (genesis, whose body is never stored) or
+    * undecodable. Mirrors the existing `finalize`/`finalizeAtDepth` pattern.
+    */
+  private def blockSlot(h: Hash): Long =
+    blockStore
+      .getBlock(h)
+      .filter(_.nonEmpty)
+      .flatMap(b => decodeBlock(b).toOption)
+      .map(_.header.slot.value.toLong)
+      .getOrElse(0L)
+
+  /** The `Head` for an already-imported block, for leaf bookkeeping:
+    * validated post-state root when known, `Hash.zero` for an unvalidated
+    * side-branch block.
+    */
+  private def headOf(h: Hash): Head = Head(h, blockSlot(h), blockRoot(h).getOrElse(Hash.zero))
+
+  /** Rebuild `leafMap` from scratch by walking `blockStore.children` from
+    * genesis: any reachable block with no imported children is a leaf. Used
+    * on restore, where the in-memory `leafMap` built during the previous
+    * process run is gone but the persisted parent -> children index isn't.
+    */
+  private def rebuildLeaves(genesisHash: Hash): Unit =
+    leafMap.clear()
+    val stack = mutable.ArrayDeque(genesisHash)
+    val visited = mutable.HashSet.empty[Hash]
+    while stack.nonEmpty do
+      val h = stack.removeHead()
+      if !visited.contains(h) then
+        visited += h
+        blockStore.children(h) match
+          case Nil      => leafMap.put(h, headOf(h))
+          case children => children.foreach(stack.prepend)
+
   /** Initialize a fresh database from the chain spec, or restore heads from a
     * previous run. Returns true when genesis was (re-)initialized.
     */
@@ -158,6 +198,14 @@ final class ChainManager(
             )
           )
         bestHead = Head(bestHash, metaLong("best_slot").getOrElse(0L), root)
+        val genesisHash = blockStore
+          .getHead(BlockStore.GenesisHead)
+          .getOrElse(
+            throw new IllegalStateException(
+              "block store invariant: genesis head present but its hash lookup failed on restore"
+            )
+          )
+        rebuildLeaves(genesisHash)
         logger.info(
           s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
         )
@@ -177,6 +225,8 @@ final class ChainManager(
         putBlockRoot(genesisHash, root)
         putBlockHeight(genesisHash, 0L)
         bestHead = Head(genesisHash, 0L, root)
+        leafMap.clear()
+        leafMap.put(genesisHash, bestHead)
         logger.info(
           s"initialized genesis ${genesisHash.toHex.take(18)} root=${root.toHex.take(18)}"
         )
@@ -216,6 +266,10 @@ final class ChainManager(
               blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
               val height = parentHeight + 1
               putBlockHeight(hash, height)
+              leafMap.remove(parent)
+              if blockStore.children(hash).isEmpty then
+                leafMap.put(hash, Head(hash, block.header.slot.value.toLong, Hash.zero))
+              else leafMap.remove(hash)
               val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
               if height > bestHeight then reorgTo(hash, events)
               else
@@ -249,6 +303,9 @@ final class ChainManager(
         putBlockRoot(hash, postRoot)
         putBlockHeight(hash, blockHeight(parent).getOrElse(0L) + 1)
         bestHead = Head(hash, slot, postRoot)
+        leafMap.remove(parent)
+        if blockStore.children(hash).isEmpty then leafMap.put(hash, bestHead)
+        else leafMap.remove(hash)
         logger.info(
           s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
         )
@@ -323,8 +380,6 @@ final class ChainManager(
         case Right(head) =>
           replayed += head.hash
         case Left(err) =>
-          // Roll back: restore the previous chain and clear the roots the
-          // partial replay recorded.
           replayed.foreach(dropBlockRoot)
           trieStore.markCommitted(previousBest.stateRoot)
           bestHead = previousBest

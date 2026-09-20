@@ -65,6 +65,7 @@ final class JamNode(
   val pools = new ExtrinsicPools
   val distribution = new DistributionService(pools, spec.config.coresCount, egress)
   val shards = new ShardService(shardStore, spec.config)
+  val segments = new SegmentPool()
   val tickets = new TicketService(chain, pools, distribution, egress)
   val preimages = new PreimageService(chain, pools, egress)
 
@@ -99,7 +100,7 @@ final class JamNode(
     * CE 135 distribution) with this node's validator keys.
     */
   def enableGuaranteeing(keys: Seq[ValidatorKeySet]): Unit =
-    val g = new GuarantorService(chain, distribution, pools, keys, Some(shardStore))
+    val g = new GuarantorService(chain, distribution, pools, keys, Some(shardStore), segments)
     guarantor = Some(g)
     network.registerHandler(
       StreamKind.WorkPackageSubmission,
@@ -108,6 +109,18 @@ final class JamNode(
     network.registerHandler(
       StreamKind.WorkPackageSharing,
       g.workPackageSharingHandler
+    )
+    network.registerHandler(
+      StreamKind.BundleRequest,
+      g.bundleRequestHandler
+    )
+    network.registerHandler(
+      StreamKind.SegmentRequest,
+      g.segmentRequestHandler
+    )
+    network.registerHandler(
+      StreamKind.WorkPackageBundleSubmission,
+      g.bundleSubmissionHandler
     )
 
   /** Enable the assurer role: after every imported block, pending cores are
