@@ -105,35 +105,6 @@ object StateKeys:
         false
       else true
 
-  def isServiceDataKeyFullWithFirst(key: JamBytes, firstByte: Int): Boolean =
-    if key.length != 31 then false
-    else if firstByte == 0xff then key(2) != 0
-    else if KNOWN_PREFIXES.contains(firstByte) then
-      var i = 1
-      while i < 31 do
-        if key(i) != 0 then return true
-        i += 1
-      false
-    else true
-
-  /** Extracts service index from a key with prefix 255. Service bytes at
-    * positions 1, 3, 5, 7.
-    */
-  def extractServiceIndex255(key: JamBytes): Int =
-    (key(1).toInt & 0xff) |
-      ((key(3).toInt & 0xff) << 8) |
-      ((key(5).toInt & 0xff) << 16) |
-      ((key(7).toInt & 0xff) << 24)
-
-  /** Extracts service index from a service data key. Service bytes at positions
-    * 0, 2, 4, 6.
-    */
-  def extractServiceIndexInterleaved(key: JamBytes): Int =
-    (key(0).toInt & 0xff) |
-      ((key(2).toInt & 0xff) << 8) |
-      ((key(4).toInt & 0xff) << 16) |
-      ((key(6).toInt & 0xff) << 24)
-
 /** Codec for encoding/decoding state between raw keyvals and typed state
   * structures.
   */
@@ -144,7 +115,7 @@ object StateCodec:
 
   // Bandersnatch ring commitment size (144 bytes)
   private val RING_COMMITMENT_SIZE: Int =
-    TinyConfig.BANDERSNATCH_RING_COMMITMENT_SIZE
+    io.forge.jam.protocol.safrole.SafroleTypes.BandersnatchRingCommitmentSize
 
   /** Checks if a key is a simple protocol state key (prefix + 30 zero bytes).
     */
@@ -220,78 +191,6 @@ object StateCodec:
         gammaZ = decoded.gammaZ
       else if isSimpleKey(key, StateKeys.JUDGEMENTS) then
         postOffenders = decodeOffenders(value)
-
-    SafroleState(
-      tau,
-      eta,
-      lambda,
-      kappa,
-      gammaK,
-      iota,
-      gammaA,
-      gammaS,
-      gammaZ,
-      postOffenders
-    )
-
-  /** Decode SafroleState from a prebuilt simple-prefix index
-    */
-  def decodeSafroleStateFromIndex(
-      simpleByPrefix: Array[KeyValue],
-      config: ChainConfig
-  ): SafroleState =
-    var tau: Long = 0
-    var eta: List[Hash] = List.fill(4)(Hash.zero)
-    var kappa: List[ValidatorKey] = List.empty
-    var lambda: List[ValidatorKey] = List.empty
-    var gammaK: List[ValidatorKey] = List.empty
-    var iota: List[ValidatorKey] = List.empty
-    var gammaA: List[TicketMark] = List.empty
-    var gammaS: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys =
-      io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(
-        List.fill(config.epochLength)(BandersnatchPublicKey.zero)
-      )
-    var gammaZ: JamBytes = JamBytes.zeros(RING_COMMITMENT_SIZE)
-    var postOffenders: List[Ed25519PublicKey] = List.empty
-
-    val tauKv = simpleByPrefix(StateKeys.TIMESLOT.toInt & 0xff)
-    if tauKv != null then
-      uint32L.decode(BitVector(tauKv.value.toByteVector)) match
-        case Attempt.Successful(DecodeResult(v, _)) => tau = v & 0xffffffffL
-        case Attempt.Failure(_)                     => ()
-
-    val etaKv = simpleByPrefix(StateKeys.ENTROPY_POOL.toInt & 0xff)
-    if etaKv != null then eta = decodeEntropyPool(etaKv.value.toArray)
-
-    val kappaKv = simpleByPrefix(StateKeys.CURRENT_VALIDATORS.toInt & 0xff)
-    if kappaKv != null then
-      kappa = decodeValidatorList(kappaKv.value.toArray, config.validatorCount)
-
-    val lambdaKv = simpleByPrefix(StateKeys.PREVIOUS_VALIDATORS.toInt & 0xff)
-    if lambdaKv != null then
-      lambda =
-        decodeValidatorList(lambdaKv.value.toArray, config.validatorCount)
-
-    val iotaKv = simpleByPrefix(StateKeys.VALIDATOR_QUEUE.toInt & 0xff)
-    if iotaKv != null then
-      iota = decodeValidatorList(iotaKv.value.toArray, config.validatorCount)
-
-    val safroleKv = simpleByPrefix(StateKeys.SAFROLE_STATE.toInt & 0xff)
-    if safroleKv != null then
-      val (decoded, _) =
-        decodeSafroleGammaState(
-          safroleKv.value.toArray,
-          config.validatorCount,
-          config.epochLength
-        )
-      gammaK = decoded.gammaK
-      gammaA = decoded.gammaA
-      gammaS = decoded.gammaS
-      gammaZ = decoded.gammaZ
-
-    val judgementsKv = simpleByPrefix(StateKeys.JUDGEMENTS.toInt & 0xff)
-    if judgementsKv != null then
-      postOffenders = decodeOffenders(judgementsKv.value.toArray)
 
     SafroleState(
       tau,
@@ -442,18 +341,3 @@ object StateCodec:
           _.keys
         )
       )
-
-  /** Groups keyvals by state key prefix.
-    */
-  def groupKeyvals(keyvals: List[KeyValue]): Map[Int, List[KeyValue]] =
-    keyvals.groupBy(kv => kv.key.toArray(0).toInt & 0xff)
-
-  /** Gets keyvals for a specific state component.
-    */
-  def getComponentKeyval(
-      keyvals: List[KeyValue],
-      component: Byte
-  ): Option[KeyValue] =
-    keyvals.find(kv =>
-      (kv.key.toArray(0).toInt & 0xff) == (component.toInt & 0xff)
-    )

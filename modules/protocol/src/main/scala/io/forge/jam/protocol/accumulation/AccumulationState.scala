@@ -566,8 +566,6 @@ object AccumulationInput:
   *   The accumulation root hash
   * @param accumulationStats
   *   Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
-  * @param transferStats
-  *   Per-service transfer statistics: serviceId -> (count, gasUsed)
   * @param commitments
   *   Individual service commitments (service_id, hash) - stored in state for
   *   key 0x10
@@ -575,7 +573,6 @@ object AccumulationInput:
 final case class AccumulationOutputData(
     ok: JamBytes,
     accumulationStats: Map[Long, (Long, Int)] = Map.empty,
-    transferStats: Map[Long, (Long, Long)] = Map.empty,
     commitments: List[(Long, JamBytes)] = List.empty
 )
 
