@@ -7,6 +7,7 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.trie.TrieNode
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 
 import scala.collection.mutable
@@ -67,6 +68,63 @@ object SyncCodec:
       bytes(32) == 0,
       decodeU32(bytes, 33)
     )
+
+  /** CE 129 request: Header Hash(32) ++ Start Key(31) ++ End Key(31) ++
+    * Maximum Size(4 LE) = 98 bytes.
+    */
+  def encodeStateRequest(headerHash: Hash, start: JamBytes, end: JamBytes, maxSize: Long): Array[Byte] =
+    require(start.length == 31, s"start key must be 31 bytes, got ${start.length}")
+    require(end.length == 31, s"end key must be 31 bytes, got ${end.length}")
+    headerHash.bytes ++ start.toArray ++ end.toArray ++ encodeU32(maxSize)
+
+  def decodeStateRequest(bytes: Array[Byte]): Either[String, (Hash, JamBytes, JamBytes, Long)] =
+    if bytes.length != 98 then
+      Left(s"CE129: expected 98 bytes, got ${bytes.length}")
+    else
+      val headerHash = Hash(java.util.Arrays.copyOfRange(bytes, 0, 32))
+      val start = JamBytes(java.util.Arrays.copyOfRange(bytes, 32, 63))
+      val end = JamBytes(java.util.Arrays.copyOfRange(bytes, 63, 94))
+      val maxSize = decodeU32(bytes, 94)
+      Right((headerHash, start, end, maxSize))
+
+  /** CE 129 response message 1: concatenated 65-byte boundary-node
+    * encodings (may be empty).
+    */
+  def encodeBoundaryNodes(nodes: List[TrieNode]): Array[Byte] =
+    val out = new java.io.ByteArrayOutputStream(nodes.length * TrieNode.StorageBytes)
+    nodes.foreach(n => out.write(n.encode.toArray))
+    out.toByteArray
+
+  def decodeBoundaryNodes(bytes: Array[Byte]): List[TrieNode] =
+    bytes
+      .grouped(TrieNode.StorageBytes)
+      .map(chunk => TrieNode.decode(JamBytes(chunk)))
+      .toList
+
+  /** CE 129 response message 2: concatenated `key(31) ++ compactLen(value)
+    * ++ value` pairs.
+    */
+  def encodeStatePairs(pairs: List[(JamBytes, JamBytes)]): Array[Byte] =
+    val out = new java.io.ByteArrayOutputStream()
+    pairs.foreach { case (k, v) =>
+      out.write(k.toArray)
+      out.write(JamCodecs.encodeCompactInteger(v.length.toLong))
+      out.write(v.toArray)
+    }
+    out.toByteArray
+
+  def decodeStatePairs(bytes: Array[Byte]): List[(JamBytes, JamBytes)] =
+    val out = mutable.ArrayBuffer[(JamBytes, JamBytes)]()
+    var offset = 0
+    while offset < bytes.length do
+      val key = JamBytes(java.util.Arrays.copyOfRange(bytes, offset, offset + 31))
+      offset += 31
+      val (len, consumed) = JamCodecs.decodeCompactInteger(bytes, offset)
+      offset += consumed
+      val value = JamBytes(java.util.Arrays.copyOfRange(bytes, offset, offset + len.toInt))
+      offset += len.toInt
+      out += ((key, value))
+    out.toList
 
   private def encodeU32(v: Long): Array[Byte] =
     Array(
@@ -230,3 +288,26 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             logger.warn(s"block sync failed: ${e.getMessage}")
     })
     ()
+
+  // =========================================================================
+  // CE 129 — state request (trie range)
+  // =========================================================================
+  def stateRequestHandler: io.forge.jam.network.StreamHandler =
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      stream.onMessage { msg =>
+        try
+          decodeStateRequest(msg) match
+            case Left(err) => logger.warn(s"CE129 request decode failed: $err")
+            case Right((headerHash, start, end, maxSize)) =>
+              chain.stateAt(headerHash) match
+                case None =>
+                  logger.debug(s"CE129: state request for unknown header ${headerHash.toHex.take(18)}")
+                case Some(trie) =>
+                  val cap = math.min(maxSize, Int.MaxValue.toLong).toInt
+                  val (boundary, pairs) = trie.range(start, end, cap)
+                  stream.send(encodeBoundaryNodes(boundary))
+                  stream.send(encodeStatePairs(pairs))
+        catch
+          case e: Exception => logger.warn(s"CE129 handler failed: ${e.getMessage}")
+        stream.finish()
+      }

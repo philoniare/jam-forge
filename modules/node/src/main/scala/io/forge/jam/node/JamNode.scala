@@ -189,6 +189,7 @@ final class JamNode(
       )
       .registerHandler(StreamKind.BlockRequest, sync.blockRequestHandler)
       .registerHandler(StreamKind.WorkReportDistribution, distribution.workReportHandler)
+      .registerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
       .registerHandler(StreamKind.AssuranceDistribution, distribution.assuranceHandler)
       .registerHandler(StreamKind.ShardDistribution, shards.custodyHandler)
       .registerHandler(StreamKind.AuditShardRequest, shards.custodyHandler)
@@ -198,6 +199,7 @@ final class JamNode(
       .registerHandler(StreamKind.TicketDistributionStep2, tickets.ticketHandler)
       .registerHandler(StreamKind.PreimageAnnouncement, preimages.announceHandler)
       .registerHandler(StreamKind.PreimageRequest, preimages.requestHandler)
+      .registerHandler(StreamKind.StateRequest, sync.stateRequestHandler)
       .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
 
     logger.info(

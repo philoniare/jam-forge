@@ -213,6 +213,76 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           buf += ((TrieNode.leafKey(node), v))
         }
 
+  def range(start: JamBytes, end: JamBytes, maxSize: Int): (List[TrieNode], List[(JamBytes, JamBytes)]) =
+    require(start.length == 31, s"start must be 31 bytes, got ${start.length}")
+    require(end.length == 31, s"end must be 31 bytes, got ${end.length}")
+
+    val pairs = mutable.ArrayBuffer[(JamBytes, JamBytes)]()
+    var accumulated = 0L
+    var stop = false
+    var lastIncludedKey: Option[JamBytes] = None
+
+    def leafValue(node: TrieNode): Option[JamBytes] =
+      node.nodeType match
+        case TrieNodeType.EmbeddedLeaf => TrieNode.embeddedValue(node)
+        case TrieNodeType.RegularLeaf =>
+          val vh = Hash.fromByteVectorUnchecked(node.right.toByteVector)
+          pendingValues.get(vh).orElse(backend.readRawValue(vh))
+        case TrieNodeType.Branch => None
+
+    def visit(hash: Hash, depth: Int, boundedByStart: Boolean): Unit =
+      if !stop then
+        getNode(hash) match
+          case None => ()
+          case Some(node) if node.nodeType == TrieNodeType.Branch =>
+            val leftHash = Hash.fromByteVectorUnchecked(node.left.toByteVector)
+            val rightHash = Hash.fromByteVectorUnchecked(node.right.toByteVector)
+            if boundedByStart && bitAt(start, depth) then
+              // start's bit here is 1: the whole left (bit=0) subtree is < start.
+              visit(rightHash, depth + 1, boundedByStart = true)
+            else
+              visit(leftHash, depth + 1, boundedByStart)
+              if !stop then visit(rightHash, depth + 1, boundedByStart = false)
+          case Some(leaf) =>
+            val key = TrieNode.leafKey(leaf)
+            if boundedByStart && JamBytes.compareUnsigned(key.toArray, start.toArray) < 0 then
+              () // before the range; skip
+            else if JamBytes.compareUnsigned(key.toArray, end.toArray) > 0 then
+              stop = true
+            else
+              leafValue(leaf).foreach { v =>
+                if pairs.isEmpty || accumulated + v.length <= maxSize then
+                  pairs += ((key, v))
+                  accumulated += v.length
+                  lastIncludedKey = Some(key)
+                else
+                  stop = true
+              }
+
+    visit(currentRoot, depth = 0, boundedByStart = true)
+
+    def descentPath(key: JamBytes): List[TrieNode] =
+      val path = mutable.ArrayBuffer[TrieNode]()
+      var cur = currentRoot
+      var depth = 0
+      var continue = true
+      while continue do
+        getNode(cur) match
+          case Some(node) if node.nodeType == TrieNodeType.Branch =>
+            path += node
+            cur =
+              if bitAt(key, depth) then Hash.fromByteVectorUnchecked(node.right.toByteVector)
+              else Hash.fromByteVectorUnchecked(node.left.toByteVector)
+            depth += 1
+          case _ => continue = false
+      path.toList
+
+    val boundaryNodes = mutable.LinkedHashSet[TrieNode]()
+    descentPath(start).foreach(boundaryNodes += _)
+    lastIncludedKey.foreach(k => descentPath(k).foreach(boundaryNodes += _))
+
+    (boundaryNodes.toList, pairs.toList)
+
   private[trie] def getNode(hash: Hash): Option[TrieNode] =
     if hash == Hash.zero then None
     else pendingNodes.get(hash).orElse(backend.readNode(hash))

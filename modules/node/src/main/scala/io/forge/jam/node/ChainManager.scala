@@ -342,6 +342,9 @@ final class ChainManager(
   def readRawState(stateKey: JamBytes): Option[JamBytes] =
     trieStore.at(bestHead.stateRoot).read(stateKey)
 
+  def stateAt(headerHash: Hash): Option[StateTrie] =
+    blockRoot(headerHash).map(root => StateTrie.at(trieStore.backend, root))
+
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */

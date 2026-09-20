@@ -223,6 +223,7 @@ final class GuarantorService(
       val guarantee =
         GuaranteeExtrinsic(report, Timeslot(UInt(slot.toInt)), signatures.take(3))
       pools.addGuarantee(guarantee)
+      distribution.recordReport(report)
       distribution.distributeGuaranteeToAll(guarantee)
       logger.info(
         s"guaranteed package ${report.packageSpec.hash.toHex.take(18)} on core ${report.coreIndex.toInt} " +
