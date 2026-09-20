@@ -100,6 +100,9 @@ final class ExtrinsicPools:
     preimages.values.asScala.toList
       .sortBy(p => (p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray).toHex))
 
+  def findPreimage(hash: Hash): Option[Preimage] =
+    preimages.values.asScala.find(p => Hashing.blake2b256(p.blob.toArray) == hash)
+
   /** Drop content consumed by (or stale after) an imported block. */
   def pruneAfterImport(
       includedGuarantees: List[GuaranteeExtrinsic],

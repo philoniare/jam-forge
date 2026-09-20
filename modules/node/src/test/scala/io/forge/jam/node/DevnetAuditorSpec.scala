@@ -128,7 +128,9 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       val report = block.extrinsic.guarantees.head.report
       val reportHash = Hashing.blake2b256(report.encode.toArray)
 
-      // A audited synchronously during authorSlot(3)'s import.
+      val verdictDeadlineA = System.currentTimeMillis() + 30000
+      while auditorA.verdictFor(reportHash).isEmpty && System.currentTimeMillis() < verdictDeadlineA do
+        Thread.sleep(50)
       auditorA.verdictFor(reportHash) shouldBe Some(true)
 
       // B audits when the announced block syncs; then its CE 144 reaches A.

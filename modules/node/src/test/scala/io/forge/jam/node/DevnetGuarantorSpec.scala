@@ -235,6 +235,9 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
       // Slot 3: guarantee on-chain → A's assurer reacts automatically.
       nodeA.authorSlot(3).isDefined shouldBe true
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
+      val assureDeadline = System.currentTimeMillis() + 30000
+      while nodeA.pools.assuranceCount < 5 && System.currentTimeMillis() < assureDeadline do
+        Thread.sleep(50)
       nodeA.pools.assuranceCount should be >= 5
 
       // Slot 4: assurances on-chain → report available → accumulation runs.

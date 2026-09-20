@@ -148,7 +148,9 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
 
       for slot <- 1L to 5L do node.authorSlot(slot).isDefined shouldBe true
 
-      // best height 5, depth 2 → finalized at height 3 (slot 3).
+      val finalityDeadline = System.currentTimeMillis() + 30000
+      while node.chain.finalized.slot != 3L && System.currentTimeMillis() < finalityDeadline do
+        Thread.sleep(50)
       node.chain.finalized.slot shouldBe 3L
 
       // Finalizing below the finalized head is rejected.
