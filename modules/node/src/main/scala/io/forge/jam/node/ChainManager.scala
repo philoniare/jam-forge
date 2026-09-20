@@ -36,9 +36,6 @@ final class ChainManager(
     )
   private val blockCodec = Block.blockCodec(config)
 
-  /** Recent ancestor headers (newest first) for lookup-anchor validation. */
-  private val recentHeaders = mutable.ArrayDeque.empty[(Long, Hash)]
-
   final case class Head(hash: Hash, slot: Long, stateRoot: Hash)
 
   @volatile private var bestHead: Head = Head(Hash.zero, 0L, Hash.zero)
@@ -223,9 +220,6 @@ final class ChainManager(
         putMetaLong("best_slot", slot)
         putBlockRoot(hash, postRoot)
         putBlockHeight(hash, blockHeight(parent).getOrElse(0L) + 1)
-        recentHeaders.prepend((slot, hash))
-        while recentHeaders.size > config.maxLookupAnchorAge.toInt + 1 do
-          recentHeaders.removeLast()
         bestHead = Head(hash, slot, postRoot)
         logger.info(
           s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"

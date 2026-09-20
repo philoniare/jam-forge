@@ -69,7 +69,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         fail(s"Failed to load test case $testCaseName: $error")
       case Right(testCase) =>
         // Test state transition
-        val (postState, _, _, output) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(postState, _, _, output) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty, // initStagingSet - not part of accumulation test vectors
@@ -104,7 +104,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         case Right(testCase) =>
           try
             // Test state transition
-            val (postState, _, _, output) = AccumulationTransition.stfInternal(
+            val AccumulationStfResult(postState, _, _, output) = AccumulationTransition.stfInternal(
               testCase.input,
               testCase.preState,
               List.empty, // initStagingSet - not part of accumulation test vectors
@@ -147,7 +147,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case: $error")
       case Right(testCase) =>
-        val (postState, _, _, _) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(postState, _, _, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty,
@@ -176,7 +176,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
         preReadyCount shouldBe 9 withClue
           "Fixture precondition: 9 ready-queued reports expected"
 
-        val (fullState, _, _, _) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(fullState, _, _, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty,
@@ -192,7 +192,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           reportAccGas = 0L,
           coresCount = 1
         )
-        val (starvedState, _, _, _) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(starvedState, _, _, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty,
@@ -223,7 +223,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case: $error")
       case Right(testCase) =>
-        val (postState, _, _, _) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(postState, _, _, _) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty,
@@ -424,7 +424,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       case Left(error) =>
         fail(s"Failed to load test case $testCaseName: $error")
       case Right(testCase) =>
-        val (postState, _, _, output) = AccumulationTransition.stfInternal(
+        val AccumulationStfResult(postState, _, _, output) = AccumulationTransition.stfInternal(
           testCase.input,
           testCase.preState,
           List.empty,
@@ -460,7 +460,7 @@ class AccumulationTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right(testCase) =>
           try
-            val (postState, _, _, output) = AccumulationTransition.stfInternal(
+            val AccumulationStfResult(postState, _, _, output) = AccumulationTransition.stfInternal(
               testCase.input,
               testCase.preState,
               List.empty,

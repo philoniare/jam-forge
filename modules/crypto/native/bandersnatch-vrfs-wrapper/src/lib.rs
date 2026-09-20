@@ -12,7 +12,7 @@ type RingProof = ark_ec_vrfs::ring::Proof<BandersnatchSha512Ell2>;
 type PcsParams = ark_ec_vrfs::ring::PcsParams<BandersnatchSha512Ell2>;
 type RingParams = RingProofParams<BandersnatchSha512Ell2>;
 use jni::objects::{JByteArray, JClass};
-use jni::sys::{jbyte, jbyteArray, jint, jlong};
+use jni::sys::{jbyte, jbyteArray, jint};
 use jni::JNIEnv;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -237,19 +237,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
     match env.byte_array_from_slice(&buf) {
         Ok(array) => array.into_raw(),
         Err(e) => throw_and_return_null(&mut env, &format!("Failed to create output array: {}", e)),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_destroyVerifier(
-    _env: JNIEnv,
-    _class: JClass,
-    verifier_ptr: jlong,
-) {
-    if verifier_ptr != 0 {
-        unsafe {
-            let _ = Box::from_raw(verifier_ptr as *mut Verifier);
-        }
     }
 }
 
@@ -684,20 +671,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
     match env.byte_array_from_slice(&output_bytes) {
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_rustFree(
-    _env: JNIEnv,
-    _class: JClass,
-    ptr: jlong,
-    len: jlong,
-) {
-    unsafe {
-        if ptr != 0 {
-            let _ = Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
-        }
     }
 }
 
