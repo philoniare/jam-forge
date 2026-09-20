@@ -96,9 +96,6 @@ class BlockImporter(
 
   def store: StateTrieStore = trieStore
 
-  private var bootstrapCount: Int = 0
-  def bootstrapCalls: Int = bootstrapCount
-
   def currentTrieRoot: Hash = trieStore.currentRoot
 
   /** Imports a block and applies all state transitions using the unified
@@ -139,7 +136,6 @@ class BlockImporter(
 
       if trieStore.currentRoot != block.header.parentStateRoot then
         trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value)))
-        bootstrapCount += 1
         if trieStore.currentRoot != block.header.parentStateRoot then
           return ImportResult.Failure(
             ImportError.InvalidStateRoot,
@@ -353,35 +349,6 @@ class BlockImporter(
       out += ReportTypes.ServiceStatisticsEntry(id = id, record = record)
       oi += 1
     out.toList
-
-  /** Imports a block and returns just the computed SafroleState for comparison.
-    * This is useful for trace testing where we want to compare typed state.
-    */
-  def importBlockForSafrole(
-      block: Block,
-      preState: RawState
-  ): (Option[SafroleState], Option[String]) =
-    try
-      importBlock(block, preState) match
-        case ImportResult.Success(_, safroleState) => (safroleState, None)
-        case ImportResult.Failure(_, message)      => (None, Some(message))
-    catch
-      case e: Exception =>
-        (None, Some(s"Exception: ${e.getMessage}"))
-
-  /** Validates that a block import produces the expected post-state. Used for
-    * testing against trace vectors.
-    */
-  def validateBlockImport(
-      block: Block,
-      preState: RawState,
-      expectedPostState: RawState
-  ): Boolean =
-    importBlock(block, preState) match
-      case ImportResult.Success(actualRoot, _) =>
-        actualRoot == expectedPostState.stateRoot
-      case ImportResult.Failure(_, _) =>
-        false
 
   def materializePostState(config: ChainConfig): RawState =
     val trie = trieStore.at(trieStore.currentRoot)

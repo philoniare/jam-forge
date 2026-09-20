@@ -4,7 +4,7 @@ import _root_.scodec.{Codec, Attempt, DecodeResult, Err}
 import _root_.scodec.bits.{BitVector, ByteVector}
 import _root_.scodec.codecs.*
 import io.circe.{Decoder, HCursor}
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs
 import io.forge.jam.core.types.block.Block
@@ -143,22 +143,3 @@ object Genesis:
         header <- c.downField("header").as[Header]
         state <- c.downField("state").as[RawState]
       yield Genesis(header, state)
-
-/**
- * Configuration for tiny chain spec used by all traces.
- * Uses ChainConfig.TINY for standard parameters.
- */
-object TinyConfig:
-  val CONFIG: ChainConfig = ChainConfig.TINY
-  val VALIDATORS_COUNT: Int = CONFIG.validatorCount
-  val EPOCH_LENGTH: Int = CONFIG.epochLength
-  val CORES_COUNT: Int = CONFIG.coresCount
-  val PREIMAGE_EXPUNGE_DELAY: Int = CONFIG.preimageExpungePeriod
-  val MAX_TICKET_ATTEMPTS: Int = CONFIG.ticketsPerValidator
-
-  // Safrole-specific parameters
-  val TICKET_CUTOFF: Int = CONFIG.ticketCutoff
-  val RING_SIZE: Int = 6
-
-  // Bandersnatch ring commitment size
-  val BANDERSNATCH_RING_COMMITMENT_SIZE: Int = 144

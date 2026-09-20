@@ -12,13 +12,6 @@ final class ServiceStorageView(trie: StateTrie):
 
   private val readCache = mutable.HashMap.empty[JamBytes, Option[JamBytes]]
 
-  private var reads: Int = 0
-  private var writes: Int = 0
-
-  def readCount: Int = reads
-
-  def writeCount: Int = pending.size
-
   def get(serviceId: Long, storageKey: JamBytes): Option[JamBytes] =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
     pending.get(stateKey) match
@@ -27,7 +20,6 @@ final class ServiceStorageView(trie: StateTrie):
         readCache.get(stateKey) match
           case Some(cached) => cached
           case None         =>
-            reads += 1
             val v = trie.read(stateKey)
             readCache.update(stateKey, v)
             v
@@ -35,16 +27,13 @@ final class ServiceStorageView(trie: StateTrie):
   def put(serviceId: Long, storageKey: JamBytes, value: JamBytes): Unit =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
     pending = pending.updated(stateKey, Some(value))
-    writes += 1
 
   def delete(serviceId: Long, storageKey: JamBytes): Unit =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
     pending = pending.updated(stateKey, None)
-    writes += 1
 
 
   def readTrie(stateKey: JamBytes): Option[JamBytes] =
-    reads += 1
     trie.read(stateKey)
 
   def getByStateKey(stateKey: JamBytes): Option[JamBytes] =
@@ -54,18 +43,15 @@ final class ServiceStorageView(trie: StateTrie):
         readCache.get(stateKey) match
           case Some(cached) => cached
           case None         =>
-            reads += 1
             val v = trie.read(stateKey)
             readCache.update(stateKey, v)
             v
 
   def putByStateKey(stateKey: JamBytes, value: JamBytes): Unit =
     pending = pending.updated(stateKey, Some(value))
-    writes += 1
 
   def deleteByStateKey(stateKey: JamBytes): Unit =
     pending = pending.updated(stateKey, None)
-    writes += 1
 
   def enumerate(
       prefix: JamBytes,
