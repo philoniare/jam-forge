@@ -3,9 +3,12 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, ExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
+import io.forge.jam.core.Hashing
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
+import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
 import scodec.Codec
 import scodec.bits.ByteVector
 
@@ -14,6 +17,7 @@ import scala.jdk.CollectionConverters.*
 
 /** Distribution protocols feeding the extrinsic pools:
   *   - CE 135 work-report distribution (guaranteed work-report → authors)
+  *   - CE 136 work-report request, served from a bounded known-report cache
   *   - CE 141 assurance distribution (assurer → authors)
   *   - CE 142/143 preimage announcement/request live in [[PreimageService]]
   *
@@ -47,6 +51,7 @@ final class DistributionService(
           case Right(g) =>
             logger.debug(s"pooled guarantee for core ${g.report.coreIndex.toInt}")
             pools.addGuarantee(g)
+            recordReport(g.report)
             stream.finish()
           case Left(err) =>
             logger.warn(s"bad CE135 payload: $err")
@@ -59,6 +64,33 @@ final class DistributionService(
 
   def distributeGuaranteeToAll(g: GuaranteeExtrinsic): Unit =
     connections.forEach(c => if c.isOpen then distributeGuarantee(c, g))
+
+  // =========================================================================
+  // CE 136 — work-report request
+  // =========================================================================
+  private val knownReports =
+    java.util.Collections.synchronizedMap(
+      new java.util.LinkedHashMap[Hash, WorkReport](64, 0.75f, false) {
+        override def removeEldestEntry(e: java.util.Map.Entry[Hash, WorkReport]) = size > 256
+      }
+    )
+
+  /** Record a report in the known-report cache, keyed by its blake2b-256
+    * hash, so it can later be served over CE 136.
+    */
+  def recordReport(report: WorkReport): Unit =
+    knownReports.put(Hashing.blake2b256(report.encode.toArray), report)
+
+  /** CE 136: Work-Report Hash (32) -> Work-Report. */
+  def reportRequestHandler: StreamHandler = new StreamHandler:
+    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+      stream.onMessage { msg =>
+        try
+          if msg.length == 32 then
+            Option(knownReports.get(Hash(msg))).foreach(r => stream.send(r.encode.toArray))
+        catch case e: Exception => logger.warn(s"CE136 failed: ${e.getMessage}")
+        stream.finish()
+      }
 
   // =========================================================================
   // CE 141 — assurance distribution
