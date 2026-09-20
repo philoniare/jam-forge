@@ -66,11 +66,16 @@ final class AuditorService(
     val spec = report.packageSpec
     val result =
       for
-        bundleBytes <- shards.reconstructBundle(
-          spec.erasureRoot,
-          spec.length.toLong.toInt,
-          distribution.peers
-        )
+        bundleBytes <- fetchBundleDirect(spec.erasureRoot, distribution.peers) match
+          case Some(bytes) =>
+            logger.debug(s"CE147: fetched bundle directly for ${spec.erasureRoot.toHex.take(18)}")
+            Right(bytes)
+          case None =>
+            shards.reconstructBundle(
+              spec.erasureRoot,
+              spec.length.toLong.toInt,
+              distribution.peers
+            )
         bundle <- WorkPackageBundle.decode(bundleBytes)
         recomputed <- computeReport
           .compute(
@@ -96,6 +101,56 @@ final class AuditorService(
         // Irretrievable or undecodable bundle is an audit failure.
         logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
         false
+
+  // =========================================================================
+  // CE 147 — bundle request (client side)
+  // =========================================================================
+  def fetchBundleDirect(
+      erasureRoot: Hash,
+      peers: Iterable[JamnpConnection],
+      totalBudgetMs: Long = 15000,
+      maxPeers: Int = 3
+  ): Option[Array[Byte]] =
+    val deadline = System.currentTimeMillis() + totalBudgetMs
+    val candidates = peers.iterator.filter(_.isOpen).take(maxPeers)
+    var result: Option[Array[Byte]] = None
+    while result.isEmpty && candidates.hasNext && System.currentTimeMillis() < deadline do
+      result = fetchBundleFrom(candidates.next(), erasureRoot, deadline)
+    result
+
+  /** One CE 147 request/response attempt against `conn`, bounded by the
+    * shared absolute `deadline` (not a fixed per-call duration) so a peer
+    * that stalls on `openStream` doesn't get a fresh full timeout budget for
+    * the response wait too. On any failure — including a timeout — the
+    * stream is fully closed (not just locally `finish()`ed) so it doesn't
+    * linger registered on the connection pipeline until an idle-out that a
+    * busy connection may never trigger.
+    */
+  private def fetchBundleFrom(
+      conn: JamnpConnection,
+      erasureRoot: Hash,
+      deadline: Long
+  ): Option[Array[Byte]] =
+    var stream: JamnpStream = null
+    try
+      val openTimeout = deadline - System.currentTimeMillis()
+      if openTimeout <= 0 then return None
+      stream = conn.openStream(StreamKind.BundleRequest).get(openTimeout, TimeUnit.MILLISECONDS)
+      val response = new CompletableFuture[Array[Byte]]()
+      stream.onMessage(response.complete(_))
+      stream.onClosed(() => response.complete(null)) // peer holds nothing / declined
+      stream.send(erasureRoot.bytes.toArray)
+      stream.finish()
+      val respTimeout = deadline - System.currentTimeMillis()
+      if respTimeout <= 0 then
+        stream.close()
+        None
+      else Option(response.get(respTimeout, TimeUnit.MILLISECONDS))
+    catch
+      case e: Exception =>
+        logger.debug(s"CE147 direct bundle fetch failed: ${e.getMessage}")
+        if stream != null then stream.close()
+        None
 
   // =========================================================================
   // CE 144 — audit announcements

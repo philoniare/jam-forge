@@ -148,6 +148,8 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   /** UP 0 streams by peer connection, for broadcasting announcements. */
   private val announceStreams = ConcurrentHashMap.newKeySet[JamnpStream]()
 
+  private val StateRequestMaxSizeCap: Long = 16L * 1024 * 1024
+
   /** Single-threaded import pipeline so block application stays sequential. */
   private val importExecutor = Executors.newSingleThreadExecutor { r =>
     val t = new Thread(r, "jam-sync-import")
@@ -303,7 +305,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
                 case None =>
                   logger.debug(s"CE129: state request for unknown header ${headerHash.toHex.take(18)}")
                 case Some(trie) =>
-                  val cap = math.min(maxSize, Int.MaxValue.toLong).toInt
+                  val cap = math.min(maxSize, StateRequestMaxSizeCap).toInt
                   val (boundary, pairs) = trie.range(start, end, cap)
                   stream.send(encodeBoundaryNodes(boundary))
                   stream.send(encodeStatePairs(pairs))
