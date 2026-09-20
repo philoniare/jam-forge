@@ -55,11 +55,18 @@ final class JamNode(
   private val blockStore: BlockStore = stores._2
   val shardStore: ShardStore = stores._3
 
+  private val egress: java.util.concurrent.ExecutorService =
+    java.util.concurrent.Executors.newSingleThreadExecutor(r =>
+      val t = new Thread(r, "jam-egress"); t.setDaemon(true); t
+    )
+
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)
   val pools = new ExtrinsicPools
-  val distribution = new DistributionService(pools, spec.config.coresCount)
+  val distribution = new DistributionService(pools, spec.config.coresCount, egress)
   val shards = new ShardService(shardStore, spec.config)
+  val tickets = new TicketService(chain, pools, distribution, egress)
+  val preimages = new PreimageService(chain, pools, egress)
 
   val slotClock = new SlotClock(
     eraStartSeconds = nodeConfig.eraStartSeconds,
@@ -76,7 +83,6 @@ final class JamNode(
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
   @volatile private var auditor: Option[AuditorService] = None
-  @volatile private var tickets: Option[TicketService] = None
   @volatile private var shuttingDown: Boolean = false
 
   /** Hook invoked at every slot boundary (after any authoring attempt). */
@@ -86,9 +92,8 @@ final class JamNode(
     * Safrole ticket generation for ticketed sealing.
     */
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
-    val ts = new TicketService(chain, pools, keys)
-    tickets = Some(ts)
-    author = Some(new BlockAuthor(chain, keys, pools, ts.ownTickets))
+    tickets.setValidatorKeys(keys)
+    author = Some(new BlockAuthor(chain, keys, pools, tickets.ownTickets))
 
   /** Enable the guarantor role (CE 133 work-package intake → refine → sign →
     * CE 135 distribution) with this node's validator keys.
@@ -117,7 +122,7 @@ final class JamNode(
     * judged (CE 145). Returns the service for verdict inspection.
     */
   def enableAuditing(keys: Seq[ValidatorKeySet]): AuditorService =
-    val a = new AuditorService(chain, distribution, shards, pools, keys)
+    val a = new AuditorService(chain, distribution, shards, pools, keys, egress)
     auditor = Some(a)
     network.registerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
     network.registerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
@@ -132,7 +137,10 @@ final class JamNode(
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     if shuttingDown then return None
-    tickets.foreach(_.maybeGenerate())
+    tickets.maybeGenerate()
+    val slotInEpoch = slot % chain.config.epochLength
+    if slotInEpoch == math.max(chain.config.epochLength / 60, 1) then
+      tickets.distributeTickets(distribution.peers, _ => None)
     author.flatMap { a =>
       a.tryAuthor(slot).flatMap { block =>
         importAuthored(block) match
@@ -168,6 +176,8 @@ final class JamNode(
     if nodeConfig.finalityDepth > 0 then
       chain.onImported((_, _) => chain.finalizeAtDepth(nodeConfig.finalityDepth))
 
+    chain.onImported((head, block) => preimages.onImported(head, block))
+
     // Track accepted peers for distribution when they open UP 0 to us.
     val announceHandler = sync.blockAnnouncementHandler
     network
@@ -184,6 +194,10 @@ final class JamNode(
       .registerHandler(StreamKind.AuditShardRequest, shards.custodyHandler)
       .registerHandler(StreamKind.SegmentShardRequest, shards.segmentShardHandler)
       .registerHandler(StreamKind.SegmentShardRequestVerified, shards.custodyHandler)
+      .registerHandler(StreamKind.TicketDistributionStep1, tickets.ticketHandler)
+      .registerHandler(StreamKind.TicketDistributionStep2, tickets.ticketHandler)
+      .registerHandler(StreamKind.PreimageAnnouncement, preimages.announceHandler)
+      .registerHandler(StreamKind.PreimageRequest, preimages.requestHandler)
       .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
 
     logger.info(
@@ -248,10 +262,14 @@ final class JamNode(
     guarantor.foreach(_.shutdown()) // drains in-flight refine/co-sign work
     network.shutdown()
     sync.shutdown() // waits for an in-flight sync import
+    egress.shutdown()
+    egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)
+    preimages.shutdown() // its own executor for CE143 fetches, drained alongside egress
     shutdownStorageOnly()
 
   /** Close only the storage layers (for tests that never start networking). */
   def shutdownStorageOnly(): Unit =
+    chain.shutdown()
     blockStore.close()
     shardStore.close()
     trieBackend.close()

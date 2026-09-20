@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, constants}
@@ -28,7 +28,8 @@ final class AuditorService(
     distribution: DistributionService,
     shards: ShardService,
     pools: ExtrinsicPools,
-    validatorKeys: Seq[ValidatorKeySet]
+    validatorKeys: Seq[ValidatorKeySet],
+    egress: ExecutorService
 ) extends LazyLogging:
 
   private val computeReport = new ComputeReport(chain.config)
@@ -210,10 +211,24 @@ final class AuditorService(
       .foreach(f.tupled)
 
   private def sendOneShot(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
+    submitSend(() => conn.openStream(kind), kind, payload)
+
+  private[node] def submitSend(
+      open: () => CompletableFuture[JamnpStream],
+      kind: Byte,
+      payload: Array[Byte]
+  ): Unit =
     try
-      val stream = conn.openStream(kind).get(10, java.util.concurrent.TimeUnit.SECONDS)
-      stream.send(payload)
-      stream.finish()
+      egress.submit(new Runnable {
+        def run(): Unit =
+          try
+            val stream = open().get(10, TimeUnit.SECONDS)
+            stream.send(payload)
+            stream.finish()
+          catch
+            case e: Exception =>
+              logger.warn(s"send on ${StreamKind.name(kind)} failed: ${e.getMessage}")
+      })
     catch
-      case e: Exception =>
-        logger.warn(s"send on ${StreamKind.name(kind)} failed: ${e.getMessage}")
+      case _: java.util.concurrent.RejectedExecutionException =>
+        logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")

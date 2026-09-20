@@ -48,6 +48,15 @@ final class ChainManager(
     importListeners.add(listener)
     ()
 
+  private val postImportBus = new PostImportBus[Head, Block]((head, block) =>
+    importListeners.forEach { l =>
+      try l(head, block)
+      catch case e: Exception => logger.error("import listener failed", e)
+    }
+  )
+
+  def shutdown(): Unit = postImportBus.close()
+
   def best: Head = bestHead
 
   def finalized: Head =
@@ -193,12 +202,13 @@ final class ChainManager(
     * branch and adopted via reorg when its branch becomes strictly longer
     */
   def importBlock(blockBytes: Array[Byte]): Either[String, Head] =
-    synchronized {
+    val events = mutable.ListBuffer.empty[(Head, Block)]
+    val result = synchronized {
       decodeBlock(blockBytes).flatMap { block =>
         val hash = headerHashOf(block)
         val parent = block.header.parent
         if blockRoot(hash).isDefined then Left("block already imported")
-        else if parent == bestHead.hash then importOnBest(block, blockBytes)
+        else if parent == bestHead.hash then importOnBest(block, blockBytes, events)
         else
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
@@ -207,7 +217,7 @@ final class ChainManager(
               val height = parentHeight + 1
               putBlockHeight(hash, height)
               val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
-              if height > bestHeight then reorgTo(hash)
+              if height > bestHeight then reorgTo(hash, events)
               else
                 Left(
                   s"stored on side branch (height $height <= best $bestHeight)"
@@ -216,9 +226,14 @@ final class ChainManager(
               Left(s"unknown parent ${parent.toHex.take(18)}")
       }
     }
+    events.foreach((head, block) => postImportBus.publish(head, block))
+    result
 
-  /** Validate and apply a block that extends the best head. */
-  private def importOnBest(block: Block, blockBytes: Array[Byte]): Either[String, Head] =
+  private def importOnBest(
+      block: Block,
+      blockBytes: Array[Byte],
+      events: mutable.ListBuffer[(Head, Block)]
+  ): Either[String, Head] =
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
     importer.importBlock(block, preState) match
@@ -237,17 +252,17 @@ final class ChainManager(
         logger.info(
           s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
         )
-        importListeners.forEach { l =>
-          try l(bestHead, block)
-          catch case e: Exception => logger.error("import listener failed", e)
-        }
+        events += ((bestHead, block))
         Right(bestHead)
 
   /** Adopt the branch ending at `tip`: rewind to the common ancestor (the
     * nearest tip-ancestor with a validated post-state root) and replay the
     * branch
     */
-  private def reorgTo(tip: Hash): Either[String, Head] =
+  private def reorgTo(
+      tip: Hash,
+      events: mutable.ListBuffer[(Head, Block)]
+  ): Either[String, Head] =
     // Collect the unvalidated branch (tip backwards until a validated block).
     val branch = mutable.ListBuffer.empty[Array[Byte]]
     var cursor = tip
@@ -304,7 +319,7 @@ final class ChainManager(
 
     val replayed = mutable.ListBuffer.empty[Hash]
     branch.foreach { bytes =>
-      decodeBlock(bytes).flatMap(b => importOnBest(b, bytes)) match
+      decodeBlock(bytes).flatMap(b => importOnBest(b, bytes, events)) match
         case Right(head) =>
           replayed += head.hash
         case Left(err) =>
@@ -330,7 +345,7 @@ final class ChainManager(
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */
-  def stateView(): TrieBackedJamState = synchronized {
+  def stateView(): TrieBackedJamState = {
     val root = bestHead.stateRoot
     val trie = StateTrie.at(trieStore.backend, root)
     new TrieBackedJamState(
