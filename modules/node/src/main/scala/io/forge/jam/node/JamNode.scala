@@ -34,11 +34,26 @@ final class JamNode(
       .map(NodeIdentity.fromSeed)
       .getOrElse(NodeIdentity.generate())
 
-  private val trieBackend =
-    RocksDbTrieBackend.open(nodeConfig.dataDir.resolve("state"))
-  private val blockStore = BlockStore.open(nodeConfig.dataDir.resolve("blocks"))
+  private def openStores(): (RocksDbTrieBackend, BlockStore, ShardStore) =
+    val trie = RocksDbTrieBackend.open(nodeConfig.dataDir.resolve("state"))
+    try
+      val blocks = BlockStore.open(nodeConfig.dataDir.resolve("blocks"))
+      try
+        val shard = ShardStore.open(nodeConfig.dataDir.resolve("shards"))
+        (trie, blocks, shard)
+      catch
+        case e: Throwable =>
+          blocks.close()
+          throw e
+    catch
+      case e: Throwable =>
+        trie.close()
+        throw e
 
-  val shardStore: ShardStore = ShardStore.open(nodeConfig.dataDir.resolve("shards"))
+  private val stores = openStores()
+  private val trieBackend: RocksDbTrieBackend = stores._1
+  private val blockStore: BlockStore = stores._2
+  val shardStore: ShardStore = stores._3
 
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)

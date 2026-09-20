@@ -150,3 +150,27 @@ class BandersnatchVrfTest extends AnyFunSuite with Matchers:
     // Verification should fail because attempt doesn't match
     result.isDefined shouldBe false
   }
+
+  test("Malformed input to guarded exports returns None and does not abort the JVM") {
+    assume(BandersnatchVrf.isAvailable, "Native library not available - skipping JNI tests")
+
+    // Garbage of an unexpected length into the IETF verify export.
+    val garbagePublic = Array.fill(32)(0xff.toByte)
+    val garbageInput = Array.fill(48)(0x7a.toByte)
+    val garbageAux = Array.emptyByteArray
+    val garbageSig = Array.fill(96)(0xab.toByte)
+    BandersnatchVrf.ietfVrfVerify(garbagePublic, garbageInput, garbageAux, garbageSig) shouldBe None
+
+    // Too-short signature into the getVrfOutput export.
+    BandersnatchVrf.getVrfOutput(Array.fill(10)(0x01.toByte)) shouldBe None
+
+    // Malformed ring signature (all zeros, wrong content) into the ring verify export.
+    val entropy = Hash(hexToBytes("0xbb30a42c1e62f0afda5f0a4e8a562f7a13a24cea00ee81917b86b89e801314aa"))
+    val gammaZ = JamBytes(hexToBytes("0x" + expectedGammaZ))
+    val malformedRingSig = JamBytes(Array.fill(784)(0xcd.toByte))
+    BandersnatchVrf.verifyRingProof(malformedRingSig, gammaZ, entropy, UByte(0), 6) shouldBe None
+
+    // The JVM is still alive: a subsequent valid operation succeeds.
+    val stillAlive = BandersnatchVrf.generateRingRoot(tinyValidatorKeys, 6)
+    stillAlive.isDefined shouldBe true
+  }

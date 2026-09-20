@@ -156,6 +156,40 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     }
   }
 
+  test("repeated open/close does not leak locks or handles; reopen succeeds") {
+    val dir = Files.createTempDirectory("jam-rocksdb-leakshape")
+    try
+      val value = JamBytes(Array.fill[Byte](48)(0x5a))
+      val node = TrieNode.leaf(key31(11), value)
+
+      // Seed data so each reopen has something to read back.
+      val seed = RocksDbTrieBackend.open(dir)
+      seed.batchUpdate(
+        Seq(
+          BackendOp.WriteNode(node),
+          BackendOp.WriteRawValue(value),
+          BackendOp.NodeRefDelta(node.hash, 1),
+          BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
+        )
+      )
+      seed.close()
+
+      // Open/close 50 times; a leaked lock or handle exhaustion throws here.
+      (0 until 50).foreach { _ =>
+        val b = RocksDbTrieBackend.open(dir)
+        b.readNode(node.hash) shouldBe Some(node)
+        b.close()
+      }
+
+      // A fresh open on the same dir still succeeds and sees the data.
+      val reopened = RocksDbTrieBackend.open(dir)
+      try
+        reopened.readNode(node.hash) shouldBe Some(node)
+        reopened.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
+      finally reopened.close()
+    finally deleteRecursively(dir)
+  }
+
   test("clear empties everything") {
     withBackend { backend =>
       val value = JamBytes(Array.fill[Byte](40)(4))

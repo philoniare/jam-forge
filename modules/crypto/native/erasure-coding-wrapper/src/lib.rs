@@ -2,6 +2,21 @@ use jni::objects::{JByteArray, JClass, JIntArray, JObjectArray};
 use jni::sys::{jint, jobjectArray};
 use jni::JNIEnv;
 
+macro_rules! jni_guard {
+    ($env:expr, $default:expr, $body:block) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = $env.throw_new(
+                    "java/lang/RuntimeException",
+                    "native panic (see stderr); converted to exception",
+                );
+                $default
+            }
+        }
+    };
+}
+
 /// Encode original shards into recovery shards using Reed-Solomon erasure coding.
 ///
 /// # Arguments
@@ -17,6 +32,7 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_encode(
     original: JObjectArray,
     recovery_count: jint,
 ) -> jobjectArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_null = || -> jobjectArray { std::ptr::null_mut() };
 
     // Get original shard count
@@ -116,6 +132,7 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_encode(
     }
 
     result_array.into_raw()
+    })
 }
 
 /// Recover original shards from a subset of recovery/original shards.
@@ -137,6 +154,7 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_recover(
     original_count: jint,
     recovery_count: jint,
 ) -> jobjectArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_null = || -> jobjectArray { std::ptr::null_mut() };
 
     if original_count <= 0 || recovery_count <= 0 {
@@ -273,6 +291,7 @@ pub extern "system" fn Java_io_forge_jam_crypto_ErasureCodingWrapper_recover(
     }
 
     result_array.into_raw()
+    })
 }
 
 #[cfg(test)]

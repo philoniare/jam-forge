@@ -23,7 +23,9 @@ final class RocksDbTrieBackend private (
     valuesCf: ColumnFamilyHandle,
     nodeRefsCf: ColumnFamilyHandle,
     valueRefsCf: ColumnFamilyHandle,
-    ownedHandles: Seq[ColumnFamilyHandle]
+    ownedHandles: Seq[ColumnFamilyHandle],
+    cfOptions: ColumnFamilyOptions,
+    dbOptions: DBOptions
 ) extends StateTrieBackend
     with AutoCloseable:
 
@@ -106,6 +108,8 @@ final class RocksDbTrieBackend private (
     writeOptions.close()
     ownedHandles.foreach(_.close())
     db.close()
+    cfOptions.close()
+    dbOptions.close()
 
   private def encodeLE8(v: Long): Array[Byte] =
     val out = new Array[Byte](8)
@@ -147,5 +151,7 @@ object RocksDbTrieBackend:
       valuesCf = hs(2),
       nodeRefsCf = hs(3),
       valueRefsCf = hs(4),
-      ownedHandles = hs
+      ownedHandles = hs,
+      cfOptions = cfOptions,
+      dbOptions = options
     )
