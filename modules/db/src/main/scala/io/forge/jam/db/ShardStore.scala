@@ -14,7 +14,9 @@ import scala.jdk.CollectionConverters.*
 final class ShardStore private (
     db: RocksDB,
     shardsCf: ColumnFamilyHandle,
-    ownedHandles: Seq[ColumnFamilyHandle]
+    ownedHandles: Seq[ColumnFamilyHandle],
+    cfOptions: ColumnFamilyOptions,
+    dbOptions: DBOptions
 ) extends AutoCloseable:
   private def key(erasureRoot: Hash, validatorIndex: Int): Array[Byte] =
     val out = new Array[Byte](34)
@@ -54,6 +56,8 @@ final class ShardStore private (
   override def close(): Unit =
     ownedHandles.foreach(_.close())
     db.close()
+    cfOptions.close()
+    dbOptions.close()
 
 object ShardStore:
   def open(path: Path): ShardStore =
@@ -68,4 +72,10 @@ object ShardStore:
       .setCreateMissingColumnFamilies(true)
     val db = RocksDB.open(options, path.toString, descriptors.asJava, handles)
     val hs = handles.asScala.toSeq
-    new ShardStore(db, shardsCf = hs(1), ownedHandles = hs)
+    new ShardStore(
+      db,
+      shardsCf = hs(1),
+      ownedHandles = hs,
+      cfOptions = cfOptions,
+      dbOptions = options
+    )

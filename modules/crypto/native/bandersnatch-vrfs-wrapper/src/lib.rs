@@ -21,6 +21,22 @@ use std::sync::{Arc, Mutex};
 static RING_CONTEXTS: OnceLock<Mutex<HashMap<usize, RingParams>>> = OnceLock::new();
 const ERROR_RESULT: [u8; 32] = [0; 32];
 
+macro_rules! jni_guard {
+    ($env:expr, $default:expr, $body:block) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(v) => v,
+            Err(_) => {
+                // The unwinding panic already printed its message via the default hook.
+                let _ = $env.throw_new(
+                    "java/lang/RuntimeException",
+                    "native panic (see stderr); converted to exception",
+                );
+                $default
+            }
+        }
+    };
+}
+
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<BandersnatchSha512Ell2>;
 type BanderInput = Input<BandersnatchSha512Ell2>;
 type BanderOutput = Output<BandersnatchSha512Ell2>;
@@ -91,25 +107,27 @@ fn ring_context(ring_size: jint) -> Arc<RingParams> {
 
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_initializeContext(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     srs_data: JByteArray,
     ring_size: jint,
 ) -> jbyteArray {
-    let srs_bytes = match env.convert_byte_array(srs_data) {
-        Ok(data) => data,
-        Err(e) => return throw_exception(env, &format!("Failed to convert SRS data: {}", e)),
-    };
+    jni_guard!(env, std::ptr::null_mut(), {
+        let srs_bytes = match env.convert_byte_array(srs_data) {
+            Ok(data) => data,
+            Err(e) => return throw_exception(&mut env, &format!("Failed to convert SRS data: {}", e)),
+        };
 
-    if let Err(e) = initialize_ring_context(&srs_bytes, ring_size) {
-        return throw_exception(env, &format!("Failed to initialize context: {}", e));
-    }
+        if let Err(e) = initialize_ring_context(&srs_bytes, ring_size) {
+            return throw_exception(&mut env, &format!("Failed to initialize context: {}", e));
+        }
 
-    // Return empty array on success
-    match env.byte_array_from_slice(&[]) {
-        Ok(array) => array.into_raw(),
-        Err(e) => throw_exception(env, &format!("Failed to create return array: {}", e)),
-    }
+        // Return empty array on success
+        match env.byte_array_from_slice(&[]) {
+            Ok(array) => array.into_raw(),
+            Err(e) => throw_exception(&mut env, &format!("Failed to create return array: {}", e)),
+        }
+    })
 }
 
 // Verifier actor.
@@ -170,6 +188,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
     ring_size: jint,
     keys: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     // Helper function to throw exception and return null
     fn throw_and_return_null(env: &mut JNIEnv, message: &str) -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", message);
@@ -238,9 +257,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
         Ok(array) => array.into_raw(),
         Err(e) => throw_and_return_null(&mut env, &format!("Failed to create output array: {}", e)),
     }
+    })
 }
 
-fn throw_exception(mut env: JNIEnv, message: &str) -> jbyteArray {
+fn throw_exception(env: &mut JNIEnv, message: &str) -> jbyteArray {
     let _ = env.throw_new("java/lang/RuntimeException", message);
     std::ptr::null_mut()
 }
@@ -258,6 +278,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
     entropy: JByteArray,
     attempt: jbyte,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     use ark_ec_vrfs::ring::Prover as _;
 
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
@@ -336,6 +357,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 #[no_mangle]
@@ -348,6 +370,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     commitment: JByteArray,
     ring_size: jint,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_error = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
@@ -388,6 +411,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
         },
         Err(e) => return_error(&mut env, &e.to_string()),
     }
+    })
 }
 
 /// IETF VRF signature structure (96 bytes: 32 output + 64 proof)
@@ -404,6 +428,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed
     _class: JClass,
     seed: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         std::ptr::null_mut()
@@ -430,6 +455,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 /// Get the public key from a secret key (serialized)
@@ -439,6 +465,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecr
     _class: JClass,
     secret_bytes: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         std::ptr::null_mut()
@@ -465,6 +492,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecr
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 /// IETF VRF sign - creates a 96-byte signature
@@ -476,6 +504,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
     vrf_input: JByteArray,
     aux_data: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     use ark_ec_vrfs::ietf::Prover as _;
 
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
@@ -524,6 +553,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 /// IETF VRF verify - verifies signature and returns 32-byte output hash
@@ -536,6 +566,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
     aux_data: JByteArray,
     signature: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     use ark_ec_vrfs::ietf::Verifier as _;
 
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
@@ -589,6 +620,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 /// Get VRF output directly from secret key and input (without creating signature)
@@ -599,6 +631,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
     secret_bytes: JByteArray,
     vrf_input: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
@@ -630,6 +663,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 /// Extract the VRF output from an IETF VRF signature.
@@ -640,6 +674,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
     _class: JClass,
     signature: JByteArray,
 ) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
@@ -672,6 +707,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
+    })
 }
 
 #[cfg(test)]

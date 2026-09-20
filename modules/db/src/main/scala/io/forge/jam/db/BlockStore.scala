@@ -19,7 +19,9 @@ final class BlockStore private (
     headersCf: ColumnFamilyHandle,
     childrenCf: ColumnFamilyHandle,
     metaCf: ColumnFamilyHandle,
-    ownedHandles: Seq[ColumnFamilyHandle]
+    ownedHandles: Seq[ColumnFamilyHandle],
+    cfOptions: ColumnFamilyOptions,
+    dbOptions: DBOptions
 ) extends AutoCloseable:
 
   private inline def key(h: Hash): Array[Byte] = h.bytes.toArray
@@ -89,6 +91,8 @@ final class BlockStore private (
   override def close(): Unit =
     ownedHandles.foreach(_.close())
     db.close()
+    cfOptions.close()
+    dbOptions.close()
 
 object BlockStore:
   val BestHead = "best"
@@ -116,5 +120,7 @@ object BlockStore:
       headersCf = hs(2),
       childrenCf = hs(3),
       metaCf = hs(4),
-      ownedHandles = hs
+      ownedHandles = hs,
+      cfOptions = cfOptions,
+      dbOptions = options
     )
