@@ -5,12 +5,17 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AccumulationBridge
-import org.bouncycastle.jcajce.provider.digest.Keccak
 
 import scala.collection.mutable
-import java.nio.{ByteBuffer, ByteOrder}
 
 import io.forge.jam.core.types.epoch.ValidatorKey
+
+final case class AccumulationStfResult(
+    state: AccumulationState,
+    stagingSet: List[JamBytes],
+    authQueues: List[List[JamBytes]],
+    output: AccumulationOutput
+)
 
 /** Accumulation State Transition Function.
   */
@@ -24,7 +29,7 @@ object AccumulationTransition:
   ): AccumulationOutput =
     val pre = AccumulationBridge.extract(view)
 
-    val (postState, postStagingSet, postAuthQueues, output) =
+    val result =
       stfInternal(
         input,
         pre.state,
@@ -37,32 +42,14 @@ object AccumulationTransition:
 
     AccumulationBridge.apply(
       view,
-      postState,
-      postStagingSet,
+      result.state,
+      result.stagingSet,
       pre.initStagingSet,
-      postAuthQueues,
+      result.authQueues,
       pre.initAuthQueues
     )
-    output
+    result.output
 
-  /** Internal Accumulation STF implementation using AccumulationState.
-    *
-    * @param input
-    *   The accumulation input containing slot and reports
-    * @param preState
-    *   The pre-transition state
-    * @param initStagingSet
-    *   Initial staging set (validator queue) as list of 336-byte JamBytes
-    * @param initAuthQueues
-    *   Initial authorization queues per core as list of lists of 32-byte hashes
-    * @param config
-    *   The accumulation configuration
-    * @param prevSlot
-    *   The previous block's slot
-    * @return
-    *   Tuple of (post-transition state, post staging set, post auth queues,
-    *   output)
-    */
   def stfInternal(
       input: AccumulationInput,
       preState: AccumulationState,
@@ -71,20 +58,96 @@ object AccumulationTransition:
       config: ChainConfig,
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor] = None
-  ): (
-      AccumulationState,
-      List[JamBytes],
-      List[List[JamBytes]],
-      AccumulationOutput
-  ) =
+  ): AccumulationStfResult =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max(input.slot - prevSlot, 1L)
+    val partition = partitionAndQueueReports(input.reports, preState, m, config)
 
+    // 8. Execute PVM for accumulated reports (respecting gas budget)
+    val run = runOuterAccumulation(
+      immediateReports = partition.immediateReports,
+      readyToAccumulate = partition.readyToAccumulate,
+      preState = preState,
+      initStagingSet = initStagingSet,
+      initAuthQueues = initAuthQueues,
+      slot = input.slot,
+      config = config,
+      sharedExecutor = sharedExecutor
+    )
+
+    val outerResult = run.outerResult
+    val commitments = outerResult.commitments
+
+    // 9. Rebuild the ready queue, then rotate the accumulated sliding window —
+    //    both edited with the gas-bounded actually-accumulated set (ACC-003).
+    val finalReadyQueue = rebuildReadyQueue(
+      workingReadyQueue = partition.workingReadyQueue,
+      editedNewRecords = partition.editedNewRecords,
+      actuallyAccumulated = run.actuallyAccumulated,
+      m = m,
+      deltaT = deltaT,
+      config = config
+    )
+
+    val newAccumulatedArray =
+      rotateAccumulated(preState.accumulated, run.actuallyAccumulated, config)
+
+    // 10-13. Statistics, lastAccumulationSlot, posterior privileges, post state.
+    val assembled = assemblePostState(
+      outerResult = outerResult,
+      reportsToAccumulate = run.reportsToAccumulate,
+      finalReadyQueue = finalReadyQueue,
+      newAccumulatedArray = newAccumulatedArray,
+      preState = preState,
+      slot = input.slot
+    )
+
+    // 14. Compute commitment root from yields
+    val outputHash = KeccakCommitmentMerkle.computeCommitmentRoot(commitments)
+
+    // 15. Convert commitments to list format for state storage (key 0x10)
+    val commitmentsList =
+      commitments.toList.sortBy(c => (c.serviceIndex, c.hash)).map { c =>
+        (c.serviceIndex, c.hash)
+      }
+
+    // 16. Extract post staging set and auth queues from posterior state
+    val postStagingSet = outerResult.postState.stagingSet.toList
+
+    // Auth queues: use the posterior state's auth queues
+    val postAuthQueues = outerResult.postState.authQueue.map(_.toList).toList
+
+    AccumulationStfResult(
+      assembled.state,
+      postStagingSet,
+      postAuthQueues,
+      StfResult.success(
+        AccumulationOutputData(
+          outputHash,
+          assembled.accumulationStats,
+          commitmentsList
+        )
+      )
+    )
+
+  private final case class QueuedReportPartition(
+      immediateReports: List[WorkReport],
+      readyToAccumulate: List[WorkReport],
+      workingReadyQueue: Vector[List[AccumulationReadyRecord]],
+      editedNewRecords: List[AccumulationReadyRecord]
+  )
+
+  private def partitionAndQueueReports(
+      reports: List[WorkReport],
+      preState: AccumulationState,
+      m: Int,
+      config: ChainConfig
+  ): QueuedReportPartition =
     // 1. Collect all historically accumulated hashes (for dependency checking)
     val historicallyAccumulated = mutable.Set.from(preState.accumulated.flatten)
 
     // 2. Partition new reports into immediate vs queued
-    val (immediateReports, queuedReports) = input.reports.partition { report =>
+    val (immediateReports, queuedReports) = reports.partition { report =>
       report.context.prerequisites.isEmpty && report.segmentRootLookup.isEmpty
     }
 
@@ -133,10 +196,6 @@ object AccumulationTransition:
     val allQueuedWithSlots =
       existingQueuedWithSlots ++ editedNewRecords.map(r => (m, r))
 
-    // Only the extracted (topologically-accumulatable) reports are needed here;
-    // the post-extraction residue is not used — the final ready queue is rebuilt
-    // from the full pre-extraction record sets and the gas-bounded accumulated set
-    // (ACC-003), see step 9.
     val (readyToAccumulate, _) =
       extractAccumulatableWithSlots(
         allQueuedWithSlots,
@@ -150,15 +209,32 @@ object AccumulationTransition:
       historicallyAccumulated += hash
     }
 
-    // 7. The final ready-queue rebuild is deferred to step 9, after the
-    //    gas-bounded accumulated count n is known (ACC-003): per spec
-    //    (accumulation.tex:424-430) ready'/accumulated'[Cepochlen-1] must be
-    //    edited with only the hashes ACTUALLY accumulated within the gas budget,
-    //    not the optimistic pre-execution set. Extracted-but-unaccumulated
-    //    overflow reports therefore survive in their original slots, and a
-    //    dependency is pruned only when its work-report was actually accumulated.
+    QueuedReportPartition(
+      immediateReports = immediateReports,
+      readyToAccumulate = readyToAccumulate,
+      workingReadyQueue = workingReadyQueue,
+      editedNewRecords = editedNewRecords
+    )
 
-    // 8. Execute PVM for accumulated reports (respecting gas budget)
+  /** What step 8 produces: the raw outer-accumulation result plus the two
+    * gas-BOUNDED views of it every later step is computed against.
+    */
+  private final case class AccumulationRun(
+      outerResult: OuterAccumulationResult,
+      reportsToAccumulate: List[WorkReport],
+      actuallyAccumulated: Set[JamBytes]
+  )
+
+  private def runOuterAccumulation(
+      immediateReports: List[WorkReport],
+      readyToAccumulate: List[WorkReport],
+      preState: AccumulationState,
+      initStagingSet: List[JamBytes],
+      initAuthQueues: List[List[JamBytes]],
+      slot: Long,
+      config: ChainConfig,
+      sharedExecutor: Option[AccumulationExecutor]
+  ): AccumulationRun =
     val allToAccumulate = immediateReports ++ readyToAccumulate
     val partialState = preState.toPartialState(initStagingSet, initAuthQueues)
 
@@ -177,7 +253,7 @@ object AccumulationTransition:
       workReports = allToAccumulate,
       alwaysAccers = partialState.alwaysAccers.toMap,
       gasLimit = totalGasLimit,
-      timeslot = input.slot,
+      timeslot = slot,
       entropy = preState.entropy,
       executor = executor,
       config = config
@@ -193,10 +269,20 @@ object AccumulationTransition:
         .map(report => JamBytes(report.packageSpec.hash.bytes.toArray))
         .toSet
 
-    val newPartialState = outerResult.postState
-    val gasUsedPerService = outerResult.gasUsedMap
-    val commitments = outerResult.commitments
+    AccumulationRun(
+      outerResult = outerResult,
+      reportsToAccumulate = reportsToAccumulate,
+      actuallyAccumulated = actuallyAccumulated
+    )
 
+  private def rebuildReadyQueue(
+      workingReadyQueue: Vector[List[AccumulationReadyRecord]],
+      editedNewRecords: List[AccumulationReadyRecord],
+      actuallyAccumulated: Set[JamBytes],
+      m: Int,
+      deltaT: Long,
+      config: ChainConfig
+  ): List[List[AccumulationReadyRecord]] =
     // Rebuild ready queue
     val finalReadyQueue = (0 until config.epochLength).map { idx =>
       val i =
@@ -224,16 +310,41 @@ object AccumulationTransition:
       "Ready-queue post-condition violated: an accumulated hash leaked into the final queue"
     )
 
-    // 9. Rotate accumulated array (sliding window)
+    finalReadyQueue
+
+  private def rotateAccumulated(
+      priorAccumulated: List[List[JamBytes]],
+      actuallyAccumulated: Set[JamBytes],
+      config: ChainConfig
+  ): List[List[JamBytes]] =
     val newAccumulatedList = actuallyAccumulated.toList.sorted
-    val newAccumulatedArray = (0 until config.epochLength).map { idx =>
+    (0 until config.epochLength).map { idx =>
       if idx == config.epochLength - 1 then
         // New items at last position
         newAccumulatedList
       else
         // Shift left by 1
-        preState.accumulated.lift(idx + 1).getOrElse(List.empty)
+        priorAccumulated.lift(idx + 1).getOrElse(List.empty)
     }.toList
+
+  /** The posterior state plus the per-service accumulation stats the STF output
+    * also reports.
+    */
+  private final case class AssembledPostState(
+      state: AccumulationState,
+      accumulationStats: Map[Long, (Long, Int)]
+  )
+
+  private def assemblePostState(
+      outerResult: OuterAccumulationResult,
+      reportsToAccumulate: List[WorkReport],
+      finalReadyQueue: List[List[AccumulationReadyRecord]],
+      newAccumulatedArray: List[List[JamBytes]],
+      preState: AccumulationState,
+      slot: Long
+  ): AssembledPostState =
+    val newPartialState = outerResult.postState
+    val gasUsedPerService = outerResult.gasUsedMap
 
     // 10. Update statistics
     val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
@@ -256,7 +367,7 @@ object AccumulationTransition:
         newPartialState.accounts = newPartialState.accounts.updated(
           serviceId,
           account.copy(
-            info = account.info.copy(lastAccumulationSlot = input.slot)
+            info = account.info.copy(lastAccumulationSlot = slot)
           )
         )
       }
@@ -269,7 +380,7 @@ object AccumulationTransition:
     val finalAlwaysAccers = outerResult.postState.alwaysAccers.toMap
 
     val finalState = AccumulationState(
-      slot = input.slot,
+      slot = slot,
       entropy = JamBytes(preState.entropy.toArray),
       readyQueue = finalReadyQueue,
       accumulated = newAccumulatedArray,
@@ -290,33 +401,7 @@ object AccumulationTransition:
         newPartialState.rawServiceAccountsByStateKey
     )
 
-    // 14. Compute commitment root from yields
-    val outputHash = computeCommitmentRoot(commitments)
-
-    // 15. Convert commitments to list format for state storage (key 0x10)
-    val commitmentsList =
-      commitments.toList.sortBy(c => (c.serviceIndex, c.hash)).map { c =>
-        (c.serviceIndex, c.hash)
-      }
-
-    // 16. Extract post staging set and auth queues from posterior state
-    val postStagingSet = outerResult.postState.stagingSet.toList
-
-    // Auth queues: use the posterior state's auth queues
-    val postAuthQueues = outerResult.postState.authQueue.map(_.toList).toList
-
-    (
-      finalState,
-      postStagingSet,
-      postAuthQueues,
-      StfResult.success(
-        AccumulationOutputData(
-          outputHash,
-          accumulationStats,
-          commitmentsList
-        )
-      )
-    )
+    AssembledPostState(state = finalState, accumulationStats = accumulationStats)
 
   /** Edit ready queue records by removing accumulated reports and pruning
     * dependencies.
@@ -385,6 +470,13 @@ object AccumulationTransition:
       stagingSet: List[JamBytes] = List.empty,
       authQueues: List[List[JamBytes]] = List.empty
   )
+
+  private def mergeBy[K, V](a: Map[K, V], b: Map[K, V])(
+      combine: (V, V) => V
+  ): Map[K, V] =
+    b.foldLeft(a) { case (acc, (k, v)) =>
+      acc.updated(k, acc.get(k).map(combine(_, v)).getOrElse(v))
+    }
 
   /** Outer accumulation function. Recursively processes work reports and
     * deferred transfers.
@@ -462,29 +554,15 @@ object AccumulationTransition:
 
     // Merge results
     val mergedGasUsed =
-      (parallelResult.gasUsedMap.keys ++ outerResult.gasUsedMap.keys).toSet.map {
-        serviceId =>
-          serviceId -> (parallelResult.gasUsedMap.getOrElse(
-            serviceId,
-            0L
-          ) + outerResult.gasUsedMap.getOrElse(
-            serviceId,
-            0L
-          ))
-      }.toMap
+      mergeBy(parallelResult.gasUsedMap, outerResult.gasUsedMap)(_ + _)
 
     // Merge privilege snapshots:
     // - For privilege fields (manager, delegator, registrar, assigners, alwaysAccers):
     //   FIRST batch takes precedence
     // - For stagingSet and authQueues: LAST update wins
-    val allServiceIds =
-      (parallelResult.privilegeSnapshots.keys ++ outerResult.privilegeSnapshots.keys).toSet
-    val mergedSnapshots = allServiceIds.map { serviceId =>
-      val parallel = parallelResult.privilegeSnapshots.get(serviceId)
-      val outer = outerResult.privilegeSnapshots.get(serviceId)
-
-      (parallel, outer) match
-        case (Some(p), Some(o)) =>
+    val mergedSnapshots =
+      mergeBy(parallelResult.privilegeSnapshots, outerResult.privilegeSnapshots) {
+        (p, o) =>
           // Both batches have this service - merge field by field
           // For privileges, use first batch (parallel); for stagingSet/authQueues, use last update (outer if non-empty)
           val mergedStagingSet =
@@ -493,7 +571,7 @@ object AccumulationTransition:
             if o.authQueues.nonEmpty && o.authQueues.exists(_.nonEmpty) then
               o.authQueues
             else p.authQueues
-          serviceId -> PrivilegeSnapshot(
+          PrivilegeSnapshot(
             manager = p.manager,
             delegator = p.delegator,
             registrar = p.registrar,
@@ -502,13 +580,7 @@ object AccumulationTransition:
             stagingSet = mergedStagingSet,
             authQueues = mergedAuthQueues
           )
-        case (Some(p), None) => serviceId -> p
-        case (None, Some(o)) => serviceId -> o
-        case (None, None)    =>
-          throw new RuntimeException(
-            s"Unexpected: service $serviceId in allServiceIds but not in any snapshot"
-          )
-    }.toMap
+      }
 
     OuterAccumulationResult(
       reportsAccumulated = i + outerResult.reportsAccumulated,
@@ -528,10 +600,6 @@ object AccumulationTransition:
       privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty
   )
 
-  /** Execute PVM accumulation for all reports. In v0.7.0, deferred transfers
-    * are processed separately via on_transfer (PC=10), not mixed with work
-    * items in accumulate (PC=5).
-    */
   private def executeAccumulation(
       partialState: PartialState,
       reports: List[WorkReport],
@@ -541,13 +609,77 @@ object AccumulationTransition:
       entropy: JamBytes,
       executor: AccumulationExecutor
   ): AccumulationExecResult =
-    val gasUsedMap = mutable.Map.empty[Long, Long]
-    val commitments = mutable.Set.empty[Commitment]
-    val newDeferredTransfers = mutable.ListBuffer.empty[DeferredTransfer]
-    val allProvisions = mutable.Set.empty[(Long, JamBytes)]
     val initialState = partialState.deepCopy()
 
-    // Group work items AND transfers by service (v0.7.1 - unified accumulate entry point)
+    val serviceOperands = groupOperandsByService(reports, deferredTransfers)
+
+    // Collect all services to accumulate (work items + always-accers + transfer destinations)
+    val servicesToAccumulate = mutable.Set.empty[Long]
+    servicesToAccumulate ++= serviceOperands.keys
+    servicesToAccumulate ++= alwaysAccers.keys
+
+    if servicesToAccumulate.isEmpty && deferredTransfers.isEmpty then
+      return AccumulationExecResult(
+        partialState,
+        Map.empty,
+        Set.empty,
+        List.empty
+      )
+
+    // Execute services sequentially (for now - can be parallelized later)
+    val sortedServices = servicesToAccumulate.toList.sorted
+    val run = runServices(
+      sortedServices = sortedServices,
+      serviceOperands = serviceOperands,
+      alwaysAccers = alwaysAccers,
+      initialState = initialState,
+      timeslot = timeslot,
+      entropy = entropy,
+      executor = executor
+    )
+
+    val finalState = initialState
+
+    val privileges = reconcilePrivileges(partialState, run.privilegeSnapshots)
+    finalState.manager = privileges.manager
+    finalState.delegator = privileges.delegator
+    finalState.registrar = privileges.registrar
+    finalState.assigners.clear()
+    finalState.assigners ++= privileges.assigners
+    finalState.alwaysAccers.clear()
+    finalState.alwaysAccers ++= privileges.alwaysAccers
+    // Update stagingSet from delegator's post-state (only when it changed)
+    privileges.stagingSet.foreach { ss =>
+      finalState.stagingSet.clear()
+      finalState.stagingSet ++= ss
+    }
+    finalState.authQueue.clear()
+    finalState.authQueue ++= privileges.authQueues.map(q =>
+      mutable.ListBuffer.from(q)
+    )
+
+    // Process preimage integrations on the final merged state
+    val stateAfterPreimages =
+      if run.provisions.nonEmpty then
+        preimageIntegration(
+          run.provisions,
+          finalState,
+          timeslot,
+          executor.storageView
+        )
+      else finalState
+    AccumulationExecResult(
+      stateAfterPreimages,
+      run.gasUsedMap,
+      run.commitments,
+      run.deferredTransfers,
+      run.privilegeSnapshots
+    )
+
+  private def groupOperandsByService(
+      reports: List[WorkReport],
+      deferredTransfers: List[DeferredTransfer]
+  ): mutable.Map[Long, mutable.ListBuffer[AccumulationOperand]] =
     val serviceOperands =
       mutable.Map.empty[Long, mutable.ListBuffer[AccumulationOperand]]
 
@@ -576,27 +708,37 @@ object AccumulationTransition:
         ) +=
           AccumulationOperand.WorkItem(operand)
 
-    // Collect all services to accumulate (work items + always-accers + transfer destinations)
-    val servicesToAccumulate = mutable.Set.empty[Long]
-    servicesToAccumulate ++= serviceOperands.keys
-    servicesToAccumulate ++= alwaysAccers.keys
+    serviceOperands
 
-    if servicesToAccumulate.isEmpty && deferredTransfers.isEmpty then
-      return AccumulationExecResult(
-        partialState,
-        Map.empty,
-        Set.empty,
-        List.empty
-      )
+  /** Everything the per-service execution loop accumulates across one batch.
+    */
+  private final case class ServiceRunResults(
+      gasUsedMap: Map[Long, Long],
+      privilegeSnapshots: Map[Long, PrivilegeSnapshot],
+      commitments: Set[Commitment],
+      deferredTransfers: List[DeferredTransfer],
+      provisions: Set[(Long, JamBytes)]
+  )
+
+  private def runServices(
+      sortedServices: List[Long],
+      serviceOperands: mutable.Map[Long, mutable.ListBuffer[AccumulationOperand]],
+      alwaysAccers: Map[Long, Long],
+      initialState: PartialState,
+      timeslot: Long,
+      entropy: JamBytes,
+      executor: AccumulationExecutor
+  ): ServiceRunResults =
+    val gasUsedMap = mutable.Map.empty[Long, Long]
+    val commitments = mutable.Set.empty[Commitment]
+    val newDeferredTransfers = mutable.ListBuffer.empty[DeferredTransfer]
+    val allProvisions = mutable.Set.empty[(Long, JamBytes)]
 
     // Track privilege snapshots
     val privilegeSnapshots = mutable.Map.empty[Long, PrivilegeSnapshot]
 
     // Collect account changes from all services for merging
     val allAccountChanges = new AccountChanges()
-
-    // Execute services sequentially (for now - can be parallelized later)
-    val sortedServices = servicesToAccumulate.toList.sorted
 
     for serviceId <- sortedServices do
       val operands =
@@ -655,14 +797,40 @@ object AccumulationTransition:
 
     // Apply all merged account changes to the initial state
     allAccountChanges.applyTo(initialState)
-    val finalState = initialState
 
-    val origManager = partialState.manager
-    val origDelegator = partialState.delegator
-    val origRegistrar = partialState.registrar
-    val origAssigners = partialState.assigners.toList
+    ServiceRunResults(
+      gasUsedMap = gasUsedMap.toMap,
+      privilegeSnapshots = privilegeSnapshots.toMap,
+      commitments = commitments.toSet,
+      deferredTransfers = newDeferredTransfers.toList,
+      provisions = allProvisions.toSet
+    )
 
-    val managerSnapshot = privilegeSnapshots.get(origManager)
+  private final case class PrivilegeResolution(
+      manager: Long,
+      delegator: Long,
+      registrar: Long,
+      assigners: List[Long],
+      alwaysAccers: Map[Long, Long],
+      stagingSet: Option[List[JamBytes]],
+      authQueues: List[List[JamBytes]]
+  )
+
+  private def reconcilePrivileges(
+      prior: PartialState,
+      snapshots: Map[Long, PrivilegeSnapshot]
+  ): PrivilegeResolution =
+    // R(o, a, b) = b if a == o else a — `o` the pre-state value, `a` the
+    // manager's post value, `b` the owning service's post value.
+    def r(orig: Long, managerPost: Long, ownerPost: Long): Long =
+      if managerPost == orig then ownerPost else managerPost
+
+    val origManager = prior.manager
+    val origDelegator = prior.delegator
+    val origRegistrar = prior.registrar
+    val origAssigners = prior.assigners.toList
+
+    val managerSnapshot = snapshots.get(origManager)
     val managerPostManager =
       managerSnapshot.map(_.manager).getOrElse(origManager)
     val managerPostDelegator =
@@ -673,78 +841,48 @@ object AccumulationTransition:
       managerSnapshot.map(_.assigners).getOrElse(origAssigners)
     val managerPostAlwaysAccers = managerSnapshot
       .map(_.alwaysAccers)
-      .getOrElse(partialState.alwaysAccers.toMap)
+      .getOrElse(prior.alwaysAccers.toMap)
 
-    val delegatorSnapshot = privilegeSnapshots.get(origDelegator)
+    val delegatorSnapshot = snapshots.get(origDelegator)
     val delegatorPostDelegator =
       delegatorSnapshot.map(_.delegator).getOrElse(origDelegator)
 
-    val registrarSnapshot = privilegeSnapshots.get(origRegistrar)
+    val registrarSnapshot = snapshots.get(origRegistrar)
     val registrarPostRegistrar =
       registrarSnapshot.map(_.registrar).getOrElse(origRegistrar)
 
-    // Apply R function: R(o, a, b) = b if a == o else a
-    finalState.manager = managerPostManager
-    finalState.delegator =
-      if managerPostDelegator == origDelegator then delegatorPostDelegator
-      else managerPostDelegator
-    finalState.registrar =
-      if managerPostRegistrar == origRegistrar then registrarPostRegistrar
-      else managerPostRegistrar
-    finalState.assigners.clear()
-    finalState.assigners ++= origAssigners.zipWithIndex.map {
+    val newAssigners = origAssigners.zipWithIndex.map {
       case (origAssigner, c) =>
         val managerPostAssigner =
           managerPostAssigners.lift(c).getOrElse(origAssigner)
-        val assignerSnapshot = privilegeSnapshots.get(origAssigner)
+        val assignerSnapshot = snapshots.get(origAssigner)
         val assignerPostAssigner =
           assignerSnapshot.flatMap(_.assigners.lift(c)).getOrElse(origAssigner)
-        if managerPostAssigner == origAssigner then assignerPostAssigner
-        else managerPostAssigner
-    }
-    finalState.alwaysAccers.clear()
-    finalState.alwaysAccers ++= managerPostAlwaysAccers
-
-    // Update stagingSet from delegator's post-state
-    val delegatorStagingSet =
-      delegatorSnapshot.map(_.stagingSet).filter(_.nonEmpty)
-    delegatorStagingSet.foreach { ss =>
-      finalState.stagingSet.clear()
-      finalState.stagingSet ++= ss
+        r(origAssigner, managerPostAssigner, assignerPostAssigner)
     }
 
     // Update auth queues: for each core c, the new auth queue comes from the original assigner's post-state
     val newAuthQueues = origAssigners.zipWithIndex.map {
       case (origAssigner, coreIndex) =>
-        val assignerSnapshot = privilegeSnapshots.get(origAssigner)
+        val assignerSnapshot = snapshots.get(origAssigner)
         // Get the auth queue for this specific core from the assigner's post-state
         assignerSnapshot.flatMap(_.authQueues.lift(coreIndex)).getOrElse {
           // If no change, use the original auth queue for this core
-          partialState.authQueue
+          prior.authQueue
             .lift(coreIndex)
             .map(_.toList)
             .getOrElse(List.empty)
         }
     }
-    finalState.authQueue.clear()
-    finalState.authQueue ++= newAuthQueues.map(q => mutable.ListBuffer.from(q))
 
-    // Process preimage integrations on the final merged state
-    val stateAfterPreimages =
-      if allProvisions.nonEmpty then
-        preimageIntegration(
-          allProvisions.toSet,
-          finalState,
-          timeslot,
-          executor.storageView
-        )
-      else finalState
-    AccumulationExecResult(
-      stateAfterPreimages,
-      gasUsedMap.toMap,
-      commitments.toSet,
-      newDeferredTransfers.toList,
-      privilegeSnapshots.toMap
+    PrivilegeResolution(
+      manager = managerPostManager,
+      delegator = r(origDelegator, managerPostDelegator, delegatorPostDelegator),
+      registrar = r(origRegistrar, managerPostRegistrar, registrarPostRegistrar),
+      assigners = newAssigners,
+      alwaysAccers = managerPostAlwaysAccers,
+      stagingSet = delegatorSnapshot.map(_.stagingSet).filter(_.nonEmpty),
+      authQueues = newAuthQueues
     )
 
   /** Compute changes a service made to state.
@@ -888,148 +1026,3 @@ object AccumulationTransition:
       .view
       .mapValues(_.size)
       .toMap
-
-  /** Compute the Keccak Merkle root of service commitments.
-    */
-  private def computeCommitmentRoot(commitments: Set[Commitment]): JamBytes =
-    if commitments.isEmpty then return JamBytes(new Array[Byte](Hash.Size))
-
-    // Sort by service index, then by hash for deterministic ordering
-    val sortedCommitments =
-      commitments.toList.sortBy(c => (c.serviceIndex, c.hash))
-    val nodes = sortedCommitments.map { commitment =>
-      val buffer = ByteBuffer.allocate(4 + Hash.Size).order(ByteOrder.LITTLE_ENDIAN)
-      buffer.putInt(commitment.serviceIndex.toInt)
-      buffer.put(commitment.hash.toArray)
-      buffer.array()
-    }
-
-    // Binary Merkle tree with Keccak-256
-    JamBytes(binaryMerklize(nodes))
-
-  /** Well-balanced binary Merkle function.
-    */
-  private def binaryMerklize(leaves: List[Array[Byte]]): Array[Byte] =
-    leaves match
-      case Nil         => new Array[Byte](Hash.Size)
-      case head :: Nil => keccak256(head)
-      case _           =>
-        binaryMerklizeHelper(leaves) match
-          case MerklizeResult.Leaf(data) => keccak256(data)
-          case MerklizeResult.Hash(hash) => hash
-
-  /** Merkle result can be either a leaf (unhashed data) or a hash.
-    */
-  private enum MerklizeResult:
-    case Leaf(data: Array[Byte])
-    case Hash(hash: Array[Byte])
-
-    def toByteArray: Array[Byte] = this match
-      case Leaf(data) => data
-      case Hash(hash) => hash
-
-  /** Helper for well-balanced binary Merkle tree.
-    */
-  private def binaryMerklizeHelper(nodes: List[Array[Byte]]): MerklizeResult =
-    nodes match
-      case Nil         => MerklizeResult.Hash(new Array[Byte](Hash.Size))
-      case head :: Nil => MerklizeResult.Leaf(head)
-      case _           =>
-        val mid = (nodes.size + 1) / 2 // roundup of half
-        val left = nodes.take(mid)
-        val right = nodes.drop(mid)
-        val leftResult = binaryMerklizeHelper(left)
-        val rightResult = binaryMerklizeHelper(right)
-        // Hash with "node" prefix as per GP E.1.1
-        MerklizeResult.Hash(
-          keccakHashWithPrefix(
-            "node".getBytes,
-            leftResult.toByteArray,
-            rightResult.toByteArray
-          )
-        )
-
-  private def keccak256(data: Array[Byte]): Array[Byte] =
-    val digest = new Keccak.Digest256()
-    digest.update(data, 0, data.length)
-    digest.digest()
-
-  private def keccakHashWithPrefix(
-      prefix: Array[Byte],
-      left: Array[Byte],
-      right: Array[Byte]
-  ): Array[Byte] =
-    val digest = new Keccak.Digest256()
-    digest.update(prefix, 0, prefix.length)
-    digest.update(left, 0, left.length)
-    digest.update(right, 0, right.length)
-    digest.digest()
-
-/** Account changes tracker for merging parallel service executions.
-  */
-class AccountChanges:
-  val accountUpdates: mutable.Map[Long, ServiceAccount] = mutable.Map.empty
-  val removedAccounts: mutable.Set[Long] = mutable.Set.empty
-  // Storage data changes (for WRITE host call updates)
-  val rawServiceDataUpdates: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty
-  val rawServiceDataRemovals: mutable.Set[JamBytes] = mutable.Set.empty
-
-  def checkAndMerge(other: AccountChanges): Unit =
-    // Merge account updates
-    for (id, account) <- other.accountUpdates do
-      accountUpdates.get(id) match
-        case Some(existing) if existing != account =>
-          throw new RuntimeException(
-            s"Conflicting parallel account updates for service $id: block invalid"
-          )
-        case _ => accountUpdates(id) = account
-
-    // Merge removed accounts
-    removedAccounts ++= other.removedAccounts
-
-    for (key, value) <- other.rawServiceDataUpdates do
-      rawServiceDataUpdates.get(key) match
-        case Some(existing) if existing != value =>
-          throw new RuntimeException(
-            s"Conflicting parallel storage updates for key $key: block invalid"
-          )
-        case _ => rawServiceDataUpdates(key) = value
-    rawServiceDataRemovals ++= other.rawServiceDataRemovals
-
-  def applyTo(state: PartialState): Unit =
-    // Apply account updates FIRST
-    for (id, account) <- accountUpdates do
-      state.accounts = state.accounts.updated(id, account)
-
-    // THEN apply removals — removals take precedence
-    for id <- removedAccounts do
-      state.accounts = state.accounts.removed(id)
-
-      val serviceIdBytes = ByteBuffer
-        .allocate(4)
-        .order(ByteOrder.LITTLE_ENDIAN)
-        .putInt(id.toInt)
-        .array()
-      val keysToRemove = state.rawServiceDataByStateKey.keys.filter { key =>
-        val arr = key.toArray
-        arr.length >= 8 &&
-        arr(0) == serviceIdBytes(0) &&
-        arr(2) == serviceIdBytes(1) &&
-        arr(4) == serviceIdBytes(2) &&
-        arr(6) == serviceIdBytes(3) &&
-        !StateKey.isChapterKey(arr) &&
-        !StateKey.isAccountRecordKey(arr)
-      }.toList
-      state.rawServiceDataByStateKey =
-        state.rawServiceDataByStateKey.removedAll(keysToRemove)
-
-      // Also remove the service account key from rawServiceAccountsByStateKey
-      val serviceAccountKey = StateKey.computeServiceAccountKey(id)
-      state.rawServiceAccountsByStateKey =
-        state.rawServiceAccountsByStateKey.removed(serviceAccountKey)
-
-    // Apply rawServiceData changes
-    state.rawServiceDataByStateKey =
-      state.rawServiceDataByStateKey.removedAll(rawServiceDataRemovals)
-    state.rawServiceDataByStateKey =
-      state.rawServiceDataByStateKey ++ rawServiceDataUpdates
