@@ -51,3 +51,6 @@ bin/
 .bsp/
 .bloop/
 **/metals**
+
+### Interop harness ###
+scripts/interop/logs/

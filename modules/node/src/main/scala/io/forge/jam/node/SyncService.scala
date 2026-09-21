@@ -198,6 +198,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
           handshaken = true
           val (peerFinal, peerLeaves) = decodeHandshake(msg)
           peerFinals.put(conn, peerFinal)
+          logger.info(
+            s"UP0 handshake decoded from accepted peer: final=${peerFinal.hash.toHex.take(18)} " +
+              s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
+          )
           stream.send(ourHandshake)
           onPeerLeaves(conn, peerLeaves, peerFinal)
         else onAnnouncement(conn, msg)
@@ -219,6 +223,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         handshaken = true
         val (peerFinal, peerLeaves) = decodeHandshake(msg)
         peerFinals.put(conn, peerFinal)
+        logger.info(
+          s"UP0 handshake decoded from dialed peer: final=${peerFinal.hash.toHex.take(18)} " +
+            s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
+        )
         onPeerLeaves(conn, peerLeaves, peerFinal)
       else onAnnouncement(conn, msg)
     }
