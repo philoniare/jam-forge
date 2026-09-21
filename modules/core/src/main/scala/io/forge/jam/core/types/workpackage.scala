@@ -10,6 +10,7 @@ import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workresult.WorkResult
 import io.forge.jam.core.types.work.PackageSpec
+import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 
@@ -179,26 +180,27 @@ object workpackage:
 
   /**
    * Availability assignment for a core.
-   * Contains a work report and a timeout slot.
    */
   final case class AvailabilityAssignment(
-    report: WorkReport,
-    timeout: Long
-  )
+    guarantee: GuaranteeExtrinsic,
+    registeredSlot: Long
+  ):
+    /** `(aa_guarantee)_g_workreport` — the guaranteed work report. */
+    def report: WorkReport = guarantee.report
 
   object AvailabilityAssignment:
     given Codec[AvailabilityAssignment] =
-      (Codec[WorkReport] :: uint32L).xmap(
-        { case (report, timeout) =>
-          AvailabilityAssignment(report, timeout & 0xFFFFFFFFL)
+      (Codec[GuaranteeExtrinsic] :: uint32L).xmap(
+        { case (guarantee, registeredSlot) =>
+          AvailabilityAssignment(guarantee, registeredSlot & 0xFFFFFFFFL)
         },
-        aa => (aa.report, aa.timeout & 0xFFFFFFFFL)
+        aa => (aa.guarantee, aa.registeredSlot & 0xFFFFFFFFL)
       )
 
     given Decoder[AvailabilityAssignment] =
       Decoder.instance { cursor =>
         for
-          report <- cursor.get[WorkReport]("report")
-          timeout <- cursor.get[Long]("timeout")
-        yield AvailabilityAssignment(report, timeout)
+          guarantee <- cursor.get[GuaranteeExtrinsic]("guarantee")
+          registeredSlot <- cursor.get[Long]("registered_slot")
+        yield AvailabilityAssignment(guarantee, registeredSlot)
       }

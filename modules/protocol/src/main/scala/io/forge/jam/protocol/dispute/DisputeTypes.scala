@@ -11,6 +11,7 @@ import io.circe.Decoder
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.FullJamStateCodecs
 
 /**
  * Types for the Disputes State Transition Function.
@@ -78,7 +79,7 @@ object DisputeTypes:
         l => l & 0xFFFFFFFFL,
         tau => tau & 0xFFFFFFFFL
       )
-      val validatorListCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
+      val validatorListCodec = FullJamStateCodecs.validatorListCodec(validatorCount)
 
       (psiCodec :: rhoCodec :: tauCodec :: validatorListCodec :: validatorListCodec).xmap(
         { case (psi, rho, tau, kappa, lambda) =>
@@ -124,21 +125,22 @@ object DisputeTypes:
    * Error codes for the Disputes STF.
    */
   enum DisputeErrorCode:
-    case BadSignature
-    case BadGuarantorKey
-    case BadAuditorKey
-    case BadJudgementAge
-    case BadVoteSplit
-    case NotEnoughFaults
-    case NotEnoughCulprits
-    case OffenderAlreadyReported
-    case AlreadyJudged
-    case CulpritsNotSortedUnique
-    case VerdictsNotSortedUnique
-    case FaultsNotSortedUnique
-    case JudgementsNotSortedUnique
-    case FaultVerdictWrong
-    case CulpritsVerdictNotBad
+    case AlreadyJudged               // 0
+    case BadVoteSplit                // 1
+    case VerdictsNotSortedUnique     // 2
+    case JudgementsNotSortedUnique   // 3
+    case CulpritsNotSortedUnique     // 4
+    case FaultsNotSortedUnique       // 5
+    case NotEnoughFaults             // 6
+    case CulpritsVerdictNotBad       // 7
+    case FaultVerdictWrong           // 8
+    case OffenderAlreadyReported     // 9
+    case BadJudgementAge             // 10
+    case BadValidatorIndex           // 11
+    case BadSignature                // 12
+    case BadGuarantorKey             // 13
+    case BadAuditorKey               // 14
+    case BadVotesCount               // 15
 
   object DisputeErrorCode:
     given Codec[DisputeErrorCode] = byte.exmap(
@@ -160,7 +162,8 @@ object DisputeTypes:
           case "bad_judgement_age" => DisputeErrorCode.BadJudgementAge
           case "bad_vote_split" => DisputeErrorCode.BadVoteSplit
           case "not_enough_faults" => DisputeErrorCode.NotEnoughFaults
-          case "not_enough_culprits" => DisputeErrorCode.NotEnoughCulprits
+          case "bad_validator_index" => DisputeErrorCode.BadValidatorIndex
+          case "bad_votes_count" => DisputeErrorCode.BadVotesCount
           case "offender_already_reported" => DisputeErrorCode.OffenderAlreadyReported
           case "already_judged" => DisputeErrorCode.AlreadyJudged
           case "culprits_not_sorted_unique" => DisputeErrorCode.CulpritsNotSortedUnique

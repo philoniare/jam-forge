@@ -10,6 +10,7 @@ import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.json.JsonHelpers
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.FullJamStateCodecs
 import io.circe.Decoder
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
@@ -105,6 +106,7 @@ object ReportTypes:
     imports: Long = 0,
     exports: Long = 0,
     accumulateCount: Long = 0,
+    accumulateTransferCount: Long = 0,
     accumulateGasUsed: Long = 0
   )
 
@@ -113,7 +115,7 @@ object ReportTypes:
       (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
         JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
         JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
         {
           case (
                 providedCount,
@@ -125,6 +127,7 @@ object ReportTypes:
                 imports,
                 exports,
                 accumulateCount,
+                accumulateTransferCount,
                 accumulateGasUsed
               ) =>
             ServiceActivityRecord(
@@ -137,6 +140,7 @@ object ReportTypes:
               imports,
               exports,
               accumulateCount,
+              accumulateTransferCount,
               accumulateGasUsed
             )
         },
@@ -151,6 +155,7 @@ object ReportTypes:
             record.imports,
             record.exports,
             record.accumulateCount,
+            record.accumulateTransferCount,
             record.accumulateGasUsed
           )
       )
@@ -167,6 +172,7 @@ object ReportTypes:
           imports <- cursor.getOrElse[Long]("imports")(0)
           exports <- cursor.getOrElse[Long]("exports")(0)
           accumulateCount <- cursor.getOrElse[Long]("accumulate_count")(0)
+          accumulateTransferCount <- cursor.getOrElse[Long]("accumulate_transfer_count")(0)
           accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
         yield ServiceActivityRecord(
           providedCount,
@@ -178,6 +184,7 @@ object ReportTypes:
           imports,
           exports,
           accumulateCount,
+          accumulateTransferCount,
           accumulateGasUsed
         )
       }
@@ -230,8 +237,8 @@ object ReportTypes:
     def codec(coresCount: Int, validatorsCount: Int): Codec[ReportState] =
       val availAssignmentsCodec =
         JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coresCount)
-      val currValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
-      val prevValidatorsCodec = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorsCount)
+      val currValidatorsCodec = FullJamStateCodecs.validatorListCodec(validatorsCount)
+      val prevValidatorsCodec = FullJamStateCodecs.validatorListCodec(validatorsCount)
       val entropyCodec = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
       val offendersCodec = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
       val recentBlocksCodec = summon[Codec[HistoricalBetaContainer]]
@@ -377,6 +384,8 @@ object ReportTypes:
     case BannedValidator
     case LookupAnchorNotRecent
     case MissingWorkResults
+    case BadAnchorSlot
+    case BadErasureShards
     case DuplicateGuarantors
 
   object ReportErrorCode:
@@ -419,6 +428,8 @@ object ReportTypes:
           case "banned_validator" => ReportErrorCode.BannedValidator
           case "lookup_anchor_not_recent" => ReportErrorCode.LookupAnchorNotRecent
           case "missing_work_results" => ReportErrorCode.MissingWorkResults
+          case "bad_anchor_slot" => ReportErrorCode.BadAnchorSlot
+          case "bad_erasure_shards" => ReportErrorCode.BadErasureShards
           case "duplicate_guarantors" => ReportErrorCode.DuplicateGuarantors
           case other => throw new IllegalArgumentException(s"Unknown error code: $other")
         }

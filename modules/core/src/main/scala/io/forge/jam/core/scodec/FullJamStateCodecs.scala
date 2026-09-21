@@ -28,9 +28,11 @@ object FullJamStateCodecs:
   val entropyPoolCodec: Codec[List[Hash]] =
     JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
 
-  /** Codec for a fixed-size list of validators. */
+  /**
+   * Codec for `ValidatorsData`.
+   */
   def validatorListCodec(count: Int): Codec[List[ValidatorKey]] =
-    JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], count)
+    JamCodecs.compactPrefixedList(summon[Codec[ValidatorKey]])
 
   /** Codec for authorization pools: per-core compact length prefix + N hashes. */
   def authPoolsCodec(coresCount: Int): Codec[List[List[Hash]]] =

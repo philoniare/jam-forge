@@ -61,8 +61,11 @@ object AssuranceTransition:
    * Handle timeouts by clearing stale assignments.
    */
   private def handleTimeouts(state: AssuranceState, currentSlot: Long, config: ChainConfig): AssuranceState =
+    val validatorSetResized = state.currValidators.size != state.postValidators.size
     val newAssignments = state.availAssignments.map {
-      case Some(assignment) if isReportTimedOut(assignment.timeout, currentSlot, config) => None
+      case Some(assignment)
+          if validatorSetResized || isReportTimedOut(assignment.registeredSlot, currentSlot, config) =>
+        None
       case other => other
     }
     state.copy(availAssignments = newAssignments)
@@ -147,7 +150,7 @@ object AssuranceTransition:
     val result = scala.collection.mutable.Set[Int]()
     var coreIndex = 0
     while coreIndex < coresCount do
-      if 3 * counts(coreIndex) > 2 * config.validatorCount then result += coreIndex
+      if 3 * counts(coreIndex) > 2 * state.currValidators.size then result += coreIndex
       coreIndex += 1
     result.toSet
 

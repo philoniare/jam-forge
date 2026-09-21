@@ -61,6 +61,7 @@ object AvailabilitySpecifier:
         hash = packageHash,
         length = UInt(bundle.length),
         erasureRoot = erasureRoot,
+        erasureShards = UShort(config.validatorCount),
         exportsRoot = segmentsRoot(exportedSegments),
         exportsCount = UShort(exportedSegments.length)
       )

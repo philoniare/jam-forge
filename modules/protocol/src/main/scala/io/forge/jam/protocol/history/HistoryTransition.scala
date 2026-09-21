@@ -78,6 +78,7 @@ object HistoryTransition:
       headerHash = input.headerHash,
       beefyRoot = beefyRoot,
       stateRoot = ZeroHash,
+      slot = input.slot,
       reported = input.workPackages
     )
 

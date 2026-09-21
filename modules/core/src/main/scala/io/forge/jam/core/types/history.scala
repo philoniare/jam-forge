@@ -1,6 +1,7 @@
 package io.forge.jam.core.types
 
 import scodec.*
+import scodec.codecs.uint32L
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, optionCodec, compactPrefixedList}
 import io.circe.Decoder
@@ -38,22 +39,23 @@ object history:
 
   /**
    * Historical block entry containing header hash, beefy root, state root,
-   * and reported work packages.
+   * block slot and reported work packages.
    */
   final case class HistoricalBeta(
     headerHash: Hash,
     beefyRoot: Hash,
     stateRoot: Hash,
+    slot: Long,
     reported: List[ReportedWorkPackage]
   )
 
   object HistoricalBeta:
     given Codec[HistoricalBeta] =
-      (hashCodec :: hashCodec :: hashCodec :: compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
-        { case (headerHash, beefyRoot, stateRoot, reported) =>
-          HistoricalBeta(headerHash, beefyRoot, stateRoot, reported)
+      (hashCodec :: hashCodec :: hashCodec :: uint32L :: compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
+        { case (headerHash, beefyRoot, stateRoot, slot, reported) =>
+          HistoricalBeta(headerHash, beefyRoot, stateRoot, slot & 0xFFFFFFFFL, reported)
         },
-        hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.reported.sortBy(_.hash))
+        hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.slot & 0xFFFFFFFFL, hb.reported.sortBy(_.hash))
       )
 
     given Decoder[HistoricalBeta] =
@@ -62,8 +64,9 @@ object history:
           headerHash <- cursor.get[Hash]("header_hash")
           beefyRoot <- cursor.get[Hash]("beefy_root")
           stateRoot <- cursor.get[Hash]("state_root")
+          slot <- cursor.get[Long]("slot")
           reported <- cursor.get[List[ReportedWorkPackage]]("reported")
-        yield HistoricalBeta(headerHash, beefyRoot, stateRoot, reported)
+        yield HistoricalBeta(headerHash, beefyRoot, stateRoot, slot, reported)
       }
 
   /**
