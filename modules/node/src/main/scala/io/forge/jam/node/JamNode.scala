@@ -16,8 +16,7 @@ final case class NodeConfig(
     ed25519Seed: Option[Array[Byte]] = None,
     /** JAM-common-era override for devnets whose genesis starts "now". */
     eraStartSeconds: Long = SlotClock.JamCommonEraSeconds,
-    slotTicking: Boolean = true,
-    finalityDepth: Int = 8
+    slotTicking: Boolean = true
 )
 
 /** A running JAM node: persistent chain (RocksDB), JAMNP-S networking with
@@ -186,8 +185,8 @@ final class JamNode(
     Files.createDirectories(nodeConfig.dataDir)
     chain.initializeOrRestore(spec)
 
-    if nodeConfig.finalityDepth > 0 then
-      chain.onImported((_, _) => chain.finalizeAtDepth(nodeConfig.finalityDepth))
+    if spec.devnetFinalityDepth > 0 then
+      chain.onImported((_, _) => chain.finalizeAtDepth(spec.devnetFinalityDepth))
 
     chain.onImported((head, block) => preimages.onImported(head, block))
 

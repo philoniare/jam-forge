@@ -5,6 +5,7 @@ import java.nio.file.{Files, Path, Paths}
 import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
@@ -147,17 +148,20 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       val block2bHash = nodeB.chain.headerHashOf(block2b)
       nodeA.chain.importBlock(block2bBytes).isLeft shouldBe true
 
-      val leavesBefore = nodeA.chain.leaves.map(_.hash).toSet
-      val bestBefore = nodeA.chain.best.hash
-      leavesBefore shouldBe Set(headA2.hash, block2bHash)
+      def triples(heads: List[ChainManager#Head]) = heads.map(h => (h.hash, h.slot, h.stateRoot)).toSet
+      val leavesBefore = triples(nodeA.chain.leaves)
+      val bestBefore = nodeA.chain.best
+      leavesBefore.map(_._1) shouldBe Set(headA2.hash, block2bHash)
+      leavesBefore should contain((headA2.hash, headA2.slot, headA2.stateRoot))
+      leavesBefore should contain((block2bHash, 2L, Hash.zero))
 
       nodeA.shutdownStorageOnly()
       val nodeA2 = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
       try
         nodeA2.chain.initializeOrRestore(spec)
-        nodeA2.chain.best.hash shouldBe bestBefore
-        nodeA2.chain.leaves.map(_.hash).toSet shouldBe leavesBefore
-        nodeA2.chain.leaves.head.hash shouldBe bestBefore
+        nodeA2.chain.best.hash shouldBe bestBefore.hash
+        triples(nodeA2.chain.leaves) shouldBe leavesBefore
+        nodeA2.chain.leaves.head.hash shouldBe bestBefore.hash
       finally nodeA2.shutdownStorageOnly()
       nodeA = null // already shut down above
     finally
@@ -165,4 +169,118 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       if nodeB != null then nodeB.shutdownStorageOnly()
       cleanup(dirA)
       cleanup(dirB)
+  }
+
+  test("finalizing prunes a dead side-branch leaf at or below the finalized height") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec(
+      id = "leaves-finality-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+
+    val dirA = tempDir("jam-leaves-finality-a")
+    val dirB = tempDir("jam-leaves-finality-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false))
+      nodeA.chain.initializeOrRestore(spec)
+      nodeB.chain.initializeOrRestore(spec)
+
+      nodeA.enableAuthoring(devKeys)
+      val bareAuthorB = new BlockAuthor(nodeB.chain, devKeys)
+      val bareAuthorShared = new BlockAuthor(nodeA.chain, devKeys)
+
+      val block1 = bareAuthorShared.tryAuthor(1).getOrElse(fail("author block 1"))
+      val block1Bytes = nodeA.chain.encodeBlock(block1)
+      nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
+      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
+
+      nodeA.authorSlot(2).isDefined shouldBe true
+      val headA2 = nodeA.chain.best
+
+      // B's competing block 2' parks on a side branch: a dead tip that will
+      // never be adoptable again once A's chain is finalized past it.
+      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
+      val block2bBytes = nodeB.chain.encodeBlock(block2b)
+      val block2bHash = nodeB.chain.headerHashOf(block2b)
+      nodeA.chain.importBlock(block2bBytes).isLeft shouldBe true
+      nodeA.chain.leaves.map(_.hash).toSet shouldBe Set(headA2.hash, block2bHash)
+
+      // A extends past it: block2b (height 2) is now behind A's new best
+      // (height 3), but it's still tracked as a (dead) leaf.
+      nodeA.authorSlot(3).isDefined shouldBe true
+      val headA3 = nodeA.chain.best
+      nodeA.chain.leaves.map(_.hash).toSet shouldBe Set(headA3.hash, block2bHash)
+
+      val finalizeResult = nodeA.chain.finalize(headA3.hash)
+      withClue(s"finalize result: $finalizeResult") { finalizeResult.isRight shouldBe true }
+
+      val leavesAfter = nodeA.chain.leaves
+      leavesAfter.map(_.hash) shouldBe List(headA3.hash)
+      leavesAfter.map(_.hash) should not contain block2bHash
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("finalized head carries the finalized block's real state root, and it survives a restart") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec(
+      id = "leaves-finalized-root-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+
+    val dirA = tempDir("jam-leaves-finalized-root-a")
+    var nodeA: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeA.chain.initializeOrRestore(spec)
+
+      // Before any finalize call beyond genesis, `finalized` is genesis,
+      // whose real root is known from bootstrap.
+      val genesisRoot = nodeA.chain.best.stateRoot
+      nodeA.chain.finalized.hash shouldBe nodeA.chain.best.hash
+      nodeA.chain.finalized.stateRoot shouldBe genesisRoot
+
+      nodeA.enableAuthoring(devKeys)
+      val block1 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(1).getOrElse(fail("author block 1"))
+      val block1Bytes = nodeA.chain.encodeBlock(block1)
+      val head1 = nodeA.chain.importBlock(block1Bytes).getOrElse(fail("import block 1"))
+      head1.stateRoot should not be Hash.zero
+
+      val finalizeResult = nodeA.chain.finalize(head1.hash)
+      withClue(s"finalize result: $finalizeResult") { finalizeResult.isRight shouldBe true }
+
+      nodeA.chain.finalized.hash shouldBe head1.hash
+      nodeA.chain.finalized.stateRoot shouldBe head1.stateRoot
+
+      // Restart: a fresh ChainManager over the same on-disk stores must still
+      // report the real root, not the old Hash.zero placeholder.
+      nodeA.shutdownStorageOnly()
+      val nodeA2 = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
+      try
+        nodeA2.chain.initializeOrRestore(spec)
+        nodeA2.chain.finalized.hash shouldBe head1.hash
+        nodeA2.chain.finalized.stateRoot shouldBe head1.stateRoot
+      finally nodeA2.shutdownStorageOnly()
+      nodeA = null
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      cleanup(dirA)
   }

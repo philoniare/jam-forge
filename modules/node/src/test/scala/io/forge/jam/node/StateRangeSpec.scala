@@ -13,10 +13,16 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.collection.mutable
 
-private given io.circe.Decoder[TraceStep] =
-  TraceStep.decoder(using summon[io.circe.Decoder[Block]])
-
+/** End-to-end CE 129 (state request) between two networked nodes: node A is
+  * seeded with a real fuzz-trace pre-state as its genesis; node B connects,
+  * opens a CE 129 stream, requests the full key range of A's genesis state,
+  * and the response's key/value pairs are checked against A's own state
+  * reads (`chain.readRawState`), matching the `TwoNodeSyncSpec` devnet
+  * pattern.
+  */
 class StateRangeSpec extends AnyFunSuite with Matchers:
+  private given io.circe.Decoder[TraceStep] =
+    TraceStep.decoder(using summon[io.circe.Decoder[Block]])
 
   private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir =
@@ -72,7 +78,6 @@ class StateRangeSpec extends AnyFunSuite with Matchers:
       nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
 
       nodeA.chain.best.stateRoot shouldBe step.preState.stateRoot
-
       val expectedKeys = step.preState.keyvals.map(_.key).distinct.sorted
       val expected = expectedKeys.map(k => (k, nodeA.chain.readRawState(k).getOrElse(
         fail(s"node A is missing genesis key ${k.toHex}")
