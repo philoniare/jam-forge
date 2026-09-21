@@ -99,24 +99,24 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
   }
 
   // ============================================================================
-  // Test 3: PackageSpec encode/decode (102 bytes fixed)
+  // Test 3: PackageSpec encode/decode (104 bytes fixed)
   // ============================================================================
 
-  "PackageSpec" should "encode to exactly 102 bytes" in {
+  "PackageSpec" should "encode to exactly 104 bytes" in {
     val hash = Hash(Array.fill(32)(0x11.toByte))
     val erasureRoot = Hash(Array.fill(32)(0x22.toByte))
     val exportsRoot = Hash(Array.fill(32)(0x33.toByte))
-    val spec = PackageSpec(hash, UInt(1000), erasureRoot, exportsRoot, UShort(10))
+    val spec = PackageSpec(hash, UInt(1000), erasureRoot, UShort(1023), exportsRoot, UShort(10))
     val encoded = encode(spec)
     encoded.length shouldBe PackageSpec.Size
-    encoded.length shouldBe 102
+    encoded.length shouldBe 104
   }
 
   it should "encode length as 4-byte little-endian at offset 32" in {
     val hash = Hash.zero
     val erasureRoot = Hash.zero
     val exportsRoot = Hash.zero
-    val spec = PackageSpec(hash, UInt(0x12345678), erasureRoot, exportsRoot, UShort(0))
+    val spec = PackageSpec(hash, UInt(0x12345678), erasureRoot, UShort(0), exportsRoot, UShort(0))
     val encoded = encode(spec)
     // Length is at offset 32, 4 bytes little-endian
     encoded(32) shouldBe 0x78.toByte
@@ -129,13 +129,14 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val hash = Hash(Array.tabulate(32)(i => i.toByte))
     val erasureRoot = Hash(Array.tabulate(32)(i => (i + 32).toByte))
     val exportsRoot = Hash(Array.tabulate(32)(i => (i + 64).toByte))
-    val spec = PackageSpec(hash, UInt(999999), erasureRoot, exportsRoot, UShort(65535))
+    val spec = PackageSpec(hash, UInt(999999), erasureRoot, UShort(6), exportsRoot, UShort(65535))
     val encoded = encode(spec)
     val (decoded, consumed) = decode[PackageSpec](encoded)
     consumed shouldBe PackageSpec.Size
     decoded.hash.toHex shouldBe spec.hash.toHex
     decoded.length shouldBe spec.length
     decoded.erasureRoot.toHex shouldBe spec.erasureRoot.toHex
+    decoded.erasureShards shouldBe spec.erasureShards
     decoded.exportsRoot.toHex shouldBe spec.exportsRoot.toHex
     decoded.exportsCount shouldBe spec.exportsCount
   }
@@ -373,7 +374,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val codec = EpochMark.epochMarkCodec(6)
     val encoded = codec.encode(epochMark).require.bytes
     encoded.length shouldBe EpochMark.size(6)
-    encoded.length shouldBe (32 + 32 + 6 * 64) // 448 bytes
+    encoded.length shouldBe (32 + 32 + 1 + 6 * 64) // 449 bytes
   }
 
   it should "round-trip correctly with decoder" in {

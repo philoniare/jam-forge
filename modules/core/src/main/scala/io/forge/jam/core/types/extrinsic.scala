@@ -110,10 +110,11 @@ object extrinsic:
   )
 
   object Verdict:
-    /** Create a codec that knows the votes per verdict */
+    /**
+     * Codec for a verdict.
+     */
     def codec(votesPerVerdict: Int): Codec[Verdict] =
-      import io.forge.jam.core.scodec.JamCodecs.fixedSizeList
-      (hashCodec :: PrimitiveCodecs.timeslot :: fixedSizeList(summon[Codec[Vote]], votesPerVerdict)).xmap(
+      (hashCodec :: PrimitiveCodecs.timeslot :: compactPrefixedList(summon[Codec[Vote]])).xmap(
         { case (target, age, votes) =>
           Verdict(target, age, votes)
         },

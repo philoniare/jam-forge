@@ -62,9 +62,10 @@ object simpletypes:
       hash <- cursor.downField("hash").as[Hash]
       length <- cursor.downField("length").as[Long]
       erasureRoot <- cursor.downField("erasure_root").as[Hash]
+      erasureShards <- cursor.downField("erasure_shards").as[Int]
       exportsRoot <- cursor.downField("exports_root").as[Hash]
       exportsCount <- cursor.downField("exports_count").as[Int]
-    yield PackageSpec(hash, UInt(length.toInt), erasureRoot, exportsRoot, UShort(exportsCount))
+    yield PackageSpec(hash, UInt(length.toInt), erasureRoot, UShort(erasureShards), exportsRoot, UShort(exportsCount))
   }
 
   given Decoder[Vote] = Decoder.instance { cursor =>

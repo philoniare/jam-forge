@@ -17,27 +17,29 @@ import spire.math.{UShort, UInt}
 object work:
 
   /**
-   * Package specification containing hash, length, erasure root, exports root, and exports count.
-   * Fixed size: 102 bytes (32 + 4 + 32 + 32 + 2)
+   * Package specification (availability specifier).
+   *
+   * Fixed size: 104 bytes (32 + 4 + 32 + 2 + 32 + 2)
    */
   final case class PackageSpec(
     hash: Hash,
     length: UInt,
     erasureRoot: Hash,
+    erasureShards: UShort,
     exportsRoot: Hash,
     exportsCount: UShort
   )
 
   object PackageSpec:
-    val Size: Int = Hash.Size + 4 + Hash.Size + Hash.Size + 2 // 102 bytes
+    val Size: Int = Hash.Size + 4 + Hash.Size + 2 + Hash.Size + 2 // 104 bytes
 
     given Codec[PackageSpec] =
-      (hashCodec :: uint32L :: hashCodec :: hashCodec :: uint16L).xmap(
+      (hashCodec :: uint32L :: hashCodec :: uint16L :: hashCodec :: uint16L).xmap(
         {
-          case (hash, length, erasureRoot, exportsRoot, exportsCount) =>
-            PackageSpec(hash, UInt(length.toInt), erasureRoot, exportsRoot, UShort(exportsCount))
+          case (hash, length, erasureRoot, erasureShards, exportsRoot, exportsCount) =>
+            PackageSpec(hash, UInt(length.toInt), erasureRoot, UShort(erasureShards), exportsRoot, UShort(exportsCount))
         },
-        ps => (ps.hash, ps.length.toLong & 0xffffffffL, ps.erasureRoot, ps.exportsRoot, ps.exportsCount.toInt)
+        ps => (ps.hash, ps.length.toLong & 0xffffffffL, ps.erasureRoot, ps.erasureShards.toInt, ps.exportsRoot, ps.exportsCount.toInt)
       )
 
     given Decoder[PackageSpec] = Decoder.instance { cursor =>
@@ -45,12 +47,14 @@ object work:
         hash <- cursor.get[Hash]("hash")
         length <- cursor.get[Long]("length")
         erasureRoot <- cursor.get[Hash]("erasure_root")
+        erasureShards <- cursor.get[Int]("erasure_shards")
         exportsRoot <- cursor.get[Hash]("exports_root")
         exportsCount <- cursor.get[Int]("exports_count")
       yield PackageSpec(
         hash,
         UInt(length.toInt),
         erasureRoot,
+        UShort(erasureShards),
         exportsRoot,
         UShort(exportsCount)
       )

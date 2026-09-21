@@ -31,17 +31,21 @@ object complextypes:
   given Decoder[Context] = Decoder.instance { cursor =>
     for
       anchor <- cursor.downField("anchor").as[Hash]
+      anchorSlot <- cursor.downField("anchor_slot").as[Long]
       stateRoot <- cursor.downField("state_root").as[Hash]
       beefyRoot <- cursor.downField("beefy_root").as[Hash]
       lookupAnchor <- cursor.downField("lookup_anchor").as[Hash]
       lookupAnchorSlot <- cursor.downField("lookup_anchor_slot").as[Long]
+      lookupAnchorStateRoot <- cursor.downField("lookup_anchor_state_root").as[Hash]
       prerequisites <- cursor.downField("prerequisites").as[List[Hash]]
     yield Context(
       anchor,
+      Timeslot(anchorSlot.toInt),
       stateRoot,
       beefyRoot,
       lookupAnchor,
       Timeslot(lookupAnchorSlot.toInt),
+      lookupAnchorStateRoot,
       prerequisites
     )
   }

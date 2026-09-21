@@ -34,18 +34,20 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   // Test 1: Context encode/decode (with prerequisites list)
   // ============================================================================
 
-  "Context" should "encode without prerequisites to 133 bytes" in {
+  "Context" should "encode without prerequisites to 169 bytes" in {
     val ctx = Context(
       anchor = Hash(Array.fill(32)(0x11.toByte)),
+      anchorSlot = Timeslot(0),
       stateRoot = Hash(Array.fill(32)(0x22.toByte)),
       beefyRoot = Hash(Array.fill(32)(0x33.toByte)),
       lookupAnchor = Hash(Array.fill(32)(0x44.toByte)),
       lookupAnchorSlot = Timeslot(42),
+      lookupAnchorStateRoot = Hash.zero,
       prerequisites = List.empty
     )
     val encoded = encode(ctx)
-    // 4 * 32 + 4 + 1 (compact 0) = 133 bytes
-    encoded.length shouldBe 133
+    // 5 * 32 + 2 * 4 + 1 (compact 0) = 169 bytes
+    encoded.length shouldBe 169
   }
 
   it should "encode prerequisites with compact length prefix" in {
@@ -53,25 +55,29 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
     val prereq2 = Hash(Array.fill(32)(0xBB.toByte))
     val ctx = Context(
       anchor = Hash.zero,
+      anchorSlot = Timeslot(0),
       stateRoot = Hash.zero,
       beefyRoot = Hash.zero,
       lookupAnchor = Hash.zero,
       lookupAnchorSlot = Timeslot(0),
+      lookupAnchorStateRoot = Hash.zero,
       prerequisites = List(prereq1, prereq2)
     )
     val encoded = encode(ctx)
-    // 4 * 32 + 4 + 1 (compact 2) + 2 * 32 = 197 bytes
-    encoded.length shouldBe 197
+    // 5 * 32 + 2 * 4 + 1 (compact 2) + 2 * 32 = 233 bytes
+    encoded.length shouldBe 233
   }
 
   it should "round-trip correctly" in {
     val prereq = Hash(Array.tabulate(32)(i => i.toByte))
     val ctx = Context(
       anchor = Hash(Array.tabulate(32)(i => (i + 10).toByte)),
+      anchorSlot = Timeslot(0),
       stateRoot = Hash(Array.tabulate(32)(i => (i + 20).toByte)),
       beefyRoot = Hash(Array.tabulate(32)(i => (i + 30).toByte)),
       lookupAnchor = Hash(Array.tabulate(32)(i => (i + 40).toByte)),
       lookupAnchorSlot = Timeslot(12345),
+      lookupAnchorStateRoot = Hash.zero,
       prerequisites = List(prereq)
     )
     val encoded = encode(ctx)
@@ -303,10 +309,12 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   "WorkPackage" should "round-trip correctly" in {
     val ctx = Context(
       anchor = Hash.zero,
+      anchorSlot = Timeslot(0),
       stateRoot = Hash.zero,
       beefyRoot = Hash.zero,
       lookupAnchor = Hash.zero,
       lookupAnchorSlot = Timeslot(0),
+      lookupAnchorStateRoot = Hash.zero,
       prerequisites = List.empty
     )
 
@@ -345,10 +353,12 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
   "WReport" should "round-trip correctly" in {
     val ctx = Context(
       anchor = Hash.zero,
+      anchorSlot = Timeslot(0),
       stateRoot = Hash.zero,
       beefyRoot = Hash.zero,
       lookupAnchor = Hash.zero,
       lookupAnchorSlot = Timeslot(0),
+      lookupAnchorStateRoot = Hash.zero,
       prerequisites = List.empty
     )
 
@@ -356,6 +366,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       hash = Hash(Array.fill(32)(0x11.toByte)),
       length = UInt(1000),
       erasureRoot = Hash(Array.fill(32)(0x22.toByte)),
+      erasureShards = UShort(1023),
       exportsRoot = Hash(Array.fill(32)(0x33.toByte)),
       exportsCount = UShort(10)
     )
