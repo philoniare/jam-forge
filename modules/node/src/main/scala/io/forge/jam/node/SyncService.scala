@@ -148,6 +148,13 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   /** UP 0 streams by peer connection, for broadcasting announcements. */
   private val announceStreams = ConcurrentHashMap.newKeySet[JamnpStream]()
 
+  private val peerFinals = new ConcurrentHashMap[JamnpConnection, HashSlot]()
+
+  /** The latest `Final` announced by the peer on `conn`, if any handshake or
+    * announcement has been received from it yet.
+    */
+  def peerFinal(conn: JamnpConnection): Option[HashSlot] = Option(peerFinals.get(conn))
+
   private val StateRequestMaxSizeCap: Long = 16L * 1024 * 1024
 
   /** Single-threaded import pipeline so block application stays sequential. */
@@ -182,13 +189,17 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     (conn: JamnpConnection, stream: JamnpStream) =>
       var handshaken = false
       announceStreams.add(stream)
-      stream.onClosed(() => announceStreams.remove(stream))
+      stream.onClosed { () =>
+        announceStreams.remove(stream)
+        peerFinals.remove(conn)
+      }
       stream.onMessage { msg =>
         if !handshaken then
           handshaken = true
           val (peerFinal, peerLeaves) = decodeHandshake(msg)
+          peerFinals.put(conn, peerFinal)
           stream.send(ourHandshake)
-          onPeerLeaves(conn, peerLeaves)
+          onPeerLeaves(conn, peerLeaves, peerFinal)
         else onAnnouncement(conn, msg)
       }
 
@@ -199,12 +210,16 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       .get(10, TimeUnit.SECONDS)
     var handshaken = false
     announceStreams.add(stream)
-    stream.onClosed(() => announceStreams.remove(stream))
+    stream.onClosed { () =>
+      announceStreams.remove(stream)
+      peerFinals.remove(conn)
+    }
     stream.onMessage { msg =>
       if !handshaken then
         handshaken = true
         val (peerFinal, peerLeaves) = decodeHandshake(msg)
-        onPeerLeaves(conn, peerLeaves)
+        peerFinals.put(conn, peerFinal)
+        onPeerLeaves(conn, peerLeaves, peerFinal)
       else onAnnouncement(conn, msg)
     }
     stream.send(ourHandshake)
@@ -216,15 +231,21 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     announceStreams.forEach(_.send(msg))
 
   private def onAnnouncement(conn: JamnpConnection, msg: Array[Byte]): Unit =
-    val (headerBytes, _) = decodeAnnouncement(msg)
+    val (headerBytes, peerFinal) = decodeAnnouncement(msg)
+    peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
     if !chain.hasBlock(headerHash) then
       logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting")
       requestAndImport(conn, headerHash)
 
-  private def onPeerLeaves(conn: JamnpConnection, leaves: List[HashSlot]): Unit =
+  private def onPeerLeaves(conn: JamnpConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
     leaves.foreach { leaf =>
-      if !chain.hasBlock(leaf.hash) then
+      if leaf.slot < peerFinal.slot then
+        logger.debug(
+          s"peer leaf ${leaf.hash.toHex.take(18)} (slot ${leaf.slot}) below peer's own " +
+            s"final (slot ${peerFinal.slot}); ignoring"
+        )
+      else if !chain.hasBlock(leaf.hash) then
         logger.debug(s"peer leaf ${leaf.hash.toHex.take(18)} unknown; requesting")
         requestAndImport(conn, leaf.hash)
     }

@@ -9,9 +9,6 @@ import io.forge.jam.protocol.traces.TraceStep
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-private given io.circe.Decoder[TraceStep] =
-  TraceStep.decoder(using summon[io.circe.Decoder[Block]])
-
 /** End-to-end block sync between two networked nodes using a real fuzz-trace
   * block: node A treats the trace's pre-state as a checkpoint genesis and
   * imports the trace block (full STF incl. seal verification); node B starts
@@ -19,6 +16,8 @@ private given io.circe.Decoder[TraceStep] =
   * UP 0 handshake, fetches the block via CE 128 and imports it.
   */
 class TwoNodeSyncSpec extends AnyFunSuite with Matchers:
+  private given io.circe.Decoder[TraceStep] =
+    TraceStep.decoder(using summon[io.circe.Decoder[Block]])
 
   private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir =
@@ -97,6 +96,52 @@ class TwoNodeSyncSpec extends AnyFunSuite with Matchers:
       nodeB.chain.best.hash shouldBe nodeA.chain.best.hash
       nodeB.chain.best.stateRoot shouldBe step.postState.stateRoot
       nodeB.chain.hasBlock(nodeA.chain.best.hash) shouldBe true
+    finally
+      if nodeA != null then nodeA.shutdown()
+      if nodeB != null then nodeB.shutdown()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("node B's SyncService records node A's announced Final from the UP0 handshake") {
+    val step = findImportableStep().getOrElse(
+      cancel("no importable fuzz trace available (jam-conformance corpus not present)")
+    )
+
+    val spec = ChainSpec(
+      id = "trace-devnet-final",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = None,
+      explicitGenesisHash = Some(step.block.header.parent),
+      genesisState = step.preState.keyvals,
+      bootnodes = Nil
+    )
+
+    val dirA = tempDir("jam-node-final-a")
+    val dirB = tempDir("jam-node-final-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+
+      // Node A imports and directly finalizes the trace block (bypassing
+      // depth-based auto finality) so its announced Final is deterministic.
+      val blockBytes = nodeA.chain.encodeBlock(step.block)
+      val headA = nodeA.chain.importBlock(blockBytes).getOrElse(fail("node A import"))
+      nodeA.chain.finalize(headA.hash).isRight shouldBe true
+      nodeA.chain.finalized.hash shouldBe headA.hash
+
+      // Node B connects after A's Final has advanced; the UP0 handshake
+      // response carries A's Final, which SyncService must record per
+      // connection.
+      val conn = nodeB.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeA.listenPort))
+
+      val deadline = System.currentTimeMillis() + 15000
+      while nodeB.sync.peerFinal(conn).isEmpty && System.currentTimeMillis() < deadline
+      do Thread.sleep(50)
+
+      nodeB.sync.peerFinal(conn) shouldBe Some(SyncCodec.HashSlot(headA.hash, headA.slot))
     finally
       if nodeA != null then nodeA.shutdown()
       if nodeB != null then nodeB.shutdown()

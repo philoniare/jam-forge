@@ -36,7 +36,8 @@ object Bootnode:
   *   "genesis_header": "0x…",          // optional if genesis_header_hash given
   *   "genesis_header_hash": "0x…",     // optional; derived from header if absent
   *   "genesis_state": [{"key": "0x…31-bytes…", "value": "0x…"}, …],
-  *   "bootnodes": ["<ed25519-hex>@host:port", …]
+  *   "bootnodes": ["<ed25519-hex>@host:port", …],
+  *   "devnet_finality_depth": 5        // optional, default 5; see field doc below
   * }
   * }}}
   */
@@ -46,7 +47,8 @@ final case class ChainSpec(
     genesisHeaderBytes: Option[Array[Byte]],
     explicitGenesisHash: Option[Hash],
     genesisState: List[KeyValue],
-    bootnodes: List[Bootnode]
+    bootnodes: List[Bootnode],
+    devnetFinalityDepth: Int = 5
 ):
   val genesisHeaderHash: Hash =
     explicitGenesisHash.orElse(genesisHeaderBytes.map(Hashing.blake2b256)).getOrElse {
@@ -71,6 +73,7 @@ object ChainSpec:
       headerHash <- c.get[Option[String]]("genesis_header_hash")
       state <- c.getOrElse[List[KeyValue]]("genesis_state")(Nil)
       bootnodes <- c.getOrElse[List[String]]("bootnodes")(Nil)
+      devnetFinalityDepth <- c.getOrElse[Int]("devnet_finality_depth")(5)
     yield ChainSpec(
       id = id,
       config = configName match
@@ -81,7 +84,8 @@ object ChainSpec:
       genesisHeaderBytes = header.map(parseHex),
       explicitGenesisHash = headerHash.map(h => Hash(parseHex(h))),
       genesisState = state,
-      bootnodes = bootnodes.map(Bootnode.parse)
+      bootnodes = bootnodes.map(Bootnode.parse),
+      devnetFinalityDepth = devnetFinalityDepth
     )
 
   def fromJson(json: String): Either[String, ChainSpec] =

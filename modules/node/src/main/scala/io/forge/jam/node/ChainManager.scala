@@ -64,7 +64,8 @@ final class ChainManager(
 
   def finalized: Head =
     val hash = blockStore.getHead(BlockStore.FinalizedHead).getOrElse(Hash.zero)
-    Head(hash, metaLong("finalized_slot").getOrElse(0L), Hash.zero)
+    val root = blockStore.getMeta("finalized_root").filter(_.length == 32).map(Hash(_)).getOrElse(Hash.zero)
+    Head(hash, metaLong("finalized_slot").getOrElse(0L), root)
 
   /** Mark a main-chain block as finalized: the finalized head advances and
     * side branches forking at or below it are no longer adoptable
@@ -73,7 +74,7 @@ final class ChainManager(
     synchronized {
       blockRoot(hash) match
         case None => Left("cannot finalize a non-main-chain block")
-        case Some(_) =>
+        case Some(root) =>
           val slot = blockStore
             .getBlock(hash)
             .filter(_.nonEmpty)
@@ -87,8 +88,14 @@ final class ChainManager(
           else
             blockStore.setHead(BlockStore.FinalizedHead, hash)
             putMetaLong("finalized_slot", slot)
+            blockStore.setMeta("finalized_root", root.bytes.toArray)
+            val finalizedHeight = metaLong(s"height:${hash.toHex}").getOrElse(0L)
+            val it = leafMap.entrySet().iterator()
+            while it.hasNext do
+              val e = it.next()
+              if blockHeight(e.getKey).getOrElse(0L) <= finalizedHeight then it.remove()
             logger.info(s"finalized ${hash.toHex.take(18)} slot=$slot")
-            Right(Head(hash, slot, Hash.zero))
+            Right(Head(hash, slot, root))
     }
 
   /** Devnet finality rule: finalize the ancestor `depth` blocks behind the
@@ -168,6 +175,8 @@ final class ChainManager(
     */
   private def rebuildLeaves(genesisHash: Hash): Unit =
     leafMap.clear()
+    val finalizedHeight =
+      blockStore.getHead(BlockStore.FinalizedHead).flatMap(blockHeight).getOrElse(0L)
     val stack = mutable.ArrayDeque(genesisHash)
     val visited = mutable.HashSet.empty[Hash]
     while stack.nonEmpty do
@@ -175,7 +184,8 @@ final class ChainManager(
       if !visited.contains(h) then
         visited += h
         blockStore.children(h) match
-          case Nil      => leafMap.put(h, headOf(h))
+          case Nil =>
+            if blockHeight(h).getOrElse(0L) > finalizedHeight then leafMap.put(h, headOf(h))
           case children => children.foreach(stack.prepend)
 
   /** Initialize a fresh database from the chain spec, or restore heads from a
@@ -206,6 +216,10 @@ final class ChainManager(
             )
           )
         rebuildLeaves(genesisHash)
+        if blockStore.getMeta("finalized_root").isEmpty then
+          blockStore.getHead(BlockStore.FinalizedHead).flatMap(blockRoot).foreach { finalizedRoot =>
+            blockStore.setMeta("finalized_root", finalizedRoot.bytes.toArray)
+          }
         logger.info(
           s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
         )
@@ -222,6 +236,8 @@ final class ChainManager(
         blockStore.setHead(BlockStore.FinalizedHead, genesisHash)
         blockStore.setMeta("state_root", root.bytes.toArray)
         putMetaLong("best_slot", 0L)
+        putMetaLong("finalized_slot", 0L)
+        blockStore.setMeta("finalized_root", root.bytes.toArray)
         putBlockRoot(genesisHash, root)
         putBlockHeight(genesisHash, 0L)
         bestHead = Head(genesisHash, 0L, root)
@@ -388,7 +404,10 @@ final class ChainManager(
           putMetaLong("best_slot", previousBest.slot)
           return Left(s"reorg replay failed: $err")
     }
-    abandoned.foreach(dropBlockRoot)
+    abandoned.foreach { h =>
+      dropBlockRoot(h)
+      Option(leafMap.get(h)).foreach(head => leafMap.put(h, head.copy(stateRoot = Hash.zero)))
+    }
     Right(bestHead)
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)
