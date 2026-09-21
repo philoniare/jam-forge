@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.nio.file.{Files, Path, Paths}
-import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{Executors, ExecutorService, LinkedBlockingQueue, TimeUnit}
 
 import io.circe.Decoder
 import io.circe.parser.decode
@@ -9,6 +9,7 @@ import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Hash, ServiceId}
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.Preimage
+import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.network.StreamKind
 import io.forge.jam.protocol.accumulation.StateKey
 import io.forge.jam.protocol.traces.{Genesis, KeyValue}
@@ -25,6 +26,37 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers:
   }
   test("announcement decode rejects wrong length") {
     PreimageCodec.decodeAnnouncement(new Array[Byte](39)).isLeft shouldBe true
+  }
+
+  private def newEgress(): ExecutorService =
+    Executors.newSingleThreadExecutor(r =>
+      val t = new Thread(r, "jam-egress-test"); t.setDaemon(true); t
+    )
+
+  test("announcedMeta evicts the oldest entry once the cap is exceeded") {
+    val dir = Files.createTempDirectory("jam-preimage-cap-spec")
+    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"))
+    val blockStore = BlockStore.open(dir.resolve("blocks"))
+    val chain = new ChainManager(ChainConfig.TINY, trieBackend, blockStore)
+    val egress = newEgress()
+    val cap = 3
+    val service = new PreimageService(chain, new ExtrinsicPools, egress, announcedMetaCap = cap)
+    try
+      // Four distinct blobs -> four distinct hashes, one more than the cap.
+      val blobs = (0 until cap + 1).map(i => Array.fill[Byte](4)(i.toByte))
+      val hashes = blobs.map(Hashing.blake2b256)
+
+      blobs.foreach(b => service.announce(0L, b, Nil))
+
+      service.announcedMetaSize shouldBe cap
+      // The oldest (first-inserted) entry was evicted...
+      service.hasAnnouncedMeta(hashes.head) shouldBe false
+      // ...while every entry inserted after it survives.
+      hashes.tail.foreach(h => service.hasAnnouncedMeta(h) shouldBe true)
+    finally
+      egress.shutdownNow()
+      service.shutdown()
+      cleanup(dir)
   }
 
   private val baseDir =
