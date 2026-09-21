@@ -37,6 +37,41 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
     TicketService.proxyIndexFor(id, 6) shouldBe 5
   }
 
+  test("ticketsForEpoch keeps only tickets recorded for the current epoch") {
+    val currentId = Seq.fill[Byte](32)(0x01)
+    val staleId = Seq.fill[Byte](32)(0x02)
+    val unknownId = Seq.fill[Byte](32)(0x03) // present in envelopes but missing from epochOf
+
+    val envelopes = Map(
+      currentId -> envelope(0x0a),
+      staleId -> envelope(0x0b),
+      unknownId -> envelope(0x0c)
+    )
+    val epochOf = Map(currentId -> 5L, staleId -> 4L)
+
+    val result = TicketService.ticketsForEpoch(epoch = 5L, envelopes = envelopes, epochOf = epochOf)
+
+    result.keySet shouldBe Set(currentId)
+    result(currentId) shouldBe envelopes(currentId)
+  }
+
+  test("ticketsForEpoch is a no-op when every ticket already matches the current epoch") {
+    val idA = Seq.fill[Byte](32)(0x0d)
+    val idB = Seq.fill[Byte](32)(0x0e)
+    val envelopes = Map(idA -> envelope(1), idB -> envelope(2))
+    val epochOf = Map(idA -> 9L, idB -> 9L)
+
+    TicketService.ticketsForEpoch(9L, envelopes, epochOf) shouldBe envelopes
+  }
+
+  test("ticketsForEpoch drops everything when all tickets are stale") {
+    val idA = Seq.fill[Byte](32)(0x0f)
+    val envelopes = Map(idA -> envelope(3))
+    val epochOf = Map(idA -> 1L)
+
+    TicketService.ticketsForEpoch(2L, envelopes, epochOf) shouldBe empty
+  }
+
   private val baseDir =
     sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val genesisPath =
@@ -83,6 +118,8 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
       nodeA.tickets.maybeGenerate()
       nodeA.pools.ticketCount should be > 0
 
+      // No validator-index -> connection map on this devnet, so this exercises
+      // the CE132 direct-broadcast fallback.
       nodeA.tickets.distributeTickets(nodeA.distribution.peers, _ => None)
 
       val deadline = System.currentTimeMillis() + 15000

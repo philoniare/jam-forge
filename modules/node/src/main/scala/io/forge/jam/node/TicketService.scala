@@ -207,7 +207,9 @@ final class TicketService(
     val epoch = view.timeslot / chain.config.epochLength
     val validatorCount = view.validators.nextEpoch.size
     if validatorCount == 0 then return
-    ownTicketEnvelopes.asScala.foreach { case (idSeq, env) =>
+    val current =
+      TicketService.ticketsForEpoch(epoch, ownTicketEnvelopes.asScala.toMap, ticketEpoch.asScala.toMap)
+    current.foreach { case (idSeq, env) =>
       val id = Hash(idSeq.toArray)
       val proxyIndex = TicketService.proxyIndexFor(id, validatorCount)
       val payload = TicketCodec.encode(epoch, env)
@@ -260,6 +262,13 @@ object TicketService:
     val b = ticketId.bytes
     val v = ((b(28) & 0xffL) << 24) | ((b(29) & 0xffL) << 16) | ((b(30) & 0xffL) << 8) | (b(31) & 0xffL)
     (v % validatorCount).toInt
+
+  private[node] def ticketsForEpoch(
+      epoch: Long,
+      envelopes: Map[Seq[Byte], TicketEnvelope],
+      epochOf: Map[Seq[Byte], Long]
+  ): Map[Seq[Byte], TicketEnvelope] =
+    envelopes.filter { case (idSeq, _) => epochOf.getOrElse(idSeq, -1L) == epoch }
 
 /** CE 131/132 wire format (jamnp-s): Epoch Index (u32 LE) ++ Attempt (1) ++
   * RingVRF proof (784). Both kinds carry the identical message.

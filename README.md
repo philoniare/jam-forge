@@ -4,7 +4,7 @@
 
 [![Scala Version](https://img.shields.io/badge/scala-3.3.7-red.svg)](https://www.scala-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com)
+[![Run Tests](https://github.com/philoniare/jam-forge/actions/workflows/run-tests.yml/badge.svg)](https://github.com/philoniare/jam-forge/actions/workflows/run-tests.yml)
 [![codecov](https://codecov.io/gh/philoniare/jam-forge/branch/main/graph/badge.svg)](https://codecov.io/gh/philoniare/jam-forge)
 
 ---
@@ -25,7 +25,7 @@ JAM-Forge is an idiomatic Scala 3 implementation of the **JAM (Join-Accumulate M
 
 ## 🏗️ Architecture
 
-JAM-Forge is organized into five core modules:
+JAM-Forge is organized into eight core modules:
 
 ### 📦 Modules
 
@@ -35,6 +35,9 @@ JAM-Forge is organized into five core modules:
 | **jam-crypto** 🔐 | Cryptographic operations (Bandersnatch VRF, Ed25519, Erasure Coding) | `io.forge.jam.crypto` |
 | **jam-pvm** 🖥️ | PolkaVM implementation (RISC-V virtual machine) | `io.forge.jam.pvm` |
 | **jam-protocol** 📜 | State transition functions (Safrole, Statistics, Accumulation, etc.) | `io.forge.jam.protocol` |
+| **jam-network** 🌐 | JAMNP-S networking (QUIC transport, all stream kinds) | `io.forge.jam.network` |
+| **jam-db** 🗄️ | Persistent storage (RocksDB-backed state and block stores) | `io.forge.jam.db` |
+| **jam-node** 🖧 | Full node: authoring, guaranteeing, assuring, auditing, sync | `io.forge.jam.node` |
 | **jam-conformance** 🧪 | Conformance testing server for cross-implementation validation | `io.forge.jam.conformance` |
 
 ---

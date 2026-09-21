@@ -1,7 +1,6 @@
 package io.forge.jam.node
 
 import java.util.concurrent.{
-  ConcurrentHashMap,
   ExecutorService,
   LinkedBlockingQueue,
   TimeUnit
@@ -38,10 +37,18 @@ object PreimageCodec:
 final class PreimageService(
     chain: ChainManager,
     pools: ExtrinsicPools,
-    egress: ExecutorService
+    egress: ExecutorService,
+    announcedMetaCap: Int = PreimageService.DefaultAnnouncedMetaCap
 ) extends LazyLogging:
 
-  private val announcedMeta = new ConcurrentHashMap[Hash, (Long, Long)]()
+  private val announcedMeta =
+    java.util.Collections.synchronizedMap(
+      new java.util.LinkedHashMap[Hash, (Long, Long)](64, 0.75f, false) {
+        override def removeEldestEntry(e: java.util.Map.Entry[Hash, (Long, Long)]) =
+          size > announcedMetaCap
+      }
+    )
+
   private val fetchExecutor: ExecutorService =
     java.util.concurrent.Executors.newFixedThreadPool(
       4,
@@ -86,6 +93,9 @@ final class PreimageService(
         catch case e: Exception => logger.warn(s"CE143 handler failed: ${e.getMessage}")
         stream.finish()
       }
+
+  private[node] def announcedMetaSize: Int = announcedMeta.size()
+  private[node] def hasAnnouncedMeta(hash: Hash): Boolean = announcedMeta.containsKey(hash)
 
   private[node] def lookupBlob(hash: Hash): Option[Array[Byte]] =
     pools.findPreimage(hash).map(_.blob.toArray).orElse {
@@ -159,3 +169,6 @@ final class PreimageService(
     catch
       case _: java.util.concurrent.RejectedExecutionException =>
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+
+object PreimageService:
+  val DefaultAnnouncedMetaCap: Int = 4096
