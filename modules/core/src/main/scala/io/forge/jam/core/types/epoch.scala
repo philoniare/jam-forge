@@ -3,7 +3,7 @@ package io.forge.jam.core.types
 import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, blsPublicKeyCodec}
+import io.forge.jam.core.scodec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, blsPublicKeyCodec, compactPrefixedList}
 import io.circe.Decoder
 import _root_.scodec.*
 import _root_.scodec.bits.*
@@ -54,16 +54,17 @@ object epoch:
   )
 
   object EpochMark:
-    /** Calculate size based on validator count */
+    /** Calculate size based on validator count (includes the 0.8.0 compact length discriminator) */
     def size(validatorCount: Int): Int =
-      Hash.Size + Hash.Size + validatorCount * EpochValidatorKey.Size
+      Hash.Size + Hash.Size +
+        io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(validatorCount.toLong).length +
+        validatorCount * EpochValidatorKey.Size
 
     /**
-     * Create a codec that knows the expected validator count.
-     * EpochMark has a config-dependent size, so we need the validator count.
+     * Codec for the epoch mark.
      */
     def epochMarkCodec(validatorCount: Int): Codec[EpochMark] =
-      (hashCodec :: hashCodec :: vectorOfN(provide(validatorCount), summon[Codec[EpochValidatorKey]]).xmap(_.toList, _.toVector)).xmap(
+      (hashCodec :: hashCodec :: compactPrefixedList(summon[Codec[EpochValidatorKey]])).xmap(
         { case (e, te, vs) => EpochMark(e, te, vs) },
         em => (em.entropy, em.ticketsEntropy, em.validators)
       )
