@@ -10,6 +10,7 @@ import io.circe.{Decoder, DecodingFailure}
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.FullJamStateCodecs
 import io.forge.jam.core.scodec.JamCodecs.{given Codec[BandersnatchPublicKey]}
 
 /**
@@ -89,10 +90,10 @@ object SafroleTypes:
     def codec(validatorCount: Int, epochLength: Int): Codec[SafroleState] =
       val tauCodec: Codec[Long] = uint32L.xmap(_ & 0xFFFFFFFFL, _ & 0xFFFFFFFFL)
       val etaCodec: Codec[List[Hash]] = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
-      val lambdaCodec: Codec[List[ValidatorKey]] = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
-      val kappaCodec: Codec[List[ValidatorKey]] = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
-      val gammaKCodec: Codec[List[ValidatorKey]] = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
-      val iotaCodec: Codec[List[ValidatorKey]] = JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
+      val lambdaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
+      val kappaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
+      val gammaKCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
+      val iotaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
       val gammaACodec: Codec[List[TicketMark]] = JamCodecs.compactPrefixedList(summon[Codec[TicketMark]])
       val gammaSCodec: Codec[TicketsOrKeys] = TicketsOrKeys.codec(epochLength)
       val gammaZCodec: Codec[JamBytes] = fixedSizeBytes(BandersnatchRingCommitmentSize.toLong, bytes).xmap(

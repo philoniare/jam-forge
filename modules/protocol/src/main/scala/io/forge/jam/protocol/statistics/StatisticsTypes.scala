@@ -8,6 +8,7 @@ import io.circe.Decoder
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.FullJamStateCodecs
 
 /**
  * Types for the Statistics State Transition Function.
@@ -143,7 +144,7 @@ object StatisticsTypes:
       (JamCodecs.fixedSizeList(summon[Codec[StatCount]], validatorCount) ::
        JamCodecs.fixedSizeList(summon[Codec[StatCount]], validatorCount) ::
        uint32L ::
-       JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)).xmap(
+       FullJamStateCodecs.validatorListCodec(validatorCount)).xmap(
         { case (valsCurrStats, valsLastStats, slot, currValidators) =>
           StatState(valsCurrStats, valsLastStats, slot & 0xFFFFFFFFL, currValidators)
         },

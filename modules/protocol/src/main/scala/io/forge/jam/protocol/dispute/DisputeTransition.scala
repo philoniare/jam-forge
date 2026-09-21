@@ -44,14 +44,24 @@ object DisputeTransition:
     val validAges = Set(currentEpoch, currentEpoch - 1)
     validAges.contains(age)
 
+  /** `floor(2/3 * |k|) + 1` for the validator set `k` identified by the verdict.
+    */
+  private def superMajorityOf(validatorSetSize: Int): Int =
+    (2 * validatorSetSize) / 3 + 1
+
+  /** `floor(1/3 * |k|)` for the validator set `k` identified by the verdict. */
+  private def oneThirdOf(validatorSetSize: Int): Int =
+    validatorSetSize / 3
+
   /** Validate vote distribution matches allowed thresholds. Only allow: 0 (all
     * negative), 1/3 (uncertain), or 2/3+1 (supermajority)
     */
   private def validateVoteDistribution(
       positiveVotes: Int,
-      config: ChainConfig
+      validatorSetSize: Int
   ): Boolean =
-    val validThresholds = Set(0, config.oneThird, config.votesPerVerdict)
+    val validThresholds =
+      Set(0, oneThirdOf(validatorSetSize), superMajorityOf(validatorSetSize))
     validThresholds.contains(positiveVotes)
 
   /** Get the appropriate validator set based on verdict age.
@@ -77,20 +87,28 @@ object DisputeTransition:
     */
   private def computeGoodTargets(
       verdicts: List[Verdict],
+      state: DisputeState,
       config: ChainConfig
   ): Set[Hash] =
     verdicts.flatMap { verdict =>
+      val validatorSet = getValidatorSet(verdict, state, config.epochLength)
       val positiveVotes = verdict.votes.count(_.vote)
-      if positiveVotes >= config.votesPerVerdict then Some(verdict.target)
+      if positiveVotes >= superMajorityOf(validatorSet.size) then Some(verdict.target)
       else None
     }.toSet
 
+  /** Posterior judgement sets derived from the validated verdicts. Produced by
+    * [[validateVerdicts]] and consumed by the culprit and fault phases.
+    */
   private final case class VerdictOutcome(
       newBadTargets: Set[Hash],
       badsetPrime: Set[Hash],
       goodsetPrime: Set[Hash]
   )
 
+  /** Phases 1-2: verdict ordering, then each verdict's content. Returns the
+    * posterior bad/good sets the later phases check against.
+    */
   private def validateVerdicts(
       disputes: Dispute,
       state: DisputeState,
@@ -106,7 +124,6 @@ object DisputeTransition:
           _.target.bytes
         )
       then break(Left(DisputeErrorCode.VerdictsNotSortedUnique))
-      val culpritCountByTarget = disputes.culprits.groupBy(_.target).view.mapValues(_.size).toMap
       val faultsByTarget = disputes.faults.groupBy(_.target)
 
       // 2. Validate each verdict (must happen before culprit target validation)
@@ -116,11 +133,13 @@ object DisputeTransition:
           break(Left(DisputeErrorCode.BadJudgementAge))
 
         val validatorSet = getValidatorSet(verdict, state, config.epochLength)
+        if verdict.votes.size != superMajorityOf(validatorSet.size) then
+          break(Left(DisputeErrorCode.BadVotesCount))
+
         val positiveVotes = verdict.votes.count(_.vote)
-        val negativeVotes = verdict.votes.count(!_.vote)
 
         // Validate vote distribution
-        if !validateVoteDistribution(positiveVotes, config) then
+        if !validateVoteDistribution(positiveVotes, validatorSet.size) then
           break(Left(DisputeErrorCode.BadVoteSplit))
 
         // Validate votes are sorted and unique by index
@@ -165,14 +184,8 @@ object DisputeTransition:
           psiWonkySet.contains(verdict.target)
         then break(Left(DisputeErrorCode.AlreadyJudged))
 
-        // For all-negative verdicts, require at least 2 culprits
-        if negativeVotes == verdict.votes.size && positiveVotes == 0 then
-          val culpritsForTarget = culpritCountByTarget.getOrElse(verdict.target, 0)
-          if culpritsForTarget < 2 then
-            break(Left(DisputeErrorCode.NotEnoughCulprits))
-
         // For supermajority positive verdicts, require at least one fault
-        if positiveVotes >= config.votesPerVerdict then
+        if positiveVotes >= superMajorityOf(validatorSet.size) then
           val matchingFaults = faultsByTarget.getOrElse(verdict.target, Nil)
           if matchingFaults.isEmpty then break(Left(DisputeErrorCode.NotEnoughFaults))
 
@@ -183,7 +196,7 @@ object DisputeTransition:
 
       // Now compute bad/good targets from validated verdicts -> posterior sets badset'/goodset'
       val newBadTargets = computeBadTargets(disputes.verdicts)
-      val newGoodTargets = computeGoodTargets(disputes.verdicts, config)
+      val newGoodTargets = computeGoodTargets(disputes.verdicts, state, config)
       val badsetPrime: Set[Hash] = state.psi.bad.toSet ++ newBadTargets
       val goodsetPrime: Set[Hash] = state.psi.good.toSet ++ newGoodTargets
       Right(VerdictOutcome(newBadTargets, badsetPrime, goodsetPrime))
@@ -435,7 +448,7 @@ object DisputeTransition:
     )
 
   /** Process disputes and update state. Returns tuple of (new state, offenders
-    * mark for output) 
+    * mark for output)
     */
   private def processDisputes(
       disputes: Dispute,

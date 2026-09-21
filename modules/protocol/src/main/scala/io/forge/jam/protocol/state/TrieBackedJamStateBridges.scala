@@ -68,7 +68,8 @@ object TrieBackedJamStateBridges:
     def extract(view: TrieBackedJamState): AssuranceState =
       AssuranceState(
         availAssignments = view.cores.reports,
-        currValidators = view.validators.current
+        currValidators = view.validators.current,
+        postValidators = view.validators.current
       )
 
     def apply(view: TrieBackedJamState, post: AssuranceState): Unit =

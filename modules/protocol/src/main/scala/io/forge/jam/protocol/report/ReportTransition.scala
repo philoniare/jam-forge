@@ -119,7 +119,7 @@ object ReportTransition:
         (preState, StfResult.error(err))
       case Right((reports, packages, guarantors)) =>
         val postState = preState.copy(
-          availAssignments = updateAvailAssignments(preState.availAssignments, reports, input.slot),
+          availAssignments = updateAvailAssignments(preState.availAssignments, input.guarantees, input.slot),
           coresStatistics = StatsAggregation.coreStatsByCore(input.guarantees, config.coresCount),
           servicesStatistics = StatsAggregation.serviceStatsFromGuarantees(input.guarantees)
         )
@@ -546,11 +546,11 @@ object ReportTransition:
    */
   private def updateAvailAssignments(
     existing: List[Option[AvailabilityAssignment]],
-    reports: List[WorkReport],
+    guarantees: List[GuaranteeExtrinsic],
     currentSlot: Long
   ): List[Option[AvailabilityAssignment]] =
-    val reportsByCore = reports.map(r => r.coreIndex.toInt -> r).toMap
+    val guaranteesByCore = guarantees.map(g => g.report.coreIndex.toInt -> g).toMap
     existing.zipWithIndex.map {
       case (existing, index) =>
-        reportsByCore.get(index).map(AvailabilityAssignment(_, currentSlot)).orElse(existing)
+        guaranteesByCore.get(index).map(AvailabilityAssignment(_, currentSlot)).orElse(existing)
     }

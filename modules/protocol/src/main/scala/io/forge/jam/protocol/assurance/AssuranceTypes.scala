@@ -12,6 +12,7 @@ import spire.math.UByte
 import _root_.scodec.Codec
 import _root_.scodec.codecs.*
 import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec}
+import io.forge.jam.core.scodec.FullJamStateCodecs
 
 /**
  * Types for the Assurances State Transition Function.
@@ -56,18 +57,22 @@ object AssuranceTypes:
    */
   final case class AssuranceState(
     availAssignments: List[Option[AvailabilityAssignment]],
-    currValidators: List[ValidatorKey]
+    currValidators: List[ValidatorKey],
+    postValidators: List[ValidatorKey]
   )
 
   object AssuranceState:
-    /** Create a codec that knows the cores and validator counts */
+    /**
+     * Create a codec that knows the cores and validator counts.
+     */
     def codec(coreCount: Int, validatorCount: Int): Codec[AssuranceState] =
       (fixedSizeList(optionCodec(summon[Codec[AvailabilityAssignment]]), coreCount) ::
-       fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)).xmap(
-        { case (availAssignments, currValidators) =>
-          AssuranceState(availAssignments, currValidators)
+       FullJamStateCodecs.validatorListCodec(validatorCount) ::
+       FullJamStateCodecs.validatorListCodec(validatorCount)).xmap(
+        { case (availAssignments, currValidators, postValidators) =>
+          AssuranceState(availAssignments, currValidators, postValidators)
         },
-        as => (as.availAssignments, as.currValidators)
+        as => (as.availAssignments, as.currValidators, as.postValidators)
       )
 
     given Decoder[AssuranceState] =
@@ -75,7 +80,8 @@ object AssuranceTypes:
         for
           availAssignments <- cursor.get[List[Option[AvailabilityAssignment]]]("avail_assignments")
           currValidators <- cursor.get[List[ValidatorKey]]("curr_validators")
-        yield AssuranceState(availAssignments, currValidators)
+          postValidators <- cursor.get[List[ValidatorKey]]("post_validators")
+        yield AssuranceState(availAssignments, currValidators, postValidators)
       }
 
   /**

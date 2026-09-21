@@ -10,6 +10,7 @@ import io.forge.jam.core.primitives.{
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.scodec.FullJamStateCodecs
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import _root_.scodec.{Codec, Attempt, DecodeResult}
@@ -221,7 +222,7 @@ object StateCodec:
       expectedCount: Int
   ): List[ValidatorKey] =
     val codec =
-      JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], expectedCount)
+      FullJamStateCodecs.validatorListCodec(expectedCount)
     val bits = BitVector(value)
     codec.decode(bits) match
       case Attempt.Successful(DecodeResult(validators, _)) => validators
@@ -257,7 +258,7 @@ object StateCodec:
 
     // gammaK - fixed list of ValidatorKey
     val gammaKCodec =
-      JamCodecs.fixedSizeList(summon[Codec[ValidatorKey]], validatorCount)
+      FullJamStateCodecs.validatorListCodec(validatorCount)
     val gammaK = gammaKCodec.decode(remainingBits) match
       case Attempt.Successful(DecodeResult(validators, remainder)) =>
         val consumed = (remainingBits.size - remainder.size) / 8

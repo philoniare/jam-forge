@@ -416,6 +416,7 @@ object InputExtractor:
       headerHash = headerHash,
       parentStateRoot = block.header.parentStateRoot,
       accumulateRoot = accumulateRoot,
+      slot = block.header.slot.value.toLong,
       workPackages = workPackages
     )
 

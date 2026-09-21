@@ -47,6 +47,7 @@ object HistoryTypes:
     headerHash: Hash,
     parentStateRoot: Hash,
     accumulateRoot: Hash,
+    slot: Long,
     workPackages: List[ReportedWorkPackage]
   ):
     /**
@@ -66,11 +67,12 @@ object HistoryTypes:
 
   object HistoricalInput:
     given Codec[HistoricalInput] =
-      (JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
-        { case (headerHash, parentStateRoot, accumulateRoot, workPackages) =>
-          HistoricalInput(headerHash, parentStateRoot, accumulateRoot, workPackages)
+      (JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.hashCodec ::
+        _root_.scodec.codecs.uint32L :: JamCodecs.compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
+        { case (headerHash, parentStateRoot, accumulateRoot, slot, workPackages) =>
+          HistoricalInput(headerHash, parentStateRoot, accumulateRoot, slot & 0xFFFFFFFFL, workPackages)
         },
-        hi => (hi.headerHash, hi.parentStateRoot, hi.accumulateRoot, hi.workPackages)
+        hi => (hi.headerHash, hi.parentStateRoot, hi.accumulateRoot, hi.slot & 0xFFFFFFFFL, hi.workPackages)
       )
 
 
@@ -80,11 +82,12 @@ object HistoryTypes:
           headerHashHex <- cursor.get[String]("header_hash")
           parentStateRootHex <- cursor.get[String]("parent_state_root")
           accumulateRootHex <- cursor.get[String]("accumulate_root")
+          slot <- cursor.get[Long]("slot")
           workPackages <- cursor.get[List[ReportedWorkPackage]]("work_packages")
           headerHash <- parseHash(headerHashHex)
           parentStateRoot <- parseHash(parentStateRootHex)
           accumulateRoot <- parseHash(accumulateRootHex)
-        yield HistoricalInput(headerHash, parentStateRoot, accumulateRoot, workPackages)
+        yield HistoricalInput(headerHash, parentStateRoot, accumulateRoot, slot, workPackages)
       }
 
   /**
