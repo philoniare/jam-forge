@@ -34,15 +34,18 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
         hash = Hashing.blake2b256(Array.fill[Byte](4)(tag)),
         length = UInt(0),
         erasureRoot = Hash.zero,
+        erasureShards = UShort(0),
         exportsRoot = Hash.zero,
         exportsCount = UShort(0)
       ),
       context = Context(
         anchor = Hash.zero,
+        anchorSlot = Timeslot(0),
         stateRoot = Hash.zero,
         beefyRoot = Hash.zero,
         lookupAnchor = Hash.zero,
         lookupAnchorSlot = Timeslot(0),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),

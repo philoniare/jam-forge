@@ -76,7 +76,7 @@ object WarmupRunner extends Resource:
     if !Files.exists(tracesDir) then
       println(s"ERROR: Traces directory not found: $tracesDir")
       println(
-        "Set JAM_TRACES_DIR or place traces under jam-conformance/fuzz-reports/0.7.2/traces"
+        "Set JAM_TRACES_DIR or place traces under jam-conformance/fuzz-reports/0.8.0/traces"
       )
       sys.exit(1)
 
@@ -113,7 +113,7 @@ object WarmupRunner extends Resource:
       .get("JAM_TRACES_DIR")
       .map(Paths.get(_))
       .getOrElse(
-        Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
+        Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.8.0", "traces")
       )
 
   override def beforeCheckpoint(context: Context[_ <: Resource]): Unit =

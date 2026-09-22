@@ -11,7 +11,7 @@ import java.nio.file.{Files, Paths}
 /**
  * Conformance tests for JAM fuzz report traces.
  *
- * These tests load JSON trace files from jamtestvectors/traces/
+ * These tests load JSON trace files from jam-conformance/fuzz-reports/0.8.0/traces/
  * and verify that our implementation produces the expected post-state after importing each block.
  *
  * Each trace file contains:
@@ -32,9 +32,9 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
   // TINY-config traces
-  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "traces")
+  private val tracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.8.0", "traces")
   // FULL-config traces
-  private val fullTracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.7.2", "full-traces")
+  private val fullTracesDir = Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.8.0", "full-traces")
 
   private val requireCorpus = sys.props.get("jam.fuzz.requireCorpus").exists(_.toBoolean)
   private val compareKeyvals = sys.props.get("jam.fuzz.compareKeyvals").exists(_.toBoolean)
@@ -48,7 +48,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
         println(msg)
         cancel(msg)
 
-  describe("v0.7.2 Fuzz Report Traces"):
+  describe("v0.8.0 Fuzz Report Traces"):
 
     describe("single trace validation"):
 
@@ -57,7 +57,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = true, compareKeyvals = compareKeyvals)
 
-        val defaultTarget = "1767891325_4549/00005961.json"
+        val defaultTarget = "1789474628_8353/00000212.json"
         val target = sys.props.getOrElse("jam.fuzz.target", defaultTarget)
         val (targetTraceId, targetFileName) = target.split("/", 2) match
           case Array(t, f) if t.nonEmpty && f.nonEmpty => (t, f)
@@ -125,7 +125,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
     describe("all traces validation"):
 
-      it("should pass all v0.7.2 fuzz report traces"):
+      it("should pass all v0.8.0 fuzz report traces"):
         requireCorpusPath(tracesDir, "TINY traces directory")
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = false, compareKeyvals = compareKeyvals)
@@ -140,7 +140,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
         val errorsByTrace = errors.groupBy(_.traceId)
 
         // Report summary
-        println(s"\n=== v0.7.2 Fuzz Report Traces Summary ===")
+        println(s"\n=== v0.8.0 Fuzz Report Traces Summary ===")
         println(s"Total files: ${results.size}")
         println(s"Passed: ${successes.size}")
         println(s"Failed: ${failures.size} (in ${failuresByTrace.size} traces)")
@@ -205,7 +205,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
         val failuresByTrace = failures.groupBy(_.traceId)
         val errorsByTrace = errors.groupBy(_.traceId)
 
-        println(s"\n=== v0.7.2 FULL Config Traces Summary ===")
+        println(s"\n=== v0.8.0 FULL Config Traces Summary ===")
         println(s"Total files: ${results.size}")
         println(s"Passed: ${successes.size}")
         println(s"Failed: ${failures.size} (in ${failuresByTrace.size} traces)")

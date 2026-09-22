@@ -9,14 +9,14 @@ import java.nio.file.{Files, Paths}
 /**
  * Integration tests for fuzz-proto conformance test vectors.
  *
- * These tests load test vectors from jam-conformance/fuzz-proto/examples/v1/
+ * These tests load test vectors from jam-conformance/fuzz-proto/examples/0.8.0/
  * and verify that our implementation produces the expected outputs.
  */
 class FuzzProtoSpec extends AnyFunSpec with Matchers:
 
   // Base directory for test vectors
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
-  private val examplesDir = Paths.get(baseDir, "jam-conformance", "fuzz-proto", "examples", "0.7.2")
+  private val examplesDir = Paths.get(baseDir, "jam-conformance", "fuzz-proto", "examples", "0.8.0")
 
   describe("FuzzProto Conformance Tests"):
 

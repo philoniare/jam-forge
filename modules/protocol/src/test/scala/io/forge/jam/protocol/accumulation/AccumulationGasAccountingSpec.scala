@@ -31,15 +31,18 @@ class AccumulationGasAccountingSpec extends AnyFunSuite with Matchers:
         hash = hashOf(packageTag),
         length = UInt(1000),
         erasureRoot = hashOf(0x02),
+        erasureShards = UShort(0),
         exportsRoot = hashOf(0x03),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = hashOf(0x04),
+        anchorSlot = Timeslot(0),
         stateRoot = hashOf(0x05),
         beefyRoot = hashOf(0x06),
         lookupAnchor = hashOf(0x07),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),

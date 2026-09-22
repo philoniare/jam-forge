@@ -58,10 +58,12 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
       authCodeHash = Hash(Array.fill[Byte](32)(9)),
       context = Context(
         anchor = Hash(Array.fill[Byte](32)(1)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill[Byte](32)(2)),
         beefyRoot = Hash(Array.fill[Byte](32)(3)),
         lookupAnchor = Hash(Array.fill[Byte](32)(4)),
         lookupAnchorSlot = Timeslot(77),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       authorization = JamBytes(Array[Byte](0x0a, 0x0b)),

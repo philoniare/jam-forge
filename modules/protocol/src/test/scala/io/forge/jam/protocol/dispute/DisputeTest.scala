@@ -337,7 +337,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
             fail(s"Expected non-null rho at index $idx but got null in test case: $testCaseName")
           case (Some(e), Some(a)) =>
             e.report shouldBe a.report withClue s"Rho report mismatch at index $idx in test case: $testCaseName"
-            e.timeout shouldBe a.timeout withClue s"Rho timeout mismatch at index $idx in test case: $testCaseName"
+            e.registeredSlot shouldBe a.registeredSlot withClue s"Rho registered-slot mismatch at index $idx in test case: $testCaseName"
     }
 
     // Check kappa

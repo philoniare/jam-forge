@@ -247,13 +247,15 @@ class BlockGenerator(
     else List.empty
 
     val report = WorkReport(
-      packageSpec = PackageSpec(packageHash, UInt(100 + rng.nextInt(5000)), Hash.zero, Hash.zero, UShort(0)),
+      packageSpec = PackageSpec(packageHash, UInt(100 + rng.nextInt(5000)), Hash.zero, UShort(0), Hash.zero, UShort(0)),
       context = Context(
         anchor = anchorEntry.headerHash,
+        anchorSlot = Timeslot(0),
         stateRoot = anchorEntry.stateRoot,
         beefyRoot = anchorEntry.beefyRoot,
         lookupAnchor = anchorEntry.headerHash,
         lookupAnchorSlot = Timeslot(UInt(preTau.toInt)),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = prerequisites
       ),
       coreIndex = CoreIndex(coreIndex),

@@ -73,6 +73,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
         headerHash = hashFilled(i),
         beefyRoot = hashFilled(i + 10),
         stateRoot = hashFilled(i + 20),
+        slot = 0L,
         reported = List.empty
       )
     }.toList
@@ -89,6 +90,7 @@ class HistoryTest extends AnyFunSuite with Matchers:
       headerHash = hashFilled(9),
       parentStateRoot = hashFilled(99),
       accumulateRoot = hashFilled(199),
+      slot = 0L,
       workPackages = List.empty
     )
 

@@ -18,7 +18,7 @@ import io.forge.jam.core.primitives.{
   Gas
 }
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
+import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic}
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
 import io.forge.jam.core.types.context.Context
@@ -68,8 +68,8 @@ class AssuranceTest extends AnyFunSuite with Matchers:
 
   private def simpleWorkReport(coreIndex: Int): WorkReport =
     WorkReport(
-      PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
-      Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+      PackageSpec(Hash.zero, UInt(100), Hash.zero, UShort(0), Hash.zero, UShort(1)),
+      Context(Hash.zero, Timeslot(0), Hash.zero, Hash.zero, Hash.zero, Timeslot(0), Hash.zero, List.empty),
       CoreIndex(coreIndex),
       Hash.zero,
       Gas(0L),
@@ -78,13 +78,21 @@ class AssuranceTest extends AnyFunSuite with Matchers:
       List.empty
     )
 
+  private def simpleAssignment(coreIndex: Int, registeredSlot: Long): AvailabilityAssignment =
+    AvailabilityAssignment(
+      GuaranteeExtrinsic(simpleWorkReport(coreIndex), Timeslot(registeredSlot.toInt), List.empty),
+      registeredSlot
+    )
+
   private def initialState(validatorCount: Int, coreCount: Int, timeout: Long): AssuranceState =
     val assignments = (0 until coreCount).map { coreIndex =>
-      Some(AvailabilityAssignment(simpleWorkReport(coreIndex), timeout))
+      Some(simpleAssignment(coreIndex, timeout))
     }.toList
+    val validators = (0 until validatorCount).map(i => validatorKeyFilled(i)).toList
     AssuranceState(
       availAssignments = assignments,
-      currValidators = (0 until validatorCount).map(i => validatorKeyFilled(i)).toList
+      currValidators = validators,
+      postValidators = validators
     )
 
   test("assurance bitfield processing") {
@@ -122,12 +130,14 @@ class AssuranceTest extends AnyFunSuite with Matchers:
 
   test("core timeout handling") {
     // Test that stale reports are cleared based on timeout
+    val validators4 = (0 until 4).map(i => validatorKeyFilled(i)).toList
     val state = AssuranceState(
       availAssignments = List(
-        Some(AvailabilityAssignment(simpleWorkReport(0), 5)), // timeout at slot 5
-        Some(AvailabilityAssignment(simpleWorkReport(1), 10)) // timeout at slot 10
+        Some(simpleAssignment(0, 5)),  // registered at slot 5
+        Some(simpleAssignment(1, 10))  // registered at slot 10
       ),
-      currValidators = (0 until 4).map(i => validatorKeyFilled(i)).toList
+      currValidators = validators4,
+      postValidators = validators4
     )
 
     val input = AssuranceInput(
@@ -271,7 +281,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           case (Some(e), Some(a)) =>
             e.report shouldBe a.report withClue
               s"Work report mismatch at index $index in test case: $testCaseName"
-            e.timeout shouldBe a.timeout withClue
+            e.registeredSlot shouldBe a.registeredSlot withClue
               s"Timeout mismatch at index $index in test case: $testCaseName"
     }
 

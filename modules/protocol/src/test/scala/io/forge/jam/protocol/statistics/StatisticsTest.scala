@@ -134,8 +134,8 @@ class StatisticsTest extends AnyFunSuite with Matchers:
 
     // Create a simple work report
     val workReport = WorkReport(
-      PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
-      Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+      PackageSpec(Hash.zero, UInt(100), Hash.zero, UShort(0), Hash.zero, UShort(1)),
+      Context(Hash.zero, Timeslot(0), Hash.zero, Hash.zero, Hash.zero, Timeslot(0), Hash.zero, List.empty),
       CoreIndex(0),
       Hash.zero,
       Gas(0L),
@@ -197,8 +197,8 @@ class StatisticsTest extends AnyFunSuite with Matchers:
     )
 
     val workReport = WorkReport(
-      PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
-      Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+      PackageSpec(Hash.zero, UInt(100), Hash.zero, UShort(0), Hash.zero, UShort(1)),
+      Context(Hash.zero, Timeslot(0), Hash.zero, Hash.zero, Hash.zero, Timeslot(0), Hash.zero, List.empty),
       CoreIndex(0), Hash.zero, Gas(0L), JamBytes.empty, List.empty, List.empty
     )
 
