@@ -137,7 +137,9 @@ class GrowHeapHostCallSpec extends HostCallTestBase:
     val instance = realGrowHeapInstance()
     val (h, b) = instance.growHeapPageBounds
     h shouldBe 48L
-    b shouldBe 1044431L
+    // Z(100) = 65536 (gp #538 deviation: the stack reservation is zone-rounded,
+    // not page-rounded) => b = (2^32 - 3*65536 - 2^24 - 65536) / 4096
+    b shouldBe 1044416L
 
   }
 

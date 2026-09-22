@@ -89,7 +89,8 @@ final class InterpretedInstance private (
     val stackSizeU = module.memoryMap.stackSize.signed.toLong & 0xFFFFFFFFL
     val zoneU = PvmConstants.ZZ.signed.toLong & 0xFFFFFFFFL
     val inputSizeU = PvmConstants.ZI.signed.toLong & 0xFFFFFFFFL
-    val b = (Abi.AddressSpaceSize.toLong - 3L * zoneU - inputSizeU - stackSizeU) / ps
+    val stackReservation = ((stackSizeU + zoneU - 1L) / zoneU) * zoneU
+    val b = (Abi.AddressSpaceSize.toLong - 3L * zoneU - inputSizeU - stackReservation) / ps
     (h, b)
 
   // ============================================================================
