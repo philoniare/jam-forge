@@ -232,12 +232,12 @@ class HostCallGasCostSpec extends HostCallTestBase:
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
   }
 
-  test("LOG (100) costs 0 gas") {
+  test("LOG (100) costs Cgasunknown=1000 (not a gp host call, so charged as an unknown one)") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
 
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
+    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe HostCallGas.Cgasunknown
   }
 
   test("fetchGas is total for every guest-suppliable selector 0-255") {

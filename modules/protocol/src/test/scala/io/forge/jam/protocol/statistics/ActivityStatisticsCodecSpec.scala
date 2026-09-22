@@ -13,9 +13,10 @@ import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
 
   private val PinnedHex: String =
-    "0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c000000" +
-      "0d0000000e0000000f0000001000000011000000120000001300000014000000150000001600000017000000180000" +
-      "006465666768696a6b6c6d6e6f70717273022a0000000102030405060708090aefbeadde0b0c0d0e0f1011121314"
+    "020100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000" +
+      "00020d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800" +
+      "00006465666768696a6b6c6d6e6f70717273022a000000010203040506070809150aefbeadde0b0c0d0e0f1011121316" +
+      "14"
 
   private val fixture: ActivityStatisticsCodec.ActivityStatistics =
     ActivityStatisticsCodec.ActivityStatistics(
@@ -44,6 +45,7 @@ class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
             extrinsicSize = 7,
             exports = 8,
             accumulateCount = 9,
+            accumulateTransferCount = 21,
             accumulateGasUsed = 10
           )
         ),
@@ -59,6 +61,7 @@ class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
             extrinsicSize = 17,
             exports = 18,
             accumulateCount = 19,
+            accumulateTransferCount = 22,
             accumulateGasUsed = 20
           )
         )

@@ -55,7 +55,7 @@ class AccumulationHostCalls(
       case HostCall.YIELD   => HostCallGas.CgasTaurus
       case HostCall.PROVIDE =>
         HostCallGas.provideGas(getReg(instance, 9))
-      case HostCall.LOG => 0L
+      case HostCall.LOG => HostCallGas.Cgasunknown
       case _ => HostCallGas.Cgasunknown
 
   /** Dispatch a host call based on its identifier. Gas should be charged BEFORE

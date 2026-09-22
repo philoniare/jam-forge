@@ -141,8 +141,9 @@ object StatisticsTypes:
 
   object StatState:
     def codec(validatorCount: Int): Codec[StatState] =
-      (JamCodecs.fixedSizeList(summon[Codec[StatCount]], validatorCount) ::
-       JamCodecs.fixedSizeList(summon[Codec[StatCount]], validatorCount) ::
+      // 0.8.0: ValidatorsStatistics is a bounded sequence (compact length prefix).
+      (JamCodecs.compactPrefixedList(summon[Codec[StatCount]]) ::
+       JamCodecs.compactPrefixedList(summon[Codec[StatCount]]) ::
        uint32L ::
        FullJamStateCodecs.validatorListCodec(validatorCount)).xmap(
         { case (valsCurrStats, valsLastStats, slot, currValidators) =>
