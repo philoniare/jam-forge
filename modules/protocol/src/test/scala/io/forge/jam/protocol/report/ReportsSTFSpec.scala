@@ -120,15 +120,18 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         hash = packageHash,
         length = UInt(1000),
         erasureRoot = hashOf(0x02),
+        erasureShards = UShort(0),
         exportsRoot = hashOf(0x03),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = hashOf(0x04),
+        anchorSlot = Timeslot(0),
         stateRoot = hashOf(0x05),
         beefyRoot = hashOf(0x06),
         lookupAnchor = hashOf(0x07),
         lookupAnchorSlot = Timeslot(lookupAnchorSlot),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = prerequisites
       ),
       coreIndex = CoreIndex(coreIndex),
@@ -204,6 +207,7 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       headerHash = hashOf(0x55),
       beefyRoot = zeroHash,
       stateRoot = zeroHash,
+      slot = 0L,
       reported = reported
     )
     state.copy(recentBlocks =
@@ -216,6 +220,7 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       headerHash = anchor,
       beefyRoot = beefyRoot,
       stateRoot = stateRoot,
+      slot = 0L,
       reported = List.empty
     )
     val s = minimalState(config)
@@ -355,7 +360,7 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
   test("property: availability assignments have valid timeout") {
     forAll(genAvailabilityAssignment(testConfig)) { assignment =>
       // Property: timeout should be a positive value
-      assignment.timeout should be > 0L
+      assignment.registeredSlot should be > 0L
     }
   }
 
@@ -641,8 +646,8 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     // availability. Occupy core 0 in the pre-state, then submit a report for it.
     val base = minimalState(testConfig)
     val occupant = io.forge.jam.core.types.workpackage.AvailabilityAssignment(
-      buildWorkReport(coreIndex = 0, packageHash = hashOf(0x99)),
-      timeout = 10L
+      buildGuarantee(buildWorkReport(coreIndex = 0, packageHash = hashOf(0x99)), 10, 2),
+      registeredSlot = 10L
     )
     val engaged = base.copy(availAssignments = Some(occupant) :: base.availAssignments.tail)
     val report = buildWorkReport(coreIndex = 0)

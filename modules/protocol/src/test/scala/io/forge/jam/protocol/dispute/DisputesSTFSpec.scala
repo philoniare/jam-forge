@@ -5,7 +5,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey, Ed25519Signature}
-import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
+import io.forge.jam.core.types.extrinsic.{Dispute, GuaranteeExtrinsic, Verdict}
 import io.forge.jam.core.types.dispute.{Culprit, Fault}
 import io.forge.jam.core.types.work.Vote
 import io.forge.jam.protocol.generators.StfGenerators.*
@@ -321,7 +321,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       )
 
       // Create an AvailabilityAssignment with this report
-      val assignment = AvailabilityAssignment(workReport, 100L)
+      val assignment = AvailabilityAssignment(GuaranteeExtrinsic(workReport, Timeslot(100), List.empty), 100L)
 
       // Create rho with this assignment at index 0, rest are None
       val rhoWithReport = Some(assignment) :: List.fill(tinyConfig.coresCount - 1)(None)
@@ -363,7 +363,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
       )
 
       // Create an AvailabilityAssignment with this report at index 1
-      val assignment = AvailabilityAssignment(workReport, 200L)
+      val assignment = AvailabilityAssignment(GuaranteeExtrinsic(workReport, Timeslot(200), List.empty), 200L)
       val rhoWithReport = None :: Some(assignment) :: List.fill(tinyConfig.coresCount - 2)(None)
 
       // Create psi with the report hash already in the (cumulative) wonky list
@@ -398,7 +398,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
         summon[Codec[WorkReport]].encode(workReport).require.toByteArray
       )
 
-      val assignment = AvailabilityAssignment(workReport, 300L)
+      val assignment = AvailabilityAssignment(GuaranteeExtrinsic(workReport, Timeslot(300), List.empty), 300L)
       val rhoWithReport = Some(assignment) :: List.fill(tinyConfig.coresCount - 1)(None)
 
       // Create psi with the report hash in GOOD list (not bad or wonky)
@@ -428,7 +428,7 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
     import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 
     forAll(genWorkReport(tinyConfig), genDisputeState(tinyConfig)) { (workReport, baseState) =>
-      val assignment = AvailabilityAssignment(workReport, 400L)
+      val assignment = AvailabilityAssignment(GuaranteeExtrinsic(workReport, Timeslot(400), List.empty), 400L)
       val rhoWithReport = Some(assignment) :: List.fill(tinyConfig.coresCount - 1)(None)
 
       // Empty psi - no judgments at all

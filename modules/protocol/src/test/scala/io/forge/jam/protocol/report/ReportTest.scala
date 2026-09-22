@@ -84,15 +84,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x01.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(invalidCoreIndex),
@@ -142,15 +145,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x01.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -201,15 +207,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x01.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -257,15 +266,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x01.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -313,6 +325,7 @@ class ReportTest extends AnyFunSuite with Matchers:
             headerHash = Hash(Array.fill(32)(0x01.toByte)),
             beefyRoot = Hash(Array.fill(32)(0x02.toByte)),
             stateRoot = Hash(Array.fill(32)(0x03.toByte)),
+            slot = 0L,
             reported = List.empty
           )
         ),
@@ -326,15 +339,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x11.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x12.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x13.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0xFF.toByte)), // Not in recent blocks
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x15.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x16.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x01.toByte)), // This is in recent blocks
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -380,6 +396,7 @@ class ReportTest extends AnyFunSuite with Matchers:
           headerHash = Hash(Array.fill(32)(0x01.toByte)),
           beefyRoot = Hash(Array.fill(32)(0x02.toByte)),
           stateRoot = Hash(Array.fill(32)(0x03.toByte)),
+          slot = 0L,
           reported = List.empty
         )
       ),
@@ -397,15 +414,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x11.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x12.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x13.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = anchor,
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x15.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x16.toByte)),
         lookupAnchor = lookupAnchor,
         lookupAnchorSlot = Timeslot(lookupAnchorSlot),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -525,15 +545,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = packageHash, // Same hash
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -590,15 +613,18 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = packageHash,
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x02.toByte)),
+        erasureShards = UShort(0),
         exportsRoot = Hash(Array.fill(32)(0x03.toByte)),
         exportsCount = UShort(1)
       ),
       context = Context(
         anchor = Hash(Array.fill(32)(0x04.toByte)),
+        anchorSlot = Timeslot(0),
         stateRoot = Hash(Array.fill(32)(0x05.toByte)),
         beefyRoot = Hash(Array.fill(32)(0x06.toByte)),
         lookupAnchor = Hash(Array.fill(32)(0x07.toByte)),
         lookupAnchorSlot = Timeslot(1),
+        lookupAnchorStateRoot = Hash.zero,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),
@@ -719,7 +745,7 @@ class ReportTest extends AnyFunSuite with Matchers:
             val actAssign = act.get
             actAssign.report shouldBe expAssign.report withClue
               s"Assignment work report mismatch at index $idx in test case: $testCaseName"
-            actAssign.timeout shouldBe expAssign.timeout withClue
+            actAssign.registeredSlot shouldBe expAssign.registeredSlot withClue
               s"Assignment timeout mismatch at index $idx in test case: $testCaseName"
           case (false, false) => ()
           case (true, false) =>

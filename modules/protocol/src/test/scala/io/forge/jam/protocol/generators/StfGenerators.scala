@@ -45,7 +45,7 @@ import io.forge.jam.protocol.preimage.PreimageTypes.{
   PreimageHistoryKey
 }
 import io.forge.jam.protocol.statistics.StatisticsTypes.{StatState, StatInput, StatCount, StatExtrinsic}
-import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute, Preimage, Verdict}
+import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute, GuaranteeExtrinsic, Preimage, Verdict}
 import io.forge.jam.core.types.history.{HistoricalBetaContainer, HistoricalBeta, HistoricalMmr}
 import io.forge.jam.core.types.preimage.PreimageHash
 import spire.math.{UByte, UShort, UInt}
@@ -549,13 +549,15 @@ object StfGenerators:
   val genContext: Gen[Context] =
     for
       anchor <- genHash
+      anchorSlot <- Gen.choose(0, 1000).map(Timeslot.apply)
       stateRoot <- genHash
       beefyRoot <- genHash
       lookupAnchor <- genHash
       lookupAnchorSlot <- Gen.choose(0, 1000).map(Timeslot.apply)
+      lookupAnchorStateRoot <- genHash
       prereqCount <- Gen.choose(0, 3)
       prereqs <- Gen.listOfN(prereqCount, genHash)
-    yield Context(anchor, stateRoot, beefyRoot, lookupAnchor, lookupAnchorSlot, prereqs)
+    yield Context(anchor, anchorSlot, stateRoot, beefyRoot, lookupAnchor, lookupAnchorSlot, lookupAnchorStateRoot, prereqs)
 
   /**
    * Generator for package specification.
@@ -565,9 +567,10 @@ object StfGenerators:
       hash <- genHash
       length <- Gen.choose(100, 10000).map(UInt.apply)
       erasureRoot <- genHash
+      erasureShards <- Gen.choose(0, 1023).map(UShort.apply)
       exportsRoot <- genHash
       exportsCount <- Gen.choose(0, 10).map(UShort.apply)
-    yield PackageSpec(hash, length, erasureRoot, exportsRoot, exportsCount)
+    yield PackageSpec(hash, length, erasureRoot, erasureShards, exportsRoot, exportsCount)
 
   /**
    * Generator for refine load statistics.
@@ -639,8 +642,11 @@ object StfGenerators:
   def genAvailabilityAssignment(config: ChainConfig): Gen[AvailabilityAssignment] =
     for
       report <- genWorkReport(config)
-      timeout <- Gen.choose(1L, 1000L)
-    yield AvailabilityAssignment(report, timeout)
+      registeredSlot <- Gen.choose(1L, 1000L)
+    yield AvailabilityAssignment(
+      GuaranteeExtrinsic(report, Timeslot(registeredSlot.toInt), List.empty),
+      registeredSlot
+    )
 
   /**
    * Generator for assurance state.
@@ -652,7 +658,7 @@ object StfGenerators:
       rhoSize <- Gen.const(config.coresCount)
       availAssignments <- Gen.listOfN(rhoSize, Gen.option(genAvailabilityAssignment(config)))
       currValidators <- genValidatorKeys(config.validatorCount)
-    yield AssuranceState(availAssignments, currValidators)
+    yield AssuranceState(availAssignments, currValidators, currValidators)
 
   /** Helper to extract validator index as Int for sorting */
   private def assuranceValidatorIndexAsInt(ae: AssuranceExtrinsic): Int = ae.validatorIndex.toInt
@@ -709,16 +715,17 @@ object StfGenerators:
 
   /**
    * Generator for historical beta entries.
-   * HistoricalBeta takes (headerHash, beefyRoot, stateRoot, reported).
+   * HistoricalBeta takes (headerHash, beefyRoot, stateRoot, slot, reported).
    */
   val genHistoricalBeta: Gen[HistoricalBeta] =
     for
       headerHash <- genHash
       beefyRoot <- genHash
       stateRoot <- genHash
+      slot <- Gen.choose(0L, 1000L)
       workPackageCount <- Gen.choose(0, 3)
       workPackages <- Gen.listOfN(workPackageCount, genReportedWorkPackage)
-    yield HistoricalBeta(headerHash, beefyRoot, stateRoot, workPackages)
+    yield HistoricalBeta(headerHash, beefyRoot, stateRoot, slot, workPackages)
 
   /**
    * Generator for historical beta container.
@@ -746,9 +753,10 @@ object StfGenerators:
       headerHash <- genHash
       parentStateRoot <- genHash
       accumulateRoot <- genHash
+      slot <- Gen.choose(0L, 1000L)
       workPackageCount <- Gen.choose(0, config.coresCount.min(5))
       workPackages <- Gen.listOfN(workPackageCount, genReportedWorkPackage)
-    yield HistoricalInput(headerHash, parentStateRoot, accumulateRoot, workPackages)
+    yield HistoricalInput(headerHash, parentStateRoot, accumulateRoot, slot, workPackages)
 
   // ==========================================================================
   // Preimage State Generators

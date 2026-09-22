@@ -91,10 +91,12 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
         authCodeHash = authCodeHash,
         context = Context(
           anchor = anchor.headerHash,
+          anchorSlot = Timeslot(0),
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
           lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
+          lookupAnchorStateRoot = Hash.zero,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,

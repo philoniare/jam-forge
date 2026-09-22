@@ -162,7 +162,7 @@ class AssurancesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
           assignmentOpt.foreach { assignment =>
             // Any remaining assignment should have timeout + period > currentSlot
             // or was refreshed
-            (assignment.timeout + testConfig.assuranceTimeoutPeriod) should be > largeSlot
+            (assignment.registeredSlot + testConfig.assuranceTimeoutPeriod) should be > largeSlot
           }
         }
       }
@@ -220,7 +220,7 @@ class AssurancesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
         // GP: All assignments with timeout + U <= currentSlot should be cleared
         postState.availAssignments.foreach { assignmentOpt =>
           assignmentOpt.foreach { assignment =>
-            (assignment.timeout + testConfig.assuranceTimeoutPeriod) should be > veryLargeSlot
+            (assignment.registeredSlot + testConfig.assuranceTimeoutPeriod) should be > veryLargeSlot
           }
         }
       }

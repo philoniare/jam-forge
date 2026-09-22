@@ -337,8 +337,8 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
       whenever(preEpoch == postEpoch && preState.valsCurrStats.size >= 3) {
         // Create a minimal work report
         val workReport = WorkReport(
-          PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
-          Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+          PackageSpec(Hash.zero, UInt(100), Hash.zero, UShort(0), Hash.zero, UShort(1)),
+          Context(Hash.zero, Timeslot(0), Hash.zero, Hash.zero, Hash.zero, Timeslot(0), Hash.zero, List.empty),
           CoreIndex(0),
           Hash.zero,
           Gas(0L),
@@ -510,8 +510,8 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
 
       whenever(preEpoch == postEpoch && preState.valsCurrStats.size >= 3) {
         val workReport = WorkReport(
-          PackageSpec(Hash.zero, UInt(100), Hash.zero, Hash.zero, UShort(1)),
-          Context(Hash.zero, Hash.zero, Hash.zero, Hash.zero, Timeslot(0), List.empty),
+          PackageSpec(Hash.zero, UInt(100), Hash.zero, UShort(0), Hash.zero, UShort(1)),
+          Context(Hash.zero, Timeslot(0), Hash.zero, Hash.zero, Hash.zero, Timeslot(0), Hash.zero, List.empty),
           CoreIndex(0),
           Hash.zero,
           Gas(0L),

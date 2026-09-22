@@ -130,6 +130,7 @@ class HistorySTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
           headerHash = Hash(Array.fill(32)(i.toByte)),
           beefyRoot = Hash.zero,
           stateRoot = Hash.zero,
+          slot = 0L,
           reported = List.empty
         )
       }.toList
