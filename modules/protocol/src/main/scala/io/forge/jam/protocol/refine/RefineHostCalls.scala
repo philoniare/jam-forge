@@ -79,7 +79,7 @@ class RefineHostCalls(
       case HostCall.INVOKE =>
         HostCallGas.invokeGasUpfront(invokeInnerGasLimit(instance))
       case HostCall.EXPUNGE => HostCallGas.CgasX
-      case HostCall.LOG => 0L
+      case HostCall.LOG => HostCallGas.Cgasunknown
       case _ => HostCallGas.Cgasunknown
 
   private def invokeInnerGasLimit(instance: PvmInstance): ULong =

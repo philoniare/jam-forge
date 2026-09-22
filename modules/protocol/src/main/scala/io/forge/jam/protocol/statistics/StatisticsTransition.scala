@@ -46,16 +46,24 @@ object StatisticsTransition:
    * @return Tuple of (post-transition state, optional output).
    */
   def stfInternal(input: StatInput, preState: StatState, config: ChainConfig): (StatState, Option[StatOutput]) =
-    // Calculate epochs for pre and post states
     val preEpoch = preState.slot / config.epochLength
     val postEpoch = input.slot / config.epochLength
 
-    // Handle epoch transition: rotate stats
-    val (baseStats, lastStats) = if postEpoch > preEpoch then
-      // Current becomes last, reset current
-      (List.fill(config.validatorCount)(StatCount.zero), preState.valsCurrStats)
-    else
-      (preState.valsCurrStats, preState.valsLastStats)
+    // pi_dagger: assurances applied to the prior accumulator.
+    val daggerArr: Array[StatCount] = preState.valsCurrStats.toArray
+    for (assurance <- input.extrinsic.assurances) do
+      val idx = assurance.validatorIndex.toInt
+      if idx >= 0 && idx < daggerArr.length then
+        val s = daggerArr(idx)
+        daggerArr(idx) = s.copy(assurances = s.assurances + 1)
+    val dagger = daggerArr.toList
+
+    // pi_ddagger / pi_L'
+    val (baseStats, lastStats) =
+      if postEpoch > preEpoch then
+        (List.fill(preState.currValidators.size)(StatCount.zero), dagger)
+      else
+        (dagger, preState.valsLastStats)
 
     val statsArr: Array[StatCount] = baseStats.toArray
 
@@ -94,13 +102,6 @@ object StatisticsTransition:
       if idx < statsArr.length && reporters.contains(validator.ed25519.toByteVector) then
         val s = statsArr(idx)
         statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
-
-    // Update assurances
-    for (assurance <- input.extrinsic.assurances) do
-      val idx = assurance.validatorIndex.toInt
-      if idx >= 0 && idx < statsArr.length then
-        val s = statsArr(idx)
-        statsArr(idx) = s.copy(assurances = s.assurances + 1)
 
     val postState = StatState(
       valsCurrStats = statsArr.toList,

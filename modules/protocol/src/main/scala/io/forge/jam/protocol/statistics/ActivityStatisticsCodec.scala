@@ -26,7 +26,7 @@ object ActivityStatisticsCodec:
   val coreStatisticsCodec: Codec[CoreStatisticsRecord] = summon[Codec[CoreStatisticsRecord]]
 
   /**
-   * Per-service entry: u32 LE service id followed by 10 compact integers.
+   * Per-service entry: u32 LE service id followed by 11 compact integers.
    */
   val serviceStatisticsCodec: Codec[ServiceStatisticsEntry] =
     (uint32L ::
@@ -34,8 +34,8 @@ object ActivityStatisticsCodec:
       JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-      { case (id, pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
+      JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+      { case (id, pc, ps, rc, rg, imp, xc, xs, exp, ac, atc, ag) =>
         ServiceStatisticsEntry(
           id & 0xffffffffL,
           ServiceActivityRecord(
@@ -48,6 +48,7 @@ object ActivityStatisticsCodec:
             extrinsicSize = xs,
             exports = exp,
             accumulateCount = ac,
+            accumulateTransferCount = atc,
             accumulateGasUsed = ag
           )
         )
@@ -64,14 +65,15 @@ object ActivityStatisticsCodec:
           e.record.extrinsicSize,
           e.record.exports,
           e.record.accumulateCount,
+          e.record.accumulateTransferCount,
           e.record.accumulateGasUsed
         )
     )
 
   /** Codec for the full activity-statistics state item. */
   def activityStatisticsCodec(validatorCount: Int, coresCount: Int): Codec[ActivityStatistics] =
-    (JamCodecs.fixedSizeList(statCountCodec, validatorCount) ::
-      JamCodecs.fixedSizeList(statCountCodec, validatorCount) ::
+    (JamCodecs.compactPrefixedList(statCountCodec) ::
+      JamCodecs.compactPrefixedList(statCountCodec) ::
       JamCodecs.fixedSizeList(coreStatisticsCodec, coresCount) ::
       JamCodecs.compactPrefixedList(serviceStatisticsCodec)).xmap(
       { case (acc, prev, core, svc) =>

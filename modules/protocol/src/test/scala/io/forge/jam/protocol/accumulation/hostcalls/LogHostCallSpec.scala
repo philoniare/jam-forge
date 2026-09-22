@@ -9,7 +9,7 @@ import spire.math.ULong
  */
 class LogHostCallSpec extends HostCallTestBase:
 
-  test("LOG: returns WHAT and costs 0 gas (JIP-1 convention — not Cgasunknown=1000, not the old flat 10)") {
+  test("LOG: returns WHAT and costs Cgasunknown=1000") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -18,5 +18,5 @@ class LogHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
 
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe 0L
+    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe HostCallGas.Cgasunknown
   }
