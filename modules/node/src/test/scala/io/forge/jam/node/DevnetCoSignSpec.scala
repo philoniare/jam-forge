@@ -6,7 +6,7 @@ import java.util.concurrent.TimeUnit
 import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
-import io.forge.jam.core.primitives.{Gas, ServiceId, Timeslot}
+import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
 import io.forge.jam.core.scodec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem

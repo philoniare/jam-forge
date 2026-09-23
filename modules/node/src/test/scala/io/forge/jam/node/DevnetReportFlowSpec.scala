@@ -77,12 +77,13 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
         Hashing.blake2b256("devnet-package-1".getBytes),
         UInt(200),
         Hash.zero,
+        UShort(view.config.validatorCount),
         Hash.zero,
         UShort(0)
       ),
       context = Context(
         anchor = anchor.headerHash,
-        anchorSlot = Timeslot(0),
+        anchorSlot = Timeslot(anchor.slot.toInt),
         stateRoot = anchor.stateRoot,
         beefyRoot = anchor.beefyRoot,
         lookupAnchor = anchor.headerHash,

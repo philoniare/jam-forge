@@ -161,10 +161,10 @@ object BlockGasModel:
       case I.SetGreaterThanUnsignedImm(d, s, _) => mk(3, 3, AluUnit, src = bit(s), dst = bit(d))
       case I.SetGreaterThanSignedImm(d, s, _) => mk(3, 3, AluUnit, src = bit(s), dst = bit(d))
 
-      case I.CmovIfZero(d, s1, s2) => mk(2, 2, AluUnit, src = bit(s1) | bit(s2) | bit(d), dst = bit(d))
-      case I.CmovIfNotZero(d, s1, s2) => mk(2, 2, AluUnit, src = bit(s1) | bit(s2) | bit(d), dst = bit(d))
-      case I.CmovIfZeroImm(d, s, _) => mk(2, 3, AluUnit, src = bit(s) | bit(d), dst = bit(d))
-      case I.CmovIfNotZeroImm(d, s, _) => mk(2, 3, AluUnit, src = bit(s) | bit(d), dst = bit(d))
+      case I.CmovIfZero(d, s1, s2) => mk(2, 2, AluUnit, src = bit(s1) | bit(s2), dst = bit(d))
+      case I.CmovIfNotZero(d, s1, s2) => mk(2, 2, AluUnit, src = bit(s1) | bit(s2), dst = bit(d))
+      case I.CmovIfZeroImm(d, s, _) => mk(2, 3, AluUnit, src = bit(s), dst = bit(d))
+      case I.CmovIfNotZeroImm(d, s, _) => mk(2, 3, AluUnit, src = bit(s), dst = bit(d))
 
       case I.Maximum(d, s1, s2) => aluThreeOp(3, 2, 3, d, s1, s2, skip)
       case I.MaximumUnsigned(d, s1, s2) => aluThreeOp(3, 2, 3, d, s1, s2, skip)
