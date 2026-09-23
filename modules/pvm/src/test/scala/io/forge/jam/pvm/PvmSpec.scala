@@ -12,15 +12,11 @@ import io.forge.jam.pvm.types.ProgramCounter
 
 /**
  * PVM conformance suite running test vectors from
- * `resources/pvm/`
+ * `resources/pvm/`.
  */
 class PvmSpec extends AnyFlatSpec with Matchers:
 
   private val testDir = new File(getClass.getClassLoader.getResource("pvm").toURI)
-  private val dynamicPagingVectors: Set[String] = Set(
-    "multistep_paging_at_the_start_of_block",
-    "multistep_paging_in_the_middle_of_block"
-  )
 
   private def loadTestCase(file: File): PvmTestCase =
     val content = Source.fromFile(file).mkString
@@ -189,12 +185,7 @@ class PvmSpec extends AnyFlatSpec with Matchers:
   testDir.listFiles().filter(_.getName.endsWith(".json")).sorted.foreach { file =>
     val testName = file.getName.replace(".json", "")
 
-    if dynamicPagingVectors.contains(testName) then
-      testName should "pass test vector" ignore {
-        runTestCase(loadTestCase(file))
-      }
-    else
-      testName should "pass test vector" in {
+    testName should "pass test vector" in {
         val tc = loadTestCase(file)
         blockGasCosts(tc)
         runTestCase(tc)

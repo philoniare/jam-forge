@@ -281,7 +281,10 @@ lazy val node = (project in file("modules/node"))
     Compile / mainClass := Some("io.forge.jam.node.Main"),
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
-    Test / javaOptions ++= nativeLibJavaOptions((ThisBuild / baseDirectory).value),
+    Test / javaOptions ++= nativeLibJavaOptions(
+      (ThisBuild / baseDirectory).value,
+      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+    ),
     assembly / mainClass := Some("io.forge.jam.node.Main"),
     assembly / assemblyJarName := "jam-node.jar",
     assembly / assemblyMergeStrategy := {
