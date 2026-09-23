@@ -16,7 +16,8 @@ final case class BlockPipelineResult(
     safroleOutput: Option[SafroleOutputData],
     availableReports: List[WorkReport],
     accumulateRoot: Option[Hash],
-    accumulationStats: Map[Long, (Long, Int)]
+    accumulationStats: Map[Long, (Long, Int)],
+    accumulationTransferCounts: Map[Long, Int]
 )
 
 object BlockPipeline:
@@ -71,6 +72,7 @@ object BlockPipeline:
       accRoot = Hash(accOut.ok.toArray)
       _ <- storeAccumulateRoot(accRoot)
       _ <- storeAccumulationStats(accOut.accumulationStats)
+      _ <- storeAccumulationTransferCounts(accOut.accumulationTransferCounts)
       _ <- storeLastAccumulationOutputs(accOut.commitments)
 
       // Step 8: History (uses accumulateRoot)
@@ -94,7 +96,8 @@ object BlockPipeline:
           safroleOutput = ctx.safroleOutput,
           availableReports = ctx.availableReports,
           accumulateRoot = ctx.accumulateRoot,
-          accumulationStats = ctx.accumulationStats
+          accumulationStats = ctx.accumulationStats,
+          accumulationTransferCounts = ctx.accumulationTransferCounts
         )
       )
     } yield finalResult

@@ -175,7 +175,8 @@ class BlockImporter(
           val finalServiceStats = computeFinalServiceStatistics(
             guarantees = block.extrinsic.guarantees,
             preimages = block.extrinsic.preimages,
-            accumulationStats = result.accumulationStats
+            accumulationStats = result.accumulationStats,
+            accumulationTransferCounts = result.accumulationTransferCounts
           )
 
           view.cores.statistics = finalCoreStats
@@ -283,7 +284,8 @@ class BlockImporter(
       accumulationStats: Map[
         Long,
         (Long, Int)
-      ] // serviceId -> (gasUsed, workItemCount)
+      ], // serviceId -> (gasUsed, workItemCount)
+      accumulationTransferCounts: Map[Long, Int] // serviceId -> T(s), deferred transfers delivered (gp 0.8.0 eq:accumulationstatisticsdef)
   ): List[ReportTypes.ServiceStatisticsEntry] =
     // Collect all service IDs from all sources (immutable)
     val stats =
@@ -318,6 +320,13 @@ class BlockImporter(
       stats(serviceId) = cur.copy(
         accumulateCount = cur.accumulateCount + count.toLong,
         accumulateGasUsed = cur.accumulateGasUsed + gasUsed
+      )
+    }
+
+    accumulationTransferCounts.foreach { case (serviceId, transfers) =>
+      val cur = getOrEmpty(serviceId)
+      stats(serviceId) = cur.copy(
+        accumulateTransferCount = cur.accumulateTransferCount + transfers.toLong
       )
     }
 

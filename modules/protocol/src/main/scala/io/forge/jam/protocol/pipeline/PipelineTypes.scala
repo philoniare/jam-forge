@@ -26,6 +26,7 @@ final case class PipelineContext(
   availableReports: List[WorkReport] = List.empty,
   accumulateRoot: Option[Hash] = None,
   accumulationStats: Map[Long, (Long, Int)] = Map.empty,
+  accumulationTransferCounts: Map[Long, Int] = Map.empty,
   posteriorOffenders: List[Ed25519PublicKey] = List.empty
 )
 
