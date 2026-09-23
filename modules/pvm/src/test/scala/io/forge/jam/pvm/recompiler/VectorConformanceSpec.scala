@@ -324,7 +324,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
             fail(s"$coverageLine\n${failures.length} vector(s) compiled but FAILED parity/expected-* (showing up to 20):$detail")
 
           unsupportedCount shouldBe 0
-          multiRunCount shouldBe 4 // the four `multistep_*` vectors, and only those
+          multiRunCount shouldBe 2 // the two `multistep_ecalli_*` vectors, and only those
           passCount shouldBe (total - multiRunCount)
         finally rc.close()
   }

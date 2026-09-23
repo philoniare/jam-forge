@@ -143,6 +143,9 @@ object NativeRunner extends StrictLogging:
                     // Write registers back onto the instance (callers read via instance.reg).
                     for i <- 0 until 13 do instance.setReg(i, regs(i))
 
+                    // Write gas back. Mirrors VectorConformanceSpec's parity convention: the
+                    // recompiler's out.gasRemaining is the RAW remaining gas, same meaning as
+                    // instance.gas after an interpreter run.
                     instance.setGas(out.gasRemaining)
 
                     // Write PC back so callers that inspect instance.programCounter after a
@@ -254,7 +257,7 @@ object NativeRunner extends StrictLogging:
           case None =>
             throw new IllegalStateException(
               s"grow_heap invariant violated: BasicMemory.sbrk($growBytes) failed after " +
-                "GrowHeapHostCall accepted the request page bounds"
+                "GrowHeapHostCall accepted the request against the page bounds"
             )
           case Some(_) =>
             val newHeapEnd = instance.basicMemory.heapEnd.toLong & 0xFFFFFFFFL
