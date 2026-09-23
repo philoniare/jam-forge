@@ -134,7 +134,7 @@ object AccumulationOperand:
   */
 final case class PreimageKey(
     hash: Hash,
-    length: Int
+    length: Long
 )
 
 /** Preimage request state.

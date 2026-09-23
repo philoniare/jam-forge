@@ -363,6 +363,8 @@ class AccumulationTest extends AnyFunSuite with Matchers:
       s"ServiceActivityRecord exports mismatch for $context in test case: $testCaseName"
     expected.accumulateCount shouldBe actual.accumulateCount withClue
       s"ServiceActivityRecord accumulateCount mismatch for $context in test case: $testCaseName"
+    expected.accumulateTransferCount shouldBe actual.accumulateTransferCount withClue
+      s"ServiceActivityRecord accumulateTransferCount mismatch for $context in test case: $testCaseName"
     expected.accumulateGasUsed shouldBe actual.accumulateGasUsed withClue
       s"ServiceActivityRecord accumulateGasUsed mismatch for $context in test case: $testCaseName"
 
