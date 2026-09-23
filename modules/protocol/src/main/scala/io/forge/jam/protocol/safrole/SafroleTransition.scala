@@ -184,9 +184,12 @@ object SafroleTransition extends StrictLogging:
         validator
     }
 
-    // Generate new ring root
+    // Generate new ring root.
+    val ringKeys = newGammaK
+      .map(_.bandersnatch)
+      .padTo(config.validatorCount, BandersnatchPublicKey(new Array[Byte](32)))
     val newGammaZ = BandersnatchWrapper
-      .generateRingRoot(newGammaK.map(_.bandersnatch), config.validatorCount)
+      .generateRingRoot(ringKeys, config.validatorCount)
       .getOrElse(
         throw new SafroleCryptoFailure("Bandersnatch ring-root generation failed during epoch transition")
       )
@@ -287,12 +290,10 @@ object SafroleTransition extends StrictLogging:
           Right(postState)
 
       case ticket :: rest =>
-        // Check attempt value - valid attempts are 0 to (ticketsPerValidator - 1)
-        // ticketsPerValidator is the A parameter from Gray Paper
-        if ticket.attempt.toInt >= config.ticketsPerValidator then
+        if ticket.attempt.toInt >= maxTicketEntries(postState.gammaK.size, config) then
           Left(SafroleErrorCode.BadTicketAttempt)
         else
-          // Verify ring VRF proof using post-epoch ring root
+          // Verify ring VRF proof using post-epoch ring root over the pending set
           BandersnatchWrapper.verifyRingProof(
             ticket.signature,
             verificationGammaZ,
@@ -327,6 +328,10 @@ object SafroleTransition extends StrictLogging:
                   accumulatedIds,
                   accumulatedTickets
                 )
+
+  private def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =
+    if pendingSetSize <= 0 then config.ticketsPerValidator
+    else (2 * config.epochLength + pendingSetSize - 1) / pendingSetSize
 
   /**
    * Generate fallback sealing sequence when epoch changes without sufficient tickets.

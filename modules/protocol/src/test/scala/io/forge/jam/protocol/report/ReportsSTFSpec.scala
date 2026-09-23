@@ -120,7 +120,7 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         hash = packageHash,
         length = UInt(1000),
         erasureRoot = hashOf(0x02),
-        erasureShards = UShort(0),
+        erasureShards = UShort(testConfig.validatorCount),
         exportsRoot = hashOf(0x03),
         exportsCount = UShort(1)
       ),

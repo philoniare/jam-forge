@@ -161,7 +161,7 @@ object ReportTransition:
         val slot =
           if ctx.isCurrent then input.slot
           else math.max(0, input.slot - config.rotationPeriod)
-        val assignments = calculateCoreAssignmentsArr(randomness, slot, config)
+        val assignments = calculateCoreAssignmentsArr(randomness, slot, validators.size, config)
         RotationCache(validators, validators.toArray, assignments)
       })
 
@@ -223,6 +223,7 @@ object ReportTransition:
         accountsById,
         preState.authPools,
         preState.availAssignments,
+        preState.currValidators.size,
         config
       )
       _ <- validateGuarantorSignaturesCached(
@@ -389,6 +390,8 @@ object ReportTransition:
           break(Left(ReportErrorCode.BadStateRoot))
         if anchor.beefyRoot != context.beefyRoot then
           break(Left(ReportErrorCode.BadBeefyMmrRoot))
+        if anchor.slot != context.anchorSlot.value.toLong then
+          break(Left(ReportErrorCode.BadAnchorSlot))
 
         // Validate prerequisites with segment root consistency
         for prerequisite <- context.prerequisites do
@@ -417,6 +420,7 @@ object ReportTransition:
     accountsById: Map[Long, ServiceAccount],
     authPools: List[List[Hash]],
     availAssignments: List[Option[AvailabilityAssignment]],
+    activeValidatorCount: Int,
     config: ChainConfig
   ): ValidationResult =
     for
@@ -432,7 +436,15 @@ object ReportTransition:
         }
         ensure(totalAccGas <= ULong(config.reportAccGas), ReportErrorCode.WorkReportGasTooHigh)
       }
-      _ <- ensure(workReport.coreIndex.toInt < config.coresCount, ReportErrorCode.BadCoreIndex)
+      _ <- ensure(
+        workReport.coreIndex.toInt < config.coresCount &&
+          workReport.coreIndex.toInt < activeValidatorCount / 3,
+        ReportErrorCode.BadCoreIndex
+      )
+      _ <- ensure(
+        workReport.packageSpec.erasureShards.toInt == activeValidatorCount,
+        ReportErrorCode.BadErasureShards
+      )
       _ <- validateAuthorizer(workReport, authPools)
       _ <- validateWorkResults(workReport, accountsById)
       _ <- ensure(
@@ -522,13 +534,17 @@ object ReportTransition:
 
       Right(())
 
-  private def calculateCoreAssignmentsArr(randomness: Hash, slot: Long, config: ChainConfig): Array[Int] =
-    val validatorCount = config.validatorCount
-    val coresCount = config.coresCount
+  private def calculateCoreAssignmentsArr(
+    randomness: Hash,
+    slot: Long,
+    validatorCount: Int,
+    config: ChainConfig
+  ): Array[Int] =
+    val activeCores = math.max(1, validatorCount / 3)
     val source = new Array[Int](validatorCount)
     var i = 0
     while i < validatorCount do
-      source(i) = (coresCount * i) / validatorCount
+      source(i) = i / 3
       i += 1
     val shuffledIndices = Shuffle.jamComputeShuffle(validatorCount, randomness)
     val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
@@ -537,7 +553,7 @@ object ReportTransition:
     val it = shuffledIndices.iterator
     while it.hasNext do
       val idx = it.next()
-      out(j) = math.floorMod(source(idx) + shift, coresCount)
+      out(j) = math.floorMod(source(idx) + shift, activeCores)
       j += 1
     out
 
