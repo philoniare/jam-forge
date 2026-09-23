@@ -72,7 +72,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
         case _            => instance.setReg(7, HostCallResult.WHAT.signed)
 
   // ---- 1. host-call-free program: Interpreted vs Recompiled parity ----------
-  ignore("a host-call-free program produces identical (exit, registers, gas, pc) in both modes") {
+  test("a host-call-free program produces identical (exit, registers, gas, pc) in both modes") {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required) — Recompiled mode would only exercise the deopt path here, not native execution")
     else
@@ -89,21 +89,23 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       nativeOutput.toSeq shouldBe interpOutput.toSeq
   }
 
-  test("NativeRunner.run deopts with the gp-0.8 kill-switch reason even for an otherwise native-eligible program") {
+  test("NativeRunner.run executes an otherwise native-eligible program natively, with no deopt") {
     import io.forge.jam.protocol.accumulation.NativeRunner
 
-    val module = moduleOf(haltCode, haltBitmask)
-    val reasonKey = "gp-0.8-recompiler-not-migrated"
-    val before = NativeRunner.deoptReasons.getOrElse(reasonKey, 0L)
+    if !canRunNative then
+      cancel("recompiler unavailable on this host (AArch64 dylib required) — nothing would run natively")
+    else
+      val module = moduleOf(haltCode, haltBitmask)
+      val before = NativeRunner.nativeCount
 
-    val (nativeExit, _, _) =
-      PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
+      val (nativeExit, _, _) =
+        PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
 
-    nativeExit shouldBe PvmRunner.PvmExit.Halt
-    NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
+      nativeExit shouldBe PvmRunner.PvmExit.Halt
+      NativeRunner.nativeCount shouldBe (before + 1)
   }
 
-  ignore("a program containing Ecalli run via NativeRunner with a dispatcher executes NATIVELY and matches the interpreter") {
+  test("a program containing Ecalli run via NativeRunner with a dispatcher executes NATIVELY and matches the interpreter") {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required) — this test specifically asserts NATIVE execution, not the deopt path")
     else
@@ -168,7 +170,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
           io.forge.jam.protocol.accumulation.GrowHeapHostCall.handle(instance)
         case _ => instance.setReg(7, HostCallResult.WHAT.signed)
 
-  test("a program containing Ecalli(GROW_HEAP) deopts to the interpreter, which grows/reports the heap for real") {
+  test("a program containing Ecalli(GROW_HEAP) runs NATIVELY and matches the interpreter") {
     import io.forge.jam.pvm.engine.InterpretedInstance
     import io.forge.jam.pvm.types.ProgramCounter
     import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
@@ -182,18 +184,21 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       inst.setReg(0, 0xffff0000L) // RA_INIT
       inst
 
-    val reasonKey = "gp-0.8-recompiler-not-migrated"
-    val before = NativeRunner.deoptReasons.getOrElse(reasonKey, 0L)
-    val nativeInstance = freshInstance()
-    val outcome = NativeRunner.run(
-      nativeInstance,
-      entryPc = 0,
-      ExecutionMode.Recompiled,
-      GrowHeapCapableHostCalls,
-      preDispatch = None
-    )
-    outcome shouldBe None // deopt — never a native grow_heap dispatch
-    NativeRunner.deoptReasons.getOrElse(reasonKey, 0L) shouldBe (before + 1)
+    val nativeOutcome =
+      if !canRunNative then None
+      else
+        val nativeInstance = freshInstance()
+        val outcome = NativeRunner.run(
+          nativeInstance,
+          entryPc = 0,
+          ExecutionMode.Recompiled,
+          GrowHeapCapableHostCalls,
+          preDispatch = None
+        )
+        // gp 0.8.0 A.7 grow_heap is dispatched through the ordinary ecalli upcall
+        // and mutates the live native region table, so this is a real native run.
+        outcome shouldBe Some(NativeRunner.RunOutcome.Halt)
+        Some((nativeInstance.gas, nativeInstance.reg(7)))
 
     val interpInstance = freshInstance()
     val interpWrapper = new InterpretedInstanceWrapper(interpInstance)
@@ -213,11 +218,16 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
     exit shouldBe Some(PvmRunner.PvmExit.Halt)
     interpInstance.reg(7) shouldBe 32L // the REAL heap pointer h
     interpInstance.gas shouldBe (1000L - 100L - 275L)
+
+    nativeOutcome.foreach { (nativeGas, nativeReg7) =>
+      nativeGas shouldBe interpInstance.gas
+      nativeReg7 shouldBe interpInstance.reg(7)
+    }
   }
 
   // ---- 3. missing dylib: Recompiled mode is safe, never crashes --------------
 
-  ignore("Recompiled mode with an unset/missing dylib property falls back to interpreter results without crashing") {
+  test("Recompiled mode with an unset/missing dylib property falls back to interpreter results without crashing") {
     val original = Option(System.getProperty("jam.pvm.recompiler.lib"))
     try
       System.clearProperty("jam.pvm.recompiler.lib")
@@ -236,45 +246,60 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
   }
 
   private def longLE(v: Long): Array[Byte] = Array.tabulate(8)(i => ((v >>> (i * 8)) & 0xff).toByte)
-  private val sbrkNoHeapRegionCode: Array[Byte] =
-    Array[Byte](20, 5) ++ longLE(64L) ++ Array[Byte](101.toByte, ((3 & 0xf) | ((5 & 0xf) << 4)).toByte) ++ Array[Byte](50, 0)
-  private val sbrkNoHeapRegionBitmask: Array[Byte] = Array[Byte](0x01, 0x14)
 
-  ignore("Sbrk on a module with no initial RW/heap region deopts to the interpreter instead of crashing") {
-    if !libPath.isEmpty && !isAarch64Host then
-      cancel("recompiler dylib staged but host isn't AArch64 — Recompiled mode would only exercise the no-dylib deopt path here")
+  /** `LoadImm64 r7, 34; Ecalli(GROW_HEAP); JumpIndirect r0` — grow the heap to
+    * page 34, i.e. two pages past `h = 32`, then halt. */
+  private val growHeapTwoPagesCode: Array[Byte] =
+    Array[Byte](20, 7) ++ longLE(34L) ++ Array[Byte](10, 1, 50, 0)
+  private val growHeapTwoPagesBitmask: Array[Byte] = Array[Byte](0x01, 0x14)
+
+  test("grow_heap that maps pages onto a module with NO initial RW data matches the interpreter natively") {
+    if !canRunNative then
+      cancel("recompiler unavailable on this host (AArch64 dylib required) — nothing would run natively")
     else
       import io.forge.jam.pvm.engine.InterpretedInstance
       import io.forge.jam.pvm.types.ProgramCounter
-      import io.forge.jam.protocol.accumulation.NativeRunner
+      import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
 
-      val module = moduleOf(sbrkNoHeapRegionCode, sbrkNoHeapRegionBitmask)
+      // `moduleOf` builds every module with no RW data, so the heap starts empty
+      // and `grow_heap` has to map its pages from nothing. The region table seeds
+      // a zero-length heap region precisely so this case has something to extend.
+      val module = moduleOf(growHeapTwoPagesCode, growHeapTwoPagesBitmask)
 
       def freshInstance(): InterpretedInstance =
         val inst = InterpretedInstance.fromModule(module, forceStepTracing = false)
-        inst.setGas(1000L)
+        inst.setGas(10_000L)
         inst.setNextProgramCounter(ProgramCounter(0))
         inst.setReg(0, 0xffff0000L) // RA_INIT
         inst
 
-      val (interpExit, interpGas, interpOutput) =
-        PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Interpreted)
+      val interpInstance = freshInstance()
+      val interpWrapper = new InterpretedInstanceWrapper(interpInstance)
+      var interpExit: Option[PvmRunner.PvmExit] = None
+      while interpExit.isEmpty do
+        interpInstance.run() match
+          case Right(io.forge.jam.pvm.InterruptKind.Finished) => interpExit = Some(PvmRunner.PvmExit.Halt)
+          case Right(io.forge.jam.pvm.InterruptKind.Ecalli(hostId)) =>
+            val gasCost = GrowHeapCapableHostCalls.getGasCost(hostId.signed, interpWrapper)
+            interpInstance.setGas(interpInstance.gas - gasCost)
+            if interpInstance.gas < 0 then interpExit = Some(PvmRunner.PvmExit.OutOfGas)
+            else GrowHeapCapableHostCalls.dispatch(hostId.signed, interpWrapper)
+          case Right(io.forge.jam.pvm.InterruptKind.OutOfGas) => interpExit = Some(PvmRunner.PvmExit.OutOfGas)
+          case Right(io.forge.jam.pvm.InterruptKind.Step) => ()
+          case _ => interpExit = Some(PvmRunner.PvmExit.Panic)
+
+      interpExit shouldBe Some(PvmRunner.PvmExit.Halt)
+      interpInstance.reg(7) shouldBe 34L // the new heap pointer: growth actually happened
+      interpInstance.basicMemory.heapSize.signed shouldBe 2 * 4096
 
       val nativeInstance = freshInstance()
-      noException should be thrownBy {
-        NativeRunner.run(nativeInstance, entryPc = 0, ExecutionMode.Recompiled, NoHostCalls, preDispatch = None)
-      }
-
-      val (fallbackExit, fallbackGas, fallbackOutput) =
-        PvmRunner.run(module, Array.empty, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
-
-      fallbackExit shouldBe interpExit
-      fallbackExit shouldBe PvmRunner.PvmExit.Halt
-      fallbackGas shouldBe interpGas
-      fallbackOutput.toSeq shouldBe interpOutput.toSeq
-
-      if canRunNative then
-        NativeRunner.deoptReasons.get("sbrk-no-heap-region") shouldBe defined
+      val outcome = NativeRunner.run(
+        nativeInstance, entryPc = 0, ExecutionMode.Recompiled, GrowHeapCapableHostCalls, preDispatch = None
+      )
+      outcome shouldBe Some(NativeRunner.RunOutcome.Halt)
+      nativeInstance.reg(7) shouldBe interpInstance.reg(7)
+      nativeInstance.gas shouldBe interpInstance.gas
+      nativeInstance.basicMemory.heapSize.signed shouldBe interpInstance.basicMemory.heapSize.signed
   }
 
   private val authCodeHash = Hash(Array.fill[Byte](32)(0x21))
@@ -317,7 +342,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       )
     )
 
-  ignore("conformance sanity: forcing Recompiled mode on a real is-authorized invocation matches Interpreted mode") {
+  test("conformance sanity: forcing Recompiled mode on a real is-authorized invocation matches Interpreted mode") {
     val wp = workPackage(5L)
     val accounts = new HostLookup(5L, Some(preimageOf(haltCode, haltBitmask)))
 

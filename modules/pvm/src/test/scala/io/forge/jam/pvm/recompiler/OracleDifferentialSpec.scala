@@ -430,12 +430,12 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val rwData = new Array[Byte](RW_LEN); rng.nextBytes(rwData)
     val initRegs = Array.fill(13)(rng.nextLong())
     initRegs(0) = RW_BASE.toLong // r0 = memory base (both engines)
-    val gas = prog.length.toLong + rng.nextInt(50)
+    val gas = sufficientGas(prog) + rng.nextInt(50)
 
     val (interp, iRwAfter) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
 
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val backing = rwData.clone()
@@ -455,14 +455,17 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private def compareRunLoads(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
     compareRunMem(rc, prog, rng)
 
+  private def sufficientGas(prog: Seq[AInstr]): Long =
+    toRawColumns(prog).blockGas.sum + 100L
+
   private def compareRun(rc: PvmRecompiler, prog: Seq[AInstr], rng: Random): Unit =
-    compareRunGas(rc, prog, prog.length.toLong + rng.nextInt(50), rng) // sufficient
+    compareRunGas(rc, prog, sufficientGas(prog) + rng.nextInt(50), rng)
 
   private def compareRunGas(rc: PvmRecompiler, prog: Seq[AInstr], gas: Long, rng: Random): Unit =
     val initRegs = Array.fill(13)(rng.nextLong())
     val interp = runInterpreter(prog, initRegs.clone(), gas)
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas)
@@ -475,7 +478,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       nRegs.toSeq shouldBe interp.regs.toSeq
     }
 
-  "the native recompiler" should "match the production interpreter on arithmetic programs" ignore {
+  "the native recompiler" should "match the production interpreter on arithmetic programs" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -490,7 +493,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on control-flow programs (forward jumps/branches)" ignore {
+  it should "match the production interpreter on control-flow programs (forward jumps/branches)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -503,7 +506,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on out-of-gas (partial-execution) semantics" ignore {
+  it should "match the production interpreter on out-of-gas (partial-execution) semantics" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -514,12 +517,12 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           // registers exactly where the interpreter does.
           for _ <- 0 until 20000 do
             val prog = (0 until (1 + rng.nextInt(12))).map(_ => randArith(rng)) :+ Trap
-            compareRunGas(rc, prog, rng.nextInt(prog.length + 1).toLong, rng)
+            compareRunGas(rc, prog, rng.nextInt((sufficientGas(prog) + 1).toInt).toLong, rng)
           info("oracle differential (arith OOG): 20000 programs matched the interpreter")
         finally rc.close()
   }
 
-  it should "match the production interpreter on backward loops (OOG mid-loop)" ignore {
+  it should "match the production interpreter on backward loops (OOG mid-loop)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -535,7 +538,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on indirect memory loads (all widths + faults)" ignore {
+  it should "match the production interpreter on indirect memory loads (all widths + faults)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -548,7 +551,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on indirect memory loads AND stores (writeback)" ignore {
+  it should "match the production interpreter on indirect memory loads AND stores (writeback)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -603,7 +606,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     entryIndex: Int = 0
   ): Unit =
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val backing = described.backing.clone()
@@ -634,7 +637,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     compareRegionRun(rc, prog, initRegs, gas, described, interp, entryIndex)
     interp
 
-  it should "match the production interpreter: loads from an RO region succeed, stores fault" ignore {
+  it should "match the production interpreter: loads from an RO region succeed, stores fault" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -676,7 +679,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // region's own upper page boundary, driving both an unmapped-gap fault and
   // an in-region-then-off-the-end spanning fault against the SAME real
   // MemoryMap the interpreter built.
-  it should "match the production interpreter on unmapped-gap and page-spanning accesses" ignore {
+  it should "match the production interpreter on unmapped-gap and page-spanning accesses" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -714,7 +717,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- sub-0x10000 panic escalation -------------------------------------------
-  it should "match the production interpreter: sub-0x10000 faults escalate to panic" ignore {
+  it should "match the production interpreter: sub-0x10000 faults escalate to panic" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -736,7 +739,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- entry-index: nonzero initial PC (mid-program start) -------------------
-  it should "match the production interpreter when starting mid-program (nonzero entry index)" ignore {
+  it should "match the production interpreter when starting mid-program (nonzero entry index)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -765,7 +768,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- PC assertions across ALL exit kinds (dedicated smoke coverage) --------
-  it should "report the correct PC on halt, panic, OOG, and fault exits" ignore {
+  it should "report the correct PC on halt, panic, OOG, and fault exits" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -797,7 +800,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- sbrk-grown heap: RecompilerMemory.describe region fidelity ------------
-  it should "extend the RW region to cover an sbrk-grown heap (region fidelity)" ignore {
+  it should "extend the RW region to cover an sbrk-grown heap (region fidelity)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -905,7 +908,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchNeImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-A straight-line arithmetic (Fallthrough/LoadImm/MoveReg/AddImm32/Shl64Imm/And/Or/Cmov)" ignore {
+  it should "match the production interpreter on batch-A straight-line arithmetic (Fallthrough/LoadImm/MoveReg/AddImm32/Shl64Imm/And/Or/Cmov)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -920,7 +923,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on batch-A control flow (BranchEqImm/BranchNeImm with negative immediates)" ignore {
+  it should "match the production interpreter on batch-A control flow (BranchEqImm/BranchNeImm with negative immediates)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -933,7 +936,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on absolute LoadU64/StoreU64 in and out of mapped regions" ignore {
+  it should "match the production interpreter on absolute LoadU64/StoreU64 in and out of mapped regions" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -950,10 +953,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
               if isStore then Seq(LoadImm64(1, rng.nextLong()), StoreAbs64(1, address), Trap)
               else Seq(LoadAbs64(1, address), Trap)
             val initRegs = Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + 10
+            val gas = sufficientGas(prog)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val backing = new Array[Byte](RW_LEN)
@@ -1001,7 +1004,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     val interp = InterpResult(exit, inst.gas, regs, pc, faultPage)
 
     val pp = RecompilerAbi.prepareProgram(code, bitmask, jumpTable)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val nRegs = initRegs.clone()
     val out = rc.execute(blk, nRegs, gas, Array.empty[PvmRecompiler.Region], Array.emptyByteArray, PAGE_SHIFT, entryIndex)
@@ -1176,7 +1179,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       ShiftRotImmAlt(shiftRotImmAltOpcodes(rng.nextInt(shiftRotImmAltOpcodes.length)), rng.nextInt(13), rng.nextInt(13), amt)
     case _ => ShiftRotReg(shiftRotRegOpcodes(rng.nextInt(shiftRotRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
 
-  it should "match the production interpreter on batch-B straight-line arithmetic (SetCmp*/ShiftRotate*)" ignore {
+  it should "match the production interpreter on batch-B straight-line arithmetic (SetCmp*/ShiftRotate*)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1202,7 +1205,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         case _ => rng.nextLong()
     }
 
-  it should "match the production interpreter on batch-B compares/shifts with extreme register values" ignore {
+  it should "match the production interpreter on batch-B compares/shifts with extreme register values" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1213,10 +1216,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val n = 1 + rng.nextInt(8)
             val prog = (0 until n).map(_ => randBatchBArith(rng)) :+ Trap
             val initRegs = edgeRegs(rng)
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1255,7 +1258,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-B control flow (Branch*Imm + reg-reg compare branches, signed/unsigned/negative-imm mixes)" ignore {
+  it should "match the production interpreter on batch-B control flow (Branch*Imm + reg-reg compare branches, signed/unsigned/negative-imm mixes)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1265,10 +1268,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchBControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1295,7 +1298,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 2 => AluImm2(aluImm2Opcodes(rng.nextInt(aluImm2Opcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt())
     case _ => NegateAndAddImm(negateAndAddImmOpcodes(rng.nextInt(negateAndAddImmOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt())
 
-  it should "match the production interpreter on batch-C straight-line arithmetic (Add32/Sub32/Mul32/Xor/AndImm/XorImm/OrImm/MulImm32/MulImm64/NegateAndAddImm32/64)" ignore {
+  it should "match the production interpreter on batch-C straight-line arithmetic (Add32/Sub32/Mul32/Xor/AndImm/XorImm/OrImm/MulImm32/MulImm64/NegateAndAddImm32/64)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1326,7 +1329,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   private val i32Min: Int = 0x80000000
 
-  it should "match the production interpreter on batch-C arithmetic with sign-extension/overflow edge values" ignore {
+  it should "match the production interpreter on batch-C arithmetic with sign-extension/overflow edge values" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1337,10 +1340,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val n = 1 + rng.nextInt(10)
             val prog = (0 until n).map(_ => randBatchCEdgeArith(rng)) :+ Trap
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1385,7 +1388,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-C control flow (mixed with batch-A/B ops)" ignore {
+  it should "match the production interpreter on batch-C control flow (mixed with batch-A/B ops)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1395,10 +1398,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchCControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1415,13 +1418,15 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  private val unaryOpOpcodes: Array[Int] = Array(102, 103, 104, 105, 106, 107, 108, 109, 110, 111)
+  // gp 0.8.0 appendix A.9 two-register family: `sbrk` (101 in 0.7) is gone and
+  // the family shifted down by one, so it now runs 101..110 and 111 is unmapped.
+  private val unaryOpOpcodes: Array[Int] = Array(101, 102, 103, 104, 105, 106, 107, 108, 109, 110)
 
   private def randBatchDArith(rng: Random): AInstr = rng.nextInt(2) match
     case 0 => LoadImm64(rng.nextInt(13), rng.nextLong())
     case _ => UnaryOp(unaryOpOpcodes(rng.nextInt(unaryOpOpcodes.length)), rng.nextInt(13), rng.nextInt(13))
 
-  it should "match the production interpreter on batch-D straight-line arithmetic (CountSetBits/CountLeadingZeroBits/CountTrailingZeroBits 64/32, SignExtend8/16, ZeroExtend16, ReverseByte)" ignore {
+  it should "match the production interpreter on batch-D straight-line arithmetic (CountSetBits/CountLeadingZeroBits/CountTrailingZeroBits 64/32, SignExtend8/16, ZeroExtend16, ReverseByte)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1452,7 +1457,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 0 => LoadImm64(rng.nextInt(13), edgeBitPatterns(rng))
     case _ => UnaryOp(unaryOpOpcodes(rng.nextInt(unaryOpOpcodes.length)), rng.nextInt(13), rng.nextInt(13))
 
-  it should "match the production interpreter on batch-D arithmetic with zero/all-ones/single-bit edge values" ignore {
+  it should "match the production interpreter on batch-D arithmetic with zero/all-ones/single-bit edge values" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1463,10 +1468,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val n = 1 + rng.nextInt(10)
             val prog = (0 until n).map(_ => randBatchDEdgeArith(rng)) :+ Trap
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.tabulate(13)(_ => edgeBitPatterns(rng))
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1509,7 +1514,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-D control flow (mixed with batch-A/B/C ops)" ignore {
+  it should "match the production interpreter on batch-D control flow (mixed with batch-A/B/C ops)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1519,10 +1524,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchDControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1550,7 +1555,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 2 => CmovZ(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
     case _ => CmovImm(cmovImmOpcodes(rng.nextInt(cmovImmOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt())
 
-  it should "match the production interpreter on batch-E straight-line arithmetic (Maximum/MaximumUnsigned/Minimum/MinimumUnsigned/AndInverted/OrInverted/Xnor/CmovIfZero/CmovIfZeroImm/CmovIfNotZeroImm)" ignore {
+  it should "match the production interpreter on batch-E straight-line arithmetic (Maximum/MaximumUnsigned/Minimum/MinimumUnsigned/AndInverted/OrInverted/Xnor/CmovIfZero/CmovIfZeroImm/CmovIfNotZeroImm)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1578,7 +1583,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       case 2 => CmovZ(rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
       case _ => CmovImm(cmovImmOpcodes(rng.nextInt(cmovImmOpcodes.length)), rng.nextInt(13), rng.nextInt(13), edgeImm)
 
-  it should "match the production interpreter on batch-E min/max with signed/unsigned crossover values and cmov condition boundaries" ignore {
+  it should "match the production interpreter on batch-E min/max with signed/unsigned crossover values and cmov condition boundaries" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1599,10 +1604,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
                 case 6 => 0x7FFFFFFFFFFFFFFFL
                 case _ => rng.nextLong()
             }
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1646,7 +1651,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-E control flow (mixed with batch-A/B/C/D ops)" ignore {
+  it should "match the production interpreter on batch-E control flow (mixed with batch-A/B/C/D ops)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1656,10 +1661,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchEControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1684,7 +1689,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 0 => LoadImm64(rng.nextInt(13), rng.nextLong())
     case _ => DivRemMulUpper(divRemMulUpperOpcodes(rng.nextInt(divRemMulUpperOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
 
-  it should "match the production interpreter on batch-F straight-line arithmetic (DivUnsigned/DivSigned/RemUnsigned/RemSigned 32/64, MulUpperSignedSigned/UnsignedUnsigned/SignedUnsigned)" ignore {
+  it should "match the production interpreter on batch-F straight-line arithmetic (DivUnsigned/DivSigned/RemUnsigned/RemSigned 32/64, MulUpperSignedSigned/UnsignedUnsigned/SignedUnsigned)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1714,7 +1719,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 0 => LoadImm64(rng.nextInt(13), edgeDivRemOperand(rng))
     case _ => DivRemMulUpper(divRemMulUpperOpcodes(rng.nextInt(divRemMulUpperOpcodes.length)), rng.nextInt(13), rng.nextInt(13), rng.nextInt(13))
 
-  it should "match the production interpreter on batch-F div/rem/mul-upper with edge-biased operands (zero divisors, signed MIN/-1 overflow, mul-upper sign-mix extremes)" ignore {
+  it should "match the production interpreter on batch-F div/rem/mul-upper with edge-biased operands (zero divisors, signed MIN/-1 overflow, mul-upper sign-mix extremes)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1725,10 +1730,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val n = 1 + rng.nextInt(10)
             val prog = (0 until n).map(_ => randBatchFEdgeArith(rng)) :+ Trap
             val initRegs = Array.tabulate(13) { _ => edgeDivRemOperand(rng) }
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1775,7 +1780,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpReg(branchCmpRegOpcodes(rng.nextInt(branchCmpRegOpcodes.length)), rng.nextInt(13), rng.nextInt(13), tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-F control flow (mixed with batch-A/B/C/D/E ops)" ignore {
+  it should "match the production interpreter on batch-F control flow (mixed with batch-A/B/C/D/E ops)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1785,10 +1790,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchFControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val interp = runInterpreter(prog, initRegs.clone(), gas)
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val out = rc.execute(blk, nRegs, gas)
@@ -1829,7 +1834,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchEqImm(rng.nextInt(13), rng.nextInt(400) - 200, tgt))
     out.toSeq
 
-  it should "match the production interpreter on LoadImmAndJump: register write persists across the jump (forward control flow, mixed batches)" ignore {
+  it should "match the production interpreter on LoadImmAndJump: register write persists across the jump (forward control flow, mixed batches)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1842,7 +1847,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJump: backward jump to an earlier block leader" ignore {
+  it should "match the production interpreter on LoadImmAndJump: backward jump to an earlier block leader" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1858,7 +1863,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val prog = Seq(Trap, LoadImmAndJump(reg, imm, 0))
             val entryByteOffset = sizeOf(Trap) // byte offset of instruction 1
             val initRegs = Array.fill(13)(rng.nextLong())
-            val interp = runBoth(rc, prog, initRegs, gas = 10L, initialPcByteOffset = entryByteOffset, entryIndex = 1)
+            val interp = runBoth(rc, prog, initRegs, gas = sufficientGas(prog), initialPcByteOffset = entryByteOffset, entryIndex = 1)
             interp.exit shouldBe PvmRecompiler.EXIT_PANIC // always ends at instruction 0's Trap
           info("oracle differential (LoadImmAndJump backward jump): 8000 programs matched the interpreter")
         finally rc.close()
@@ -1904,7 +1909,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   private val DJUMP_HALT_ADDR: Long = 0xFFFF0000L
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: valid table resolution (dst != base)" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: valid table resolution (dst != base)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1923,7 +1928,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: dst==base aliasing reads the PRE-write base value" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: dst==base aliasing reads the PRE-write base value" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1942,7 +1947,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: misaligned address panics but writes dst" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: misaligned address panics but writes dst" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1961,7 +1966,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: zero address panics but writes dst" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: zero address panics but writes dst" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -1980,7 +1985,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: out-of-range table index panics but writes dst" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: out-of-range table index panics but writes dst" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2017,7 +2022,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on LoadImmAndJumpIndirect: halt sentinel writes dst before halting" ignore {
+  it should "match the production interpreter on LoadImmAndJumpIndirect: halt sentinel writes dst before halting" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2043,7 +2048,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     case 4 => (4, false); case 5 => (4, true); case _ => (8, false)
   private def randAbsStoreWidth(rng: Random): Int = Array(1, 2, 4, 8)(rng.nextInt(4))
 
-  it should "match the production interpreter on absolute LoadU8/I8/U16/I16/U32/I32 in and out of mapped regions" ignore {
+  it should "match the production interpreter on absolute LoadU8/I8/U16/I16/U32/I32 in and out of mapped regions" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2057,12 +2062,12 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val address = RW_BASE + rng.nextInt(RW_LEN + 64) - 32
             val prog = Seq(LoadAbs(1, address, w, s), Trap)
             val initRegs = Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + 10
+            val gas = sufficientGas(prog)
             val rwData = new Array[Byte](RW_LEN)
             rng.nextBytes(rwData)
             val interp = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())._1
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val backing = rwData.clone()
@@ -2082,7 +2087,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on absolute StoreU8/U16/U32 in and out of mapped regions" ignore {
+  it should "match the production interpreter on absolute StoreU8/U16/U32 in and out of mapped regions" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2098,7 +2103,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             compareRunMem(rc, prog, rng)
             val isFault =
               val initRegs = Array.fill(13)(0L)
-              runInterpreter(prog, initRegs, prog.length.toLong + 10).exit == PvmRecompiler.EXIT_FAULT
+              runInterpreter(prog, initRegs, sufficientGas(prog)).exit == PvmRecompiler.EXIT_FAULT
             if isFault then faultCount += 1 else okCount += 1
           faultCount should be > 0
           okCount should be > 0
@@ -2108,7 +2113,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   // ---- StoreImmU8/16/32/64 + StoreImmIndirectU8/16/32/64 ----------------------
 
-  it should "match the production interpreter on StoreImmU8/16/32/64 (absolute, immediate value) in and out of mapped regions" ignore {
+  it should "match the production interpreter on StoreImmU8/16/32/64 (absolute, immediate value) in and out of mapped regions" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2123,7 +2128,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val value = rng.nextInt().toLong // fits the 4-byte wire immediate
             val prog = Seq(StoreImmAbs(address, value, w), Trap)
             compareRunMem(rc, prog, rng)
-            val isFault = runInterpreter(prog, Array.fill(13)(0L), prog.length.toLong + 10).exit == PvmRecompiler.EXIT_FAULT
+            val isFault = runInterpreter(prog, Array.fill(13)(0L), sufficientGas(prog)).exit == PvmRecompiler.EXIT_FAULT
             if isFault then faultCount += 1 else okCount += 1
           faultCount should be > 0
           okCount should be > 0
@@ -2131,7 +2136,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "match the production interpreter on StoreImmIndirectU8/16/32/64 (base reg + offset, immediate value) in and out of mapped regions" ignore {
+  it should "match the production interpreter on StoreImmIndirectU8/16/32/64 (base reg + offset, immediate value) in and out of mapped regions" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2146,7 +2151,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val value = rng.nextInt().toLong
             val prog = Seq(LoadImm64(1, RW_BASE.toLong), StoreImmIndirect(1, offset, value, w), Trap)
             compareRunMem(rc, prog, rng)
-            val isFault = runInterpreter(prog, Array.fill(13)(0L), prog.length.toLong + 10).exit == PvmRecompiler.EXIT_FAULT
+            val isFault = runInterpreter(prog, Array.fill(13)(0L), sufficientGas(prog)).exit == PvmRecompiler.EXIT_FAULT
             if isFault then faultCount += 1 else okCount += 1
           faultCount should be > 0
           okCount should be > 0
@@ -2181,7 +2186,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           case _ => BranchCmpImm(branchCmpImmOpcodes(rng.nextInt(branchCmpImmOpcodes.length)), rng.nextInt(13), rng.nextInt(400) - 200, tgt))
     out.toSeq
 
-  it should "match the production interpreter on batch-G control flow (mixed with batch-A/B/C/D/E/F ops, in a mapped RW region)" ignore {
+  it should "match the production interpreter on batch-G control flow (mixed with batch-A/B/C/D/E/F ops, in a mapped RW region)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2191,12 +2196,12 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
           for _ <- 0 until 20000 do
             val prog = genBatchGControlFlowProgram(rng)
             val initRegs = if rng.nextBoolean() then edgeRegs(rng) else Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val rwData = new Array[Byte](RW_LEN)
             rng.nextBytes(rwData)
             val (interp, iRwAfter) = runInterpreterMem(prog, initRegs.clone(), gas, rwData.clone())
             val pp = toRawColumns(prog)
-            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blk.isValid shouldBe true
             val nRegs = initRegs.clone()
             val backing = rwData.clone()
@@ -2219,7 +2224,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private def runLiveRegsOnly(rc: PvmRecompiler, prog: Seq[AInstr], initRegs: Array[Long], gas: Long)
       : (PvmRecompiler.ExecResult, Array[Long]) =
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     try
       val nRegs = initRegs.clone()
@@ -2239,7 +2244,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     entryIndex: Int = 0
   ): (PvmRecompiler.ExecResult, Array[Long], Array[Byte]) =
     val pp = toRawColumns(prog)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     try
       val nRegs = initRegs.clone()
@@ -2263,10 +2268,10 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val n = 1 + rng.nextInt(12)
             val prog = (0 until n).map(_ => randArith(rng)) :+ Trap
             val initRegs = Array.fill(13)(rng.nextLong())
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
 
             val pp = toRawColumns(prog)
-            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blkA.isValid shouldBe true
             val copyRegs = initRegs.clone()
             val copyOut = try rc.execute(blkA, copyRegs, gas) finally blkA.close()
@@ -2284,7 +2289,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "produce identical results via executeLive and execute on permission-aware memory programs (RO/RW/stack)" ignore {
+  it should "produce identical results via executeLive and execute on permission-aware memory programs (RO/RW/stack)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
       case Some(lib) =>
@@ -2295,14 +2300,14 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val prog = genMemProgram(rng)
             val initRegs = Array.fill(13)(rng.nextLong())
             initRegs(0) = RW_BASE.toLong
-            val gas = prog.length.toLong + rng.nextInt(50)
+            val gas = sufficientGas(prog) + rng.nextInt(50)
             val roData = Array.fill(64)(rng.nextInt(256).toByte)
             val rwData = new Array[Byte](RW_LEN); rng.nextBytes(rwData)
 
             val (interp, described) = setupRegionRun(prog, initRegs, gas, roData, rwData, 0)
 
             val pp = toRawColumns(prog)
-            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blkA.isValid shouldBe true
             val copyRegs = initRegs.clone()
             val copyBacking = described.backing.clone()
@@ -2338,7 +2343,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
             val initRegs = Array.fill(13)(rng.nextLong())
 
             val pp = toRawColumns(prog)
-            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+            val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
             blkA.isValid shouldBe true
             val copyRegs = initRegs.clone()
             val copyOut = try rc.execute(blkA, copyRegs, gas) finally blkA.close()
@@ -2365,7 +2370,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         try
           val prog = Seq(LoadImm64(3, 0x1122334455667788L), Trap)
           val pp = toRawColumns(prog)
-          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           blk.isValid shouldBe true
           try
             val initRegs = Array.tabulate(13)(i => (i + 1) * 111L)
@@ -2400,7 +2405,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         try
           val prog = Seq(Trap)
           val pp = toRawColumns(prog)
-          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           blk.isValid shouldBe true
           try
             val regs = Array.fill(13)(0L)

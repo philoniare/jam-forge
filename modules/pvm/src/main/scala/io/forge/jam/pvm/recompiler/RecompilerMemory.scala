@@ -36,7 +36,7 @@ object RecompilerMemory:
   def describe(instance: InterpretedInstance): Described =
     describeInternal(instance, heapSlackBytes = 0)._1
 
-  val MaxHeapSlackBytes: Long = 640L * 1024 * 1024
+  val MaxHeapSlackBytes: Long = 0xFFFFFFFFL
 
   def describeWithHeapSlack(instance: InterpretedInstance): DescribedWithHeap =
     val memoryMap = instance.module.memoryMap
@@ -75,8 +75,11 @@ object RecompilerMemory:
     val rwEffectiveLen = math.max(memoryMap.rwDataSize.signed, instance.basicMemory.heapSize.signed)
     val rwEffectiveLenAligned = AlignmentOps.alignUp(rwEffectiveLen, pageSize.signed)
     heapRegionIndex = pending.length
-    appendRegion(memoryMap.rwDataAddress, rwEffectiveLenAligned, writable = true, extraBackingSlack = heapSlackBytes)
-    if pending.length <= heapRegionIndex then heapRegionIndex = -1 // rwEffectiveLenAligned was 0 (unmapped): no heap region exists
+    if rwEffectiveLenAligned == 0 && heapSlackBytes > 0 then
+      pending += PendingRegion(memoryMap.rwDataAddress, Array.emptyByteArray, writable = true, extraSlack = heapSlackBytes)
+    else
+      appendRegion(memoryMap.rwDataAddress, rwEffectiveLenAligned, writable = true, extraBackingSlack = heapSlackBytes)
+    if pending.length <= heapRegionIndex then heapRegionIndex = -1 // unmapped and no growth possible: no heap region exists
 
     // Stack — ReadWrite.
     appendRegion(memoryMap.stackAddressLow, memoryMap.stackSize.signed, writable = true)
@@ -87,15 +90,23 @@ object RecompilerMemory:
 
     val totalCompactSize = pending.foldLeft(0L)((acc, p) => acc + p.bytes.length)
     val backing = new Array[Byte](totalCompactSize.toInt)
+    val nativeOrder =
+      pending.indices.filter(_ != heapRegionIndex) ++
+        (if heapRegionIndex >= 0 then Seq(heapRegionIndex) else Seq.empty)
+    val nativeOffsets = new Array[Long](pending.length)
+    var nativeCursor = 0L
+    nativeOrder.foreach { i =>
+      nativeOffsets(i) = nativeCursor
+      nativeCursor += pending(i).bytes.length.toLong
+    }
+
     val regions = new Array[RegionDesc](pending.length)
     var compactOffset = 0L
-    var nativeOffset = 0L
     pending.indices.foreach { i =>
       val p = pending(i)
       System.arraycopy(p.bytes, 0, backing, compactOffset.toInt, p.bytes.length)
-      regions(i) = RegionDesc(p.base.toLong & 0xFFFFFFFFL, p.bytes.length.toLong, compactOffset, nativeOffset, p.writable)
+      regions(i) = RegionDesc(p.base.toLong & 0xFFFFFFFFL, p.bytes.length.toLong, compactOffset, nativeOffsets(i), p.writable)
       compactOffset += p.bytes.length.toLong
-      nativeOffset += p.bytes.length.toLong + p.extraSlack // slack bytes: not in `backing`, reserved natively only
     }
 
     (Described(regions, backing, pageSize), heapRegionIndex)

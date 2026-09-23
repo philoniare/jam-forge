@@ -13,6 +13,7 @@ pub struct RawInstr {
     pub pc: u32,
     pub imm: i64,
     pub imm2: i64,
+    pub block_gas: i64,
 }
 
 #[repr(C)]
@@ -35,8 +36,8 @@ pub struct ExecOut {
 
 pub const OP_PANIC: u32 = 0; // basic-block terminator -> PANIC exit
 pub const OP_FALLTHROUGH: u32 = 1; // no-op block terminator; falls through to the next instruction
+pub const OP_UNLIKELY: u32 = 2;
 pub const OP_ECALLI: u32 = 10;
-pub const OP_SBRK: u32 = 101;
 pub const OP_LOAD_IMM64: u32 = 20; // reg[a] = imm
 pub const OP_JUMP: u32 = 40; // pc = imm (instruction index)
 pub const OP_JUMP_INDIRECT: u32 = 50; // indirect: target = (reg[a]+imm) & 0xFFFFFFFF
@@ -145,16 +146,16 @@ pub const OP_MUL_UPPER_UU: u32 = 214;
 pub const OP_MUL_UPPER_SU: u32 = 215;
 
 // ---- Phase 2D (batch D): unary / bit ops (regs2: a=dst, b=src) ----
-pub const OP_COUNT_SET_BITS64: u32 = 102; // reg[a] = popcount64(reg[b])
-pub const OP_COUNT_SET_BITS32: u32 = 103; // reg[a] = sign_extend32(popcount32(reg[b] as i32))
-pub const OP_COUNT_LEADING_ZERO_BITS64: u32 = 104; // reg[a] = clz64(reg[b])  (0 -> 64)
-pub const OP_COUNT_LEADING_ZERO_BITS32: u32 = 105; // reg[a] = sign_extend32(clz32(reg[b] as i32))  (0 -> 32)
-pub const OP_COUNT_TRAILING_ZERO_BITS64: u32 = 106; // reg[a] = ctz64(reg[b])  (0 -> 64)
-pub const OP_COUNT_TRAILING_ZERO_BITS32: u32 = 107; // reg[a] = sign_extend32(ctz32(reg[b] as i32))  (0 -> 32)
-pub const OP_SIGN_EXTEND8: u32 = 108; // reg[a] = sign_extend64(reg[b] as i8)
-pub const OP_SIGN_EXTEND16: u32 = 109; // reg[a] = sign_extend64(reg[b] as i16)
-pub const OP_ZERO_EXTEND16: u32 = 110; // reg[a] = reg[b] & 0xFFFF  (zero-extended, no sign extension)
-pub const OP_REVERSE_BYTE: u32 = 111; // reg[a] = byte_swap64(reg[b])  (full 64-bit byte reversal, NOT bit-reversal)
+pub const OP_COUNT_SET_BITS64: u32 = 101; // reg[a] = popcount64(reg[b])
+pub const OP_COUNT_SET_BITS32: u32 = 102; // reg[a] = sign_extend32(popcount32(reg[b] as i32))
+pub const OP_COUNT_LEADING_ZERO_BITS64: u32 = 103; // reg[a] = clz64(reg[b])  (0 -> 64)
+pub const OP_COUNT_LEADING_ZERO_BITS32: u32 = 104; // reg[a] = sign_extend32(clz32(reg[b] as i32))  (0 -> 32)
+pub const OP_COUNT_TRAILING_ZERO_BITS64: u32 = 105; // reg[a] = ctz64(reg[b])  (0 -> 64)
+pub const OP_COUNT_TRAILING_ZERO_BITS32: u32 = 106; // reg[a] = sign_extend32(ctz32(reg[b] as i32))  (0 -> 32)
+pub const OP_SIGN_EXTEND8: u32 = 107; // reg[a] = sign_extend64(reg[b] as i8)
+pub const OP_SIGN_EXTEND16: u32 = 108; // reg[a] = sign_extend64(reg[b] as i16)
+pub const OP_ZERO_EXTEND16: u32 = 109; // reg[a] = reg[b] & 0xFFFF  (zero-extended, no sign extension)
+pub const OP_REVERSE_BYTE: u32 = 110; // reg[a] = byte_swap64(reg[b])  (full 64-bit byte reversal, NOT bit-reversal)
 pub const OP_LOAD_IMM_AND_JUMP: u32 = 80;
 pub const OP_LOAD_IMM_AND_JUMP_INDIRECT: u32 = 180;
 pub const OP_LOAD_U8: u32 = 52;
@@ -188,6 +189,7 @@ pub const EXIT_FAULT: u32 = 3; // memory access out of the guest region
 pub const HOST_CONTINUE: i64 = 0;
 pub const HOST_PANIC: i64 = 1;
 pub const HOST_OOG: i64 = 2;
+pub const HOST_OOG_NEXT: i64 = 3;
 pub struct CompiledBlock {
     mem: ExecMem,
     instruction_count: u32,
@@ -214,7 +216,7 @@ pub enum Op {
     /// Basic-block terminator: end execution with EXIT_PANIC.
     Trap,
     Ecalli { host_id: u64 },
-    Sbrk { dst: u8, src: u8 },
+    Unlikely,
     /// No-op basic-block terminator: falls through to the next instruction
     Fallthrough,
     /// Unconditional jump to instruction index `target`.
@@ -385,6 +387,7 @@ pub trait Backend {
         &self,
         ops: &[Op],
         pcs: &[u32],
+        block_gas: &[i64],
         jump_table: &[u32],
         jump_table_ptr: *const u32,
         entry_offsets_ptr: *const u32,
@@ -400,7 +403,7 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
         match ins.opcode {
             OP_PANIC => ops.push(Op::Trap),
             OP_ECALLI => ops.push(Op::Ecalli { host_id: ins.imm as u64 }),
-            OP_SBRK => ops.push(Op::Sbrk { dst: ins.a as u8, src: ins.b as u8 }),
+            OP_UNLIKELY => ops.push(Op::Unlikely),
             OP_LOAD_IMM64 => ops.push(Op::LoadImm64 { dst: ins.a as u8, imm: ins.imm as u64 }),
             OP_ADD_IMM64 => ops.push(Op::AddImm64 {
                 dst: ins.a as u8,
@@ -592,6 +595,7 @@ pub unsafe extern "C" fn pvm_compile(
         None => return std::ptr::null_mut(),
     };
     let pcs: Vec<u32> = slice.iter().map(|i| i.pc).collect();
+    let block_gas: Vec<i64> = slice.iter().map(|i| i.block_gas).collect();
     let jt: Box<[u32]> = if jump_table.is_null() || jt_n == 0 {
         Box::new([])
     } else {
@@ -600,14 +604,14 @@ pub unsafe extern "C" fn pvm_compile(
     let jt_ptr = jt.as_ptr();
     let backend = aarch64::Aarch64Backend;
     let (_dry_code, _dry_count, entry_offsets_vec) =
-        match backend.emit_program(&ops, &pcs, &jt, jt_ptr, std::ptr::null(), code_len) {
+        match backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, std::ptr::null(), code_len) {
             Some(x) => x,
             None => return std::ptr::null_mut(),
         };
     let entry_offsets: Box<[u32]> = entry_offsets_vec.into_boxed_slice();
     let entry_offsets_ptr = entry_offsets.as_ptr();
     let (code, instruction_count, _final_offsets) =
-        match backend.emit_program(&ops, &pcs, &jt, jt_ptr, entry_offsets_ptr, code_len) {
+        match backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, entry_offsets_ptr, code_len) {
             Some(x) => x,
             None => return std::ptr::null_mut(),
         };
@@ -618,7 +622,6 @@ pub unsafe extern "C" fn pvm_compile(
     Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt, entry_offsets }))
 }
 pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
-pub type SbrkFn = extern "C" fn(ctx: *mut std::ffi::c_void, dst: u32, size: u64, pc: u32) -> i64;
 
 /// Execute a compiled block over the caller's register file, gas cell, and
 ///
@@ -644,7 +647,6 @@ pub unsafe extern "C" fn pvm_execute(
     out: *mut ExecOut,
     host_fn: Option<HostFn>,
     host_ctx: *mut std::ffi::c_void,
-    sbrk_fn: Option<SbrkFn>,
 ) -> u32 {
     if block.is_null() || regs.is_null() || gas.is_null() || out.is_null() {
         return EXIT_PANIC;
@@ -666,9 +668,8 @@ pub unsafe extern "C" fn pvm_execute(
         u32,
         Option<HostFn>,
         *mut std::ffi::c_void,
-        Option<SbrkFn>,
     ) -> u32 = std::mem::transmute(base);
-    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx, sbrk_fn)
+    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -680,6 +681,48 @@ pub unsafe extern "C" fn pvm_free(block: *mut CompiledBlock) {
     if !block.is_null() {
         drop(Box::from_raw(block));
     }
+}
+
+#[cfg(test)]
+fn with_block_gas(instrs: &[RawInstr], jt: &[u32]) -> Vec<RawInstr> {
+    let mut out = instrs.to_vec();
+    let ops = match decode(instrs) {
+        Some(o) => o,
+        None => return out, // unsupported opcode: compile will reject anyway
+    };
+    let n = ops.len();
+    let mut is_leader = vec![false; n];
+    if n > 0 {
+        is_leader[0] = true;
+    }
+    for &t in jt {
+        if (t as usize) < n {
+            is_leader[t as usize] = true;
+        }
+    }
+    for (i, op) in ops.iter().enumerate() {
+        if let Some(t) = op.target() {
+            if (t as usize) < n {
+                is_leader[t as usize] = true;
+            }
+        }
+        if op.is_terminator() && i + 1 < n {
+            is_leader[i + 1] = true;
+        }
+    }
+    let mut i = 0usize;
+    while i < n {
+        let lo = i;
+        i += 1;
+        while i < n && !is_leader[i] {
+            i += 1;
+        }
+        let cost = (i - lo) as i64;
+        for slot in out.iter_mut().take(i).skip(lo) {
+            slot.block_gas = cost;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -739,7 +782,7 @@ mod tests {
         host_fn: Option<HostFn>,
         host_ctx: *mut std::ffi::c_void,
     ) -> (u32, ExecOut) {
-        run_full_with_upcalls(instrs, regs, gas, regions, backing, jt, entry_index, code_len, 12, host_fn, host_ctx, None)
+        run_full_with_upcalls(instrs, regs, gas, regions, backing, jt, entry_index, code_len, 12, host_fn, host_ctx)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -755,9 +798,9 @@ mod tests {
         page_shift: u32,
         host_fn: Option<HostFn>,
         host_ctx: *mut std::ffi::c_void,
-        sbrk_fn: Option<SbrkFn>,
     ) -> (u32, ExecOut) {
         unsafe {
+            let instrs = with_block_gas(instrs, jt);
             let blk = pvm_compile(instrs.as_ptr(), instrs.len(), jt.as_ptr(), jt.len(), code_len);
             assert!(!blk.is_null(), "compile returned null");
             let mut out = ExecOut::default();
@@ -773,7 +816,6 @@ mod tests {
                 &mut out as *mut ExecOut,
                 host_fn,
                 host_ctx,
-                sbrk_fn,
             );
             pvm_free(blk);
             (ex, out)
@@ -781,7 +823,7 @@ mod tests {
     }
 
     fn ri(opcode: u32, a: u32, b: u32, c: u32, imm: i64) -> RawInstr {
-        RawInstr { opcode, a, b, c, pc: 0, imm, imm2: 0 }
+        RawInstr { opcode, a, b, c, pc: 0, imm, imm2: 0, block_gas: 0 }
     }
 
     fn with_pcs(mut prog: Vec<RawInstr>) -> Vec<RawInstr> {
@@ -893,46 +935,45 @@ mod tests {
 
     #[test]
     fn countdown_loop_runs_to_trap() {
-        // r1=3; r2=1; r3=0; loop: r1-=r2; if r1!=r3 goto loop; trap
         let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 1, 0, 0, 3), // 0  B0
             ri(OP_LOAD_IMM64, 2, 0, 0, 1), // 1  B0
             ri(OP_LOAD_IMM64, 3, 0, 0, 0), // 2  B0
-            ri(OP_SUB64, 1, 1, 2, 0),      // 3  B1
-            ri(OP_BRANCH_NE, 1, 3, 0, 3),  // 4  B1 -> 3
-            ri(OP_PANIC, 0, 0, 0, 0),      // 5  B2
+            ri(OP_FALLTHROUGH, 0, 0, 0, 0),// 3  B0 terminator
+            ri(OP_SUB64, 1, 1, 2, 0),      // 4  B1
+            ri(OP_BRANCH_NE, 1, 3, 0, 4),  // 5  B1 -> 4
+            ri(OP_PANIC, 0, 0, 0, 0),      // 6  B2
         ]);
         let mut regs = [0u64; 13];
         let mut gas = 100i64;
         let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[1], 0);
-        // B0 cost 3, B1 cost 2 run 3x, B2 cost 1 => 3 + 6 + 1 = 10
-        assert_eq!(gas, 90);
-        assert_eq!(out.pc, 5 * 4);
+        // B0 cost 4, B1 cost 2 entered 3x, B2 cost 1 => 4 + 6 + 1 = 11
+        assert_eq!(gas, 89);
+        assert_eq!(out.pc, 6 * 4);
     }
 
     #[test]
     fn oog_mid_loop_freezes_state() {
-        // Per-instruction gas (matches interpreter): charge 1 before each instr,
-        // OOG before executing when gas<0, registers frozen at the prior instr.
         let prog = with_pcs(vec![
-            ri(OP_LOAD_IMM64, 1, 0, 0, 3),
-            ri(OP_LOAD_IMM64, 2, 0, 0, 1),
-            ri(OP_LOAD_IMM64, 3, 0, 0, 0),
-            ri(OP_SUB64, 1, 1, 2, 0),
-            ri(OP_BRANCH_NE, 1, 3, 0, 3),
-            ri(OP_PANIC, 0, 0, 0, 0),
+            ri(OP_LOAD_IMM64, 1, 0, 0, 3),  // 0 B0
+            ri(OP_LOAD_IMM64, 2, 0, 0, 1),  // 1 B0
+            ri(OP_LOAD_IMM64, 3, 0, 0, 0),  // 2 B0
+            ri(OP_FALLTHROUGH, 0, 0, 0, 0), // 3 B0 terminator
+            ri(OP_SUB64, 1, 1, 2, 0),       // 4 B1
+            ri(OP_BRANCH_NE, 1, 3, 0, 4),   // 5 B1 -> 4
+            ri(OP_PANIC, 0, 0, 0, 0),       // 6 B2
         ]);
         let mut regs = [0u64; 13];
-        let mut gas = 6i64;
-        // charges: LOAD,LOAD,LOAD,SUB(r1=2),BRANCH(taken),SUB(r1=1),BRANCH -> OOG
+        let mut gas = 7i64;
+        // B0 costs 4 (7 -> 3), B1 costs 2: iteration 1 (3 -> 1, r1=2, taken),
+        // iteration 2 cannot be paid for (1 < 2) -> OOG at B1's leader.
         let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
-        assert_eq!(regs[1], 1); // two SUBs applied; frozen before the 2nd branch
-        assert_eq!(gas, -1);
-        // OOG PC = the instruction whose charge tipped gas < 0: the 2nd BRANCH_NE
-        // at instruction index 4 (byte offset 16), NOT the target it never took.
+        assert_eq!(regs[1], 2); // one SUB applied; frozen at B1's leader
+        assert_eq!(gas, 1); // unchanged by the block that could not be entered
+        // OOG PC = the leader of the block that could not be afforded (index 4).
         assert_eq!(out.pc, 4 * 4);
     }
 
@@ -1168,27 +1209,101 @@ mod tests {
             ri(OP_PANIC, 0, 0, 0, 0),
         ]);
         let mut regs = [7u64; 13];
-        let mut gas = 0i64; // 0-1 < 0 before the first instruction executes
+        let mut gas = 0i64; // 0 < the block's cost of 2
         let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
         assert_eq!(regs[5], 7); // nothing executed
-        assert_eq!(gas, -1);
+        assert_eq!(gas, 0); // gas unchanged at the faulting block
         assert_eq!(out.pc, 0);
     }
 
     #[test]
-    fn out_of_gas_after_partial_execution() {
+    fn unlikely_opcode_2_is_a_no_op_that_falls_through_without_ending_the_block() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 40),
+            ri(OP_UNLIKELY, 0, 0, 0, 0),
+            ri(OP_ADD_IMM64, 1, 1, 0, 2),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 42, "execution must continue straight through `unlikely`");
+        assert_eq!(out.pc, 3 * 4);
+        assert_eq!(gas, 100 - 4, "one block of four instructions, charged once");
+    }
+
+    #[test]
+    fn opcode_101_is_count_set_bits64_not_sbrk() {
+        let prog = with_pcs(vec![
+            ri(OP_COUNT_SET_BITS64, 2, 1, 0, 0),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        regs[1] = 0b1011_0001;
+        let mut gas = 100i64;
+        let (exit, _out) = run(&prog, &mut regs, &mut gas);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[2], 4);
+        assert_eq!(OP_COUNT_SET_BITS64, 101);
+        assert_eq!(OP_REVERSE_BYTE, 110, "the family now ends at 110");
+    }
+
+    #[test]
+    fn mid_block_entry_charges_the_enclosing_blocks_full_cost_once() {
+        // Entering at a non-leader goes through an out-of-line stub that charges
+        // `block_gas[entry]` - the cost of the ENCLOSING block, matching
+        // `InterpretedModule.blockGasCostAt` (which resolves the pc back to
+        // `findStartOfBasicBlock` before costing). The stub must charge exactly
+        // once: the block body it branches into carries no further charge.
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 2),
+            ri(OP_LOAD_IMM64, 3, 0, 0, 3),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [0u64; 13];
+        let mut gas = 100i64;
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 2);
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[1], 0);
+        assert_eq!(regs[2], 0);
+        assert_eq!(regs[3], 3);
+        assert_eq!(out.pc, 3 * 4);
+        assert_eq!(gas, 100 - 4);
+    }
+
+    #[test]
+    fn mid_block_entry_with_too_little_gas_is_oog_at_the_entry_pc_with_gas_untouched() {
+        let prog = with_pcs(vec![
+            ri(OP_LOAD_IMM64, 1, 0, 0, 1),
+            ri(OP_LOAD_IMM64, 2, 0, 0, 2),
+            ri(OP_LOAD_IMM64, 3, 0, 0, 3),
+            ri(OP_PANIC, 0, 0, 0, 0),
+        ]);
+        let mut regs = [9u64; 13];
+        let mut gas = 3i64; // block costs 4
+        let (exit, out) = run_full(&prog, &mut regs, &mut gas, &[], &mut [], &[], 2);
+        assert_eq!(exit, EXIT_OOG);
+        assert_eq!(regs[3], 9, "nothing executed");
+        assert_eq!(gas, 3, "gas unchanged at the block that could not be entered");
+        assert_eq!(out.pc, 2 * 4, "OOG is reported at the entry pc, as the interpreter does");
+    }
+
+    #[test]
+    fn out_of_gas_charges_the_whole_block_up_front_so_nothing_partially_executes() {
         let prog = with_pcs(vec![
             ri(OP_LOAD_IMM64, 5, 0, 0, 999),
             ri(OP_PANIC, 0, 0, 0, 0),
         ]);
         let mut regs = [7u64; 13];
-        let mut gas = 1i64; // LOAD executes (1->0), trap OOGs (0->-1)
+        let mut gas = 1i64; // one block of 2 instructions costs 2: 1 < 2
         let (exit, out) = run(&prog, &mut regs, &mut gas);
         assert_eq!(exit, EXIT_OOG);
-        assert_eq!(regs[5], 999); // partial execution before OOG
-        assert_eq!(gas, -1);
-        assert_eq!(out.pc, 1 * 4);
+        assert_eq!(regs[5], 7); // no partial execution under the block model
+        assert_eq!(gas, 1); // UNCHANGED - the failing block's cost is never deducted
+        assert_eq!(out.pc, 0); // the block leader, where the charge was attempted
     }
 
     #[test]
@@ -1285,8 +1400,7 @@ mod tests {
         assert_eq!(regs[1], 0); // instruction 0 never ran
         assert_eq!(regs[2], 7);
         assert_eq!(out.pc, 2 * 4);
-        // Gas charged only for the 2 executed instructions (index 1, 2).
-        assert_eq!(gas, 98);
+        assert_eq!(gas, 100 - 3);
     }
 
     #[test]
@@ -1316,22 +1430,27 @@ mod tests {
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(regs[9], 3); // the arithmetic itself still ran correctly
         assert_eq!(out.pc, code_len);
-        assert_eq!(gas, 10_000 - 2);
+        assert_eq!(gas, 10_000 - 1); // one block, charged once
     }
 
     #[test]
-    fn falls_off_end_of_code_when_gas_exhausted_reports_oog_not_panic() {
+    fn falls_off_end_of_code_does_not_charge_a_second_block() {
+        // The trap synthesized past the end of the code belongs to the block that
+        // was already running (`InterpreterCore.parseInstructionAt` returns
+        // `Instruction.Panic` for an offset past `code`, inside the same
+        // `compileBlock` run), so it must not trigger a fresh block charge -
+        // exhausting the budget on the way out is not an out-of-gas exit.
         let prog = with_pcs(vec![ri(OP_ADD64, 9, 7, 8, 0)]);
         let mut regs = [0u64; 13];
         regs[7] = 1;
         regs[8] = 2;
-        let mut gas = 1i64; // Add64 charges 1->0; synthesized Panic charges 0->-1
+        let mut gas = 1i64; // exactly the one-instruction block's cost
         let code_len = 3u32;
         let (exit, out) = run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, code_len);
-        assert_eq!(exit, EXIT_OOG);
-        assert_eq!(regs[9], 3); // Add64 still executed before the OOG
+        assert_eq!(exit, EXIT_PANIC);
+        assert_eq!(regs[9], 3);
         assert_eq!(out.pc, code_len);
-        assert_eq!(gas, -1);
+        assert_eq!(gas, 0);
     }
 
     #[test]
@@ -1384,7 +1503,7 @@ mod tests {
         let (exit, out) = run_full_with_code_len(&prog, &mut regs, &mut gas, &[], &mut [], &[], 0, code_len);
         assert_eq!(exit, EXIT_PANIC);
         assert_eq!(out.pc, code_len);
-        assert_eq!(gas, 100 - 2); // Fallthrough's own charge + the synthesized Panic's charge
+        assert_eq!(gas, 100 - 1); // one block ([Fallthrough]), charged once at entry
     }
 
     #[test]
@@ -3631,11 +3750,40 @@ mod tests {
                         );
                         HOST_CONTINUE
                     }
-                    5 => 3, // unrecognized positive status
+                    5 => 99, // unrecognized positive status (3 is now HOST_OOG_NEXT)
                     6 => -1, // unrecognized negative status
+                    7 => {
+                        *ctx.gas = 0;
+                        HOST_OOG_NEXT
+                    }
                     _ => HOST_PANIC,
                 }
             }
+        }
+
+        #[test]
+        fn forced_out_of_gas_status_reports_the_next_instructions_pc() {
+            let prog = ecalli_then_trap(7);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(calls, vec![(7u64, 0u32)]);
+            assert_eq!(exit, EXIT_OOG);
+            assert_eq!(out.pc, 4, "the Panic at index 1, i.e. the resume point");
+            assert_eq!(gas, 0, "the handler's drained value survives the exit");
+        }
+
+        #[test]
+        fn plain_host_oog_status_still_reports_the_ecallis_own_pc() {
+            let prog = ecalli_then_trap(3);
+            let mut regs = [5u64; 13];
+            let mut gas = 100i64;
+            let mut calls = Vec::new();
+            let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
+            assert_eq!(exit, EXIT_OOG);
+            assert_eq!(out.pc, 0, "the ecalli's own pc — the call never ran to completion");
+            assert_eq!(gas, -1);
         }
 
         fn ecalli_then_trap(host_id: i64) -> Vec<RawInstr> {
@@ -3692,7 +3840,7 @@ mod tests {
             assert_eq!(calls, vec![(2u64, 0u32)]);
             assert_eq!(exit, EXIT_PANIC);
             assert_eq!(out.pc, 0);
-            assert_eq!(gas, 100 - 1);
+            assert_eq!(gas, 100 - 2); // one block ([Ecalli, Panic]) charged once at entry
         }
 
         #[test]
@@ -3718,7 +3866,7 @@ mod tests {
             assert_eq!(calls, vec![(5u64, 0u32)]);
             assert_eq!(exit, EXIT_PANIC);
             assert_eq!(out.pc, 0); // the Ecalli's own pc, same PC MODEL as a real panic
-            assert_eq!(gas, 100 - 1); // only the Ecalli's own per-instruction charge — no stale/handler gas write on this path
+            assert_eq!(gas, 100 - 2); // the [Ecalli, Panic] block's single entry charge — no stale/handler gas write on this path
         }
 
         #[test]
@@ -3731,7 +3879,7 @@ mod tests {
             assert_eq!(calls, vec![(6u64, 0u32)]);
             assert_eq!(exit, EXIT_PANIC);
             assert_eq!(out.pc, 0);
-            assert_eq!(gas, 100 - 1);
+            assert_eq!(gas, 100 - 2); // one block ([Ecalli, Panic]) charged once at entry
         }
 
         #[test]
@@ -3803,9 +3951,9 @@ mod tests {
             let mut calls = Vec::new();
             let (exit, out) = run_with_ctx(&prog, &mut regs, &mut gas, Some(test_host_fn), &mut calls);
             assert_eq!(exit, EXIT_OOG);
-            assert_eq!(calls.len(), 5000); // 10000 gas / 2 gas-per-iteration (ecalli+jump)
-            assert_eq!(gas, -1);
-            assert_eq!(out.pc, 0); // OOG always attributes to the Ecalli (charged first each iteration)
+            assert_eq!(calls.len(), 5000); // 10000 gas / 2 per iteration ([Ecalli, Jump] is one block)
+            assert_eq!(gas, 0); // the 5001st entry cannot afford the block; gas is left as-is
+            assert_eq!(out.pc, 0); // OOG attributes to the block leader (the Ecalli)
         }
 
         #[test]
@@ -3825,300 +3973,6 @@ mod tests {
             assert_eq!(calls, vec![(1u64, 0u32), (1u64, 4u32), (1u64, 8u32)]);
         }
     }
-
-    mod sbrk_tests {
-        use super::*;
-
-        #[repr(C)]
-        struct TestSbrkCtx {
-            regs: *mut u64,
-            region: *mut Region,
-            heap_base: u32,
-            heap_end: u64, // current heap end (u32 value, widened)
-            max_heap_size: u32,
-            page_size: u32,
-            slack_cap: u32,
-            calls: *mut Vec<(u64, u32, u32)>, // (dst, size, pc)
-        }
-
-        fn align_up(v: u64, page_size: u32) -> u64 {
-            let p = page_size as u64;
-            (v + p - 1) / p * p
-        }
-
-        extern "C" fn test_sbrk_fn(ctx: *mut std::ffi::c_void, dst: u32, size: u64, pc: u32) -> i64 {
-            unsafe {
-                let ctx = &mut *(ctx as *mut TestSbrkCtx);
-                (*ctx.calls).push((dst as u64, size as u32, pc));
-
-                if size == u64::MAX {
-                    return 3; // neither HOST_CONTINUE, HOST_PANIC, nor HOST_OOG
-                }
-
-                // size==0: return current heap end WITHOUT growing (sbrk(0)
-                // reads heap end — BasicMemory.sbrk's very first check).
-                if size == 0 {
-                    *ctx.regs.add(dst as usize) = ctx.heap_end;
-                    return HOST_CONTINUE;
-                }
-
-                // Overflow check: heapSize (heap_end - heap_base) + size must
-                // not exceed u32::MAX (BasicMemory.sbrk: `_heapSize.toLong +
-                // size.toLong > 0xffffffffL`).
-                let cur_heap_size = ctx.heap_end - ctx.heap_base as u64;
-                let new_heap_size = cur_heap_size + (size & 0xFFFF_FFFF); // size truncated to u32 like `UInt(ctx.getReg(i.src).toInt)`
-                if new_heap_size > 0xFFFF_FFFF {
-                    return HOST_PANIC;
-                }
-                // maxHeapSize check.
-                if new_heap_size > ctx.max_heap_size as u64 {
-                    return HOST_PANIC;
-                }
-
-                let new_heap_end = ctx.heap_base as u64 + new_heap_size;
-                let new_region_len_aligned = align_up(new_heap_end, ctx.page_size) - ctx.heap_base as u64;
-
-                if new_region_len_aligned > ctx.slack_cap as u64 {
-                    return HOST_PANIC;
-                }
-
-                let old_heap_end = ctx.heap_end;
-                ctx.heap_end = new_heap_end;
-                (*ctx.region).len = new_region_len_aligned as u32;
-                *ctx.regs.add(dst as usize) = old_heap_end;
-                HOST_CONTINUE
-            }
-        }
-
-        fn sbrk_then_trap(dst: u32, src: u32) -> Vec<RawInstr> {
-            with_pcs(vec![ri(OP_SBRK, dst, src, 0, 0), ri(OP_PANIC, 0, 0, 0, 0)])
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        fn run_with_sbrk_ctx(
-            prog: &[RawInstr],
-            regs: &mut [u64; 13],
-            gas: &mut i64,
-            regions: &mut [Region],
-            backing: &mut [u8],
-            page_shift: u32,
-            ctx: &mut TestSbrkCtx,
-        ) -> (u32, ExecOut) {
-            ctx.regs = regs.as_mut_ptr();
-            ctx.region = regions.as_mut_ptr();
-            run_full_with_upcalls(
-                prog,
-                unsafe { &mut *(regs as *mut [u64; 13]) }, // same intentional aliasing as run_with_ctx (ecalli_tests)
-                gas,
-                regions,
-                backing,
-                &[],
-                0,
-                (prog.len() as u32) * 4,
-                page_shift,
-                None,
-                ctx as *mut TestSbrkCtx as *mut std::ffi::c_void,
-                Some(test_sbrk_fn),
-            )
-        }
-
-        fn standard_ctx() -> (TestSbrkCtx, Region, Vec<u8>) {
-            let base: u32 = 0x20000;
-            let page_size: u32 = 4096;
-            let max_heap_size: u32 = 64 * 1024;
-            let region = Region { base, len: page_size, buf_offset: 0, writable: 1 };
-            let backing = vec![0u8; max_heap_size as usize]; // enough backing for every non-slack-cap test
-            let ctx = TestSbrkCtx {
-                regs: std::ptr::null_mut(),
-                region: std::ptr::null_mut(),
-                heap_base: base,
-                heap_end: (base + page_size) as u64,
-                max_heap_size,
-                page_size,
-                slack_cap: max_heap_size,
-                calls: Box::into_raw(Box::new(Vec::new())),
-            };
-            (ctx, region, backing)
-        }
-
-        #[test]
-        fn sbrk_zero_reads_heap_end_without_growing() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let prog = sbrk_then_trap(3, 5); // dst=r3, src=r5 (size)
-            let mut regs = [0u64; 13];
-            regs[5] = 0; // size=0
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC); // fell through to the trailing Panic
-            assert_eq!(out.pc, 4);
-            assert_eq!(regs[3], (ctx.heap_base + 4096) as u64); // unchanged heap end (one page already mapped)
-            assert_eq!(regions[0].len, 4096); // region NOT grown
-        }
-
-        #[test]
-        fn sbrk_grows_dst_equals_old_heap_end_and_a_subsequent_store_to_the_freshly_grown_page_succeeds_natively() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let old_heap_end = ctx.heap_end;
-            let grow_size = 8192u64; // 2 pages
-            let prog = with_pcs(vec![
-                ri(OP_SBRK, 3, 5, 0, 0),                              // r3 = sbrk(r5)
-                ri(OP_STORE_INDIRECT_U64, 4, 3, 0, 0),                 // store r4 (8 bytes) at [r3 + 0] (the FIRST freshly-grown byte)
-                ri(OP_PANIC, 0, 0, 0, 0),
-            ]);
-            let mut regs = [0u64; 13];
-            regs[5] = grow_size;
-            regs[4] = 0xCAFEBABEDEADBEEFu64;
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC); // fell through both instructions to the trailing Panic
-            assert_eq!(out.pc, 8);
-            assert_eq!(regs[3], old_heap_end); // dst := OLD heap end
-            let new_heap_end = old_heap_end + grow_size;
-            assert_eq!(ctx.heap_end, new_heap_end);
-            let expected_region_len = new_heap_end - ctx.heap_base as u64; // already page-aligned: 4096+8192=12288
-            assert_eq!(regions[0].len as u64, expected_region_len);
-            // The store landed at buf_offset + (old_heap_end - base) — verify
-            // the exact bytes, proving the store was NATIVELY accepted (not
-            // a fault) and wrote to the correct backing offset.
-            let store_off = (old_heap_end - ctx.heap_base as u64) as usize;
-            assert_eq!(&backing[store_off..store_off + 8], &0xCAFEBABEDEADBEEFu64.to_le_bytes());
-        }
-
-        #[test]
-        fn sbrk_growth_crossing_multiple_pages_aligns_region_len_up_to_the_page_boundary() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            // Grow by 1 byte past the current 1-page mapped extent — must
-            // still round the region's new len UP to a full page (4096),
-            // not just old_len + 1, mirroring AlignmentOps.alignUp.
-            let prog = sbrk_then_trap(3, 5);
-            let mut regs = [0u64; 13];
-            regs[5] = 4097; // heap_end (base+4096) + 4097 = base+8193 -> aligns up to base+12288 (3 pages)
-            let mut gas = 100i64;
-            let (exit, _out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(regions[0].len, 12288); // 3 pages, page-aligned up from 8193
-            assert_eq!(ctx.heap_end, (ctx.heap_base as u64) + 4096 + 4097); // heap_end itself is EXACT, not page-aligned
-        }
-
-        #[test]
-        fn sbrk_failure_past_max_heap_size_panics_at_the_sbrk_instructions_own_pc() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let prog = sbrk_then_trap(3, 5);
-            let mut regs = [7u64; 13];
-            regs[5] = (ctx.max_heap_size as u64) + 1; // exceeds maxHeapSize outright
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            // PC MODEL: a host-driven panic reports the Sbrk instruction's
-            // OWN pc (the trailing Panic at pc=4 never runs).
-            assert_eq!(out.pc, 0);
-            assert_eq!(regs[3], 7); // dst untouched — the handler never writes it on failure
-            assert_eq!(regions[0].len, 4096); // region untouched
-            assert_eq!(ctx.heap_end, (ctx.heap_base + 4096) as u64); // heap_end untouched
-            assert_eq!(gas, 100 - 1); // only the Sbrk's own per-instruction charge — gas-cell double-write invariant holds (Sbrk touches no gas)
-        }
-
-        #[test]
-        fn sbrk_u32_overflow_panics() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            ctx.max_heap_size = u32::MAX; // isolate the overflow check from the maxHeapSize check
-            ctx.slack_cap = u32::MAX;
-            let mut regions = [region];
-            let prog = sbrk_then_trap(3, 5);
-            let mut regs = [0u64; 13];
-            // heapSize (4096) + size must exceed u32::MAX. size is truncated
-            // to u32 by the handler (matches `UInt(ctx.getReg(i.src).toInt)`)
-            // — use a size whose LOW 32 BITS alone push heapSize over.
-            regs[5] = 0xFFFF_FFFFu64 - 4096 + 2; // (heapSize=4096) + (this truncated to u32) > u32::MAX
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(out.pc, 0);
-            assert_eq!(regions[0].len, 4096);
-        }
-
-        #[test]
-        fn sbrk_dst_equals_src_aliasing_reads_size_before_overwriting_dst() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let prog = sbrk_then_trap(5, 5); // dst == src == r5
-            let mut regs = [0u64; 13];
-            let old_heap_end = ctx.heap_end;
-            regs[5] = 4096; // size
-            let mut gas = 100i64;
-            let (exit, _out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(regs[5], old_heap_end); // r5 now holds the OLD heap end, not a corrupted size-vs-result mix
-            assert_eq!(ctx.heap_end, old_heap_end + 4096);
-            assert_eq!(regions[0].len, 8192); // grew by exactly one more page (4096 requested, already page-aligned)
-        }
-
-        #[test]
-        fn sbrk_slack_cap_exceeded_panics_distinctly_from_ordinary_maxheapsize_failure() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            ctx.slack_cap = 8192; // much smaller than max_heap_size (64 KiB)
-            let mut regions = [region];
-            let prog = sbrk_then_trap(3, 5);
-            let mut regs = [0u64; 13];
-            regs[5] = 8192; // well within maxHeapSize, but new region len (12288) exceeds slack_cap (8192)
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(out.pc, 0);
-            assert_eq!(regions[0].len, 4096); // untouched — the guard fires before any mutation
-            assert_eq!(ctx.heap_end, (ctx.heap_base + 4096) as u64);
-        }
-
-        #[test]
-        fn multiple_sbrks_in_sequence_each_return_the_immediately_preceding_heap_end() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let prog = with_pcs(vec![
-                ri(OP_SBRK, 3, 5, 0, 0), // r3 = sbrk(4096)
-                ri(OP_SBRK, 4, 5, 0, 0), // r4 = sbrk(4096) again
-                ri(OP_PANIC, 0, 0, 0, 0),
-            ]);
-            let mut regs = [0u64; 13];
-            regs[5] = 4096;
-            let mut gas = 100i64;
-            let base_heap_end = ctx.heap_end;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(out.pc, 8);
-            assert_eq!(regs[3], base_heap_end); // first sbrk returns the ORIGINAL heap end
-            assert_eq!(regs[4], base_heap_end + 4096); // second sbrk returns the FIRST grow's new heap end
-            assert_eq!(regions[0].len, 12288); // 3 pages total (1 initial + 2 grown)
-        }
-
-        #[test]
-        fn sbrk_unrecognized_status_default_panics_carried_over_task_17_hardening() {
-            let (mut ctx, region, mut backing) = standard_ctx();
-            let mut regions = [region];
-            let prog = sbrk_then_trap(3, 5);
-            let mut regs = [7u64; 13];
-            regs[5] = u64::MAX; // sentinel: test_sbrk_fn returns status 3
-            let mut gas = 100i64;
-            let (exit, out) =
-                run_with_sbrk_ctx(&prog, &mut regs, &mut gas, &mut regions, &mut backing, 12, &mut ctx);
-            assert_eq!(exit, EXIT_PANIC);
-            assert_eq!(out.pc, 0); // the Sbrk instruction's own pc, same PC MODEL as every other host-driven panic
-            assert_eq!(regs[3], 7); // dst untouched — the handler never writes it on this path
-            assert_eq!(regions[0].len, 4096); // region untouched
-            assert_eq!(gas, 100 - 1); // only the Sbrk's own per-instruction charge
-        }
-    }
 }
 
 #[cfg(test)]
@@ -4127,6 +3981,7 @@ mod compile_reject_tests {
 
     fn run(prog: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64, jt: &[u32], entry_index: u32) -> (u32, ExecOut) {
         let code_len = prog.iter().map(|i| i.pc).max().map(|m| m + 4).unwrap_or(0);
+        let prog = with_block_gas(prog, jt);
         let blk = unsafe {
             pvm_compile(
                 prog.as_ptr(),
@@ -4151,7 +4006,6 @@ mod compile_reject_tests {
                 &mut out as *mut ExecOut,
                 None,
                 std::ptr::null_mut(),
-                None,
             )
         };
         unsafe { pvm_free(blk) };
@@ -4160,9 +4014,9 @@ mod compile_reject_tests {
 
     fn build_add_chain(n: usize) -> Vec<RawInstr> {
         let mut prog: Vec<RawInstr> = (0..n - 1)
-            .map(|i| RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 3) as u32, imm: 1, imm2: 0 })
+            .map(|i| RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 3) as u32, imm: 1, imm2: 0, block_gas: 0 })
             .collect();
-        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((n - 1) * 3) as u32, imm: 0, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((n - 1) * 3) as u32, imm: 0, imm2: 0, block_gas: 0 });
         prog
     }
 
@@ -4191,7 +4045,7 @@ mod compile_reject_tests {
         let expected_increments = (n - 1 - entry as usize) as u64;
         assert_eq!(regs[1], expected_increments, "must execute only the suffix starting at entry_index, not the whole program");
         assert_eq!(out.pc, ((n - 1) * 3) as u32);
-        assert_eq!(gas, 1_000_000 - expected_increments as i64 - 1 /* the trailing Panic's own charge */);
+        assert_eq!(gas, 1_000_000 - n as i64);
     }
 
     #[test]
@@ -4205,7 +4059,7 @@ mod compile_reject_tests {
         let expected_increments = (n - 2) as u64; // instructions [1, n-1) execute
         assert_eq!(regs[1], expected_increments, "entry_index=1 must skip only instruction 0, running [1..n-1)");
         assert_eq!(out.pc, ((n - 1) * 3) as u32);
-        assert_eq!(gas, 1_000_000 - expected_increments as i64 - 1);
+        assert_eq!(gas, 1_000_000 - n as i64); // whole-block charge, see above
     }
 
     #[test]
@@ -4213,14 +4067,14 @@ mod compile_reject_tests {
         let target: usize = 5000;
         let n = target + 2; // filler [2..target) skipped, target writes, target+1 = Panic
         let mut prog: Vec<RawInstr> = Vec::with_capacity(n);
-        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc: 0, imm: 2, imm2: 0 });
-        prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc: 4, imm: 0, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc: 0, imm: 2, imm2: 0, block_gas: 0 });
+        prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc: 4, imm: 0, imm2: 0, block_gas: 0 });
         for i in 2..target {
             // filler: writes a sentinel this test asserts was NEVER executed
-            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (i * 4) as u32, imm: 999, imm2: 0 });
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (i * 4) as u32, imm: 999, imm2: 0, block_gas: 0 });
         }
-        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (target * 4) as u32, imm: 7, imm2: 0 }); // target
-        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((target + 1) * 4) as u32, imm: 0, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc: (target * 4) as u32, imm: 7, imm2: 0, block_gas: 0 }); // target
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: ((target + 1) * 4) as u32, imm: 0, imm2: 0, block_gas: 0 });
         let jt = vec![target as u32]; // table[0] = target
         let mut regs = [0u64; 13];
         let mut gas = 1_000_000i64;
@@ -4237,12 +4091,12 @@ mod compile_reject_tests {
         for i in 0..10usize {
             let reg = (i / 2 + 1) as u32; // pair p=i/2 writes reg[p+1]: regs 1,1,2,2,3,3,4,4,5,5
             if i % 2 == 0 {
-                prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: reg, b: 0, c: 0, pc: (i * 4) as u32, imm: (1000 + i) as i64, imm2: 0 });
+                prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: reg, b: 0, c: 0, pc: (i * 4) as u32, imm: (1000 + i) as i64, imm2: 0, block_gas: 0 });
             } else {
-                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: reg, b: reg, c: 0, pc: (i * 4) as u32, imm: (2000 + i) as i64, imm2: 0 });
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: reg, b: reg, c: 0, pc: (i * 4) as u32, imm: (2000 + i) as i64, imm2: 0, block_gas: 0 });
             }
         }
-        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (10 * 4) as u32, imm: 0, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (10 * 4) as u32, imm: 0, imm2: 0, block_gas: 0 });
 
         {
             let mut regs = [0u64; 13];
@@ -4300,15 +4154,16 @@ mod compile_reject_tests {
         let mut ecalli_count = 0u64;
         for i in 0..n {
             if i % 7 == 0 {
-                prog.push(RawInstr { opcode: OP_ECALLI, a: 0, b: 0, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0 });
+                prog.push(RawInstr { opcode: OP_ECALLI, a: 0, b: 0, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0, block_gas: 0 });
                 ecalli_count += 1;
             } else {
-                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0 });
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0, block_gas: 0 });
             }
         }
-        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (n * 4) as u32, imm: 0, imm2: 0 });
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (n * 4) as u32, imm: 0, imm2: 0, block_gas: 0 });
         let code_len = ((n + 1) * 4) as u32;
 
+        let prog = with_block_gas(&prog, &[]);
         let blk = unsafe { pvm_compile(prog.as_ptr(), prog.len(), std::ptr::null(), 0, code_len) };
         assert!(!blk.is_null(), "large Ecalli-mixed program must compile (trampolines must prevent ImpossibleRelocation)");
 
@@ -4329,16 +4184,16 @@ mod compile_reject_tests {
                 &mut out as *mut ExecOut,
                 Some(host_fn),
                 &mut ctx as *mut Ctx as *mut std::ffi::c_void,
-                None,
             )
         };
         unsafe { pvm_free(blk) };
 
         assert_eq!(exit, EXIT_PANIC, "program ends in an explicit Panic terminator");
         assert_eq!(ctx.calls, ecalli_count, "every Ecalli site must have invoked the host handler exactly once");
-        // Gas: 1 charge per instruction, n instructions total (the trailing
-        // Panic is instruction n, charged too) plus n+1 for the panic itself.
-        assert_eq!(gas, 1_000_000 - (n as i64) - 1, "exactly n+1 gas charged (n body instructions + the trailing Panic), no more, no less — trampolines must not add or skip any gas charge");
+        // The whole program is one basic block of n+1 instructions, charged once
+        // at entry: exactly n+1 gas, no more, no less - trampolines must not add
+        // or skip a charge, and the Ecalli upcalls must not re-charge on resume.
+        assert_eq!(gas, 1_000_000 - (n as i64) - 1);
         // AddImm64 count = n - ecalli_count (non-Ecalli slots).
         let add_count = (n as u64) - ecalli_count;
         assert_eq!(regs[1], add_count, "r1 must equal exactly the number of AddImm64 instructions executed");
@@ -4352,22 +4207,22 @@ mod compile_reject_tests {
         let mut djump_site_of_slot: Vec<usize> = Vec::with_capacity(jt_len as usize);
         for s in 0..jt_len {
             for _ in 0..4 {
-                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 3, b: 3, c: 0, pc, imm: 1, imm2: 0 });
+                prog.push(RawInstr { opcode: OP_ADD_IMM64, a: 3, b: 3, c: 0, pc, imm: 1, imm2: 0, block_gas: 0 });
                 pc += 4;
             }
-            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc, imm: ((s as i64) + 1) * 2, imm2: 0 });
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 1, b: 0, c: 0, pc, imm: ((s as i64) + 1) * 2, imm2: 0, block_gas: 0 });
             pc += 4;
             djump_site_of_slot.push(prog.len()); // index of the JumpIndirect instruction about to be pushed
-            prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc, imm: 0, imm2: 0 });
+            prog.push(RawInstr { opcode: OP_JUMP_INDIRECT, a: 1, b: 0, c: 0, pc, imm: 0, imm2: 0, block_gas: 0 });
             pc += 4;
         }
         let tail_start = prog.len() as u32;
         let mut jt: Vec<u32> = Vec::with_capacity(jt_len as usize);
         for s in 0..jt_len {
             jt.push(tail_start + s * 2); // slot s -> its own LoadImm64;Panic pair
-            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc, imm: (10000 + s) as i64, imm2: 0 });
+            prog.push(RawInstr { opcode: OP_LOAD_IMM64, a: 2, b: 0, c: 0, pc, imm: (10000 + s) as i64, imm2: 0, block_gas: 0 });
             pc += 4;
-            prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc, imm: 0, imm2: 0 });
+            prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc, imm: 0, imm2: 0, block_gas: 0 });
             pc += 4;
         }
 

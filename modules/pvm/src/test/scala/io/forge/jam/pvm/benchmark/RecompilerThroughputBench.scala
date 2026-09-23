@@ -220,7 +220,7 @@ object RecompilerThroughputBench:
     val prepared = RecompilerAbi.prepareProgram(blob)
     val tCompile0 = System.nanoTime()
     val block = rc.compile(prepared.opcodes, prepared.a, prepared.b, prepared.c, prepared.pc,
-      prepared.imm, prepared.imm2, prepared.jumpTable, prepared.codeLen)
+      prepared.imm, prepared.imm2, prepared.blockGas, prepared.jumpTable, prepared.codeLen)
     val tCompile1 = System.nanoTime()
     val compileSeconds = (tCompile1 - tCompile0) / 1e9
     try
@@ -349,7 +349,7 @@ object RecompilerThroughputBench:
       // ---- recompiler compile (timed separately) + execute (timed) ----
       val ct0 = System.nanoTime()
       val block = rc.compile(pv.prepared.opcodes, pv.prepared.a, pv.prepared.b, pv.prepared.c, pv.prepared.pc,
-        pv.prepared.imm, pv.prepared.imm2, pv.prepared.jumpTable, pv.prepared.codeLen)
+        pv.prepared.imm, pv.prepared.imm2, pv.prepared.blockGas, pv.prepared.jumpTable, pv.prepared.codeLen)
       val ct1 = System.nanoTime()
       recompCompileNanos += (ct1 - ct0)
       try

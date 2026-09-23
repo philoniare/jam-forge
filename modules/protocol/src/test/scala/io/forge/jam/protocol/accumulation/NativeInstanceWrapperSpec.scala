@@ -51,7 +51,7 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
     backing: Array[Byte]
   ): (PvmRecompiler.ExecResult, NativeInstanceWrapper, PvmRecompiler#LiveExecution, PvmRecompiler#Block) =
     val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val live = rc.executeLive(blk, initRegs, gas, regions, backing, PAGE_SHIFT, 0)
     val out = live.run()
@@ -66,7 +66,7 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
           val code = Array[Byte](0) // Trap
           val bitmask = Array[Byte](1)
           val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
-          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           try
             blk.isValid shouldBe true
             val regs = Array.fill(13)(0L)
@@ -142,11 +142,11 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
           val (code, bitmask) = loadImmThenTrap(7, 0x0102030405060708L)
           val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
 
-          val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blkA = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           val copyRegs = Array.fill(13)(0L)
           val copyOut = try rc.execute(blkA, copyRegs, 100L) finally blkA.close()
 
-          val blkB = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blkB = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           val liveRegs = Array.fill(13)(0L)
           val live = rc.executeLive(blkB, liveRegs, 100L, new Array[PvmRecompiler.Region](0), new Array[Byte](0), PAGE_SHIFT, 0)
           try
@@ -187,7 +187,7 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
     val code = Array[Byte](0) // Trap — never executes before we inspect the wrapper
     val bitmask = Array[Byte](1)
     val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
-    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+    val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
     blk.isValid shouldBe true
     val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.nativeBufOffset, r.writable))
     val backing = described.backing.clone()
@@ -328,7 +328,7 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
           val code = Array[Byte](0) // Trap
           val bitmask = Array[Byte](1)
           val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
-          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           try
             blk.isValid shouldBe true
             val regs = Array.fill(13)(0L)

@@ -1,6 +1,6 @@
 package io.forge.jam.pvm.recompiler
 
-import io.forge.jam.pvm.{PvmTestCase, PvmStatus, PageMapEntry, MemoryEntry, InterruptKind, MemoryResult}
+import io.forge.jam.pvm.{PvmTestCase, PvmStatus, PvmStep, PageMapEntry, MemoryEntry, InterruptKind, MemoryResult}
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.engine.{InterpretedModule, InterpretedInstance}
@@ -100,12 +100,9 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
           rawExit = PvmRecompiler.EXIT_FAULT
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
           rawGas = instance.gas
-          // NOTE: PVM test vectors expect 1 gas consumed on page fault (PvmSpec parity).
-          instance.consumeGas(1)
           continue = false
         case Right(InterruptKind.OutOfGas) =>
-          // PvmStatus (expected-status comparison): treat as halt, matching PvmSpec.
-          actualStatus = PvmStatus.Halt
+          actualStatus = PvmStatus.OutOfGas
           // Raw exit (recompiler parity): OOG is its own EXIT_OOG code.
           rawExit = PvmRecompiler.EXIT_OOG
           finalPc = instance.programCounter.map(_.toInt).getOrElse(finalPc)
@@ -156,7 +153,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
             s"panic immediately (status=${interp.actualStatus}, finalPc=${interp.finalPc}) — cannot derive a recompiler entry index")
 
       case Some(entryIndex) =>
-        val blk = rc.compile(prepared.opcodes, prepared.a, prepared.b, prepared.c, prepared.pc, prepared.imm, prepared.imm2, prepared.jumpTable, prepared.codeLen)
+        val blk = rc.compile(prepared.opcodes, prepared.a, prepared.b, prepared.c, prepared.pc, prepared.imm, prepared.imm2, prepared.blockGas, prepared.jumpTable, prepared.codeLen)
         try
           if !blk.isValid then
             Outcome.Unsupported("pvm_compile returned an invalid block (unsupported opcode in program)")
@@ -190,15 +187,14 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     val recompilerMappedStatusOpt: Option[PvmStatus] = out.exit match
       case PvmRecompiler.EXIT_HALT => Some(PvmStatus.Halt)
       case PvmRecompiler.EXIT_PANIC => Some(PvmStatus.Panic)
-      case PvmRecompiler.EXIT_OOG => Some(PvmStatus.Halt) // matches interpreter OutOfGas->Halt mapping
+      case PvmRecompiler.EXIT_OOG => Some(PvmStatus.OutOfGas)
       case PvmRecompiler.EXIT_FAULT => Some(PvmStatus.PageFault)
       case _ => None
 
     recompilerMappedStatusOpt match
       case None => Outcome.Fail(s"unrecognized recompiler exit code ${out.exit}")
       case Some(recompilerMappedStatus) =>
-        val recompilerGasForExpected =
-          if out.exit == PvmRecompiler.EXIT_FAULT then out.gasRemaining - 1 else out.gasRemaining
+        val recompilerGasForExpected = out.gasRemaining
 
         val failures = scala.collection.mutable.ArrayBuffer.empty[String]
 
@@ -272,7 +268,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
   // ---- top-level suite ----------------------------------------------------------
   private val minExpectedVectors = 300
 
-  "the native recompiler" should "match the production interpreter and expected-* fields across all PVM test vectors (hard gate)" ignore {
+  "the native recompiler" should "match the production interpreter and expected-* fields across all PVM test vectors (hard gate)" in {
     if !isAarch64Host then
       cancel(s"recompiler is AArch64-only through Phase 4 (host os.arch=" +
         s"${System.getProperty("os.arch", "<unknown>")}); skipping — this is NOT a pass, " +
@@ -287,26 +283,34 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
           total should be >= minExpectedVectors
 
           var passCount = 0
+          var multiRunCount = 0
+          val multiRunNames = scala.collection.mutable.ArrayBuffer.empty[String]
           var unsupportedCount = 0
           val unsupportedDetails = scala.collection.mutable.ArrayBuffer.empty[String]
           val failures = scala.collection.mutable.ArrayBuffer.empty[String]
 
           files.foreach { file =>
             val tc = loadTestCase(file)
-            val outcome =
-              try runVector(rc, tc)
-              catch case e: Throwable => Outcome.Fail(s"exception: ${e.getClass.getSimpleName}: ${e.getMessage}")
-            outcome match
-              case Outcome.Pass => passCount += 1
-              case Outcome.Unsupported(reason) =>
-                unsupportedCount += 1
-                unsupportedDetails += s"${tc.name}: $reason"
-              case Outcome.Fail(msg) => failures += s"${tc.name}: $msg"
+            if tc.steps.count(_ == PvmStep.Run) > 1 then
+              multiRunCount += 1
+              multiRunNames += tc.name
+            else
+              val outcome =
+                try runVector(rc, tc)
+                catch case e: Throwable => Outcome.Fail(s"exception: ${e.getClass.getSimpleName}: ${e.getMessage}")
+              outcome match
+                case Outcome.Pass => passCount += 1
+                case Outcome.Unsupported(reason) =>
+                  unsupportedCount += 1
+                  unsupportedDetails += s"${tc.name}: $reason"
+                case Outcome.Fail(msg) => failures += s"${tc.name}: $msg"
           }
 
           val failCount = failures.length
           val coverageLine =
-            s"recompiler vector conformance: $passCount/$total pass, $unsupportedCount unsupported (deopt), $failCount fail"
+            s"recompiler vector conformance: $passCount/${total - multiRunCount} single-run vectors pass, " +
+              s"$multiRunCount multi-run vectors skipped (${multiRunNames.mkString(", ")}), " +
+              s"$unsupportedCount unsupported (deopt), $failCount fail"
           info(coverageLine)
           println(coverageLine)
 
@@ -320,6 +324,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
             fail(s"$coverageLine\n${failures.length} vector(s) compiled but FAILED parity/expected-* (showing up to 20):$detail")
 
           unsupportedCount shouldBe 0
-          passCount shouldBe total
+          multiRunCount shouldBe 4 // the four `multistep_*` vectors, and only those
+          passCount shouldBe (total - multiRunCount)
         finally rc.close()
   }
