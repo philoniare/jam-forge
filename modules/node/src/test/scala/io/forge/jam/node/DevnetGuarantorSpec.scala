@@ -96,7 +96,7 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
         authCodeHash = authCodeHash,
         context = Context(
           anchor = anchor.headerHash,
-          anchorSlot = Timeslot(0),
+          anchorSlot = Timeslot(anchor.slot.toInt),
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
@@ -204,7 +204,7 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
         authCodeHash = authCodeHash,
         context = Context(
           anchor = anchor.headerHash,
-          anchorSlot = Timeslot(0),
+          anchorSlot = Timeslot(anchor.slot.toInt),
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
@@ -310,7 +310,7 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
         authCodeHash = authCodeHash,
         context = Context(
           anchor = anchor.headerHash,
-          anchorSlot = Timeslot(0),
+          anchorSlot = Timeslot(anchor.slot.toInt),
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,

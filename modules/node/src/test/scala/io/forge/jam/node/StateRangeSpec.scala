@@ -26,7 +26,7 @@ class StateRangeSpec extends AnyFunSuite with Matchers:
 
   private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir =
-    baseDir.resolve("jam-conformance/fuzz-reports/0.7.2/traces")
+    baseDir.resolve("jam-conformance/fuzz-reports/0.8.0/traces")
 
   /** Find a trace step whose pre-state has a handful of keyvals to query. */
   private def findStepWithState(): Option[TraceStep] =
