@@ -86,13 +86,8 @@ class BlessHostCallSpec extends HostCallTestBase:
     ULong(instance.reg(7)) shouldBe HostCallResult.WHO
   }
 
-  test("BLESS: returns HUH and mutates no privilege field when caller is not manager") {
-    // createTestContext defaults serviceIndex=100L, manager=0L -> not manager.
+  test("BLESS: a non-manager caller is accepted and mutates the local privileges") {
     val context = createTestContext()
-    val (origManager, origDelegator, origRegistrar) =
-      (context.x.manager, context.x.delegator, context.x.registrar)
-    val origAssigners = context.x.assigners.toList
-    val origAlwaysAcc = context.x.alwaysAccers.toMap
 
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createMockInstance()
@@ -111,10 +106,9 @@ class BlessHostCallSpec extends HostCallTestBase:
 
     hostCalls.dispatch(HostCall.BLESS, instance)
 
-    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
-    context.x.manager shouldBe origManager
-    context.x.delegator shouldBe origDelegator
-    context.x.registrar shouldBe origRegistrar
-    context.x.assigners.toList shouldBe origAssigners
-    context.x.alwaysAccers.toMap shouldBe origAlwaysAcc
+    ULong(instance.reg(7)) shouldBe HostCallResult.OK
+    context.x.manager shouldBe 1L
+    context.x.delegator shouldBe 2L
+    context.x.registrar shouldBe 3L
+    context.x.assigners.toList shouldBe List.fill(testConfig.coresCount)(42L)
   }

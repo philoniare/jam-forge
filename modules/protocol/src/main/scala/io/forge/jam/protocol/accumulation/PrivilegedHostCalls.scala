@@ -72,10 +72,6 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
         alwaysAccMap(serviceId) = gas
         j += 1
 
-    if context.serviceIndex != context.x.manager then
-      setReg(instance, 7, HostCallResult.HUH)
-      return
-
     // Validate service indices
     val maxUInt = 0xffffffffL
     if newManager < 0 || newManager > maxUInt ||
@@ -398,14 +394,14 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val octets = acc.info.bytesUsed
     val derivedLength = math.max(81L, octets) - 81L
     val preimageKey =
-      PreimageKey(Hash(preimageHash.toArray), derivedLength.toInt)
+      PreimageKey(Hash(preimageHash.toArray), derivedLength)
     val timeslots: List[Long] = loadPreimageTimeslots(
       existing = acc.preimageRequests.get(preimageKey),
       readRaw = context.readRawDataFor(
         ejectServiceId,
         StateKey.computePreimageInfoStateKey(
           ejectServiceId,
-          derivedLength.toInt,
+          derivedLength,
           preimageHash
         )
       ),

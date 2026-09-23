@@ -329,7 +329,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
       return
-    val length = zFull.toInt
+    val length: Long = zFull.toLong
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -388,7 +388,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
       return
-    val length = zFull.toInt
+    val length: Long = zFull.toLong
 
     val acc = context.x.accounts.get(context.serviceIndex) match
       case Some(a) => a
@@ -425,7 +425,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       return
 
     // Calculate new footprint for threshold balance check
-    val lengthUnsigned = (length.toLong & 0xffffffffL)
+    val lengthUnsigned = length & 0xffffffffL
     val info = acc.info
     val (newItems, newBytes): (Int, Long) =
       if notRequestedYet then
@@ -492,7 +492,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
       return
-    val length = zFull.toInt
+    val length: Long = zFull.toLong
 
     val acc = context.x.accounts.get(context.serviceIndex) match
       case Some(a) => a
@@ -616,7 +616,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val blobBuffer = readGuestBytes(instance, blobAddr, zFull, "Provide")
 
     // Safe: readGuestBytes panicked unless zFull <= Int.MaxValue.
-    val blobLen = zFull.toInt
+    val blobLen: Long = zFull.toLong
 
     val blob = JamBytes(blobBuffer)
 

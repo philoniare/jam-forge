@@ -78,8 +78,8 @@ object StateKey:
    * @param preimageHash Hash of the preimage (32 bytes)
    * @return 31-byte state key
    */
-  def computePreimageInfoStateKey(serviceIndex: Long, length: Int, preimageHash: JamBytes): JamBytes =
-    computeServiceDataStateKey(serviceIndex, length.toLong, preimageHash)
+  def computePreimageInfoStateKey(serviceIndex: Long, length: Long, preimageHash: JamBytes): JamBytes =
+    computeServiceDataStateKey(serviceIndex, length & 0xFFFFFFFFL, preimageHash)
 
   /**
    * Computes the state key for a service account (ServiceAccountDetails).

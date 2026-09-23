@@ -27,6 +27,8 @@ object GrowHeapHostCall:
           val deltaPages = (requested - hU).toLong
           val g = CgasGeminiConst + deltaPages * CgasGeminiLinear
           if instance.gas < g then
+            instance.setGas(0L)
+            instance.setReg(7, hU.signed)
             instance.forceOutOfGas()
           else
             instance.setGas(instance.gas - g)

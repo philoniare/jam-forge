@@ -125,7 +125,8 @@ object AccumulationTransition:
         AccumulationOutputData(
           outputHash,
           assembled.accumulationStats,
-          commitmentsList
+          commitmentsList,
+          assembled.accumulationTransferCounts
         )
       )
     )
@@ -332,7 +333,8 @@ object AccumulationTransition:
     */
   private final case class AssembledPostState(
       state: AccumulationState,
-      accumulationStats: Map[Long, (Long, Int)]
+      accumulationStats: Map[Long, (Long, Int)],
+      accumulationTransferCounts: Map[Long, Int]
   )
 
   private def assemblePostState(
@@ -348,18 +350,33 @@ object AccumulationTransition:
 
     // 10. Update statistics
     val workItemsPerService = countWorkItemsPerService(reportsToAccumulate)
+    val transferCountsPerService = outerResult.transferCountMap
     val newStatistics = updateStatistics(
       gasUsedPerService,
-      workItemsPerService
+      workItemsPerService,
+      transferCountsPerService
     )
 
-    // 11. Build accumulation stats for fresh service statistics computation
-    val accumulationStats: Map[Long, (Long, Int)] = gasUsedPerService
-      .map { case (serviceId, gasUsed) =>
-        val count = workItemsPerService.getOrElse(serviceId, 0)
-        serviceId -> (gasUsed, count)
+    // 11. Build accumulation stats for fresh service statistics computation.
+    val statsServiceIds =
+      gasUsedPerService.keySet ++ workItemsPerService.keySet ++
+        transferCountsPerService.keySet
+    val accumulationStats: Map[Long, (Long, Int)] = statsServiceIds.iterator
+      .map { serviceId =>
+        serviceId -> (
+          gasUsedPerService.getOrElse(serviceId, 0L),
+          workItemsPerService.getOrElse(serviceId, 0)
+        )
       }
-      .filter { case (_, (gas, count)) => gas > 0 || count > 0 }
+      .filter { case (sid, (gas, count)) =>
+        gas > 0 || count > 0 || transferCountsPerService.getOrElse(sid, 0) > 0
+      }
+      .toMap
+    val accumulationTransferCounts: Map[Long, Int] =
+      accumulationStats.keysIterator
+        .map(sid => sid -> transferCountsPerService.getOrElse(sid, 0))
+        .filter(_._2 > 0)
+        .toMap
 
     // 12. Update lastAccumulationSlot for all services in accumulationStats
     for (serviceId, _) <- accumulationStats do
@@ -401,7 +418,11 @@ object AccumulationTransition:
         newPartialState.rawServiceAccountsByStateKey
     )
 
-    AssembledPostState(state = finalState, accumulationStats = accumulationStats)
+    AssembledPostState(
+      state = finalState,
+      accumulationStats = accumulationStats,
+      accumulationTransferCounts = accumulationTransferCounts
+    )
 
   /** Edit ready queue records by removing accumulated reports and pruning
     * dependencies.
@@ -455,7 +476,8 @@ object AccumulationTransition:
       postState: PartialState,
       gasUsedMap: Map[Long, Long],
       commitments: Set[Commitment],
-      privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty
+      privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty,
+      transferCountMap: Map[Long, Int] = Map.empty
   )
 
   /** Snapshot of privilege state values at a point in time. Also includes
@@ -556,6 +578,11 @@ object AccumulationTransition:
     val mergedGasUsed =
       mergeBy(parallelResult.gasUsedMap, outerResult.gasUsedMap)(_ + _)
 
+    val thisRoundTransferCounts: Map[Long, Int] =
+      transfers.groupBy(_.destination).view.mapValues(_.size).toMap
+    val mergedTransferCounts =
+      mergeBy(thisRoundTransferCounts, outerResult.transferCountMap)(_ + _)
+
     // Merge privilege snapshots:
     // - For privilege fields (manager, delegator, registrar, assigners, alwaysAccers):
     //   FIRST batch takes precedence
@@ -587,7 +614,8 @@ object AccumulationTransition:
       postState = outerResult.postState,
       gasUsedMap = mergedGasUsed,
       commitments = parallelResult.commitments ++ outerResult.commitments,
-      privilegeSnapshots = mergedSnapshots
+      privilegeSnapshots = mergedSnapshots,
+      transferCountMap = mergedTransferCounts
     )
 
   /** Result of parallel accumulation execution.
@@ -991,24 +1019,28 @@ object AccumulationTransition:
 
   private def updateStatistics(
       gasUsedPerService: Map[Long, Long],
-      workItemsPerService: Map[Long, Int]
+      workItemsPerService: Map[Long, Int],
+      transferCountsPerService: Map[Long, Int]
   ): List[ServiceStatisticsEntry] =
     // Build fresh statistics from only this slot's activity
     val statsMap = mutable.Map.empty[Long, ServiceStatisticsEntry]
 
     // Collect all services that had accumulation activity
-    val allServiceIds = gasUsedPerService.keys
+    val allServiceIds = gasUsedPerService.keySet ++ workItemsPerService.keySet ++
+      transferCountsPerService.keySet
 
     for serviceId <- allServiceIds do
       val accGasUsed = gasUsedPerService.getOrElse(serviceId, 0L)
       val workItems = workItemsPerService.getOrElse(serviceId, 0)
+      val transferCount = transferCountsPerService.getOrElse(serviceId, 0)
 
       // Only include services that actually did something
-      if accGasUsed > 0 || workItems > 0 then
+      if accGasUsed > 0 || workItems > 0 || transferCount > 0 then
         statsMap(serviceId) = ServiceStatisticsEntry(
           id = serviceId,
           record = ServiceActivityRecord(
             accumulateCount = workItems,
+            accumulateTransferCount = transferCount,
             accumulateGasUsed = accGasUsed
           )
         )

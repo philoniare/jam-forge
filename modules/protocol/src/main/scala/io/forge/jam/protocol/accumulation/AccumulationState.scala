@@ -115,6 +115,7 @@ final case class ServiceActivityRecord(
     extrinsicSize: Long = 0,
     exports: Long = 0,
     accumulateCount: Long = 0,
+    accumulateTransferCount: Long = 0,
     accumulateGasUsed: Long = 0
 )
 
@@ -123,9 +124,9 @@ object ServiceActivityRecord:
     (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
       JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger).xmap(
-      { case (pc, ps, rc, rg, imp, xc, xs, exp, ac, ag) =>
-        ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, ag)
+      JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
+      { case (pc, ps, rc, rg, imp, xc, xs, exp, ac, atc, ag) =>
+        ServiceActivityRecord(pc.toInt, ps, rc, rg, imp, xc, xs, exp, ac, atc, ag)
       },
       r =>
         (
@@ -138,6 +139,7 @@ object ServiceActivityRecord:
           r.extrinsicSize,
           r.exports,
           r.accumulateCount,
+          r.accumulateTransferCount,
           r.accumulateGasUsed
         )
     )
@@ -153,6 +155,7 @@ object ServiceActivityRecord:
       extrinsicSize <- cursor.getOrElse[Long]("extrinsic_size")(0)
       exports <- cursor.getOrElse[Long]("exports")(0)
       accumulateCount <- cursor.getOrElse[Long]("accumulate_count")(0)
+      accumulateTransferCount <- cursor.getOrElse[Long]("accumulate_transfer_count")(0)
       accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
     yield ServiceActivityRecord(
       providedCount,
@@ -164,6 +167,7 @@ object ServiceActivityRecord:
       extrinsicSize,
       exports,
       accumulateCount,
+      accumulateTransferCount,
       accumulateGasUsed
     )
   }
@@ -212,27 +216,32 @@ object StorageMapEntry:
     yield StorageMapEntry(JamBytes(parseHex(key)), JamBytes(parseHex(value)))
   }
 
-/** Preimage requests map key with hash and value list.
-  */
 final case class PreimageRequestsMapKey(
     hash: Hash,
+    length: Long,
     value: List[Long]
 )
 
 object PreimageRequestsMapKey:
   given Codec[PreimageRequestsMapKey] =
-    (JamCodecs.hashCodec :: JamCodecs.compactPrefixedList(uint32L)).xmap(
-      { case (hash, value) =>
-        PreimageRequestsMapKey(hash, value.map(_ & 0xffffffffL))
-      },
-      e => (e.hash, e.value.map(_ & 0xffffffffL))
-    )
+    (JamCodecs.hashCodec :: uint32L :: JamCodecs.compactPrefixedList(uint32L))
+      .xmap(
+        { case (hash, length, value) =>
+          PreimageRequestsMapKey(
+            hash,
+            length & 0xffffffffL,
+            value.map(_ & 0xffffffffL)
+          )
+        },
+        e => (e.hash, e.length & 0xffffffffL, e.value.map(_ & 0xffffffffL))
+      )
 
   given Decoder[PreimageRequestsMapKey] = Decoder.instance { cursor =>
     for
       hash <- cursor.downField("key").get[String]("hash")
+      length <- cursor.downField("key").get[Long]("length")
       value <- cursor.get[List[Long]]("value")
-    yield PreimageRequestsMapKey(Hash(parseHex(hash)), value)
+    yield PreimageRequestsMapKey(Hash(parseHex(hash)), length, value)
   }
 
 /** Full account data for accumulation state.
@@ -407,11 +416,8 @@ final case class AccumulationState(
           storage = item.data.storage.map(e => e.key -> e.value).toMap,
           preimages = preimagesMap,
           preimageRequests =
-            item.data.preimageRequests.flatMap { req =>
-              // Look up the preimage blob to get its length
-              preimagesMap.get(req.hash).map { blob =>
-                PreimageKey(req.hash, blob.length) -> PreimageRequest(req.value)
-              }
+            item.data.preimageRequests.map { req =>
+              PreimageKey(req.hash, req.length) -> PreimageRequest(req.value)
             }.toMap,
           lastAccumulated = item.data.service.lastAccumulationSlot
         )
@@ -528,9 +534,9 @@ extension (state: PartialState)
               .sortBy(_._1)
               .map { case (hash, blob) => PreimageHash(hash, blob) },
             preimageRequests = account.preimageRequests.toList
-              .sortBy(_._1.hash)
+              .sortBy(k => (k._1.hash, k._1.length))
               .map { case (key, request) =>
-                PreimageRequestsMapKey(key.hash, request.requestedAt)
+                PreimageRequestsMapKey(key.hash, key.length, request.requestedAt)
               }
           )
         )
@@ -566,6 +572,9 @@ object AccumulationInput:
   *   The accumulation root hash
   * @param accumulationStats
   *   Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
+  * @param accumulationTransferCounts
+  *   T(s): serviceId -> number of
+  *   deferred transfers delivered to that service during accumulation.
   * @param commitments
   *   Individual service commitments (service_id, hash) - stored in state for
   *   key 0x10
@@ -573,7 +582,8 @@ object AccumulationInput:
 final case class AccumulationOutputData(
     ok: JamBytes,
     accumulationStats: Map[Long, (Long, Int)] = Map.empty,
-    commitments: List[(Long, JamBytes)] = List.empty
+    commitments: List[(Long, JamBytes)] = List.empty,
+    accumulationTransferCounts: Map[Long, Int] = Map.empty
 )
 
 object AccumulationOutputData:
