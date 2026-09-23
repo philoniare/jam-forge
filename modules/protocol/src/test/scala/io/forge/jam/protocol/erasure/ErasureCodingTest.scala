@@ -16,13 +16,10 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
   val TinyConfig: ChainConfig = ChainConfig.TINY
   val FullConfig: ChainConfig = ChainConfig.FULL
 
-  // Erasure coding piece size (W_E) = 2 * number of original shards
-  // For TINY: 2 * 2 = 4
-  // For FULL: 2 * 342 = 684
+  // Erasure coding piece size = 2 * ecOriginalShards(validatorCount)
+  // For TINY (6 validators): 2 * 3 = 6.  For FULL (1023): 2 * 342 = 684.
   def basicSizeForConfig(config: ChainConfig): Int =
-    if config.validatorCount == 6 then 4
-    else if config.validatorCount == 1023 then 684
-    else config.coresCount * 2
+    ChainConfig.ecPieceSizeFor(config.validatorCount)
 
   // Test vector case class
   case class ErasureCodingTestVector(data: Array[Byte], shards: Array[Array[Byte]])

@@ -38,7 +38,9 @@ final case class ChainConfig(
   maxDependencies: Int = 8,
   /** Maximum number of work items/results per work report */
   maxWorkItems: Int = 16,
-  /** Erasure-coding piece size in bytes */
+  /**
+   * Erasure-coding piece size in bytes: `2 * ecOriginalShards(validatorCount)`.
+   */
   ecPieceSize: Int = 684,
   /** Maximum accumulation gas per work report */
   reportAccGas: Long = 10_000_000L,
@@ -68,6 +70,12 @@ final case class ChainConfig(
     z >= 6 && z % 3 == 0 && z <= 3 * coresCount
 
 object ChainConfig:
+  def ecPieceSizeFor(validatorCount: Int, segmentSize: Int = 4104): Int =
+    val bound = validatorCount / 3 + 2 // d ranges over N_bound = {0 .. bound-1}
+    var d = bound - 1
+    while d > 0 && segmentSize % (2 * d) != 0 do d -= 1
+    2 * d
+
   /**
    * Tiny configuration for fast testing with 6 validators.
    */
@@ -92,7 +100,7 @@ object ChainConfig:
     additionalMinBalancePerStateItem = 10L,
     additionalMinBalancePerStateByte = 1L,
     maxLookupAnchorAge = 24L,
-    ecPieceSize = 4
+    ecPieceSize = 6
   )
 
   /**
