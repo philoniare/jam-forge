@@ -169,6 +169,9 @@ object IntermediateSteps:
   def storeAccumulationStats(stats: Map[Long, (Long, Int)]): StfStep =
     modifyContext(_.copy(accumulationStats = stats))
 
+  def storeAccumulationTransferCounts(counts: Map[Long, Int]): StfStep =
+    modifyContext(_.copy(accumulationTransferCounts = counts))
+
   def storeLastAccumulationOutputs(
       commitments: List[(Long, JamBytes)]
   ): StfStep =
