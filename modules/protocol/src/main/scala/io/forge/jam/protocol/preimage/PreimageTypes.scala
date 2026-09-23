@@ -126,19 +126,21 @@ object PreimageTypes:
     extrinsicSize: Long = 0,
     exports: Long = 0,
     accumulateCount: Long = 0,
+    accumulateTransferCount: Long = 0,
     accumulateGasUsed: Long = 0
   )
 
   object ServiceActivityRecord:
     given Codec[ServiceActivityRecord] =
       (compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger ::
-       compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger).xmap(
-        { case (pc, ps, rc, rgu, imp, ec, es, exp, ac, agu) =>
-          ServiceActivityRecord(pc.toInt, ps, rc, rgu, imp, ec, es, exp, ac, agu)
+       compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger ::
+       compactInteger).xmap(
+        { case (pc, ps, rc, rgu, imp, ec, es, exp, ac, atc, agu) =>
+          ServiceActivityRecord(pc.toInt, ps, rc, rgu, imp, ec, es, exp, ac, atc, agu)
         },
         sar => (sar.providedCount.toLong, sar.providedSize, sar.refinementCount, sar.refinementGasUsed,
                 sar.imports, sar.extrinsicCount, sar.extrinsicSize, sar.exports,
-                sar.accumulateCount, sar.accumulateGasUsed)
+                sar.accumulateCount, sar.accumulateTransferCount, sar.accumulateGasUsed)
       )
 
     given Decoder[ServiceActivityRecord] =
@@ -153,6 +155,7 @@ object PreimageTypes:
           extrinsicSize <- cursor.getOrElse[Long]("extrinsic_size")(0)
           exports <- cursor.getOrElse[Long]("exports")(0)
           accumulateCount <- cursor.getOrElse[Long]("accumulate_count")(0)
+          accumulateTransferCount <- cursor.getOrElse[Long]("accumulate_transfer_count")(0)
           accumulateGasUsed <- cursor.getOrElse[Long]("accumulate_gas_used")(0)
         yield ServiceActivityRecord(
           providedCount,
@@ -164,6 +167,7 @@ object PreimageTypes:
           extrinsicSize,
           exports,
           accumulateCount,
+          accumulateTransferCount,
           accumulateGasUsed
         )
       }
