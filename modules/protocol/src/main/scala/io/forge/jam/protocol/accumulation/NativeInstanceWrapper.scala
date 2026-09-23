@@ -4,7 +4,24 @@ import io.forge.jam.pvm.native_.PvmRecompiler
 
 import java.lang.foreign.{MemorySegment, ValueLayout}
 
-final class NativeInstanceWrapper(live: PvmRecompiler#LiveExecution) extends PvmInstance:
+object NativeInstanceWrapper:
+
+  trait HeapGrowth:
+    /** Index of the heap (RW-data) region in the live region table. */
+    def heapRegionIndex: Int
+
+    /** current heap end in pages, and the highest
+      * page the heap may reach. */
+    def pageBounds(): (Long, Long)
+
+    /** Grow the heap by `deltaPages`; returns the heap region's new
+      * page-aligned length, or a negative value when nothing changed. */
+    def growPages(deltaPages: Long): Long
+
+final class NativeInstanceWrapper(
+    live: PvmRecompiler#LiveExecution,
+    heapGrowth: Option[NativeInstanceWrapper.HeapGrowth] = None
+) extends PvmInstance:
 
   private val regs: MemorySegment = live.regsSegment()
   private val gasSeg: MemorySegment = live.gasSegment()
@@ -114,3 +131,17 @@ final class NativeInstanceWrapper(live: PvmRecompiler#LiveExecution) extends Pvm
           MemorySegment.copy(data, 0, backing, ValueLayout.JAVA_BYTE, off, data.length)
           true
         case None => false
+
+  private var forcedOutOfGas: Boolean = false
+
+  override def forceOutOfGas(): Unit = forcedOutOfGas = true
+
+  override def isForcedOutOfGas: Boolean = forcedOutOfGas
+
+  override def growHeapPageBounds: Option[(Long, Long)] = heapGrowth.map(_.pageBounds())
+
+  override def growHeapPages(deltaPages: Long): Unit =
+    heapGrowth.foreach { hg =>
+      val newRegionLen = hg.growPages(deltaPages)
+      if newRegionLen >= 0 then growRegion(hg.heapRegionIndex, newRegionLen)
+    }

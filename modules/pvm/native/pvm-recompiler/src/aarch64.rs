@@ -1,5 +1,9 @@
 //! AArch64 single-pass emitter
-use crate::{Backend, Op, DJUMP_HALT, EXIT_FAULT, EXIT_HALT, EXIT_OOG, EXIT_PANIC};
+use crate::{
+    AluKind, Backend, CmpCond, InvLogicalKind, MinMaxKind, MulUpperKind, Op, ShiftKind, Width,
+    DJUMP_HALT, EXIT_FAULT, EXIT_HALT, EXIT_OOG, EXIT_PANIC, HOST_CONTINUE, HOST_OOG, HOST_OOG_NEXT,
+    HOST_PANIC,
+};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
 type Asm = dynasmrt::aarch64::Assembler;
@@ -594,12 +598,32 @@ fn emit_shift_rotate(a: &mut Asm, kind: ShiftKind, width: Width, amount: ShiftAm
     }
 }
 
+fn emit_block_gas_charge(
+    a: &mut Asm,
+    cost: i64,
+    pc: u32,
+    oog_label: dynasmrt::DynamicLabel,
+) {
+    mov_imm32(a, 12, pc);
+    if cost <= 0 {
+        // A.8 costs are always >= 1 (gasCostForBlock clamps with max(_, 1)), so
+        // this is purely defensive against a malformed cost column.
+        return;
+    }
+    mov_imm64(a, 9, cost as u64);
+    dynasm!(a; .arch aarch64; cmp x11, x9);
+    emit_blt_far(a, oog_label);
+    dynasm!(a; .arch aarch64; sub x11, x11, x9);
+}
+
 fn emit_upcall_frame(
     a: &mut Asm,
     blr_reg: u8,
     setup_args: impl FnOnce(&mut Asm),
     panic_label: dynasmrt::DynamicLabel,
     oog_label: Option<dynasmrt::DynamicLabel>,
+    // pc of the instruction after this one, for the HOST_OOG_NEXT status.
+    next_pc: u32,
 ) {
     dynasm!(a; .arch aarch64; str x11, [x1]);
     dynasm!(a
@@ -640,6 +664,19 @@ fn emit_upcall_frame(
             ; b =>oog_label
             ; =>not_oog
         );
+        let not_oog_next = a.new_dynamic_label();
+        dynasm!(a
+            ; .arch aarch64
+            ; cmp x9, #HOST_OOG_NEXT as u32
+            ; b.ne =>not_oog_next
+            ; ldr x11, [x1]
+        );
+        mov_imm32(a, 12, next_pc);
+        dynasm!(a
+            ; .arch aarch64
+            ; b =>oog_label
+            ; =>not_oog_next
+        );
     }
     let is_continue = a.new_dynamic_label();
     dynasm!(a
@@ -658,6 +695,7 @@ impl Backend for Aarch64Backend {
         &self,
         ops: &[Op],
         pcs: &[u32],
+        block_gas: &[i64],
         jump_table: &[u32],
         jump_table_ptr: *const u32,
         entry_offsets_ptr: *const u32,
@@ -701,12 +739,11 @@ impl Backend for Aarch64Backend {
             ; sub sp, sp, #16
             ; stp x19, x20, [sp]      // save caller's x19/x20 (x21/x22 saved below, separate slot)
             ; sub sp, sp, #16
-            ; stp x21, x22, [sp]      // save caller's x21/x22 (x22: Task 18/H2 sbrk_fn)
+            ; stp x21, x22, [sp]      // save caller's x21/x22
             ; ldr x11, [x1]   // x11 = *gas (live throughout)
             ; mov x19, x30    // save the entry LR before any `bl` clobbers x30 (see LR NOTE)
             ; ldr x20, [sp, #32]        // x20 = host_fn (arg 9; may be the null pointer)
             ; ldr x21, [sp, #40]        // x21 = host_ctx (arg 10)
-            ; ldr x22, [sp, #48]        // x22 = sbrk_fn (arg 11; Task 18/H2; may be the null pointer)
         );
         dynasm!(a; .arch aarch64; b =>dispatch_by_index_label);
         dynasm!(a; .arch aarch64; =>dispatch_by_index_label);
@@ -733,17 +770,16 @@ impl Backend for Aarch64Backend {
             );
             let lo = blocks.block_lo[b];
             let hi = blocks.block_hi[b];
+            entry_offsets[lo] = a.offset().0 as u32;
+            emit_block_gas_charge(&mut a, block_gas[lo], pcs[lo], oog_label);
 
-            // --- block body (per-instruction gas + pc) -----------------------
+            // --- block body --------------------------------------------------
             for pc in lo..hi {
                 dynasm!(a
                     ; .arch aarch64
                     ; =>instr_labels[pc]
                 );
-                entry_offsets[pc] = a.offset().0 as u32;
                 mov_imm32(&mut a, 12, pcs[pc]);
-                dynasm!(a; .arch aarch64; subs x11, x11, #1);
-                emit_blt_far(&mut a, oog_label);
                 match ops[pc] {
                     Op::LoadImm64 { dst, imm } => {
                         let dst = dst as u32;
@@ -850,26 +886,10 @@ impl Backend for Aarch64Backend {
                             },
                             panic_label,
                             Some(oog_label),
+                            if pc + 1 < ops.len() { pcs[pc + 1] } else { code_len },
                         );
                     }
-                    Op::Sbrk { dst, src } => {
-                        let (dst, src) = (dst as u32, src as u32);
-                        emit_upcall_frame(
-                            &mut a,
-                            22, // x22 = sbrk_fn
-                            |a| {
-                                dynasm!(a
-                                    ; .arch aarch64
-                                    ; ldr x2, [x0, #src * 8]  // size = reg[src], read while x0 still holds regs* (must precede the mov x0 below)
-                                    ; movz w1, #dst           // dst register index (0..12, fits imm16; zero-extended into x1)
-                                    ; mov x3, x12              // pc
-                                    ; mov x0, x21              // host_ctx (clobbers x0 LAST — every other arg already read from it)
-                                );
-                            },
-                            panic_label,
-                            None,
-                        );
-                    }
+                    Op::Unlikely => {}
                     Op::Jump { target } => {
                         let tgt = block_labels[blocks.block_of[target as usize]];
                         dynasm!(a; .arch aarch64; b =>tgt);
@@ -1534,8 +1554,22 @@ impl Backend for Aarch64Backend {
             }
             let last_op_is_terminator = ops[hi - 1].is_terminator();
             let is_last_block = b + 1 == nblocks;
-            if !last_op_is_terminator && is_last_block {
-                dynasm!(a; .arch aarch64; b =>end_of_code_label);
+            if !last_op_is_terminator {
+                if is_last_block {
+                    dynasm!(a; .arch aarch64; b =>end_of_code_label);
+                } else {
+                    dynasm!(a; .arch aarch64; b =>instr_labels[blocks.block_lo[b + 1]]);
+                }
+            }
+        }
+
+        for b in 0..nblocks {
+            let lo = blocks.block_lo[b];
+            let hi = blocks.block_hi[b];
+            for pc in (lo + 1)..hi {
+                entry_offsets[pc] = a.offset().0 as u32;
+                emit_block_gas_charge(&mut a, block_gas[pc], pcs[pc], oog_label);
+                dynasm!(a; .arch aarch64; b =>instr_labels[pc]);
             }
         }
 
@@ -1547,12 +1581,10 @@ impl Backend for Aarch64Backend {
         mov_imm32(&mut a, 12, code_len);
         dynasm!(a
             ; .arch aarch64
-            ; subs x11, x11, #1
-            ; b.lt =>oog_label
             ; b =>panic_label
             ; =>oog_label
             ; str w12, [x6]      // out->pc = current instruction's pc
-            ; str x11, [x1]      // gas is now -1 (the failing decrement)
+            ; str x11, [x1]      // the failing block's cost is NOT deducted
             ; mov x30, x19
             ; ldp x21, x22, [sp]
             ; ldp x19, x20, [sp, #16]

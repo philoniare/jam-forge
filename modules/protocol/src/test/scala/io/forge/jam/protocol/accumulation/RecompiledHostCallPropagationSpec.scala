@@ -45,7 +45,7 @@ class RecompiledHostCallPropagationSpec extends AnyFlatSpec with Matchers:
         try
           val (code, bitmask) = ecalliThenTrap(0)
           val pp = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
-          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.jumpTable, pp.codeLen)
+          val blk = rc.compile(pp.opcodes, pp.a, pp.b, pp.c, pp.pc, pp.imm, pp.imm2, pp.blockGas, pp.jumpTable, pp.codeLen)
           try
             blk.isValid shouldBe true
             val live = rc.executeLive(

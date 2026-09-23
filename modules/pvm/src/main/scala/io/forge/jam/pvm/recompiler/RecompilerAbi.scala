@@ -1,6 +1,7 @@
 package io.forge.jam.pvm.recompiler
 
 import io.forge.jam.pvm.Instruction
+import io.forge.jam.pvm.engine.BlockGasModel
 import io.forge.jam.pvm.program.{InstructionDecoder, ProgramBlob}
 
 /**
@@ -258,6 +259,7 @@ object RecompilerAbi:
     pc: Array[Int],
     imm: Array[Long],
     imm2: Array[Long],
+    blockGas: Array[Long],
     jumpTable: Array[Int],
     byteOffsetToIndex: Map[Int, Int],
     codeLen: Int
@@ -297,6 +299,15 @@ object RecompilerAbi:
     val pcArr = new Array[Int](n)
     val immArr = new Array[Long](n)
     val imm2Arr = new Array[Long](n)
+    val blockGasArr = new Array[Long](n)
+    var blockCost = 0L
+    var newBlock = true
+    for i <- 0 until n do
+      if newBlock then
+        blockCost = BlockGasModel.gasCostForBlock(code, bitmask, byteOffsets(i))
+        newBlock = false
+      blockGasArr(i) = blockCost
+      if instrs(i).opcode.startsNewBasicBlock then newBlock = true
 
     for i <- 0 until n do
       val mapped = mapInstruction(instrs(i), targetIndex)
@@ -320,7 +331,7 @@ object RecompilerAbi:
         case _ => InvalidJumpTableSlot
     }.toArray
 
-    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, jt, offsetToIndex, code.length)
+    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, blockGasArr, jt, offsetToIndex, code.length)
 
   /** Convenience overload taking a `ProgramBlob` directly. */
   def prepareProgram(blob: ProgramBlob): PreparedProgram =

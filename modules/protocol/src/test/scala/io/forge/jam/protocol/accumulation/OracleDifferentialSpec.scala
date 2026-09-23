@@ -1,10 +1,12 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.pvm.{Instruction, InterruptKind}
-import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
+import io.forge.jam.pvm.engine.{BlockGasModel, InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.{InstructionDecoder, JumpTable, ProgramBlob}
+import io.forge.jam.pvm.recompiler.RecompilerAbi
 import io.forge.jam.pvm.types.ProgramCounter
+import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.refine.HostCallDispatcher
 
 import org.scalatest.flatspec.AnyFlatSpec
@@ -21,7 +23,9 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   private val RW_BASE = 0x20000
   private val RW_LEN = 4096
 
-  private object ScriptedException extends RuntimeException("scripted host call 2: intentional throw")
+  /** A scripted host-call panic */
+  private val ScriptedException =
+    new HostCallPanic("scripted host call 2: intentional throw")
 
   private object ScriptedDispatcher extends HostCallDispatcher:
     def getGasCost(hostCallId: Int, instance: PvmInstance): Long =
@@ -140,6 +144,14 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- interpreter oracle: the executor-loop Ecalli order, against a real InterpretedInstance ----
+  private def firstBlockCost(prog: Seq[AInstr]): Long =
+    val (code, bitmask) = encodeProgram(prog)
+    BlockGasModel.gasCostForBlock(code, bitmask, 0)
+
+  /** Enough gas for every block of an acyclic `prog`, plus slack. */
+  private def sufficientGas(prog: Seq[AInstr]): Long =
+    val (code, bitmask) = encodeProgram(prog)
+    RecompilerAbi.prepareProgram(code, bitmask, JumpTable(Array.empty, 0)).blockGas.sum + 1000L
 
   private final case class InterpResult(exit: Int, gas: Long, regs: Array[Long], pc: Long, dispatchCount: Int)
 
@@ -183,7 +195,8 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
               dispatchCount += 1
               dispatcher.dispatch(hostId.signed, wrapper)
             catch
-              case _: RuntimeException =>
+              // Exactly PvmRunner's catch — see `ScriptedException` above.
+              case _: HostCallPanic =>
                 exit = PvmRecompiler.EXIT_PANIC
                 running = false
         case Left(err) => fail(s"interpreter error: $err")
@@ -279,7 +292,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     out.toSeq
 
   // ---- the differential ---------------------------------------------------------
-  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=10000 mixed programs (host ids 0/4, CONTINUE-only)" ignore {
+  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=10000 mixed programs (host ids 0/4, CONTINUE-only)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -291,7 +304,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         val initRegs = Array.fill(13)(rng.nextLong())
         initRegs(0) = RW_BASE.toLong // r0: LoadInd/StoreInd base register
         initRegs(5) = RW_BASE.toLong // r5: host-id-1 write target base
-        val gas = (prog.length * 10).toLong + rng.nextInt(200) // generous: 1/instr + up to 3/ecalli, times headroom
+        val gas = sufficientGas(prog) + rng.nextInt(200)
         val rwData = new Array[Byte](RW_LEN)
         rng.nextBytes(rwData)
 
@@ -311,7 +324,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"oracle differential (Task 17/H1, CONTINUE-only mixed): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter on host id 2 (throw -> PANIC) mixed into the program" ignore {
+  it should "match the interpreter on host id 2 (throw -> PANIC) mixed into the program" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -324,7 +337,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
         val prog = (prefix :+ Ecalli(2)) ++ Seq(randArith(rng), Trap)
         val initRegs = Array.fill(13)(rng.nextLong())
         initRegs(5) = RW_BASE.toLong
-        val gas = (prog.length * 10).toLong + 100
+        val gas = sufficientGas(prog)
         val rwData = new Array[Byte](RW_LEN)
 
         val (interp, _) = runInterpreter(prog, initRegs, gas, rwData.clone(), ScriptedDispatcher)
@@ -341,7 +354,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"oracle differential (Task 17/H1, throw->PANIC): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter on host id 4 (memory write) mixed into the program" ignore {
+  it should "match the interpreter on host id 4 (memory write) mixed into the program" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -377,7 +390,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
   }
 
   // ---- gas-edge cases: exactly 0 (dispatch proceeds) and exactly -1 (OOG, no dispatch) ----
-  it should "dispatch when gasCost drives gas to exactly 0" ignore {
+  it should "dispatch when gasCost drives gas to exactly 0" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -385,15 +398,17 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       val initRegs = Array.fill(13)(0L)
       initRegs(6) = 5L
       initRegs(7) = 10L
-      val gas = 4L // 1 (ecalli charge) + 3 (gasCost) = 4, remaining exactly 0 after dispatch
+      val gas = firstBlockCost(prog) + 3L
 
       val interpDispatcher = new CountingDispatcher
       val nativeDispatcher = new CountingDispatcher
       val (interp, _) = runInterpreter(prog, initRegs, gas, new Array[Byte](RW_LEN), interpDispatcher)
       val (native, _) = runNative(prog, initRegs, gas, new Array[Byte](RW_LEN), nativeDispatcher)
 
-      interp.exit shouldBe PvmRecompiler.EXIT_OOG // Trap's own charge against the already-0 gas
-      interp.gas shouldBe -1L
+      // The Trap shares the Ecalli's block, which was paid for on entry, so the
+      // run ends on the Trap rather than on a second gas charge.
+      interp.exit shouldBe PvmRecompiler.EXIT_PANIC
+      interp.gas shouldBe 0L
       interpDispatcher.dispatchCalls shouldBe 1 // dispatch proceeded at exactly 0 (the assertion this test exists for)
       native.exit shouldBe interp.exit
       native.gas shouldBe interp.gas
@@ -402,17 +417,17 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       native.regs(7) shouldBe 15L // r7 += r6 (host id 0), 10+5 — proves dispatch's mutation happened before the later OOG
   }
 
-  it should "NOT dispatch when gasCost drives gas to exactly -1 (OOG)" ignore {
+  it should "NOT dispatch when gasCost drives gas to exactly -1 (OOG)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
-      // Same shape, but ONE LESS starting gas: 1 (ecalli charge) + 3
-      // (gasCost) would need gas=4 to land at 0; gas=3 lands at exactly -1.
+      // Same shape, but ONE LESS starting gas, so the host call's own cost of 3
+      // lands at exactly -1 instead of exactly 0.
       val prog = Seq(Ecalli(0), Trap)
       val initRegs = Array.fill(13)(0L)
       initRegs(6) = 5L
       initRegs(7) = 10L
-      val gas = 3L
+      val gas = firstBlockCost(prog) + 2L
 
       val interpDispatcher = new CountingDispatcher
       val nativeDispatcher = new CountingDispatcher
@@ -430,7 +445,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       native.regs(7) shouldBe 10L // unchanged — dispatch never ran, r7 keeps its seeded value
   }
 
-  it should "NOT dispatch when host id 3's big gasCost drives gas deeply negative (OOG)" ignore {
+  it should "NOT dispatch when host id 3's big gasCost drives gas deeply negative (OOG)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -452,7 +467,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   // ---- preDispatch hook (accumulation's checkpoint-capture seam) -------------
 
-  it should "invoke preDispatch exactly once per successful dispatch, BEFORE dispatch runs" ignore {
+  it should "invoke preDispatch exactly once per successful dispatch, BEFORE dispatch runs" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
@@ -460,7 +475,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       val initRegs = Array.fill(13)(0L)
       initRegs(6) = 5L
       initRegs(7) = 100L
-      val gas = 100L
+      val gas = sufficientGas(prog)
 
       var preDispatchCalls = 0
       val dispatcher = new CountingDispatcher
@@ -473,7 +488,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
       dispatcher.dispatchCalls shouldBe 2
   }
 
-  it should "NOT invoke preDispatch when gasCost drives an Ecalli to OOG (no dispatch)" ignore {
+  it should "NOT invoke preDispatch when gasCost drives an Ecalli to OOG (no dispatch)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
