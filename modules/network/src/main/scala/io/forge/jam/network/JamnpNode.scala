@@ -56,17 +56,29 @@ final class JamnpStream private[network] (
     val kind: Byte
 ):
   @volatile private var receiver: Array[Byte] => Unit = _ => ()
-  @volatile private var closeListener: () => Unit = () => ()
-  private val closedFired = new java.util.concurrent.atomic.AtomicBoolean(false)
+  private var closed = false
+  private var closeDelivered = false
+  private var closeListener: () => Unit = null
 
   /** Register the message receiver (called on the event loop). */
   def onMessage(f: Array[Byte] => Unit): JamnpStream =
     receiver = f
     this
 
-  /** Register a close/FIN listener. */
+  /** Register a close/FIN listener. `openStream` returns after the kind byte
+    * is sent, so the peer can finish or reject the stream before this runs; a
+    * close that already happened fires the listener here, on the caller's
+    * thread.
+    */
   def onClosed(f: () => Unit): JamnpStream =
-    closeListener = f
+    val fireNow = synchronized {
+      closeListener = f
+      if closed && !closeDelivered then
+        closeDelivered = true
+        true
+      else false
+    }
+    if fireNow then f()
     this
 
   private[network] def dispatch(message: Array[Byte]): Unit = receiver(message)
@@ -75,7 +87,16 @@ final class JamnpStream private[network] (
     * both signal closure; handlers must not run twice).
     */
   private[network] def dispatchClosed(): Unit =
-    if closedFired.compareAndSet(false, true) then closeListener()
+    val listener = synchronized {
+      if closed then null
+      else
+        closed = true
+        if closeListener == null then null
+        else
+          closeDelivered = true
+          closeListener
+    }
+    if listener != null then listener()
 
   /** Send one framed message. */
   def send(message: Array[Byte]): Unit =

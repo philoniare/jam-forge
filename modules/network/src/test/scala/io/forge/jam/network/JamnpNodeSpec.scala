@@ -131,6 +131,45 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
       serverNode.shutdown()
   }
 
+  test("a close that lands before onClosed is registered is still reported, once") {
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config)
+
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = clientNode
+        .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
+        .get(10, TimeUnit.SECONDS)
+
+      // openStream already sent the kind byte, so the peer's rejection can
+      // arrive before the caller gets to register; force that ordering.
+      val stream = conn.openStream(StreamKind.JudgmentPublication).get(10, TimeUnit.SECONDS)
+      val deadline = System.currentTimeMillis() + 10000
+      while !stream.channel.isInputShutdown && System.currentTimeMillis() < deadline do
+        Thread.sleep(10)
+      stream.channel.isInputShutdown shouldBe true
+
+      val closes = new java.util.concurrent.atomic.AtomicInteger(0)
+      val closed = new LinkedBlockingQueue[Boolean]()
+      stream.onClosed { () =>
+        closes.incrementAndGet()
+        closed.offer(true)
+      }
+      await(closed) shouldBe true
+
+      // Tearing the stream down signals closure again; the listener must not rerun.
+      stream.close()
+      val inactiveDeadline = System.currentTimeMillis() + 10000
+      while stream.isOpen && System.currentTimeMillis() < inactiveDeadline do Thread.sleep(10)
+      stream.isOpen shouldBe false
+      // Let the event loop run any close handlers still queued behind the close.
+      stream.channel.eventLoop().submit(new Runnable { def run(): Unit = () }).get(10, TimeUnit.SECONDS)
+      closes.get shouldBe 1
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+  }
+
   test("large frames round-trip (multi-megabyte messages)") {
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
