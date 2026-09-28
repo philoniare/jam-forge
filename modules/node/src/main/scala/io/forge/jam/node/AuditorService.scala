@@ -34,13 +34,11 @@ final class AuditorService(
 
   private val computeReport = new ComputeReport(chain.config)
   private val accounts = new StateHistoricalLookup(chain)
-
-  /** reportHash -> audit verdict from this node's re-execution. */
-  private val verdicts = new ConcurrentHashMap[Hash, Boolean]()
-  /** reportHash -> announcing validator indexes seen via CE 144. */
+  private val verdicts = new ConcurrentHashMap[Hash, java.lang.Boolean]()
   private val seenAnnouncements = new ConcurrentHashMap[Hash, java.util.Set[Integer]]()
 
-  def verdictFor(reportHash: Hash): Option[Boolean] = Option(verdicts.get(reportHash))
+  def verdictFor(reportHash: Hash): Option[Boolean] =
+    Option(verdicts.get(reportHash)).map(_.booleanValue)
   def announcementsFor(reportHash: Hash): Int =
     Option(seenAnnouncements.get(reportHash)).map(_.size).getOrElse(0)
 
@@ -53,7 +51,7 @@ final class AuditorService(
     val audited = block.extrinsic.guarantees.map { g =>
       val reportHash = Hashing.blake2b256(g.report.encode.toArray)
       val valid = auditReport(g.report)
-      verdicts.put(reportHash, valid)
+      verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
       if !valid then publishJudgment(reportHash, valid = false)
       (g.report.coreIndex.toInt, reportHash, valid)
     }

@@ -32,3 +32,5 @@ jam-conformance/test-vectors/
 # Native build artifacts (we build fresh in Docker)
 modules/crypto/native/build/
 modules/crypto/native/*/target/
+modules/pvm/native/build/
+modules/pvm/native/*/target/

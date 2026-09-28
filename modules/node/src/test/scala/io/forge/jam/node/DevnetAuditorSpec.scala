@@ -74,6 +74,8 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       val auditorA = nodeA.enableAuditing(devKeys.take(1)) // validator 0 announces
       nodeB.enableGuaranteeing(devKeys)
       val auditorB = nodeB.enableAuditing(devKeys.drop(1).take(1)) // validator 1 announces
+      // The verdict waits below rely on an unaudited report reading as None.
+      auditorA.verdictFor(Hash.zero) shouldBe None
 
       val connAtoB =
         nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))

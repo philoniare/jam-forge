@@ -9,6 +9,7 @@ COPY modules/crypto/native/ark-vrf ./ark-vrf
 COPY modules/crypto/native/bandersnatch-vrfs-wrapper ./bandersnatch-vrfs-wrapper
 COPY modules/crypto/native/ed25519-zebra-wrapper ./ed25519-zebra-wrapper
 COPY modules/crypto/native/erasure-coding-wrapper ./erasure-coding-wrapper
+COPY modules/pvm/native/pvm-recompiler ./pvm-recompiler
 
 WORKDIR /build/bandersnatch-vrfs-wrapper
 RUN cargo build --release
@@ -19,19 +20,23 @@ RUN cargo build --release
 WORKDIR /build/erasure-coding-wrapper
 RUN cargo build --release
 
-# Stage 2: Build Scala application
-FROM sbtscala/scala-sbt:eclipse-temurin-21.0.5_11_1.10.6_3.3.4 AS scala-builder
+WORKDIR /build/pvm-recompiler
+RUN cargo build --release
+
+FROM sbtscala/scala-sbt:eclipse-temurin-24.0.1_9_1.12.11_3.3.7 AS scala-builder
 
 WORKDIR /build
 
-RUN mkdir -p /build/modules/crypto/native/build/linux
+RUN mkdir -p /build/modules/crypto/native/build/linux /build/modules/pvm/native/build/linux
 COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /build/modules/crypto/native/build/linux/
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /build/modules/crypto/native/build/linux/
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /build/modules/crypto/native/build/linux/
+COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /build/modules/pvm/native/build/linux/
 
 COPY build.sbt .
 COPY project/build.properties project/
 COPY project/plugins.sbt project/
+COPY project/*.scala project/
 
 RUN sbt update
 
@@ -50,7 +55,7 @@ RUN echo "Building for git=${GIT_SHA} at ${BUILD_TIME}" && \
     sbt clean "conformance/assembly"
 
 # Stage 3: Runtime image
-FROM azul/zulu-openjdk:21-jdk-crac-latest
+FROM azul/zulu-openjdk:24-jdk-crac-latest
 
 WORKDIR /app
 
@@ -67,7 +72,7 @@ COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-
 
 ENV LD_LIBRARY_PATH=/app/lib
 ENV LOG_LEVEL=ERROR
-ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof -Dlogback.configurationFile=/app/logback.xml"
+ENV JAVA_OPTS="-XX:+UseZGC -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dlogback.configurationFile=/app/logback.xml"
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
