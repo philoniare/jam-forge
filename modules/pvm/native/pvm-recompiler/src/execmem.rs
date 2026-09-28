@@ -55,8 +55,7 @@ impl ExecMem {
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
                 std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
-                // Linux/x64: mmap already RWX for the skeleton; a hardened build
-                // would W^X via mprotect here.
+                dynasmrt::cache_control::synchronize_icache(std::slice::from_raw_parts(ptr as *const u8, code.len()));
             }
         }
 

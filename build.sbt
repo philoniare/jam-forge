@@ -49,6 +49,16 @@ def commonSettings = Seq(
   publish / skip := true
 )
 
+val hasNativeRecompiler = (osName.contains("mac") || osName.contains("linux")) && {
+  val arch = System.getProperty("os.arch").toLowerCase
+  arch.contains("aarch64") || arch.contains("arm64")
+}
+
+def recompilerLibJavaOptions(baseDir: File): Seq[String] =
+  if (hasNativeRecompiler)
+    Seq(s"-Djam.pvm.recompiler.lib=$baseDir/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+  else Seq.empty
+
 def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[String] =
   Seq(
     s"-Djava.library.path=$baseDir/modules/crypto/native/build/$osDirName:$baseDir/modules/crypto/src/main/resources",
@@ -185,7 +195,7 @@ lazy val pvm = (project in file("modules/pvm"))
     Test / fork := true,
     Test / javaOptions ++= nativeLibJavaOptions(
       (ThisBuild / baseDirectory).value,
-      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+      recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     )
   )
 
@@ -214,7 +224,7 @@ lazy val protocol = (project in file("modules/protocol"))
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
     Test / javaOptions ++= nativeLibJavaOptions(
       (ThisBuild / baseDirectory).value,
-      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+      recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     )
   )
 
@@ -283,7 +293,7 @@ lazy val node = (project in file("modules/node"))
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
     Test / javaOptions ++= nativeLibJavaOptions(
       (ThisBuild / baseDirectory).value,
-      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+      recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     ),
     assembly / mainClass := Some("io.forge.jam.node.Main"),
     assembly / assemblyJarName := "jam-node.jar",
@@ -328,7 +338,7 @@ lazy val conformance = (project in file("modules/conformance"))
     Test / envVars ++= sys.env.get("LOG_LEVEL").map("LOG_LEVEL" -> _).toMap,
     Test / javaOptions ++= nativeLibJavaOptions(
       (ThisBuild / baseDirectory).value,
-      Seq(s"-Djam.pvm.recompiler.lib=${(ThisBuild / baseDirectory).value}/modules/pvm/native/build/$osDirName/libpvm_recompiler.$libSuffix")
+      recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     ),
     // Assembly settings for creating fat JAR
     assembly / mainClass := Some("io.forge.jam.conformance.ConformanceServerApp"),
