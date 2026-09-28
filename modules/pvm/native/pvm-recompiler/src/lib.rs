@@ -569,9 +569,10 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
     Some(ops)
 }
 
+const NATIVE_BACKEND: bool = cfg!(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")));
+
 /// Compile a pre-decoded single-basic-block program. Returns a heap-owned
 /// `CompiledBlock` pointer, or null if the program contains an unsupported
-/// opcode (the caller must then deopt to the interpreter).
 ///
 /// `jump_table`/`jt_n`
 ///
@@ -586,7 +587,7 @@ pub unsafe extern "C" fn pvm_compile(
     jt_n: usize,
     code_len: u32,
 ) -> *mut CompiledBlock {
-    if instrs.is_null() {
+    if !NATIVE_BACKEND || instrs.is_null() {
         return std::ptr::null_mut();
     }
     let slice = std::slice::from_raw_parts(instrs, n);
