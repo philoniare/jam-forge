@@ -28,6 +28,8 @@ class BlockGasModelSpec extends AnyFlatSpec with Matchers:
   private def divU64(d: Int, s1: Int, s2: Int) = Array[Byte](203.toByte, (s1 | (s2 << 4)).toByte, d.toByte)
   private def mul64(d: Int, s1: Int, s2: Int) = Array[Byte](202.toByte, (s1 | (s2 << 4)).toByte, d.toByte)
   private def moveReg(dst: Int, src: Int) = Array[Byte](100.toByte, (dst | (src << 4)).toByte)
+  private def cmovIz(d: Int, s1: Int, s2: Int) = Array[Byte](218.toByte, (s1 | (s2 << 4)).toByte, d.toByte)
+  private def cmovIzImm(d: Int, s: Int) = Array[Byte](147.toByte, (d | (s << 4)).toByte)
   private def loadImm(r: Int, v: Int) = Array[Byte](51, r.toByte, v.toByte)
   private def loadIndU64(dst: Int, base: Int) = Array[Byte](130.toByte, (dst | (base << 4)).toByte)
   private def storeIndU64(src: Int, base: Int) = Array[Byte](123.toByte, (src | (base << 4)).toByte)
@@ -126,6 +128,19 @@ class BlockGasModelSpec extends AnyFlatSpec with Matchers:
 
   it should "clear a stale clobber through move_reg renaming (cost 60)" in {
     cost(divU64(4, 2, 3), moveReg(4, 9), add64(5, 4, 6), trap) shouldBe 60L
+  }
+
+  // GP #559: the cmov destination register is also counted as a source register.
+  it should "make cmov_iz wait on a pending write to its destination (cost 62)" in {
+    cost(divU64(1, 2, 3), cmovIz(1, 4, 5), trap) shouldBe 62L
+  }
+
+  it should "make cmov_iz_imm wait on a pending write to its destination (cost 62)" in {
+    cost(divU64(1, 2, 3), cmovIzImm(1, 4), trap) shouldBe 62L
+  }
+
+  it should "not stall cmov_iz on an unrelated pending write (cost 60)" in {
+    cost(divU64(1, 2, 3), cmovIz(6, 4, 5), trap) shouldBe 60L
   }
 
   // ---------------------------------------------------------------------

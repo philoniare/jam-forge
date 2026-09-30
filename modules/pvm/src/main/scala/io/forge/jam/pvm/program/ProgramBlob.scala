@@ -67,12 +67,13 @@ object ProgramBlob:
 
     var offset = 0
 
-    // Read jump table entry count (varint)
+    // Read jump table entry count (varint), |j| <= Z_J. A negative Long is a
+    // varint of 2^63 or more, so it is over the limit too.
     val jumpTableEntryCount = readJamFormatVarint(data, offset) match
-      case Some((count, newOffset)) =>
+      case Some((count, newOffset)) if count >= 0 && count <= Abi.VmMaximumJumpTableEntries.signed =>
         offset = newOffset
         count.toInt
-      case None => return None
+      case _ => return None
 
     if offset >= data.length then return None
 
@@ -80,22 +81,23 @@ object ProgramBlob:
     val jumpTableEntrySize = data(offset) & 0xFF
     offset += 1
 
-    // Read code length (varint)
+    // Read code length (varint), |c| <= Z_C
     val codeLength = readJamFormatVarint(data, offset) match
-      case Some((len, newOffset)) =>
+      case Some((len, newOffset)) if len >= 0 && len <= Abi.VmMaximumCodeSize.signed =>
         offset = newOffset
         len.toInt
-      case None => return None
+      case _ => return None
 
-    // Calculate jump table length
-    val jumpTableLength = jumpTableEntryCount * jumpTableEntrySize
+    // Calculate jump table length (up to Z_J * 255 octets, which overflows an Int)
+    val jumpTableOctets = jumpTableEntryCount.toLong * jumpTableEntrySize
 
     // Calculate bitmask length
     val bitmaskLength = (codeLength + 7) / 8
 
     // Verify we have enough data
-    val expectedTotal = offset + jumpTableLength + codeLength + bitmaskLength
+    val expectedTotal = offset + jumpTableOctets + codeLength + bitmaskLength
     if data.length < expectedTotal then return None
+    val jumpTableLength = jumpTableOctets.toInt // bounded by data.length above
 
     // JAM format: jump table comes BEFORE code
     // Extract jump table
