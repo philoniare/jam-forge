@@ -163,3 +163,56 @@ class DeblobValidationSpec extends AnyFlatSpec with Matchers:
     instance.programCounter.map(_.value.toInt) shouldBe Some(0)
     instance.gas shouldBe 98L
   }
+
+  // ==========================================================================
+  // Part C: blob size limits, c ∈ B[:Z_C] and j ∈ ⟦N_R⟧[:Z_J]
+  // ==========================================================================
+
+  private val MaxCodeSize = 1 << 25 // Z_C
+  private val MaxJumpTableEntries = 1 << 24 // Z_J
+
+  /** GP natural-number encoding E(x); the values used here stay below 2^56. */
+  private def natural(x: Long): Array[Byte] =
+    val l = (0 to 7).find(l => x < (1L << (7 * (l + 1)))).get
+    val prefix = 256 - (1 << (8 - l)) + (x >>> (8 * l)).toInt
+    Array(prefix.toByte) ++ Array.tabulate(l)(i => (x >>> (8 * i)).toByte)
+
+  private val hugeNatural = Array.fill[Byte](9)(0xff.toByte) // E(2^64 - 1)
+
+  /** E(|j|) ++ E_1(z) ++ E(|c|) ++ E_z(j) ++ E(c) ++ E(k), with zeroed j, c and k. */
+  private def jamBlob(jumpEntries: Long, entrySize: Int, codeLen: Int): Array[Byte] =
+    natural(jumpEntries) ++ Array(entrySize.toByte) ++ natural(codeLen) ++
+      new Array[Byte]((jumpEntries * entrySize).toInt + codeLen + (codeLen + 7) / 8)
+
+  /** Parsed code length, so a failing assertion never prints a multi-MiB blob. */
+  private def parsedCodeLen(data: Array[Byte]): Option[Int] =
+    ProgramBlob.fromCodeAndJumpTable(data).map(_.code.length)
+
+  "ProgramBlob.fromCodeAndJumpTable" should "accept code of exactly Z_C = 2^25 octets" in {
+    parsedCodeLen(jamBlob(0, 0, MaxCodeSize)) shouldBe Some(MaxCodeSize)
+  }
+
+  it should "reject code longer than Z_C" in {
+    parsedCodeLen(jamBlob(0, 0, MaxCodeSize + 1)) shouldBe None
+  }
+
+  it should "accept exactly Z_J = 2^24 jump-table entries" in {
+    parsedCodeLen(jamBlob(MaxJumpTableEntries, 0, 1)) shouldBe Some(1)
+  }
+
+  it should "reject more than Z_J jump-table entries, even when z = 0 makes them occupy no octets" in {
+    parsedCodeLen(jamBlob(MaxJumpTableEntries + 1, 0, 1)) shouldBe None
+  }
+
+  it should "reject, not throw on, length prefixes of 2^63 or more" in {
+    val hugeCount = hugeNatural ++ Array[Byte](0) ++ natural(1) ++ new Array[Byte](2)
+    val hugeCode = natural(0) ++ Array[Byte](0) ++ hugeNatural ++ new Array[Byte](2)
+    parsedCodeLen(hugeCount) shouldBe None
+    parsedCodeLen(hugeCode) shouldBe None
+  }
+
+  it should "reject, not throw on, a truncated jump table whose octet length exceeds Int.MaxValue" in {
+    // 2^24 entries of 255 octets each, but no jump-table octets actually present.
+    val truncated = natural(MaxJumpTableEntries) ++ Array(255.toByte) ++ natural(1) ++ new Array[Byte](2)
+    parsedCodeLen(truncated) shouldBe None
+  }

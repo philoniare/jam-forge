@@ -18,10 +18,10 @@ object Abi:
   /** Address to return to host (exit VM) */
   val VmAddrReturnToHost: UInt = UInt(0xffff0000)
 
-  /** Maximum code size: 32 MB */
+  /** Maximum code size Z_C = 2^25 octets */
   val VmMaximumCodeSize: UInt = UInt(32 * 1024 * 1024)
 
-  /** Maximum jump table entries: 16M */
+  /** Maximum jump table entries Z_J = 2^24 */
   val VmMaximumJumpTableEntries: UInt = UInt(16 * 1024 * 1024)
 
   /** Maximum import count */
