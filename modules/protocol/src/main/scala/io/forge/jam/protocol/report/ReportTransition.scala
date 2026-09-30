@@ -334,7 +334,7 @@ object ReportTransition:
       Right(())
 
   /**
-   * Validate lookup anchor slot age.
+   * Validate lookup anchor slot age: x_t >= H_T - L (eq:limitlookupanchorage).
    */
   private def validateAnchorAge(
     guarantees: List[GuaranteeExtrinsic],
@@ -344,7 +344,7 @@ object ReportTransition:
     boundary:
       for guarantee <- guarantees do
         val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.value.toLong
-        if lookupAnchorSlot > currentSlot || currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
+        if currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
           break(Left(ReportErrorCode.LookupAnchorNotRecent))
       Right(())
 
