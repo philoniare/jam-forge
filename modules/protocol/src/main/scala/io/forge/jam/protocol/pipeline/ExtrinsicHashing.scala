@@ -5,14 +5,15 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.scodec.JamCodecs.{compactInt, compactPrefixedList}
 import io.forge.jam.core.types.block.Extrinsic
 import io.forge.jam.core.types.dispute.GuaranteeSignature
-import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute, Preimage}
+import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute}
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.workpackage.WorkReport
 import scodec.Codec
 
 /** H_extrinsichash computation: blake2b over the concatenated
-  * hashes of the five encoded extrinsic groups, with each guarantee item
-  * contributing hash(report) ++ slot ++ credentials. Shared by block
+  * hashes of the five encoded extrinsic groups, with each preimage item
+  * contributing service ++ hash(data) and each guarantee item contributing
+  * hash(report) ++ slot ++ credentials. Shared by block
   * validation (pipeline) and block authoring.
   */
 object ExtrinsicHashing:
@@ -20,8 +21,13 @@ object ExtrinsicHashing:
   def computeExtrinsicHash(ex: Extrinsic, config: ChainConfig): Hash =
     val ticketsEncoded =
       compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets).require.toByteArray
+    // Each preimage contributes E_4(service) ++ hash(data)
+    val preimageItems = ex.preimages.map { p =>
+      _root_.scodec.codecs.uint32L.encode(p.requester.value.toLong & 0xffffffffL).require.toByteArray ++
+        Hashing.blake2b256(p.blob.toArray).bytes
+    }
     val preimagesEncoded =
-      compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages).require.toByteArray
+      Array.concat(compactInt.encode(preimageItems.length).require.toByteArray +: preimageItems*)
     val assurancesEncoded =
       compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount))
         .encode(ex.assurances)

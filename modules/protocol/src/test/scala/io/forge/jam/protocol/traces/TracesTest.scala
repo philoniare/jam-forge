@@ -498,6 +498,32 @@ class TracesTest extends AnyFunSuite with Matchers:
           safrolePostState.entropy.pool.size shouldBe 4 withClue s"Invalid eta size in step $stepName"
   }
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // Full Block Import (the sequential-import tests above only run Safrole)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  /** Imports every step of a trace and checks it reaches the expected post-state root. */
+  private def assertFullImport(traceName: String): Unit =
+    assume(TestFileLoader.canLocateTestVectors, "Test vectors not available")
+    val stepNames = TestFileLoader.getTraceStepFilenames(traceName).toOption.getOrElse(Nil)
+    assume(stepNames.nonEmpty, s"No $traceName trace steps available")
+
+    for stepName <- stepNames do
+      val step = TestFileLoader.loadJsonFromTestVectors[TraceStep](s"traces/$traceName", stepName)
+        .fold(error => fail(s"Failed to load $traceName step $stepName: $error"), identity)
+      new BlockImporter(config).importBlock(step.block, step.preState) match
+        case ImportResult.Success(root, _) =>
+          root shouldBe step.postState.stateRoot withClue s"Post-state root mismatch in $traceName step $stepName"
+        case ImportResult.Failure(error, message) =>
+          step.postState.stateRoot shouldBe step.preState.stateRoot withClue
+            s"$traceName step $stepName rejected ($error: $message) but a state change was expected"
+
+  // These traces carry preimages, whose extrinsic-hash term is (E_4(s), H(d))
+  for traceName <- Seq("preimages", "preimages_light", "fuzzy", "fuzzy_light") do
+    test(s"$traceName trace: full block import matches every post-state root") {
+      assertFullImport(traceName)
+    }
+
   test("BP-13: isFatalCrash routes JVM-fatal errors to session-termination, not block rejection") {
     BlockImporter.isFatalCrash(new OutOfMemoryError("oom")) shouldBe true
     BlockImporter.isFatalCrash(new StackOverflowError("soe")) shouldBe true

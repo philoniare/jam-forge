@@ -515,6 +515,38 @@ class ReportTest extends AnyFunSuite with Matchers:
     postState shouldBe preState
   }
 
+  test("future lookup-anchor slot passes the age check when ancestry validation is skipped") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0xEE.toByte)),        // absent from β -> AnchorNotRecent once lookup passes
+      lookupAnchor = Hash(Array.fill(32)(0xFF.toByte)),
+      lookupAnchorSlot = 11,
+      blockSlot = 10)
+    // eq:limitlookupanchorage only bounds the lookup-anchor slot from below (x_t >= H_T - L);
+    // a future slot is ruled out by the ancestry check alone, which is skipped here.
+    val (postState, output) =
+      ReportTransition.stfInternal(input, preState, TinyConfig, skipAncestryValidation = true)
+    output.swap.toOption shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    postState shouldBe preState
+  }
+
+  test("future lookup-anchor slot is still rejected by the ancestry check") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val lookupAnchor = Hash(Array.fill(32)(0xFF.toByte))
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0x01.toByte)),
+      lookupAnchor = lookupAnchor,
+      lookupAnchorSlot = 11,
+      blockSlot = 10)
+    val ancestry = List(AncestorHeader(5L, lookupAnchor))
+    val (postState, output) =
+      ReportTransition.stfInternal(input, preState, TinyConfig, skipAncestryValidation = false, ancestry)
+    output.swap.toOption shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    postState shouldBe preState
+  }
+
   test("anchor absent from beta still yields AnchorNotRecent (anchor path unchanged)") {
     val preState = createMinimalState(
       TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
