@@ -931,8 +931,8 @@ object AccumulationTransition:
         changes.accountUpdates(serviceId) = postAccount
     }
 
-    // Check for changes in other accounts
-    for (id, postAccount) <- postState.accounts if id != serviceId do
+    for (id, postAccount) <- postState.accounts
+        if id != serviceId && !initialState.accounts.contains(id) do
       if accountChanged(initialState.accounts.get(id), postAccount) then
         if !changes.accountUpdates.contains(id) then
           changes.accountUpdates(id) = postAccount
