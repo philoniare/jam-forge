@@ -47,19 +47,42 @@ final class InterpretedModule private (
   def isDynamicPaging: Boolean = false
 
   lazy val isBlobStructurallyValid: Boolean = Program.isValidBlob(blob.code, blob.bitmask)
-  private val blockGasCosts = scala.collection.mutable.LongMap.empty[Long]
+  private val blockGasCosts =
+    val arr = new java.util.concurrent.atomic.AtomicLongArray(blob.code.length + 1)
+    var i = 0
+    while i < arr.length do
+      arr.setPlain(i, -1L)
+      i += 1
+    arr
 
   def blockGasCostAt(chargePc: Int): Long =
-    blockGasCosts.synchronized {
-      blockGasCosts.getOrElseUpdate(
-        chargePc.toLong, {
-          val start = Program
-            .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
-            .getOrElse(chargePc)
-          BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
-        }
-      )
-    }
+    if chargePc < 0 || chargePc >= blockGasCosts.length() then computeBlockGasCost(chargePc)
+    else
+      val cached = blockGasCosts.getAcquire(chargePc)
+      if cached >= 0 then cached
+      else
+        val cost = computeBlockGasCost(chargePc)
+        blockGasCosts.setRelease(chargePc, cost)
+        cost
+
+  private def computeBlockGasCost(chargePc: Int): Long =
+    val start = Program
+      .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
+      .getOrElse(chargePc)
+    BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
+  private val jumpTargetValidity = new Array[Byte](blob.code.length + 1)
+
+  def isJumpTargetValid(offset: Int): Boolean =
+    if offset < 0 || offset >= jumpTargetValidity.length then
+      Program.isJumpTargetValid(blob.code, blob.bitmask, offset)
+    else
+      jumpTargetValidity(offset) match
+        case 1 => true
+        case 2 => false
+        case _ =>
+          val valid = Program.isJumpTargetValid(blob.code, blob.bitmask, offset)
+          jumpTargetValidity(offset) = if valid then 1 else 2
+          valid
 
   private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
   private var _compiledOffsetForBlock: Array[Int] = null
