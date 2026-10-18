@@ -19,8 +19,8 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
     def batchUpdate(ops: Seq[BackendOp]): Unit =
       ops.foreach {
         case BackendOp.WriteNode(node) => nodes.put(node.hash, node); ()
-        case BackendOp.WriteRawValue(v) =>
-          values.put(io.forge.jam.core.Hashing.blake2b256(v), v); ()
+        case BackendOp.WriteRawValue(h, v) =>
+          values.put(h, v); ()
         case _: BackendOp.NodeRefDelta     => ()
         case _: BackendOp.RawValueRefDelta => ()
       }

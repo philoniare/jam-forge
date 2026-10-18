@@ -2,7 +2,7 @@ package io.forge.jam.db
 
 import java.nio.file.Path
 
-import io.forge.jam.core.{Hashing, JamBytes}
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.{BackendOp, StateTrieBackend, TrieNode, TrieNodeType}
 import org.rocksdb.{ColumnFamilyDescriptor, ColumnFamilyHandle, ColumnFamilyOptions, DBOptions, RocksDB, WriteBatch, WriteOptions}
@@ -55,8 +55,8 @@ final class RocksDbTrieBackend private (
       ops.foreach {
         case BackendOp.WriteNode(node) =>
           batch.put(nodesCf, key(node.hash), node.encode.toArray)
-        case BackendOp.WriteRawValue(v) =>
-          batch.put(valuesCf, key(Hashing.blake2b256(v)), v.toArray)
+        case BackendOp.WriteRawValue(h, v) =>
+          batch.put(valuesCf, key(h), v.toArray)
         case BackendOp.NodeRefDelta(h, d) =>
           val c = nodeCounts.getOrElseUpdate(h, readCount(nodeRefsCf, h)) + d
           nodeCounts.update(h, c)
