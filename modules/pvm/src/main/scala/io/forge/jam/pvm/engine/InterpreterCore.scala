@@ -305,7 +305,7 @@ abstract class InterpreterCore protected (
       }
 
   private def isJumpTargetValid(pc: ProgramCounter): Boolean =
-    Program.isJumpTargetValid(module.blob.code, module.blob.bitmask, pc.toInt)
+    module.isJumpTargetValid(pc.toInt)
 
   private def isValidEntryPoint(pc: ProgramCounter): Boolean =
     Program.isValidInstructionBoundary(module.blob.code, module.blob.bitmask, pc.toInt)

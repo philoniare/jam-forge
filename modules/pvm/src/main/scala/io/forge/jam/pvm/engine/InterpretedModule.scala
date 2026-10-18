@@ -47,19 +47,49 @@ final class InterpretedModule private (
   def isDynamicPaging: Boolean = false
 
   lazy val isBlobStructurallyValid: Boolean = Program.isValidBlob(blob.code, blob.bitmask)
-  private val blockGasCosts = scala.collection.mutable.LongMap.empty[Long]
+  // Per-pc memo of block gas costs (GP 0.8.0 appendix A, eq:gascostforblock), -1 = not yet computed. A flat array
+  // rather than a synchronized LongMap: the lookup runs once per executed basic block. Racing writers store the same
+  // value, and AtomicLongArray keeps the 64-bit reads/writes untorn without a lock.
+  private val blockGasCosts =
+    val arr = new java.util.concurrent.atomic.AtomicLongArray(blob.code.length + 1)
+    var i = 0
+    while i < arr.length do
+      arr.setPlain(i, -1L)
+      i += 1
+    arr
 
   def blockGasCostAt(chargePc: Int): Long =
-    blockGasCosts.synchronized {
-      blockGasCosts.getOrElseUpdate(
-        chargePc.toLong, {
-          val start = Program
-            .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
-            .getOrElse(chargePc)
-          BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
-        }
-      )
-    }
+    if chargePc < 0 || chargePc >= blockGasCosts.length() then computeBlockGasCost(chargePc)
+    else
+      val cached = blockGasCosts.getAcquire(chargePc)
+      if cached >= 0 then cached
+      else
+        val cost = computeBlockGasCost(chargePc)
+        blockGasCosts.setRelease(chargePc, cost)
+        cost
+
+  private def computeBlockGasCost(chargePc: Int): Long =
+    val start = Program
+      .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
+      .getOrElse(chargePc)
+    BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
+
+  // Per-pc memo of Program.isJumpTargetValid, the basic-block-start check that every jump and both branch targets
+  // must pass (GP 0.8.0 appendix A, §Single-Step State Transition): 0 = unknown, 1 = valid, 2 = invalid. Byte writes
+  // cannot tear and every writer stores the same deterministic value, so no synchronization is needed.
+  private val jumpTargetValidity = new Array[Byte](blob.code.length + 1)
+
+  def isJumpTargetValid(offset: Int): Boolean =
+    if offset < 0 || offset >= jumpTargetValidity.length then
+      Program.isJumpTargetValid(blob.code, blob.bitmask, offset)
+    else
+      jumpTargetValidity(offset) match
+        case 1 => true
+        case 2 => false
+        case _ =>
+          val valid = Program.isJumpTargetValid(blob.code, blob.bitmask, offset)
+          jumpTargetValidity(offset) = if valid then 1 else 2
+          valid
 
   private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
   private var _compiledOffsetForBlock: Array[Int] = null

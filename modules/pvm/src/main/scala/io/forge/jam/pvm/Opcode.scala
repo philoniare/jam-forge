@@ -523,9 +523,15 @@ enum Opcode(val value: Int):
 end Opcode
 
 object Opcode:
-  /** Lookup table for bytecode to opcode mapping */
-  private val byValue: Map[Int, Opcode] =
-    Opcode.values.map(op => op.value -> op).toMap
+  /** Lookup table for bytecode to opcode mapping, indexed by byte value (0-255).
+    *
+    * A flat array instead of a `Map[Int, Opcode]`: this sits on the interpreter's jump-validation path, where the
+    * boxed hash lookup was a top profiler hit on the `storage` trace.
+    */
+  private val byValue: Array[Option[Opcode]] =
+    val table = Array.fill[Option[Opcode]](256)(None)
+    Opcode.values.foreach(op => table(op.value) = Some(op))
+    table
 
   /**
    * Look up an opcode by its bytecode value.
@@ -533,7 +539,8 @@ object Opcode:
    * @param value The bytecode value (0-255)
    * @return Some(opcode) if valid, None if invalid
    */
-  def fromByte(value: Int): Option[Opcode] = byValue.get(value)
+  def fromByte(value: Int): Option[Opcode] =
+    if value >= 0 && value < 256 then byValue(value) else None
 
   /**
    * Look up an opcode by its bytecode value, throwing if invalid.
