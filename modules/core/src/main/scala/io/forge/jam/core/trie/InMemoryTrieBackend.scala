@@ -1,6 +1,6 @@
 package io.forge.jam.core.trie
 
-import io.forge.jam.core.{JamBytes, Hashing}
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import scala.collection.mutable
 
@@ -19,8 +19,8 @@ final class InMemoryTrieBackend extends StateTrieBackend:
     ops.foreach {
       case BackendOp.WriteNode(node) =>
         nodes.update(node.hash, node)
-      case BackendOp.WriteRawValue(v) =>
-        values.update(Hashing.blake2b256(v), v)
+      case BackendOp.WriteRawValue(h, v) =>
+        values.update(h, v)
       case BackendOp.NodeRefDelta(h, d) =>
         val c = nodeRefs(h) + d
         nodeRefs.update(h, c)

@@ -38,8 +38,8 @@ class InMemoryTrieBackendSpec extends AnyFlatSpec with Matchers:
     backend.batchUpdate(Seq(
       BackendOp.WriteNode(live), BackendOp.NodeRefDelta(live.hash, 1L),
       BackendOp.WriteNode(dead), BackendOp.NodeRefDelta(dead.hash, 1L),
-      BackendOp.WriteRawValue(liveVal), BackendOp.RawValueRefDelta(liveValHash, 1L),
-      BackendOp.WriteRawValue(deadVal), BackendOp.RawValueRefDelta(deadValHash, 1L)
+      BackendOp.writeRawValue(liveVal), BackendOp.RawValueRefDelta(liveValHash, 1L),
+      BackendOp.writeRawValue(deadVal), BackendOp.RawValueRefDelta(deadValHash, 1L)
     ))
     backend.nodeCount shouldBe 2
     backend.valueCount shouldBe 2

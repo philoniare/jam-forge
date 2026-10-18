@@ -38,7 +38,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
-          BackendOp.WriteRawValue(value),
+          BackendOp.writeRawValue(value),
           BackendOp.NodeRefDelta(node.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
         )
@@ -60,11 +60,11 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend.batchUpdate(
         Seq(
           BackendOp.WriteNode(liveNode),
-          BackendOp.WriteRawValue(liveValue),
+          BackendOp.writeRawValue(liveValue),
           BackendOp.NodeRefDelta(liveNode.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(liveValue), 1),
           BackendOp.WriteNode(deadNode),
-          BackendOp.WriteRawValue(deadValue),
+          BackendOp.writeRawValue(deadValue),
           BackendOp.NodeRefDelta(deadNode.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(deadValue), 1)
         )
@@ -86,7 +86,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
-          BackendOp.WriteRawValue(value),
+          BackendOp.writeRawValue(value),
           BackendOp.NodeRefDelta(node.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
         )
@@ -108,7 +108,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend1.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
-          BackendOp.WriteRawValue(value),
+          BackendOp.writeRawValue(value),
           BackendOp.NodeRefDelta(node.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
         )
@@ -167,7 +167,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       seed.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
-          BackendOp.WriteRawValue(value),
+          BackendOp.writeRawValue(value),
           BackendOp.NodeRefDelta(node.hash, 1),
           BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
         )
@@ -197,7 +197,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
-          BackendOp.WriteRawValue(value),
+          BackendOp.writeRawValue(value),
           BackendOp.NodeRefDelta(node.hash, 1)
         )
       )

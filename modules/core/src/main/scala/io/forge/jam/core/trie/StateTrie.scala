@@ -1,6 +1,6 @@
 package io.forge.jam.core.trie
 
-import io.forge.jam.core.{JamBytes, Hashing}
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import scala.collection.mutable
 
@@ -37,7 +37,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
   def save(): Unit =
     val ops = mutable.ArrayBuffer[BackendOp]()
     pendingNodes.values.foreach(n => ops += BackendOp.WriteNode(n))
-    pendingValues.values.foreach(v => ops += BackendOp.WriteRawValue(v))
+    pendingValues.foreach((h, v) => ops += BackendOp.WriteRawValue(h, v))
     nodeRefDeltas.foreach {
       case (h, d) if d != 0 => ops += BackendOp.NodeRefDelta(h, d)
       case _ => ()
@@ -158,7 +158,9 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     pendingNodes.update(leaf.hash, leaf)
     refNode(leaf.hash)
     if leaf.nodeType == TrieNodeType.RegularLeaf then
-      val vh = Hashing.blake2b256(value)
+      // A regular leaf's right half is already H(value) (GP 0.8.0 appendix D, §Node Encoding and Trie Identification);
+      // reuse it rather than hashing the value a second time.
+      val vh = Hash.fromByteVectorUnsafe(leaf.right.toByteVector)
       pendingValues.update(vh, value)
       refValue(vh)
     leaf.hash
