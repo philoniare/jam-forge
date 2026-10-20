@@ -69,10 +69,13 @@ COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure
 
 COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conformance.jar /app/
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
+COPY jamtestvectors/traces/preimages/*.json /app/warmup-traces/preimages/
+COPY jamtestvectors/traces/preimages_light/*.json /app/warmup-traces/preimages_light/
+ENV JAM_TRACES_DIR=/app/warmup-traces
 
 ENV LD_LIBRARY_PATH=/app/lib
 ENV LOG_LEVEL=ERROR
-ENV JAVA_OPTS="-XX:+UseZGC -Xms2g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dlogback.configurationFile=/app/logback.xml"
+ENV JAVA_OPTS="-XX:+UseZGC -Xms12g -Xmx12g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dlogback.configurationFile=/app/logback.xml"
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown

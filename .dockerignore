@@ -17,6 +17,8 @@ project/project/
 
 # Test vectors (large)
 jamtestvectors/
+!jamtestvectors/traces/preimages/*.json
+!jamtestvectors/traces/preimages_light/*.json
 graypaper/
 # Keep jam-conformance/fuzz-reports for CRaC warmup traces
 jam-conformance/crypto/

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Build and push jam-forge Docker image to GitHub Container Registry.
-# Starts the conformance fuzz server on a cold JVM (no CRaC checkpoint, no
-# startup warmup).
+# Starts the conformance fuzz server without a CRaC checkpoint; it warms the
+# JIT on the bundled warmup traces before opening the fuzz socket.
 
 IMAGE_NAME="jam-forge"
 REGISTRY="ghcr.io"

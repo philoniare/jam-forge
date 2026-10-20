@@ -98,7 +98,7 @@ object ConformanceServerApp extends IOApp:
         IO.println(s"[JAM-FORGE FATAL] $err").as(ExitCode.Error)
       case Right(Some(cfg)) =>
         cfg.dataPath.foreach(FuzzEnv.ensureDataPath)
-        runServer(cfg)
+        IO.blocking(WarmupRunner.warmupIfEnabled()) *> runServer(cfg)
       case Right(None) =>
         runFromArgs(args)
 

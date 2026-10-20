@@ -33,18 +33,19 @@ object WarmupRunner extends Resource:
       println("Restored from CRaC checkpoint.")
       true
     catch
-      case e: UnsupportedOperationException =>
-        println(s"CRaC checkpoint not available: ${e.getMessage}")
-        println(
-          "Continuing without checkpoint (JIT is still warm in this process)."
-        )
-        false
       case e: Exception =>
         println(
-          s"Checkpoint failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
+          s"CRaC checkpoint not available (${e.getClass.getSimpleName}: ${e.getMessage}); " +
+            "continuing without checkpoint (JIT is still warm in this process)."
         )
-        e.printStackTrace()
-        throw e
+        false
+
+  def warmupIfEnabled(env: String => Option[String] = sys.env.get): Unit =
+    if env("JAM_WARMUP").contains("0") then println("Warmup disabled (JAM_WARMUP=0).")
+    else
+      val tracesDir = resolveTracesDir(baseDir, env)
+      if Files.isDirectory(tracesDir) then runWarmup(tracesDir)
+      else println(s"No warmup traces at $tracesDir; starting cold.")
 
   /** Standalone warmup for the legacy `warmup` CLI. Warms then checkpoints,
     * then exits — does not start a server post-restore.
@@ -64,10 +65,9 @@ object WarmupRunner extends Resource:
         e.printStackTrace()
         sys.exit(1)
 
-  private def runWarmup(): Unit =
-    val baseDir =
-      sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
-    val tracesDir = resolveTracesDir(baseDir)
+  private def runWarmup(): Unit = runWarmup(resolveTracesDir(baseDir))
+
+  private def runWarmup(tracesDir: Path): Unit =
 
     println("=== CRaC Warmup Runner ===")
     println(s"Base directory: $baseDir")
@@ -108,9 +108,10 @@ object WarmupRunner extends Resource:
         "WARNING: No successful block imports during warmup; JIT may not be fully warmed."
       )
 
-  private def resolveTracesDir(baseDir: String): Path =
-    sys.env
-      .get("JAM_TRACES_DIR")
+  private def baseDir: String = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
+
+  private def resolveTracesDir(baseDir: String, env: String => Option[String] = sys.env.get): Path =
+    env("JAM_TRACES_DIR")
       .map(Paths.get(_))
       .getOrElse(
         Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.8.0", "traces")
