@@ -4,14 +4,24 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import scala.collection.mutable
 
+/**
+ * Binary Patricia Merkle state trie, with writes buffered until [[save]].
+ *
+ * Between saves the trie holds only what the backend will need: a node created and then replaced before `save()` is
+ * dropped at once, with its raw value if no other pending leaf shares it. So the pending set stays the size of the
+ * nodes that are new and still reachable, however many times one batch rewrites the same paths.
+ *
+ * Invariants between calls: a hash is in `pendingNodes` iff its ref delta is positive, and a raw value is in
+ * `pendingValues` iff its ref delta is positive (one per pending regular leaf that holds it). Zero deltas are not kept.
+ */
 final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private var currentRoot: Hash = initialRoot
 
-  private val pendingNodes = mutable.Map[Hash, TrieNode]()
-  private val pendingValues = mutable.Map[Hash, JamBytes]()
-  private val nodeRefDeltas = mutable.Map[Hash, Long]().withDefaultValue(0L)
-  private val valueRefDeltas = mutable.Map[Hash, Long]().withDefaultValue(0L)
+  private val pendingNodes = mutable.HashMap[Hash, TrieNode]()
+  private val pendingValues = mutable.HashMap[Hash, JamBytes]()
+  private val nodeRefDeltas = mutable.HashMap[Hash, Long]()
+  private val valueRefDeltas = mutable.HashMap[Hash, Long]()
 
   def rootHash: Hash = currentRoot
 
@@ -35,17 +45,13 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     }
 
   def save(): Unit =
-    val ops = mutable.ArrayBuffer[BackendOp]()
-    pendingNodes.values.foreach(n => ops += BackendOp.WriteNode(n))
+    val ops = new mutable.ArrayBuffer[BackendOp](
+      pendingNodes.size + pendingValues.size + nodeRefDeltas.size + valueRefDeltas.size
+    )
+    pendingNodes.valuesIterator.foreach(n => ops += BackendOp.WriteNode(n))
     pendingValues.foreach((h, v) => ops += BackendOp.WriteRawValue(h, v))
-    nodeRefDeltas.foreach {
-      case (h, d) if d != 0 => ops += BackendOp.NodeRefDelta(h, d)
-      case _ => ()
-    }
-    valueRefDeltas.foreach {
-      case (h, d) if d != 0 => ops += BackendOp.RawValueRefDelta(h, d)
-      case _ => ()
-    }
+    nodeRefDeltas.foreach((h, d) => ops += BackendOp.NodeRefDelta(h, d))
+    valueRefDeltas.foreach((h, d) => ops += BackendOp.RawValueRefDelta(h, d))
     backend.batchUpdate(ops.toSeq)
     pendingNodes.clear()
     pendingValues.clear()
@@ -56,33 +62,34 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
     getNode(rootHash) match
       case None =>
-        emitLeaf(key, value)
+        emitLeaf(TrieNode.leaf(key, value), value)
       case Some(node) if node.nodeType == TrieNodeType.Branch =>
         val bit = bitAt(key, depth)
         val leftHash = Hash.wrapUnchecked(node.left.toArrayUnsafe)
         val rightHash = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        val newChildHash =
-          if bit then insert(rightHash, key, value, depth + 1)
-          else insert(leftHash, key, value, depth + 1)
-        unrefNode(rootHash)
-        val newBranch =
-          if bit then TrieNode.branch(leftHash, newChildHash)
-          else TrieNode.branch(newChildHash, rightHash)
-        pendingNodes.update(newBranch.hash, newBranch)
-        refNode(newBranch.hash)
-        newBranch.hash
+        val oldChildHash = if bit then rightHash else leftHash
+        val newChildHash = insert(oldChildHash, key, value, depth + 1)
+        // Same value written again: nothing below changed, so neither does this branch.
+        if newChildHash == oldChildHash then rootHash
+        else
+          unrefNode(rootHash)
+          if bit then writeBranch(leftHash, newChildHash)
+          else writeBranch(newChildHash, rightHash)
       case Some(leaf) =>
         val existingKey = TrieNode.leafKey(leaf)
         if existingKey == key then
-          unrefNode(rootHash)
-          emitLeaf(key, value)
+          val newLeaf = TrieNode.leaf(key, value)
+          if newLeaf.hash == rootHash then rootHash
+          else
+            unrefNode(rootHash)
+            emitLeaf(newLeaf, value)
         else
-          unrefNode(rootHash)
-          splitLeaves(leaf, existingKey, key, value, depth)
+          // The existing leaf moves down under new branches unchanged, so its refcount does not change.
+          splitLeaves(existingKey, rootHash, key, value, depth)
 
   private def splitLeaves(
-      existing: TrieNode,
       existingKey: JamBytes,
+      existingHash: Hash,
       newKey: JamBytes,
       newValue: JamBytes,
       depth: Int,
@@ -90,25 +97,13 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     val existingBit = bitAt(existingKey, depth)
     val newBit = bitAt(newKey, depth)
     if existingBit != newBit then
-      val newLeafHash = emitLeaf(newKey, newValue)
-      pendingNodes.update(existing.hash, existing)
-      refNode(existing.hash)
-      if existing.nodeType == TrieNodeType.RegularLeaf then
-        refValue(Hash.wrapUnchecked(existing.right.toArrayUnsafe))
-      val branch =
-        if newBit then TrieNode.branch(existing.hash, newLeafHash)
-        else TrieNode.branch(newLeafHash, existing.hash)
-      pendingNodes.update(branch.hash, branch)
-      refNode(branch.hash)
-      branch.hash
+      val newLeafHash = emitLeaf(TrieNode.leaf(newKey, newValue), newValue)
+      if newBit then writeBranch(existingHash, newLeafHash)
+      else writeBranch(newLeafHash, existingHash)
     else
-      val childHash = splitLeaves(existing, existingKey, newKey, newValue, depth + 1)
-      val branch =
-        if existingBit then TrieNode.branch(Hash.zero, childHash)
-        else TrieNode.branch(childHash, Hash.zero)
-      pendingNodes.update(branch.hash, branch)
-      refNode(branch.hash)
-      branch.hash
+      val childHash = splitLeaves(existingKey, existingHash, newKey, newValue, depth + 1)
+      if existingBit then writeBranch(Hash.zero, childHash)
+      else writeBranch(childHash, Hash.zero)
 
   private def delete(rootHash: Hash, key: JamBytes, depth: Int): Hash =
     require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
@@ -149,23 +144,60 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private def writeBranch(leftHash: Hash, rightHash: Hash): Hash =
     val branch = TrieNode.branch(leftHash, rightHash)
-    pendingNodes.update(branch.hash, branch)
-    refNode(branch.hash)
+    refNode(branch)
     branch.hash
 
-  private def emitLeaf(key: JamBytes, value: JamBytes): Hash =
-    val leaf = TrieNode.leaf(key, value)
-    pendingNodes.update(leaf.hash, leaf)
-    refNode(leaf.hash)
-    if leaf.nodeType == TrieNodeType.RegularLeaf then
-      val vh = Hash.wrap(leaf.right.toArrayUnsafe)
-      pendingValues.update(vh, value)
-      refValue(vh)
+  /** `leaf` must be `TrieNode.leaf(key, value)`; `value` is kept for a regular leaf, whose node holds only its hash. */
+  private def emitLeaf(leaf: TrieNode, value: JamBytes): Hash =
+    if refNode(leaf) && leaf.nodeType == TrieNodeType.RegularLeaf then
+      refValue(Hash.wrap(leaf.right.toArrayUnsafe), value)
     leaf.hash
 
-  private def refNode(h: Hash): Unit   = nodeRefDeltas.update(h, nodeRefDeltas(h) + 1)
-  private def unrefNode(h: Hash): Unit = nodeRefDeltas.update(h, nodeRefDeltas(h) - 1)
-  private def refValue(h: Hash): Unit  = valueRefDeltas.update(h, valueRefDeltas(h) + 1)
+  /**
+   * Counts a reference to `node` and queues it for writing. Returns false, writing nothing, when `node` was replaced
+   * earlier in this batch and is now back: the backend still holds it at the refcount it had, with its raw value.
+   */
+  private def refNode(node: TrieNode): Boolean =
+    val h = node.hash
+    val d = nodeRefDeltas.getOrElse(h, 0L) + 1
+    if d == 0 then
+      nodeRefDeltas.remove(h)
+      false
+    else
+      nodeRefDeltas.update(h, d)
+      pendingNodes.update(h, node)
+      true
+
+  /**
+   * Drops a reference to `h`. A node created since the last save that loses its only reference is discarded with its
+   * raw value's reference, so the backend never sees either.
+   */
+  private def unrefNode(h: Hash): Unit =
+    val d = nodeRefDeltas.getOrElse(h, 0L) - 1
+    if d == 0 then
+      nodeRefDeltas.remove(h)
+      pendingNodes.remove(h).foreach { node =>
+        if node.nodeType == TrieNodeType.RegularLeaf then unrefValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
+      }
+    else nodeRefDeltas.update(h, d)
+
+  private def refValue(h: Hash, value: JamBytes): Unit =
+    valueRefDeltas.update(h, valueRefDeltas.getOrElse(h, 0L) + 1)
+    pendingValues.update(h, value)
+
+  private def unrefValue(h: Hash): Unit =
+    val d = valueRefDeltas.getOrElse(h, 0L) - 1
+    if d == 0 then
+      valueRefDeltas.remove(h)
+      pendingValues.remove(h)
+      ()
+    else valueRefDeltas.update(h, d)
+
+  /** Nodes queued for the next [[save]]; for tests. */
+  private[trie] def pendingNodeCount: Int = pendingNodes.size
+
+  /** Raw values queued for the next [[save]]; for tests. */
+  private[trie] def pendingValueCount: Int = pendingValues.size
 
   def getKeyValues(prefix: JamBytes, bitsCount: Int): List[(JamBytes, JamBytes)] =
     require(bitsCount >= 0 && bitsCount <= 248, "bitsCount must be in [0, 248]")

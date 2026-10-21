@@ -1,7 +1,8 @@
 package io.forge.jam.protocol.benchmark
 
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrie, StateTrieStore}
+import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrie, StateTrieStore, TrieNodeType}
 import io.forge.jam.crypto.ErasureCoding
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.traces.{BlockImporter, TraceStep}
@@ -36,12 +37,12 @@ object PolkajamComparisonBenchmark:
     val rng = new Random(42)
     val first = randomEntries(rng, n)
     val second = randomEntries(rng, n)
-    val store = new StateTrieStore(new InMemoryTrieBackend)
+    val backend = new InMemoryTrieBackend
+    val store = new StateTrieStore(backend)
     val (_, populateMs) = timeMs(store.bootstrap(first))
     result("trie_populate_1m", populateMs, "ms")
-    // Saved every InsertBatch keys: StateTrie keeps every superseded branch in its pending set until save(), so a
-    // single 1M-key batch into a 1M-key trie runs out of a 12 GB heap.
-    val (_, insertMs) = timeMs {
+    // Saved every InsertBatch keys, as before; trie_insert_1m_one_batch below does the same insert as a single batch.
+    val (finalRoot, insertMs) = timeMs {
       var root = store.currentRoot
       second.grouped(InsertBatch).foreach { batch =>
         val trie = StateTrie.at(store.backend, root)
@@ -52,6 +53,37 @@ object PolkajamComparisonBenchmark:
       root
     }
     result("trie_insert_1m", insertMs, "ms")
+    // Nodes left in the backend once dead ones are collected, against the nodes the final trie can reach: any excess
+    // is nodes written by a save() that nothing references or ever collects.
+    store.gc()
+    result("trie_backend_nodes", backend.nodeCount.toDouble, "nodes")
+    result("trie_reachable_nodes", reachableNodes(backend, finalRoot), "nodes")
+
+  /** The 1M-key insert of [[trieBenchmark]] as one update() and one save(), the shape of a single large block. */
+  private def trieOneBatchBenchmark(n: Int): Unit =
+    val rng = new Random(42)
+    val first = randomEntries(rng, n)
+    val second = randomEntries(rng, n)
+    val store = new StateTrieStore(new InMemoryTrieBackend)
+    store.bootstrap(first)
+    val (_, insertMs) = timeMs {
+      val trie = StateTrie.at(store.backend, store.currentRoot)
+      trie.update(second.map((k, v) => (k, Some(v))))
+      trie.save()
+    }
+    result("trie_insert_1m_one_batch", insertMs, "ms")
+
+  private def reachableNodes(backend: InMemoryTrieBackend, root: Hash): Double =
+    var count = 0L
+    val stack = scala.collection.mutable.Stack(root)
+    while stack.nonEmpty do
+      backend.readNode(stack.pop()).foreach { node =>
+        count += 1
+        if node.nodeType == TrieNodeType.Branch then
+          stack.push(Hash.wrapUnchecked(node.left.toArrayUnsafe))
+          stack.push(Hash.wrapUnchecked(node.right.toArrayUnsafe))
+      }
+    count.toDouble
 
   private def ecRoundTrip(name: String, pieces: Seq[Array[Byte]], config: ChainConfig): Unit =
     val recoveryOnly = config.validatorCount - config.ecPieceSize / 2
@@ -100,5 +132,6 @@ object PolkajamComparisonBenchmark:
     val only = args.toSet
     def enabled(name: String) = only.isEmpty || only.contains(name)
     if enabled("trie") then trieBenchmark(1_000_000)
+    if enabled("trie-one-batch") then trieOneBatchBenchmark(1_000_000)
     if enabled("ec") then ecBenchmark()
     if enabled("import") && TestFileLoader.canLocateTestVectors then importBenchmark(rounds = 5)
