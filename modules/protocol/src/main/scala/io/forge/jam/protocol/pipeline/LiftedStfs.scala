@@ -29,8 +29,17 @@ import io.forge.jam.protocol.pipeline.StfLifters.*
 object LiftedStfs:
 
   // 1. Safrole STF
-  val safrole: StfStepWith[SafroleOutputData] = liftStandard(
-    stf = (input, view) => SafroleTransition.stfView(input, view),
+  val safrole: StfStepWith[SafroleOutputData] = liftStandardCtx(
+    stf = (input: SafroleInput, view, ctx) =>
+      SafroleTransition.stfView(
+        input,
+        view,
+        Some(_.foreach(check =>
+          ctx.pendingChecks.add(check.thenApply(ok =>
+            if ok then None else Some(PipelineError.SafroleErr(SafroleErrorCode.BadTicketProof))
+          ))
+        ))
+      ),
     extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block),
     wrapError = (e: SafroleErrorCode) => PipelineError.SafroleErr(e)
   )

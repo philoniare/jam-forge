@@ -14,7 +14,8 @@ import scala.collection.mutable
 
 /**
  * Signature checks that decide only whether the block is valid, started on the shared pool so the state transition
- * runs while they verify. No posterior state component depends on whether the seal or entropy signature verifies.
+ * runs while they verify. No posterior state component depends on whether the seal or entropy signature verifies
+ * nor on whether a ticket's ring proof does: the ticket identifier is the proof's output
  *
  * A block import awaits them all before it succeeds. Checks are reported in the order they were started, and a failed
  * check wins over any error raised by a later pipeline step, so the error is the one a sequential check would give.
@@ -25,6 +26,10 @@ final class PendingChecks:
   /** Starts `check`, which returns the error to report if the block is invalid. */
   def start(check: => Option[PipelineError]): Unit =
     checks += Parallel.async(check)
+
+  /** Adds a check that is already running. */
+  def add(check: CompletableFuture[Option[PipelineError]]): Unit =
+    checks += check
 
   /** Waits for the checks in start order and returns the first failure. */
   def firstFailure(): Option[PipelineError] =

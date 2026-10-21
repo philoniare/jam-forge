@@ -268,6 +268,18 @@ object BandersnatchVrf:
    * @param signature The 96-byte IETF VRF signature
    * @return Some(vrfOutput) with 32-byte output, None on failure
    */
+  /**
+   * The ticket identifier carried by a ring VRF signature, read from its output
+   * point without verifying the proof. None if the output point does not decode.
+   */
+  def ringVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
+    try
+      JniBandersnatchWrapper.ensureLibraryLoaded()
+      val result = JniBandersnatchWrapper.getRingVrfOutput(signature)
+      if result == null || result.length != 32 then None else Some(result)
+    catch
+      case _: RuntimeException => None
+
   def getVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
     try
       JniBandersnatchWrapper.ensureLibraryLoaded()

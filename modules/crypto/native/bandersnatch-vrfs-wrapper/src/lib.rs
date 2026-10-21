@@ -148,6 +148,23 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_initializeCont
     })
 }
 
+type RingBuilder = ark_ec_vrfs::ring::VerifierKeyBuilder<BandersnatchSha512Ell2>;
+type RingBuilderPcsParams = ark_ec_vrfs::ring::RingBuilderPcsParams<BandersnatchSha512Ell2>;
+
+static RING_BUILDERS: Mutex<Vec<(usize, Arc<(RingBuilder, RingBuilderPcsParams)>)>> = Mutex::new(Vec::new());
+
+/// An empty ring builder and the SRS in Lagrangian form, per ring size.
+fn ring_builder(ring_size: jint) -> Arc<(RingBuilder, RingBuilderPcsParams)> {
+    let size = ring_size as usize;
+    let mut builders = RING_BUILDERS.lock().unwrap();
+    if let Some((_, b)) = builders.iter().find(|(n, _)| *n == size) {
+        return b.clone();
+    }
+    let built = Arc::new(ring_context(ring_size).verifier_key_builder());
+    builders.push((size, built.clone()));
+    built
+}
+
 // Verifier actor.
 struct Verifier {
     pub commitment: RingCommitment,
@@ -157,8 +174,12 @@ impl Verifier {
     fn new(ring: Vec<BanderPublic>, ring_size: jint) -> Self {
         // Backend currently requires the wrapped type (plain affine points)
         let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
-        let verifier_key = ring_context(ring_size).verifier_key(&pts);
-        let commitment = verifier_key.commitment();
+        let (empty, lagrange) = &*ring_builder(ring_size);
+        let mut builder = empty.clone();
+        builder
+            .append(&pts, lagrange)
+            .expect("ring larger than the ring context it was built for");
+        let commitment = builder.finalize().commitment();
         Self { commitment }
     }
 
@@ -250,7 +271,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
             Ok(public_key) => ring.push(public_key),
             Err(_e) => {
                 // Use a padding point as key
-                ring.push(BanderPublic::from(RingParams::padding_point()));
+                ring.push(BanderPublic::from_affine(RingParams::padding_point()));
             }
         }
     }
@@ -339,7 +360,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
         let key_slice = &key_bytes[i * PUBLIC_KEY_SIZE..(i + 1) * PUBLIC_KEY_SIZE];
         match BanderPublic::deserialize_compressed_unchecked(&mut &key_slice[..]) {
             Ok(public_key) => ring.push(public_key),
-            Err(_e) => ring.push(BanderPublic::from(RingParams::padding_point())),
+            Err(_e) => ring.push(BanderPublic::from_affine(RingParams::padding_point())),
         }
     }
 
@@ -722,6 +743,32 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
     })
 }
 
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getRingVrfOutput(
+    mut env: JNIEnv,
+    _class: JClass,
+    signature: JByteArray,
+) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
+    let sig = match env.convert_byte_array(&signature) {
+        Ok(data) => data,
+        Err(_) => return throw_exception(&mut env, "Failed to convert signature data"),
+    };
+    if sig.len() < 32 {
+        return throw_exception(&mut env, "Ring VRF signature too short");
+    }
+    let output = match BanderOutput::deserialize_compressed(&sig[..32]) {
+        Ok(o) => o,
+        Err(_) => return throw_exception(&mut env, "Invalid ring VRF output point"),
+    };
+    let hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
+    match env.byte_array_from_slice(&hash) {
+        Ok(array) => array.into_raw(),
+        Err(_) => throw_exception(&mut env, "Failed to create output array"),
+    }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,7 +789,7 @@ mod tests {
         // Check what we'd actually use in ring construction
         let point_for_ring = match BanderPublic::deserialize_compressed(&zeros[..]) {
             Ok(pk) => pk,
-            Err(_) => BanderPublic::from(RingParams::padding_point()),
+            Err(_) => BanderPublic::from_affine(RingParams::padding_point()),
         };
 
         // Serialize the padding point

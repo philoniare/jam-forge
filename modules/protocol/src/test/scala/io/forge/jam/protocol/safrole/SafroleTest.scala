@@ -3,7 +3,7 @@ package io.forge.jam.protocol.safrole
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.{ChainConfig, JamBytes, StfResult}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
@@ -175,6 +175,26 @@ class SafroleTest extends AnyFunSuite with Matchers:
           assertSafroleStateEquals(testCase.postState, postState, testCaseName)
       }
     }
+  }
+
+  test("GP: ticket proofs verified off the critical path give each vector's result (eqs. 6.30, 6.32)") {
+    for (folderPath, config) <- List("stf/safrole/tiny" -> TinyConfig, "stf/safrole/full" -> FullConfig) do
+      val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath).getOrElse(List.empty)
+      testCaseNames should not be empty
+      for testCaseName <- testCaseNames do
+        val testCase =
+          TestFileLoader.loadJsonFromTestVectors[SafroleCase](folderPath, testCaseName).fold(fail(_), identity)
+        // What a block import does with the handed-over checks: the block fails with BadTicketProof if any is false.
+        var handedOver = List.empty[Boolean]
+        val (stfState, stfOutput) =
+          SafroleTransition
+            .stfInternal(testCase.input, testCase.preState, config, Some(cs => handedOver = cs.map(_.join())))
+        val (postState, output) =
+          if handedOver.forall(identity) then (stfState, stfOutput)
+          else
+            (testCase.preState, StfResult.error[SafroleOutputData, SafroleErrorCode](SafroleErrorCode.BadTicketProof))
+        assertSafroleOutputEquals(testCase.output, output, testCaseName)
+        assertSafroleStateEquals(testCase.postState, postState, testCaseName)
   }
 
   /**

@@ -147,6 +147,11 @@ public class BandersnatchWrapper {
     public static native byte[] getIetfVrfOutput(byte[] signature);
 
     /**
+     * Get the VRF output hash (the ticket identifier) of a ring VRF signature, without verifying its proof.
+     */
+    public static native byte[] getRingVrfOutput(byte[] signature);
+
+    /**
      * Create a secret key from a seed.
      */
     public static native byte[] secretFromSeed(byte[] seed);

@@ -6,9 +6,11 @@ import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.core.Parallel
+import io.forge.jam.crypto.BandersnatchVrf
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.SafroleBridge
+import java.util.concurrent.CompletableFuture
 import scala.math.Ordering.Implicits.infixOrderingOps
 import com.typesafe.scalalogging.StrictLogging
 
@@ -35,6 +37,12 @@ object SafroleTransition extends StrictLogging:
   final class SafroleCryptoFailure(message: String) extends RuntimeException(message)
 
   /**
+   * Receives the ticket proof checks of a successful transition, still running. Each completes with whether its proof
+   * verifies; the caller must reject the block with [[SafroleErrorCode.BadTicketProof]] if any is false.
+   */
+  type DeferredProofs = List[CompletableFuture[Boolean]] => Unit
+
+  /**
    * Execute the Safrole STF over a typed view.
    *
    * Reads: tau, eta, validators (kappa, lambda, iota, gammaK), gamma (gammaA, gammaS, gammaZ), postOffenders
@@ -42,15 +50,16 @@ object SafroleTransition extends StrictLogging:
    *
    * @param input The safrole input containing slot, entropy, and tickets extrinsic.
    * @param state The unified JamState.
-   * @param config The chain configuration.
+   * @param deferProofs If given, ticket proofs are verified concurrently with the rest of the block and handed to it.
    * @return Tuple of (updated JamState, output).
    */
   def stfView(
     input: SafroleInput,
-    view: TrieBackedJamState
+    view: TrieBackedJamState,
+    deferProofs: Option[DeferredProofs] = None
   ): SafroleOutput =
     val preState = SafroleBridge.extract(view)
-    val (postState, output) = stfInternal(input, preState, view.config)
+    val (postState, output) = stfInternal(input, preState, view.config, deferProofs)
     SafroleBridge.apply(view, postState)
     output
 
@@ -60,18 +69,20 @@ object SafroleTransition extends StrictLogging:
    * @param input The safrole input containing slot, entropy, and tickets extrinsic.
    * @param preState The pre-transition state.
    * @param config The chain configuration.
+   * @param deferProofs If given, ticket proofs are verified concurrently with the rest of the block and handed to it.
    * @return Tuple of (post-transition state, output).
    */
   def stfInternal(
     input: SafroleInput,
     preState: SafroleState,
-    config: ChainConfig
+    config: ChainConfig,
+    deferProofs: Option[DeferredProofs] = None
   ): (SafroleState, SafroleOutput) =
     try
       if input.slot <= preState.tau then
         (preState, StfResult.error(SafroleErrorCode.BadSlot))
       else
-        processValidSlot(input, preState, config)
+        processValidSlot(input, preState, config, deferProofs)
     catch
       case e: SafroleCryptoFailure => throw e
       case e @ (_: io.forge.jam.core.codec.CodecDecodingException | _: IllegalArgumentException) =>
@@ -103,7 +114,8 @@ object SafroleTransition extends StrictLogging:
   private def processValidSlot(
     input: SafroleInput,
     preState: SafroleState,
-    config: ChainConfig
+    config: ChainConfig,
+    deferProofs: Option[DeferredProofs]
   ): (SafroleState, SafroleOutput) =
     val ctx = epochContext(preState, input.slot, config.epochLength)
 
@@ -127,7 +139,8 @@ object SafroleTransition extends StrictLogging:
     // Process ticket submissions
     val ticketResult =
       if input.extrinsic.isEmpty then Right(stateAfterEpoch)
-      else processExtrinsics(stateAfterEpoch, input.extrinsic, ctx.newPhase, ticketVerificationGammaZ, config)
+      else
+        processExtrinsics(stateAfterEpoch, input.extrinsic, ctx.newPhase, ticketVerificationGammaZ, config, deferProofs)
 
     ticketResult match
       case Left(error) =>
@@ -233,6 +246,7 @@ object SafroleTransition extends StrictLogging:
    * @param phase The current phase within epoch
    * @param verificationGammaZ The ring commitment to use for verification
    * @param config The chain configuration
+   * @param deferProofs If given, receives the still-running proof checks when every other check passes
    * @return Either an error or the updated state
    */
   private def processExtrinsics(
@@ -240,7 +254,8 @@ object SafroleTransition extends StrictLogging:
     tickets: List[TicketEnvelope],
     phase: Long,
     verificationGammaZ: JamBytes,
-    config: ChainConfig
+    config: ChainConfig,
+    deferProofs: Option[DeferredProofs]
   ): Either[SafroleErrorCode, SafroleState] =
     // Skip if in epoch tail
     if phase >= config.ticketCutoff then
@@ -248,28 +263,43 @@ object SafroleTransition extends StrictLogging:
     else if tickets.length > config.maxTicketsPerExtrinsic then
       Left(SafroleErrorCode.Reserved)
     else
+      val eta2 = postState.eta(2)
+      def verify(ticket: TicketEnvelope): Option[TicketMark] =
+        BandersnatchWrapper
+          .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.validatorCount)
       val accumulatorIds = scala.collection.mutable.HashSet.from(postState.gammaA.iterator.map(_.id))
-      val proofs = Parallel.map(tickets) { ticket =>
-        BandersnatchWrapper.verifyRingProof(
-          ticket.signature,
-          verificationGammaZ,
-          postState.eta(2),
-          ticket.attempt,
-          config.validatorCount
+      def process(marks: List[Option[TicketMark]]) =
+        processTickets(
+          postState,
+          tickets.zip(marks),
+          config,
+          None,
+          accumulatorIds,
+          scala.collection.mutable.HashSet.empty[JamBytes],
+          scala.collection.mutable.ListBuffer.empty[TicketMark],
+          0
         )
-      }
-      processTickets(
-        postState,
-        tickets.zip(proofs),
-        config,
-        None,
-        accumulatorIds,
-        scala.collection.mutable.HashSet.empty[JamBytes],
-        scala.collection.mutable.ListBuffer.empty[TicketMark]
-      )
+      deferProofs match
+        case None =>
+          process(Parallel.map(tickets)(verify)).left.map(_._1)
+        case Some(handOver) =>
+          val ids = tickets.map(t => BandersnatchVrf.ringVrfOutput(t.signature.toArray).map(JamBytes(_)))
+          val checks = tickets.zip(ids).map {
+            case (ticket, Some(id)) => Parallel.async(verify(ticket).exists(_.id == id))
+            case (_, None)          => CompletableFuture.completedFuture(false)
+          }
+          process(tickets.zip(ids).map((t, id) => id.map(TicketMark(_, t.attempt)))) match
+            case Right(state) =>
+              handOver(checks)
+              Right(state)
+            case Left((error, firstUnchecked)) =>
+              // Report what a check in ticket order would: a bad proof of a ticket before the failing check wins.
+              if checks.take(firstUnchecked).exists(c => !Parallel.await(c)) then Left(SafroleErrorCode.BadTicketProof)
+              else Left(error)
 
   /**
-   * Process tickets recursively using tail recursion.
+   * Process tickets recursively using tail recursion. An error comes with how many tickets' proofs a sequential check
+   * would have verified before reaching it.
    */
   @scala.annotation.tailrec
   private def processTickets(
@@ -279,8 +309,9 @@ object SafroleTransition extends StrictLogging:
     previousId: Option[JamBytes],
     accumulatorIds: scala.collection.mutable.HashSet[JamBytes],
     accumulatedIds: scala.collection.mutable.HashSet[JamBytes],
-    accumulatedTickets: scala.collection.mutable.ListBuffer[TicketMark]
-  ): Either[SafroleErrorCode, SafroleState] =
+    accumulatedTickets: scala.collection.mutable.ListBuffer[TicketMark],
+    index: Int
+  ): Either[(SafroleErrorCode, Int), SafroleState] =
     remainingTickets match
       case Nil =>
         // All tickets processed, update accumulator
@@ -290,7 +321,7 @@ object SafroleTransition extends StrictLogging:
             .take(config.epochLength)
           val survivingIds = combinedTickets.map(_.id).toSet
           if accumulatedTickets.exists(t => !survivingIds.contains(t.id)) then
-            Left(SafroleErrorCode.Reserved)
+            Left((SafroleErrorCode.Reserved, index))
           else
             Right(postState.copy(gammaA = combinedTickets.toList))
         else
@@ -298,23 +329,23 @@ object SafroleTransition extends StrictLogging:
 
       case (ticket, proof) :: rest =>
         if ticket.attempt.toInt >= maxTicketEntries(postState.gammaK.size, config) then
-          Left(SafroleErrorCode.BadTicketAttempt)
+          Left((SafroleErrorCode.BadTicketAttempt, index))
         else
           proof match
             case None =>
-              Left(SafroleErrorCode.BadTicketProof)
+              Left((SafroleErrorCode.BadTicketProof, index))
             case Some(ticketBody) =>
               val currentId = ticketBody.id
 
               // Check for duplicates in accumulator
               if accumulatorIds.contains(currentId) then
-                Left(SafroleErrorCode.DuplicateTicket)
+                Left((SafroleErrorCode.DuplicateTicket, index + 1))
               // Check for duplicates in new tickets being added
               else if accumulatedIds.contains(currentId) then
-                Left(SafroleErrorCode.DuplicateTicket)
+                Left((SafroleErrorCode.DuplicateTicket, index + 1))
               // Check ordering against previous ticket
               else if previousId.exists(_ >= currentId) then
-                Left(SafroleErrorCode.BadTicketOrder)
+                Left((SafroleErrorCode.BadTicketOrder, index + 1))
               else
                 accumulatedIds.add(currentId)
                 accumulatedTickets += ticketBody
@@ -325,7 +356,8 @@ object SafroleTransition extends StrictLogging:
                   Some(currentId),
                   accumulatorIds,
                   accumulatedIds,
-                  accumulatedTickets
+                  accumulatedTickets,
+                  index + 1
                 )
 
   private def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =
