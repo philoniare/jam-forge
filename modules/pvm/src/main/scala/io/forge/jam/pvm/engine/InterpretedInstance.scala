@@ -10,14 +10,45 @@ import io.forge.jam.pvm.memory.BasicMemory
  * Compiled instruction representation.
  *
  * Stores the parsed instruction along with its program counters
- * to avoid re-parsing during execution.
+ * to avoid re-parsing during execution. The operands are also copied into
+ * primitive slots (`a`, `b`, `c` for the `Int` fields, `x`, `y` for the
+ * `Long` fields, in declaration order) so [[InstructionExecutor]] reads them
+ * without dereferencing or casting `instruction`.
  */
-final case class CompiledInstruction(
-  instruction: Instruction,
-  pc: ProgramCounter,
-  nextPc: ProgramCounter,
-  opcodeValue: Int
+final class CompiledInstruction private (
+  val instruction: Instruction,
+  val pc: ProgramCounter,
+  val nextPc: ProgramCounter,
+  val opcodeValue: Int,
+  val a: Int,
+  val b: Int,
+  val c: Int,
+  val x: Long,
+  val y: Long
 )
+
+object CompiledInstruction:
+  def apply(
+    instruction: Instruction,
+    pc: ProgramCounter,
+    nextPc: ProgramCounter,
+    opcodeValue: Int
+  ): CompiledInstruction =
+    val ints = new Array[Int](3)
+    val longs = new Array[Long](2)
+    var ni = 0
+    var nl = 0
+    instruction match
+      case p: Product =>
+        p.productIterator.foreach {
+          case v: Int =>
+            ints(ni) = v; ni += 1
+          case v: Long =>
+            longs(nl) = v; nl += 1
+          case other =>
+            throw new IllegalArgumentException(s"unsupported operand $other in $instruction")
+        }
+    new CompiledInstruction(instruction, pc, nextPc, opcodeValue, ints(0), ints(1), ints(2), longs(0), longs(1))
 
 /**
  * Interpreted VM instance for host-side execution over [[BasicMemory]].

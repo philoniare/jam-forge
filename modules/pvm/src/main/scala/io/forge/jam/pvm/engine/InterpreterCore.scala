@@ -273,7 +273,7 @@ abstract class InterpreterCore protected (
 
       // Execute instruction - returns next compiled offset, or a negative
       // sentinel (Step.Interrupt) meaning "interrupt occurred, read _interrupt"
-      val next = InstructionExecutor.execute(compiled.opcodeValue, compiled.instruction, this, compiled.pc, compiled.nextPc)
+      val next = InstructionExecutor.execute(compiled, this)
 
       if next < 0 then
         // Interrupt occurred - exit loop
