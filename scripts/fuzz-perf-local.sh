@@ -19,7 +19,7 @@ if [[ ! -s "$CP_FILE" || build.sbt -nt "$CP_FILE" ]]; then
 fi
 CP="$(cat "$CP_FILE")"
 # Same JVM flags as the jam-forge Docker image (Dockerfile JAVA_OPTS).
-HEAP="${JAM_HEAP:-12g}"
+HEAP="${JAM_HEAP:-4g}"
 JOPTS=(-XX:+UseZGC -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError
   --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
   -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/src/main/resources"
