@@ -111,4 +111,26 @@ public class ErasureCodingWrapper {
 	 * @return 2D byte array of recovered original shards, or null on failure
 	 */
 	public static native byte[][] recover(byte[][] shards, int[] indices, int originalCount, int recoveryCount);
+
+	/**
+	 * Erasure-code a whole piece of data (GP C_k) in one call, coding every 2-byte position of the shards at once.
+	 *
+	 * @param data          The data, at most originalCount * 2 * k bytes; the remainder is zero padding
+	 * @param originalCount Number of original shards (basic size / 2)
+	 * @param recoveryCount Number of recovery shards to generate
+	 * @param k             Number of 2-byte words per shard
+	 * @return originalCount + recoveryCount shards of 2 * k bytes, or null on failure
+	 */
+	public static native byte[][] chunk(byte[] data, int originalCount, int recoveryCount, int k);
+
+	/**
+	 * Reconstruct a whole piece of data (GP R_k) in one call from equal-length shards.
+	 *
+	 * @param shards        2D byte array of available shards
+	 * @param indices       Array of shard indices (index < originalCount means original shard)
+	 * @param originalCount Total number of original shards
+	 * @param recoveryCount Total number of recovery shards
+	 * @return The original shards joined, each padded to an even length, or null on failure
+	 */
+	public static native byte[] reconstruct(byte[][] shards, int[] indices, int originalCount, int recoveryCount);
 }

@@ -322,3 +322,71 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
     result.isLeft shouldBe true
     result.left.toOption.get shouldBe a[ErasureCoding.InvalidRecoveryCount]
   }
+
+  // chunk and reconstruct code every 2-byte position in one native call; these check them against coding each
+  // position on its own with encode/recover
+  private def chunkPerPosition(data: Array[Byte], basicSize: Int, validatorCount: Int): Array[Array[Byte]] =
+    val k = Math.max(1, (data.length + basicSize - 1) / basicSize)
+    val padded = data.padTo(k * basicSize, 0.toByte)
+    val positions = ErasureCoding.transpose(ErasureCoding.split(padded, 2 * k).map(ErasureCoding.split(_, 2)))
+    val encoded = positions.map(p => ErasureCoding.encode(p, validatorCount - basicSize / 2).toOption.get)
+    ErasureCoding.transpose(encoded).map(ErasureCoding.join)
+
+  private def reconstructPerPosition(shards: Array[ErasureCoding.Shard], basicSize: Int, validatorCount: Int) =
+    val originalCount = basicSize / 2
+    val split = shards.map(s => ErasureCoding.split(s.data, 2))
+    val recovered = split(0).indices.map { p =>
+      val atP = shards.indices.map(i => ErasureCoding.Shard(split(i)(p), shards(i).index)).toArray
+      ErasureCoding.recover(originalCount, validatorCount - originalCount, atP).toOption.get
+    }.toArray
+    ErasureCoding.join(ErasureCoding.transpose(recovered).map(ErasureCoding.join))
+
+  test("chunk and reconstruct match per-position coding (full config)") {
+    val basicSize = basicSizeForConfig(FullConfig)
+    val validatorCount = FullConfig.validatorCount
+    val originalCount = basicSize / 2
+    val rng = new scala.util.Random(3)
+    // Lengths on both sides of whole 32-word blocks, with and without padding.
+    for len <- Seq(1, 683, 684, 685, 684 * 31, 684 * 33 - 5, 684 * 64) do
+      withClue(s"length $len: ") {
+        val data = rng.nextBytes(len)
+        val chunks = ErasureCoding.chunk(data, basicSize, validatorCount).toOption.get
+        chunks shouldBe chunkPerPosition(data, basicSize, validatorCount)
+
+        val recoveryOnly = (originalCount until validatorCount).map(i => ErasureCoding.Shard(chunks(i), i)).toArray
+        val mixed = (0 until validatorCount by 2).map(i => ErasureCoding.Shard(chunks(i), i)).toArray
+        for shards <- Seq(recoveryOnly, mixed) do
+          val rebuilt = ErasureCoding.reconstruct(shards, basicSize, validatorCount).toOption.get
+          rebuilt shouldBe reconstructPerPosition(shards, basicSize, validatorCount)
+          rebuilt.take(len) shouldBe data
+      }
+  }
+
+  test("reconstruct pads odd-length shards like per-position coding (tiny config)") {
+    val basicSize = basicSizeForConfig(TinyConfig)
+    val validatorCount = TinyConfig.validatorCount
+    val chunks = ErasureCoding.chunk(Array.tabulate[Byte](40)(_.toByte), basicSize, validatorCount).toOption.get
+    val odd = (3 until 6).map(i => ErasureCoding.Shard(chunks(i).dropRight(1), i)).toArray
+    ErasureCoding.reconstruct(odd, basicSize, validatorCount).toOption.get shouldBe
+      reconstructPerPosition(odd, basicSize, validatorCount)
+  }
+
+  test("reconstruct with duplicate shard indices fails (RecoverFailed)") {
+    val chunks = ErasureCoding.chunk(Array.tabulate[Byte](12)(_.toByte), 6, 6).toOption.get
+    val shards = Array(3, 3, 4).map(i => ErasureCoding.Shard(chunks(i), i))
+    ErasureCoding.reconstruct(shards, 6, 6) shouldBe Left(ErasureCoding.RecoverFailed)
+  }
+
+  test("Conformance test vectors - reconstruct from recovery shards") {
+    for (folder, config) <- Seq("erasure/tiny" -> TinyConfig, "erasure/full" -> FullConfig) do
+      val basicSize = basicSizeForConfig(config)
+      val originalCount = basicSize / 2
+      for filename <- TestFileLoader.getTestFilenamesFromTestVectors(folder).toOption.get do
+        withClue(s"$folder/$filename: ") {
+          val vector = TestFileLoader.loadJsonFromTestVectors[ErasureCodingTestVector](folder, filename).toOption.get
+          val shards = vector.shards.zipWithIndex.drop(originalCount).map((d, i) => ErasureCoding.Shard(d, i))
+          val rebuilt = ErasureCoding.reconstruct(shards, basicSize, config.validatorCount).toOption.get
+          rebuilt.take(vector.data.length) shouldBe vector.data
+          rebuilt.drop(vector.data.length).forall(_ == 0) shouldBe true
+        }
+  }

@@ -131,31 +131,10 @@ object ErasureCoding:
       // Use ceiling division to ensure k >= 1 even for small data
       val k = Math.max(1, (data.length + basicSize - 1) / basicSize)
 
-      // Pad data to k * basicSize bytes to ensure we always have originalCount shards
-      val paddedLength = k * basicSize
-      val paddedData = if data.length < paddedLength then
-        data ++ Array.fill(paddedLength - data.length)(0.toByte)
-      else
-        data
-
-      // Split padded data into originalCount chunks of 2*k bytes each
-      val splitted = split(paddedData, 2 * k)
-
-      // Split each chunk into inner shards of size InnerShardSize
-      val splitted2 = splitted.map(d => split(d, InnerShardSize))
-
-      // Transpose to get original shards grouped by position
-      val originalShards = transpose(splitted2)
-
-      // Encode each group of original shards - returns originalCount + recoveryCount shards
-      val encodedResults = originalShards.map(shards => encode(shards, recoveryCount))
-
-      val (errors, result2d) = encodedResults.partitionMap(identity)
-      if errors.nonEmpty then Left(errors.head)
-      else
-        // Transpose back and join
-        val transposed = transpose(result2d)
-        Right(transposed.map(join))
+      // One native call codes every 2-byte position; data is zero-padded to k * basicSize there.
+      val result = ErasureCodingWrapper.chunk(data, originalCount, recoveryCount, k)
+      if result == null then Left(EncodeFailed)
+      else Right(result)
 
   /**
    * R_k: Erasure-code reconstruction function.
@@ -181,24 +160,8 @@ object ErasureCoding:
       else
         ensureInitialized()
 
-        val shardSize = shards(0).data.length
-        val k = (shardSize + InnerShardSize - 1) / InnerShardSize
-
-        // Split each shard into inner shards
-        val splitted = shards.map(s => split(s.data, InnerShardSize))
-
-        // Recover each position
-        val recoverResults = (0 until k).map { p =>
-          // Collect inner shards at position p from all available shards
-          val recoveryShards = shards.indices.map(i => Shard(splitted(i)(p), shards(i).index)).toArray
-
-          recover(originalCount, recoveryCount, recoveryShards)
-        }
-
-        val (errors, recovered) = recoverResults.partitionMap(identity)
-        if errors.nonEmpty then Left(errors.head)
-        else
-          val result2d = recovered.toArray
-          // Transpose and join
-          val transposed = transpose(result2d)
-          Right(join(transposed.map(join)))
+        // One native call recovers every 2-byte position; odd-length shards are zero-padded to a whole word there.
+        val result =
+          ErasureCodingWrapper.reconstruct(shards.map(_.data), shards.map(_.index), originalCount, recoveryCount)
+        if result == null then Left(RecoverFailed)
+        else Right(result)
