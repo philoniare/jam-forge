@@ -10,7 +10,7 @@ import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.DisputeOutputMarks
 import io.forge.jam.protocol.pipeline.PipelineTypes.*
 import io.forge.jam.protocol.pipeline.StfLifters.*
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.Codec
 
 object IntermediateSteps:
 
@@ -36,7 +36,7 @@ object IntermediateSteps:
       val entropy = pool(3).bytes
 
       val fullHeaderBytes =
-        summon[Codec[io.forge.jam.core.types.header.Header]].encode(block.header).require.bytes.toArray
+        summon[Codec[io.forge.jam.core.types.header.Header]].encode(block.header)
       val encodedHeader = fullHeaderBytes.dropRight(96)
 
       view.gamma.st match
@@ -138,9 +138,7 @@ object IntermediateSteps:
     modifyContext(_.copy(disputeOffendersMark = output.offenders))
 
   val validateOffendersMark: StfStep = validate { (_, ctx) =>
-    val computedBytes = ctx.disputeOffendersMark.map(_.toByteVector)
-    val headerBytes = ctx.block.header.offendersMark.map(_.toByteVector)
-    if computedBytes != headerBytes then
+    if ctx.disputeOffendersMark != ctx.block.header.offendersMark then
       Left(PipelineError.InvalidOffendersMark)
     else
       Right(())

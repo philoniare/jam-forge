@@ -1,13 +1,13 @@
 package io.forge.jam.protocol.preimage
 
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactPrefixedList}
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, compactInteger, compactPrefixedList}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder

@@ -18,52 +18,47 @@ The `jam-core` module provides the foundational types and serialization infrastr
 
 ## Codec System
 
-### scodec Library
+The codec system provides type-safe binary serialization conforming to the JAM specification (GP 0.8.0 appendix C).
+It lives in `io.forge.jam.core.codec` and is a small byte-array library with no third-party dependency.
 
-The codec system uses **scodec**, a combinator library for working with binary data. scodec provides bidirectional `Codec[A]` instances that handle both encoding and decoding.
+### Codecs
+
+`Codec[A]` writes into a growable `ByteWriter` and reads from a bounds-checked `ByteReader`, so composed codecs
+allocate no intermediate buffers:
 
 ```scala
-import scodec.Codec
-import scodec.codecs._
+import io.forge.jam.core.codec.{ByteReader, ByteWriter, Codec}
 
-// Codec handles both directions
 trait Codec[A]:
-  def encode(value: A): Attempt[BitVector]
-  def decode(bits: BitVector): Attempt[DecodeResult[A]]
+  def write(out: ByteWriter, value: A): Unit
+  def read(in: ByteReader): A
+
+  def encode(value: A): Array[Byte]
+  def decode(bytes: Array[Byte]): Either[String, A]                 // ignores trailing bytes
+  def decodeExact(bytes: Array[Byte]): Either[String, A]            // rejects trailing bytes
+  def decodeAt(bytes: Array[Byte], offset: Int): Either[String, (A, Int)]  // value and bytes consumed
 ```
 
-### Custom JAM Codecs
+Inside a codec, malformed input throws `CodecDecodingException`; the `decode*` entry points turn it into `Left`.
 
-JAM-specific encodings are implemented as custom codecs:
+### Composition
+
+Fields compose with `::` into tuples, mapped onto case classes with `xmap` or `as`:
 
 ```scala
-// Compact integer encoding
-val compactCodec: Codec[UInt] = new Codec[UInt]:
-  def sizeBound = SizeBound.unknown
+import io.forge.jam.core.codec.codecs.*
 
-  def encode(n: UInt) =
-    val bytes = encodeCompact(n)
-    Attempt.successful(BitVector(bytes))
-
-  def decode(bits: BitVector) =
-    decodeCompact(bits.bytes.toArray) match
-      case Right((value, remainder)) =>
-        Attempt.successful(DecodeResult(value, BitVector(remainder)))
-      case Left(err) =>
-        Attempt.failure(Err(err))
+given Codec[Block] = (Codec[Header] :: Codec[Extrinsic]).as[Block]
 ```
 
-### Codec Composition
+Hot per-block state components write their fields directly with `Codec.of((w, v) => ..., r => ...)`.
 
-Codecs compose using scodec operators:
+### JAM Codecs
 
-```scala
-// Product types with :: operator
-given Codec[Block] = (
-  Codec[Header] ::
-  Codec[Extrinsic]
-).as[Block]
-```
+`codecs` holds the primitives (`uint8`, `uint16L`, `uint32L`, `int64L`, `compactInt`, `compactBytes`, `bytes(n)`,
+`option`, `fixedSizeList`, `compactPrefixedList`, ...) and `JamCodecs` the givens for JAM types (`Hash`, keys,
+`UInt`, ...). The compact natural encoding (eq. C.6) is implemented once, in `ByteWriter.compact` and
+`ByteReader.compact`, and rejects non-minimal encodings on decode.
 
 ## Primitive Types
 

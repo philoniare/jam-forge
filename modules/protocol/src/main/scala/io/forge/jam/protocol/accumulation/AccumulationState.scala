@@ -7,11 +7,10 @@ import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
-import _root_.scodec.{Codec, Attempt}
-import _root_.scodec.bits.BitVector
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.jamBytesCodec
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.jamBytesCodec
 
 import scala.collection.mutable
 
@@ -202,8 +201,8 @@ final case class StorageMapEntry(
 
 object StorageMapEntry:
   given Codec[StorageMapEntry] =
-    (variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]) ::
-      variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]]))
+    (compactBytes ::
+      compactBytes)
       .xmap(
         { case (key, value) => StorageMapEntry(key, value) },
         e => (e.key, e.value)
@@ -470,7 +469,7 @@ object AccumulationState:
               ) =>
             AccumulationState(
               slot & 0xffffffffL,
-              JamBytes.fromByteVector(entropy.toByteVector),
+              entropy.toJamBytes,
               readyQueue,
               accumulated,
               privileges,
@@ -590,7 +589,7 @@ object AccumulationOutputData:
   // AccumulationOutputData codec - only used for decoding in tests
   // Encoding is handled via custom logic in AccumulationOutput
   given Codec[AccumulationOutputData] =
-    variableSizeBytesLong(JamCodecs.compactInteger, summon[Codec[JamBytes]])
+    compactBytes
       .xmap(
         ok => AccumulationOutputData(ok),
         a => a.ok
@@ -616,37 +615,21 @@ object AccumulationOutput:
 // Custom codec for AccumulationOutput (StfResult[AccumulationOutputData, Nothing])
 // Since error type is Nothing, we only encode/decode success case with discriminator 0
 given accumulationOutputCodec: Codec[AccumulationOutput] =
-  new Codec[AccumulationOutput]:
-    def sizeBound = _root_.scodec.SizeBound.unknown
-
-    def encode(value: AccumulationOutput) =
-      val dataCodec = summon[Codec[AccumulationOutputData]]
+  val dataCodec = summon[Codec[AccumulationOutputData]]
+  Codec.of(
+    (w, value) =>
       value match
         case Right(data) =>
-          for
-            discriminator <- uint8.encode(0)
-            encoded <- dataCodec.encode(data)
-          yield discriminator ++ encoded
+          w.u8(0)
+          dataCodec.write(w, data)
         case Left(_) =>
           // This should never happen since error type is Nothing
-          Attempt.failure(
-            _root_.scodec.Err("Cannot encode error in AccumulationOutput")
-          )
-
-    def decode(bits: BitVector) =
-      for
-        discriminator <- uint8.decode(bits)
-        _ <-
-          if discriminator.value == 0 then Attempt.successful(())
-          else
-            Attempt.failure(
-              _root_.scodec
-                .Err(s"Invalid discriminator: ${discriminator.value}")
-            )
-        result <- summon[Codec[AccumulationOutputData]].decode(
-          discriminator.remainder
-        )
-      yield result.map(data => Right(data))
+          throw new IllegalArgumentException("Cannot encode error in AccumulationOutput"),
+    r =>
+      val discriminator = r.u8()
+      if discriminator != 0 then r.fail(s"Invalid discriminator: $discriminator")
+      Right(dataCodec.read(r))
+  )
 
 /** Test case for accumulation STF.
   */

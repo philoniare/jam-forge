@@ -1,11 +1,11 @@
 package io.forge.jam.core.types
 
-import _root_.scodec.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ServiceId, ValidatorIndex, Timeslot, Ed25519Signature}
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactPrefixedList}
-import io.forge.jam.core.scodec.PrimitiveCodecs
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, compactPrefixedList}
+import io.forge.jam.core.codec.PrimitiveCodecs
 import io.forge.jam.core.types.work.Vote
 import io.forge.jam.core.types.dispute.{Culprit, Fault, GuaranteeSignature}
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -74,11 +74,11 @@ object extrinsic:
     /** Create a codec that knows the cores count */
     def codec(coresCount: Int): Codec[AssuranceExtrinsic] =
       val bitfieldSize = (coresCount + 7) / 8
-      (hashCodec :: fixedSizeBytes(bitfieldSize.toLong, bytes) :: PrimitiveCodecs.validatorIndex :: PrimitiveCodecs.ed25519Signature).xmap(
+      (hashCodec :: bytes(bitfieldSize) :: PrimitiveCodecs.validatorIndex :: PrimitiveCodecs.ed25519Signature).xmap(
         { case (anchor, bitfield, idx, sig) =>
-          AssuranceExtrinsic(anchor, JamBytes.fromByteVector(bitfield), idx, sig)
+          AssuranceExtrinsic(anchor, bitfield, idx, sig)
         },
-        ae => (ae.anchor, ae.bitfield.toByteVector, ae.validatorIndex, ae.signature)
+        ae => (ae.anchor, ae.bitfield, ae.validatorIndex, ae.signature)
       )
 
     given Decoder[AssuranceExtrinsic] = Decoder.instance { cursor =>

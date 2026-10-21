@@ -2,8 +2,7 @@ package io.forge.jam.protocol.safrole
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
-import _root_.scodec.bits.BitVector
-import _root_.scodec.codecs.uint32L
+import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.protocol.safrole.SafroleTypes.*
@@ -74,7 +73,7 @@ object SafroleTransition extends StrictLogging:
         processValidSlot(input, preState, config)
     catch
       case e: SafroleCryptoFailure => throw e
-      case e @ (_: io.forge.jam.core.scodec.CodecDecodingException | _: IllegalArgumentException) =>
+      case e @ (_: io.forge.jam.core.codec.CodecDecodingException | _: IllegalArgumentException) =>
         logger.error("safrole input/state rejected, reporting Reserved", e)
         (preState, StfResult.error(SafroleErrorCode.Reserved))
 
@@ -345,10 +344,9 @@ object SafroleTransition extends StrictLogging:
     val keys: Array[BandersnatchPublicKey] = validators.iterator.map(_.bandersnatch).toArray
     val validatorCount = validators.size
     (0 until epochLength).map { i =>
-      val iEncoded = uint32L.encode(i.toLong & 0xffffffffL).require.toByteArray
+      val iEncoded = uint32L.encode(i.toLong & 0xffffffffL)
       val slotEntropy = Hashing.blake2b256(entropy.bytes ++ iEncoded)
-      val indexResult = uint32L.decode(BitVector(slotEntropy.bytes.take(4).toArray)).require
-      val index = ((indexResult.value & 0xffffffffL) % validatorCount).toInt
+      val index = (uint32L.decodeUnsafe(slotEntropy.bytes) % validatorCount).toInt
       keys(index)
     }.toList
 

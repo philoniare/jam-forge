@@ -1,6 +1,4 @@
-package io.forge.jam.core.scodec
-
-import scodec.bits.BitVector
+package io.forge.jam.core.codec
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -13,9 +11,9 @@ class CompactIntegerSpec extends AnyFlatSpec with Matchers:
       (1L << 20), (1L << 32), (1L << 48), (1L << 56) - 1, (1L << 56)
     )
     for v <- values do
-      val enc = compactInteger.encode(v).require
+      val enc = compactInteger.encode(v)
       withClue(s"value=$v: ") {
-        compactInteger.decode(enc).require.value shouldBe v
+        compactInteger.decodeExact(enc) shouldBe Right(v)
       }
   }
 
@@ -28,7 +26,20 @@ class CompactIntegerSpec extends AnyFlatSpec with Matchers:
   it should "reject a non-minimal encoding (SER-09)" in {
     // [0x80, 0x05] encodes value 5 in the l=1 (2-byte) class; 5 fits the 1-byte
     // class, so this is non-minimal and must be rejected.
-    compactInteger.decode(BitVector(Array[Byte](0x80.toByte, 0x05.toByte))).isFailure shouldBe true
+    compactInteger.decode(Array[Byte](0x80.toByte, 0x05.toByte)).isLeft shouldBe true
     // The minimal form decodes fine.
-    compactInteger.decode(BitVector(Array[Byte](0x05.toByte))).require.value shouldBe 5L
+    compactInteger.decode(Array[Byte](0x05.toByte)) shouldBe Right(5L)
+  }
+
+  it should "encode GP eq. (C.6) byte patterns" in {
+    compactInteger.encode(0L) shouldBe Array[Byte](0)
+    compactInteger.encode(128L) shouldBe Array[Byte](0x80.toByte, 0x80.toByte)
+    compactInteger.encode(16384L) shouldBe Array[Byte](0xc0.toByte, 0x00, 0x40)
+    compactInteger.encode(-1L) shouldBe (0xff.toByte +: Array.fill[Byte](8)(0xff.toByte))
+    compactInteger.decode(0xff.toByte +: Array.fill[Byte](8)(0xff.toByte)) shouldBe Right(-1L)
+  }
+
+  it should "reject truncated input" in {
+    compactInteger.decode(Array[Byte](0xc0.toByte, 0x00)).isLeft shouldBe true
+    compactInteger.decode(Array.emptyByteArray).isLeft shouldBe true
   }

@@ -5,7 +5,6 @@ import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.StatisticsBridge
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
-import scodec.bits.ByteVector
 
 /**
  * Statistics State Transition Function.
@@ -79,7 +78,7 @@ object StatisticsTransition:
       )
 
     // For each guarantee, determine which validator set to use based on epoch
-    val reporters: Set[ByteVector] = input.extrinsic.guarantees.flatMap { guarantee =>
+    val reporters: Set[io.forge.jam.core.primitives.Ed25519PublicKey] = input.extrinsic.guarantees.flatMap { guarantee =>
       val guaranteeEpoch = guarantee.slot.value.toLong / config.epochLength
       // Use previous validators if guarantee is from a previous epoch, otherwise current
       val validatorSet = if guaranteeEpoch < postEpoch && preState.prevValidators.nonEmpty then
@@ -91,7 +90,7 @@ object StatisticsTransition:
       guarantee.signatures.flatMap { sig =>
         val idx = sig.validatorIndex.toInt
         if idx >= 0 && idx < validatorSet.size then
-          Some(sig.validatorIndex.toInt).map(i => validatorSet(i).ed25519.toByteVector)
+          Some(sig.validatorIndex.toInt).map(i => validatorSet(i).ed25519)
         else
           None
       }
@@ -99,7 +98,7 @@ object StatisticsTransition:
 
     // Update guarantees - for each validator v, check if their Ed25519 key is in reporters
     for ((validator, idx) <- preState.currValidators.zipWithIndex) do
-      if idx < statsArr.length && reporters.contains(validator.ed25519.toByteVector) then
+      if idx < statsArr.length && reporters.contains(validator.ed25519) then
         val s = statsArr(idx)
         statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
 

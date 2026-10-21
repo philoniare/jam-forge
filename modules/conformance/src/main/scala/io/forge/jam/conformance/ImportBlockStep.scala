@@ -2,7 +2,7 @@ package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult}

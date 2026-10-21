@@ -14,8 +14,7 @@ import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.block.{Block, Extrinsic}
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Preimage, GuaranteeExtrinsic, Dispute}
 import io.forge.jam.core.types.tickets.TicketEnvelope
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 import scala.io.Source
 import java.nio.file.{Files, Paths}
 
@@ -23,7 +22,7 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
 
   private val basePath = "jamtestvectors/codec"
 
-  // Test case with scodec Codec that can depend on config
+  // Test case with a Codec that can depend on config
   private case class TestCase[A](
     name: String,
     jsonDecoder: Decoder[A],
@@ -41,7 +40,7 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
   // Helper to create config-independent codec factory
   private def static[A](codec: Codec[A]): ChainConfig => Codec[A] = _ => codec
 
-  // Get scodec codecs from the types
+  // Get codecs from the types
   private val testCases: List[TestCase[?]] = List(
     TestCase("header_0", summon[Decoder[Header]], c => Header.headerCodec(c.validatorCount, c.epochLength)),
     TestCase("header_1", summon[Decoder[Header]], c => Header.headerCodec(c.validatorCount, c.epochLength)),
@@ -91,27 +90,22 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
     // Test 1: JSON -> encode -> matches .bin
     decode[A](json)(using tc.jsonDecoder) match
       case Right(parsed) =>
-        codec.encode(parsed) match
-          case Attempt.Successful(bits) =>
-            val encoded = JamBytes.fromByteVector(bits.bytes)
-            withClue(s"Encoding mismatch for ${tc.name}:\nExpected ${expectedBinary.length} bytes, got ${encoded.length} bytes\n") {
-              encoded shouldBe expectedBinary
+        val encoded = codec.encodeJam(parsed)
+        withClue(s"Encoding mismatch for ${tc.name}:\nExpected ${expectedBinary.length} bytes, got ${encoded.length} bytes\n") {
+          encoded shouldBe expectedBinary
+        }
+
+        // Test 2: .bin -> decode -> should equal JSON-decoded value
+        codec.decodeAt(expectedBinary.toArray, 0) match
+          case Right((decoded, used)) =>
+            withClue(s"Decode didn't consume all bytes for ${tc.name}:\n") {
+              used shouldBe expectedBinary.length
             }
-
-            // Test 2: .bin -> decode -> should equal JSON-decoded value
-            codec.decode(BitVector(expectedBinary.toByteVector)) match
-              case Attempt.Successful(DecodeResult(decoded, remainder)) =>
-                withClue(s"Decode didn't consume all bytes for ${tc.name}:\n") {
-                  remainder.isEmpty shouldBe true
-                }
-                withClue(s"JSON-decoded != binary-decoded for ${tc.name}:\n") {
-                  decoded shouldBe parsed
-                }
-              case Attempt.Failure(err) =>
-                fail(s"Failed to decode $binFile: $err")
-
-          case Attempt.Failure(err) =>
-            fail(s"Failed to encode for ${tc.name}: $err")
+            withClue(s"JSON-decoded != binary-decoded for ${tc.name}:\n") {
+              decoded shouldBe parsed
+            }
+          case Left(err) =>
+            fail(s"Failed to decode $binFile: $err")
 
       case Left(error) =>
         fail(s"Failed to parse $jsonFile: $error")
@@ -126,13 +120,7 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
     decode[List[A]](json)(using tc.jsonDecoder) match
       case Right(items) =>
         // Test 1: JSON -> encode -> matches .bin
-        val encodedItems = items.flatMap { item =>
-          codec.encode(item) match
-            case Attempt.Successful(bits) => Some(JamBytes.fromByteVector(bits.bytes))
-            case Attempt.Failure(err) =>
-              fail(s"Failed to encode item for ${tc.name}: $err")
-              None
-        }
+        val encodedItems = items.map(codec.encodeJam)
         val concatenated = encodedItems.foldLeft(JamBytes.empty)(_ ++ _)
         val encoded = JamBytes(Array(tc.versionByte)) ++ concatenated
         withClue(s"Encoding mismatch for ${tc.name}:\nExpected ${expectedBinary.length} bytes, got ${encoded.length} bytes\n") {
@@ -140,13 +128,14 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
         }
 
         // Test 2: .bin -> decode each item -> should equal JSON-decoded items
-        var bits = BitVector(expectedBinary.toByteVector).drop(8) // skip version byte
+        val binary = expectedBinary.toArray
+        var offset = 1 // skip version byte
         val decodedItems = items.indices.map { _ =>
-          codec.decode(bits) match
-            case Attempt.Successful(DecodeResult(item, remainder)) =>
-              bits = remainder
+          codec.decodeAt(binary, offset) match
+            case Right((item, used)) =>
+              offset += used
               item
-            case Attempt.Failure(err) =>
+            case Left(err) =>
               fail(s"Failed to decode item for ${tc.name}: $err")
         }.toList
         withClue(s"JSON-decoded != binary-decoded for ${tc.name}:\n") {

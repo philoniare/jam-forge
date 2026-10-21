@@ -3,8 +3,8 @@ package io.forge.jam.conformance
 import cats.effect.IO
 import fs2.io.net.Socket
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.traces.{
   BlockImporter,

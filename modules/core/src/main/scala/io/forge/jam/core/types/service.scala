@@ -1,9 +1,8 @@
 package io.forge.jam.core.types
 
-import scodec.*
-import scodec.codecs.*
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.hashCodec
 import io.circe.Decoder
 
 /**
@@ -31,47 +30,38 @@ object service:
   object ServiceInfo:
     val Size: Int = 89
 
-    given Codec[ServiceInfo] =
-      (byte ::
-       hashCodec ::
-       int64L ::
-       int64L ::
-       int64L ::
-       int64L ::
-       int64L ::
-       uint32L ::
-       uint32L ::
-       uint32L ::
-       uint32L).xmap(
-        { case (version, codeHash, balance, minItemGas, minMemoGas, bytesUsed, depositOffset, items, creationSlot, lastAccumulationSlot, parentService) =>
-          ServiceInfo(
-            version = version.toInt & 0xFF,
-            codeHash = codeHash,
-            balance = balance,
-            minItemGas = minItemGas,
-            minMemoGas = minMemoGas,
-            bytesUsed = bytesUsed,
-            depositOffset = depositOffset,
-            items = items.toInt,
-            creationSlot = creationSlot & 0xFFFFFFFFL,
-            lastAccumulationSlot = lastAccumulationSlot & 0xFFFFFFFFL,
-            parentService = parentService & 0xFFFFFFFFL
-          )
-        },
-        si => (
-          si.version.toByte,
-          si.codeHash,
-          si.balance,
-          si.minItemGas,
-          si.minMemoGas,
-          si.bytesUsed,
-          si.depositOffset,
-          si.items.toLong & 0xFFFFFFFFL,
-          si.creationSlot & 0xFFFFFFFFL,
-          si.lastAccumulationSlot & 0xFFFFFFFFL,
-          si.parentService & 0xFFFFFFFFL
-        )
-      )
+    /** Service account info as stored in state (GP 0.8.0 appendix D, C(255, s)). */
+    given Codec[ServiceInfo] = Codec.of(
+      (w, si) =>
+        w.u8(si.version)
+        w.bytes(si.codeHash.toArrayUnsafe)
+        w.u64(si.balance)
+        w.u64(si.minItemGas)
+        w.u64(si.minMemoGas)
+        w.u64(si.bytesUsed)
+        w.u64(si.depositOffset)
+        w.i32(si.items)
+        w.u32(si.creationSlot)
+        w.u32(si.lastAccumulationSlot)
+        w.u32(si.parentService),
+      r =>
+        val version = r.u8()
+        val codeHash = Hash.wrap(r.bytes(Hash.Size))
+        ServiceInfo(
+          version = version,
+          codeHash = codeHash,
+          balance = r.u64(),
+          minItemGas = r.u64(),
+          minMemoGas = r.u64(),
+          bytesUsed = r.u64(),
+          depositOffset = r.u64(),
+          items = r.i32(),
+          creationSlot = r.u32(),
+          lastAccumulationSlot = r.u32(),
+          parentService = r.u32()
+        ),
+      Size
+    )
 
     given Decoder[ServiceInfo] =
       Decoder.instance { cursor =>

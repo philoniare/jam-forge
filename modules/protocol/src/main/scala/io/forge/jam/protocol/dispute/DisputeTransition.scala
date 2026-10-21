@@ -16,7 +16,7 @@ import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.DisputeBridge
 import io.forge.jam.core.types.workpackage.{AvailabilityAssignment, WorkReport}
 import io.forge.jam.crypto.Ed25519
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.Codec
 import scala.util.boundary, boundary.break
 
 /** Disputes State Transition Function.
@@ -416,8 +416,6 @@ object DisputeTransition:
           val reportHash = Hashing.blake2b256(
             summon[Codec[WorkReport]]
               .encode(assignment.report)
-              .require
-              .toByteArray
           )
 
           if clearedHashes.contains(reportHash) then None else Some(assignment)

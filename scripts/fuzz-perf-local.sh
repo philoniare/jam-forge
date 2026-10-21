@@ -6,21 +6,28 @@ TARGET="${1:?usage: $0 <target> [trace ...]}"; shift
 [[ $# -gt 0 ]] || set -- fallback safrole storage storage_light
 TRACES=("$@")
 CONF_DIR="${JAM_CONFORMANCE_DIR:-$PWD/jam-conformance}"
-OUT="target/fuzz-perf/$TARGET"
+OUT="${FUZZ_PERF_OUT:-target/fuzz-perf/$TARGET}"
 mkdir -p "$OUT"
 
 CP_FILE=target/fuzz-perf/classpath.txt
+mkdir -p target/fuzz-perf
 if [[ ! -s "$CP_FILE" || build.sbt -nt "$CP_FILE" ]]; then
   echo "== resolving classpath (sbt) =="
   sbt --error "conformance/Test/compile" >/dev/null
-  sbt --error "export conformance/Test/fullClasspath" | tail -1 | sed 's#^[^/]*/#/#' > "$CP_FILE"
+  sbt -no-colors -Dsbt.supershell=false --error "export conformance/Test/fullClasspath" | grep -E '[.]jar' | tail -1 \
+    | sed 's#^[^/]*/#/#' > "$CP_FILE"
 fi
 CP="$(cat "$CP_FILE")"
-# Same JVM flags as the jam-forge Docker image.
-JOPTS=(-XX:+UseZGC -Xms2g -Xmx4g -XX:+AlwaysPreTouch --enable-native-access=ALL-UNNAMED
-  --sun-misc-unsafe-memory-access=allow
+# Same JVM flags as the jam-forge Docker image (Dockerfile JAVA_OPTS).
+HEAP="${JAM_HEAP:-12g}"
+JOPTS=(-XX:+UseZGC -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError
+  --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
   -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/src/main/resources"
   -Dlogback.configurationFile="$PWD/modules/conformance/src/main/resources/logback-prod.xml")
+# Warmup corpus, laid out as the image's /app/warmup-traces.
+WARMUP_DIR="$(mktemp -d /tmp/jam_warmup.XXXXXX)"
+ln -s "$PWD/jamtestvectors/traces/preimages" "$WARMUP_DIR/preimages"
+ln -s "$PWD/jamtestvectors/traces/preimages_light" "$WARMUP_DIR/preimages_light"
 
 DATA="$(mktemp -d /tmp/jam_fuzz_perf.XXXXXX)"
 TARGET_PID=""
@@ -28,7 +35,7 @@ stop_target() {
   if [[ -n "$TARGET_PID" ]]; then kill "$TARGET_PID" 2>/dev/null || true; wait "$TARGET_PID" 2>/dev/null || true; fi
   TARGET_PID=""
 }
-trap 'stop_target; rm -rf "$DATA"' EXIT
+trap 'stop_target; rm -rf "$DATA" "$WARMUP_DIR"' EXIT
 
 if [[ "$TARGET" != jam-forge ]]; then
   python3 "$CONF_DIR/scripts/target.py" get "$TARGET"
@@ -38,14 +45,15 @@ for trace in "${TRACES[@]}"; do
   echo "== $TARGET / $trace =="
   rm -rf "$DATA" && mkdir -p "$DATA" && chmod 777 "$DATA"
   if [[ "$TARGET" == jam-forge ]]; then
-    java "${JOPTS[@]}" -cp "$CP" io.forge.jam.conformance.ConformanceServerApp fuzz "$DATA/fuzz.sock" \
-      > "$OUT/$trace.target.log" 2>&1 &
+    JAM_FUZZ=1 JAM_FUZZ_SPEC=tiny JAM_FUZZ_DATA_PATH="$DATA" JAM_FUZZ_SOCK_PATH="$DATA/fuzz.sock" LOG_LEVEL=ERROR \
+      JAM_TRACES_DIR="$WARMUP_DIR" JAM_WARMUP="${JAM_WARMUP:-1}" \
+      java "${JOPTS[@]}" -cp "$CP" io.forge.jam.conformance.ConformanceServerApp > "$OUT/$trace.target.log" 2>&1 &
   else
     JAM_FUZZ_DATA_PATH="$DATA" python3 "$CONF_DIR/scripts/target.py" run "$TARGET" > "$OUT/$trace.target.log" 2>&1 &
   fi
   TARGET_PID=$!
   java -cp "$CP" io.forge.jam.conformance.FuzzPerfReplay --socket "$DATA/fuzz.sock" \
-    --trace "jamtestvectors/traces/$trace" --out "$OUT/$trace.json" 2>&1 | grep -E '^RESULT|unexpected' || true
+    --trace "jamtestvectors/traces/$trace" --out "$OUT/$trace.json" --wait-secs 600 2>&1 | grep -E '^RESULT|unexpected' || true
   stop_target
 done
 

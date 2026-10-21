@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{JamBytes, constants}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.work.ExecutionResult

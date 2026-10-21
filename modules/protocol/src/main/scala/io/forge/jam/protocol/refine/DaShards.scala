@@ -3,7 +3,7 @@ package io.forge.jam.protocol.refine
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.merkle.BinaryMerkle
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.crypto.ErasureCoding
 
 /** One validator's custody unit for a work package:

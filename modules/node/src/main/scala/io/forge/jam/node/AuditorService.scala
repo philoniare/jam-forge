@@ -5,8 +5,8 @@ import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorServi
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, constants}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}

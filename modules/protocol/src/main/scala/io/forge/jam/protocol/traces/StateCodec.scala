@@ -9,13 +9,11 @@ import io.forge.jam.core.primitives.{
 }
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.FullJamStateCodecs
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.BitVector
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.Codec
 
 /** State key encoding/decoding for JAM protocol.
   *
@@ -110,7 +108,7 @@ object StateKeys:
   * structures.
   */
 object StateCodec:
-  // Import scodec codec instances (exclude ticketMarkCodec to avoid ambiguity)
+  // Import codec instances (exclude ticketMarkCodec to avoid ambiguity)
   import JamCodecs.{ticketMarkCodec as _, given, *}
   import io.forge.jam.core.types.epoch.ValidatorKey.given_Codec_ValidatorKey
 
@@ -131,9 +129,9 @@ object StateCodec:
       true
 
   private def decodeOffenders(value: Array[Byte]): List[Ed25519PublicKey] =
-    summon[Codec[Psi]].decode(BitVector(value)) match
-      case Attempt.Successful(DecodeResult(psi, _)) => psi.offenders
-      case Attempt.Failure(_)                       => List.empty
+    summon[Codec[Psi]].decode(value) match
+      case Right(psi) => psi.offenders
+      case Left(_)    => List.empty
 
   /** Decodes SafroleState from keyvals
     */
@@ -163,10 +161,9 @@ object StateCodec:
       // This avoids confusing service data keys with protocol keys
       if isSimpleKey(key, StateKeys.TIMESLOT) then
         // Timeslot: 4 bytes little-endian
-        val bits = BitVector(value)
-        uint32L.decode(bits) match
-          case Attempt.Successful(DecodeResult(v, _)) => tau = v & 0xffffffffL
-          case Attempt.Failure(_) => () // Keep default value
+        FullJamStateCodecs.timeslotCodec.decode(value) match
+          case Right(v) => tau = v
+          case Left(_)  => () // Keep default value
       else if isSimpleKey(key, StateKeys.ENTROPY_POOL) then
         // Entropy pool: 4 x 32-byte hashes
         eta = decodeEntropyPool(value)
@@ -223,10 +220,9 @@ object StateCodec:
   ): List[ValidatorKey] =
     val codec =
       FullJamStateCodecs.validatorListCodec(expectedCount)
-    val bits = BitVector(value)
-    codec.decode(bits) match
-      case Attempt.Successful(DecodeResult(validators, _)) => validators
-      case Attempt.Failure(_)                              =>
+    codec.decode(value) match
+      case Right(validators) => validators
+      case Left(_)           =>
         // Create default validator key with all zero bytes
         val zeroValidator = ValidatorKey(
           BandersnatchPublicKey.zero,
@@ -252,20 +248,16 @@ object StateCodec:
       validatorCount: Int,
       epochLength: Int
   ): (SafroleGammaDecoded, Int) =
-    val bits = BitVector(value)
-    var remainingBits = bits
-    var totalConsumed = 0
+    var offset = 0
 
     // gammaK - fixed list of ValidatorKey
     val gammaKCodec =
       FullJamStateCodecs.validatorListCodec(validatorCount)
-    val gammaK = gammaKCodec.decode(remainingBits) match
-      case Attempt.Successful(DecodeResult(validators, remainder)) =>
-        val consumed = (remainingBits.size - remainder.size) / 8
-        totalConsumed += consumed.toInt
-        remainingBits = remainder
+    val gammaK = gammaKCodec.decodeAt(value, offset) match
+      case Right((validators, used)) =>
+        offset += used
         validators
-      case Attempt.Failure(_) =>
+      case Left(_) =>
         val zeroValidator = ValidatorKey(
           BandersnatchPublicKey.zero,
           Ed25519PublicKey(Array.fill(32)(0.toByte)),
@@ -275,23 +267,19 @@ object StateCodec:
         List.fill(validatorCount)(zeroValidator)
 
     // gammaZ - 144 bytes ring commitment
-    val gammaZCodec = fixedSizeBytes(RING_COMMITMENT_SIZE.toLong, bytes)
-    val gammaZ = gammaZCodec.decode(remainingBits) match
-      case Attempt.Successful(DecodeResult(bv, remainder)) =>
-        totalConsumed += RING_COMMITMENT_SIZE
-        remainingBits = remainder
-        JamBytes.fromByteVector(bv)
-      case Attempt.Failure(_) => JamBytes.zeros(RING_COMMITMENT_SIZE)
+    val gammaZ = io.forge.jam.core.codec.codecs.bytes(RING_COMMITMENT_SIZE).decodeAt(value, offset) match
+      case Right((z, used)) =>
+        offset += used
+        z
+      case Left(_) => JamBytes.zeros(RING_COMMITMENT_SIZE)
 
     // gammaS - TicketsOrKeys (discriminator + fixed list)
     val gammaSCodec = createTicketsOrKeysCodec(epochLength)
-    val gammaS = gammaSCodec.decode(remainingBits) match
-      case Attempt.Successful(DecodeResult(toks, remainder)) =>
-        val consumed = (remainingBits.size - remainder.size) / 8
-        totalConsumed += consumed.toInt
-        remainingBits = remainder
+    val gammaS = gammaSCodec.decodeAt(value, offset) match
+      case Right((toks, used)) =>
+        offset += used
         toks
-      case Attempt.Failure(_) =>
+      case Left(_) =>
         io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(
           List.fill(epochLength)(BandersnatchPublicKey.zero)
         )
@@ -300,15 +288,13 @@ object StateCodec:
     val ticketMarkCodec =
       io.forge.jam.core.types.tickets.TicketMark.given_Codec_TicketMark
     val gammaACodec = JamCodecs.compactPrefixedList(ticketMarkCodec)
-    val gammaA = gammaACodec.decode(remainingBits) match
-      case Attempt.Successful(DecodeResult(ticketsList, remainder2)) =>
-        val consumed = (remainingBits.size - remainder2.size) / 8
-        totalConsumed += consumed.toInt
-        remainingBits = remainder2
+    val gammaA = gammaACodec.decodeAt(value, offset) match
+      case Right((ticketsList, used)) =>
+        offset += used
         ticketsList
-      case Attempt.Failure(_) => List.empty
+      case Left(_) => List.empty
 
-    (SafroleGammaDecoded(gammaK, gammaZ, gammaS, gammaA), totalConsumed)
+    (SafroleGammaDecoded(gammaK, gammaZ, gammaS, gammaA), offset)
 
   /** Creates a codec for TicketsOrKeys with the given epoch length.
     */
@@ -322,23 +308,18 @@ object StateCodec:
     val keysListCodec: Codec[List[BandersnatchPublicKey]] =
       JamCodecs.fixedSizeList(summon[Codec[BandersnatchPublicKey]], epochLength)
 
-    discriminated[io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys]
-      .by(byte)
-      .subcaseP(0) {
-        case t: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets =>
-          t
-      }(
-        ticketsListCodec.xmap(
-          io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets.apply,
-          _.tickets
-        )
-      )
-      .subcaseP(1) {
-        case k: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys =>
-          k
-      }(
-        keysListCodec.xmap(
-          io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys.apply,
-          _.keys
-        )
-      )
+    Codec.of(
+      (w, v) =>
+        v match
+          case io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets(t) =>
+            w.u8(0)
+            ticketsListCodec.write(w, t)
+          case io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(k) =>
+            w.u8(1)
+            keysListCodec.write(w, k),
+      r =>
+        r.u8() match
+          case 0 => io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets(ticketsListCodec.read(r))
+          case 1 => io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(keysListCodec.read(r))
+          case other => r.fail(s"invalid TicketsOrKeys discriminator $other")
+    )

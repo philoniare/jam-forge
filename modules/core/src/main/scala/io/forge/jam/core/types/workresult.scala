@@ -1,9 +1,9 @@
 package io.forge.jam.core.types
 
-import scodec.*
-import scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ServiceId, Gas}
-import io.forge.jam.core.scodec.JamCodecs.{compactInteger, hashCodec}
+import io.forge.jam.core.codec.JamCodecs.{compactInteger, hashCodec}
 import io.forge.jam.core.types.work.ExecutionResult
 import io.circe.Decoder
 import spire.math.{UShort, UInt}

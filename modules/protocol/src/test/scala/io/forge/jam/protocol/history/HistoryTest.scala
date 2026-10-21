@@ -4,8 +4,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.JamBytes
-import io.forge.jam.core.scodec.JamCodecs.encode
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.TestHelpers.hashFilled

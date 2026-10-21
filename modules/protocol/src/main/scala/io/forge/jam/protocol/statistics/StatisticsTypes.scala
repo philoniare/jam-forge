@@ -5,10 +5,10 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Dispute, GuaranteeExtrinsic}
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.circe.Decoder
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.FullJamStateCodecs
 
 /**
  * Types for the Statistics State Transition Function.
@@ -43,15 +43,18 @@ object StatisticsTypes:
 
     def zero: StatCount = StatCount(0, 0, 0, 0, 0, 0)
 
-    given Codec[StatCount] =
-      (uint32L :: uint32L :: uint32L :: uint32L :: uint32L :: uint32L).xmap(
-        { case (blocks, tickets, preImages, preImagesSize, guarantees, assurances) =>
-          StatCount(blocks & 0xFFFFFFFFL, tickets & 0xFFFFFFFFL, preImages & 0xFFFFFFFFL,
-                   preImagesSize & 0xFFFFFFFFL, guarantees & 0xFFFFFFFFL, assurances & 0xFFFFFFFFL)
-        },
-        sc => (sc.blocks & 0xFFFFFFFFL, sc.tickets & 0xFFFFFFFFL, sc.preImages & 0xFFFFFFFFL,
-               sc.preImagesSize & 0xFFFFFFFFL, sc.guarantees & 0xFFFFFFFFL, sc.assurances & 0xFFFFFFFFL)
-      )
+    /** Per-validator counters: 6 x u32 LE (GP 0.8.0 appendix D, pi_V). */
+    given Codec[StatCount] = Codec.of(
+      (w, sc) =>
+        w.u32(sc.blocks)
+        w.u32(sc.tickets)
+        w.u32(sc.preImages)
+        w.u32(sc.preImagesSize)
+        w.u32(sc.guarantees)
+        w.u32(sc.assurances),
+      r => StatCount(r.u32(), r.u32(), r.u32(), r.u32(), r.u32(), r.u32()),
+      Size
+    )
 
     given Decoder[StatCount] =
       Decoder.instance { cursor =>

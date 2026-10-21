@@ -3,7 +3,7 @@ package io.forge.jam.protocol.refine
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, LittleEndian}
 import io.forge.jam.core.constants
 import io.forge.jam.core.constants.Csegmentsize
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
@@ -14,7 +14,7 @@ import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.GuestRam
 import io.forge.jam.pvm.program.ProgramBlob
 import io.forge.jam.pvm.types.ProgramCounter
-import scodec.Codec
+import io.forge.jam.core.codec.Codec
 import spire.math.ULong
 
 /** Host-call dispatcher for the refine invocation
@@ -618,10 +618,7 @@ object RefineFetch:
     Hashing.blake2b256(encodeWorkPackage(wp))
 
   private def encodeScodec[A](codec: Codec[A], value: A): Array[Byte] =
-    codec.encode(value) match
-      case scodec.Attempt.Successful(bits) => bits.toByteArray
-      case scodec.Attempt.Failure(err) =>
-        throw new IllegalStateException(s"fetch encoding failed: $err")
+    codec.encode(value)
 
   /** Work-item summary S(w):
     * encode4(service) ‖ codeHash ‖ encode8(refineGas) ‖ encode8(accGas) ‖

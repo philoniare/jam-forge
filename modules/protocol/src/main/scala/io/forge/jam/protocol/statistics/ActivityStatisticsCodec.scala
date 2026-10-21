@@ -1,14 +1,13 @@
 package io.forge.jam.protocol.statistics
 
-import io.forge.jam.core.scodec.{FullJamStateCodecs, JamCodecs}
+import io.forge.jam.core.codec.{FullJamStateCodecs, JamCodecs}
 import io.forge.jam.protocol.report.ReportTypes.{
   CoreStatisticsRecord,
   ServiceActivityRecord,
   ServiceStatisticsEntry
 }
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.Codec
 
 object ActivityStatisticsCodec:
 
@@ -28,47 +27,50 @@ object ActivityStatisticsCodec:
   /**
    * Per-service entry: u32 LE service id followed by 11 compact integers.
    */
-  val serviceStatisticsCodec: Codec[ServiceStatisticsEntry] =
-    (uint32L ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-      JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-      { case (id, pc, ps, rc, rg, imp, xc, xs, exp, ac, atc, ag) =>
-        ServiceStatisticsEntry(
-          id & 0xffffffffL,
-          ServiceActivityRecord(
-            providedCount = pc.toInt,
-            providedSize = ps,
-            refinementCount = rc,
-            refinementGasUsed = rg,
-            imports = imp,
-            extrinsicCount = xc,
-            extrinsicSize = xs,
-            exports = exp,
-            accumulateCount = ac,
-            accumulateTransferCount = atc,
-            accumulateGasUsed = ag
-          )
+  val serviceStatisticsCodec: Codec[ServiceStatisticsEntry] = Codec.of(
+    (w, e) =>
+      w.u32(e.id)
+      w.compact(e.record.providedCount.toLong)
+      w.compact(e.record.providedSize)
+      w.compact(e.record.refinementCount)
+      w.compact(e.record.refinementGasUsed)
+      w.compact(e.record.imports)
+      w.compact(e.record.extrinsicCount)
+      w.compact(e.record.extrinsicSize)
+      w.compact(e.record.exports)
+      w.compact(e.record.accumulateCount)
+      w.compact(e.record.accumulateTransferCount)
+      w.compact(e.record.accumulateGasUsed),
+    r =>
+      val id = r.u32()
+      val providedCount = r.compact().toInt
+      val providedSize = r.compact()
+      val refinementCount = r.compact()
+      val refinementGasUsed = r.compact()
+      val imports = r.compact()
+      val extrinsicCount = r.compact()
+      val extrinsicSize = r.compact()
+      val exports = r.compact()
+      val accumulateCount = r.compact()
+      val accumulateTransferCount = r.compact()
+      val accumulateGasUsed = r.compact()
+      ServiceStatisticsEntry(
+        id,
+        ServiceActivityRecord(
+          providedCount = providedCount,
+          providedSize = providedSize,
+          refinementCount = refinementCount,
+          refinementGasUsed = refinementGasUsed,
+          imports = imports,
+          extrinsicCount = extrinsicCount,
+          extrinsicSize = extrinsicSize,
+          exports = exports,
+          accumulateCount = accumulateCount,
+          accumulateTransferCount = accumulateTransferCount,
+          accumulateGasUsed = accumulateGasUsed
         )
-      },
-      e =>
-        (
-          e.id & 0xffffffffL,
-          e.record.providedCount.toLong,
-          e.record.providedSize,
-          e.record.refinementCount,
-          e.record.refinementGasUsed,
-          e.record.imports,
-          e.record.extrinsicCount,
-          e.record.extrinsicSize,
-          e.record.exports,
-          e.record.accumulateCount,
-          e.record.accumulateTransferCount,
-          e.record.accumulateGasUsed
-        )
-    )
+      )
+  )
 
   /** Codec for the full activity-statistics state item. */
   def activityStatisticsCodec(validatorCount: Int, coresCount: Int): Codec[ActivityStatistics] =

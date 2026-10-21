@@ -6,7 +6,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, Shuffle, constants}
 import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, Hash, ServiceId, Timeslot, ValidatorIndex}
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic}

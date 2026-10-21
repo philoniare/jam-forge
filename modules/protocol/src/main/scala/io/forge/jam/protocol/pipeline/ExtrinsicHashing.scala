@@ -2,13 +2,13 @@ package io.forge.jam.protocol.pipeline
 
 import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.{compactInt, compactPrefixedList}
+import io.forge.jam.core.codec.JamCodecs.{compactInt, compactPrefixedList}
 import io.forge.jam.core.types.block.Extrinsic
 import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute}
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.workpackage.WorkReport
-import scodec.Codec
+import io.forge.jam.core.codec.Codec
 
 /** H_extrinsichash computation: blake2b over the concatenated
   * hashes of the five encoded extrinsic groups, with each preimage item
@@ -20,36 +20,32 @@ object ExtrinsicHashing:
 
   def computeExtrinsicHash(ex: Extrinsic, config: ChainConfig): Hash =
     val ticketsEncoded =
-      compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets).require.toByteArray
+      compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets)
     // Each preimage contributes E_4(service) ++ hash(data)
     val preimageItems = ex.preimages.map { p =>
-      _root_.scodec.codecs.uint32L.encode(p.requester.value.toLong & 0xffffffffL).require.toByteArray ++
+      io.forge.jam.core.codec.codecs.uint32L.encode(p.requester.value.toLong & 0xffffffffL) ++
         Hashing.blake2b256(p.blob.toArray).bytes
     }
     val preimagesEncoded =
-      Array.concat(compactInt.encode(preimageItems.length).require.toByteArray +: preimageItems*)
+      Array.concat(compactInt.encode(preimageItems.length) +: preimageItems*)
     val assurancesEncoded =
       compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount))
         .encode(ex.assurances)
-        .require
-        .toByteArray
     val disputesEncoded =
-      Dispute.codec(config.votesPerVerdict).encode(ex.disputes).require.toByteArray
+      Dispute.codec(config.votesPerVerdict).encode(ex.disputes)
 
     val guaranteeItems = ex.guarantees.map { g =>
-      val reportEncoded = summon[Codec[WorkReport]].encode(g.report).require.toByteArray
+      val reportEncoded = summon[Codec[WorkReport]].encode(g.report)
       val reportHash = Hashing.blake2b256(reportEncoded)
       val timeslotEncoded =
-        _root_.scodec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL).require.toByteArray
+        io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL)
       val credentialEncoded =
         compactPrefixedList(summon[Codec[GuaranteeSignature]])
           .encode(g.signatures)
-          .require
-          .toByteArray
       reportHash.bytes ++ timeslotEncoded ++ credentialEncoded
     }
 
-    val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length).require.toByteArray
+    val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length)
     val gEncoded = Array.concat(guaranteeListLenEncoded +: guaranteeItems*)
 
     val hashes =

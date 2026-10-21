@@ -5,7 +5,7 @@ import java.util.concurrent.{CompletableFuture, TimeUnit}
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.db.ShardStore
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 import io.forge.jam.protocol.refine.{DaShards, ValidatorShards}

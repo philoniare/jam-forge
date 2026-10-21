@@ -1,10 +1,10 @@
 package io.forge.jam.core.types
 
-import scodec.*
-import scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519PublicKey, Ed25519Signature}
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ed25519PublicKeyCodec}
-import io.forge.jam.core.scodec.PrimitiveCodecs
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, ed25519PublicKeyCodec}
+import io.forge.jam.core.codec.PrimitiveCodecs
 import io.circe.Decoder
 
 /**

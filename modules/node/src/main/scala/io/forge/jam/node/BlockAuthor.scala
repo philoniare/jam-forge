@@ -144,7 +144,7 @@ final class BlockAuthor(
 
     // Seal over the serialized header sans seal.
     val unsignedHeaderBytes =
-      headerCodec.encode(unsealed).require.bytes.toArray.dropRight(96)
+      headerCodec.encode(unsealed).dropRight(96)
     val seal =
       BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
     val block = Block(unsealed.copy(seal = JamBytes(seal)), extrinsic)

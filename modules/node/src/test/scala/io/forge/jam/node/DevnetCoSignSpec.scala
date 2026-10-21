@@ -7,7 +7,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workpackage.WorkPackage

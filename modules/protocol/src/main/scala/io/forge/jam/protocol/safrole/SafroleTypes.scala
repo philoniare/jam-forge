@@ -7,11 +7,11 @@ import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.json.JsonHelpers
 import io.circe.{Decoder, DecodingFailure}
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.FullJamStateCodecs
-import io.forge.jam.core.scodec.JamCodecs.{given Codec[BandersnatchPublicKey]}
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.FullJamStateCodecs
+import io.forge.jam.core.codec.JamCodecs.{given Codec[BandersnatchPublicKey]}
 
 /**
  * Types for the Safrole State Transition Function.
@@ -40,14 +40,21 @@ object SafroleTypes:
       val keysCodec: Codec[List[BandersnatchPublicKey]] =
         JamCodecs.fixedSizeList(summon[Codec[BandersnatchPublicKey]], epochLength)
 
-      discriminated[TicketsOrKeys]
-        .by(byte)
-        .subcaseP(0) { case t: Tickets => t }(
-          ticketsCodec.xmap(Tickets.apply, _.tickets)
-        )
-        .subcaseP(1) { case k: Keys => k }(
-          keysCodec.xmap(Keys.apply, _.keys)
-        )
+      Codec.of(
+        (w, v) =>
+          v match
+            case Tickets(t) =>
+              w.u8(0)
+              ticketsCodec.write(w, t)
+            case Keys(k) =>
+              w.u8(1)
+              keysCodec.write(w, k),
+        r =>
+          r.u8() match
+            case 0     => Tickets(ticketsCodec.read(r))
+            case 1     => Keys(keysCodec.read(r))
+            case other => r.fail(s"invalid TicketsOrKeys discriminator $other")
+      )
 
     given Decoder[TicketsOrKeys] = Decoder.instance { cursor =>
       val ticketsResult = cursor.downField("tickets").as[List[TicketMark]]
@@ -96,9 +103,9 @@ object SafroleTypes:
       val iotaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
       val gammaACodec: Codec[List[TicketMark]] = JamCodecs.compactPrefixedList(summon[Codec[TicketMark]])
       val gammaSCodec: Codec[TicketsOrKeys] = TicketsOrKeys.codec(epochLength)
-      val gammaZCodec: Codec[JamBytes] = fixedSizeBytes(BandersnatchRingCommitmentSize.toLong, bytes).xmap(
-        bv => JamBytes.fromByteVector(bv),
-        jb => jb.toByteVector
+      val gammaZCodec: Codec[JamBytes] = bytes(BandersnatchRingCommitmentSize).xmap(
+        bv => bv,
+        jb => jb
       )
       val postOffendersCodec: Codec[List[Ed25519PublicKey]] = JamCodecs.compactPrefixedList(JamCodecs.ed25519PublicKeyCodec)
 

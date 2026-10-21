@@ -3,8 +3,7 @@ package io.forge.jam.core
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UShort, UInt}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 
 import primitives.*
 import types.context.*
@@ -18,17 +17,15 @@ import types.work.*
 
 class ComplexTypesSpec extends AnyFlatSpec with Matchers:
 
-  // Helper method to encode using scodec Codec
+  // Helper method to encode using the given Codec
   private def encode[A](value: A)(using codec: Codec[A]): JamBytes =
-    JamBytes.fromByteVector(codec.encode(value).require.bytes)
+    codec.encodeJam(value)
 
-  // Helper method to decode using scodec Codec
+  // Helper method to decode using the given Codec, returning the value and bytes consumed
   private def decode[A](bytes: JamBytes)(using codec: Codec[A]): (A, Long) =
-    codec.decode(BitVector(bytes.toByteVector)) match
-      case Attempt.Successful(DecodeResult(value, remainder)) =>
-        (value, bytes.length - remainder.bytes.size)
-      case Attempt.Failure(err) =>
-        throw new RuntimeException(s"Decode failed: $err")
+    codec.decodeAt(bytes.toArray, 0) match
+      case Right((value, used)) => (value, used.toLong)
+      case Left(err)            => throw new RuntimeException(s"Decode failed: $err")
 
   // ============================================================================
   // Test 1: Context encode/decode (with prerequisites list)
@@ -208,7 +205,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
     val codec = JamExtrinsic.extrinsicCodec(config)
-    val encoded = codec.encode(ext).require.bytes
+    val encoded = codec.encode(ext)
     // 4 compact zeros for the 4 lists (tickets, preimages, guarantees, assurances)
     // + 3 compact zeros for dispute (verdicts, culprits, faults)
     // = 7 bytes total
@@ -225,8 +222,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
       disputes = Dispute(List.empty, List.empty, List.empty)
     )
     val codec = JamExtrinsic.extrinsicCodec(config)
-    val encoded = codec.encode(ext).require.bytes
-    val decoded = codec.decode(BitVector(encoded)).require.value
+    val encoded = codec.encode(ext)
+    val decoded = codec.decodeUnsafe(encoded)
     decoded.tickets shouldBe empty
     decoded.preimages shouldBe empty
     decoded.guarantees shouldBe empty
@@ -263,7 +260,7 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
 
     val block = JamBlock(header, extrinsic)
     val codec = JamBlock.blockCodec(config)
-    val encoded = codec.encode(block).require.bytes
+    val encoded = codec.encode(block)
 
     // Header: 32*3 (hashes) + 4 (slot) + 1 (no epoch) + 1 (no tickets) + 2 (author) + 96 (entropy) + 1 (no offenders) + 96 (seal) = 297
     // Extrinsic: 7 bytes (4 empty lists + 3 empty dispute lists)
@@ -296,8 +293,8 @@ class ComplexTypesSpec extends AnyFlatSpec with Matchers:
 
     val block = JamBlock(header, extrinsic)
     val codec = JamBlock.blockCodec(config)
-    val encoded = codec.encode(block).require.bytes
-    val decoded = codec.decode(BitVector(encoded)).require.value
+    val encoded = codec.encode(block)
+    val decoded = codec.decodeUnsafe(encoded)
     decoded.header.slot.toInt shouldBe 999
     decoded.header.authorIndex.toInt shouldBe 5
   }

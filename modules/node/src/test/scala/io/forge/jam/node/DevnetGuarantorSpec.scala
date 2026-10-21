@@ -7,7 +7,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workpackage.WorkPackage
@@ -340,7 +340,7 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
       // justifications (msg5) are all empty.
       val stream =
         connAtoB.openStream(StreamKind.WorkPackageBundleSubmission).get(10, TimeUnit.SECONDS)
-      val msg1 = Array[Byte](0, 0) ++ io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(0)
+      val msg1 = Array[Byte](0, 0) ++ io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(0)
       stream.send(msg1) // core index 0, zero segment-root mappings
       stream.send(wp.encode.toArray) // msg2: work package
       stream.send(Array.emptyByteArray) // msg3: extrinsics

@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.pvm.{ExecutionMode, MemoryResult}
 import io.forge.jam.pvm.memory.Memory.{isReadable, isWritable}

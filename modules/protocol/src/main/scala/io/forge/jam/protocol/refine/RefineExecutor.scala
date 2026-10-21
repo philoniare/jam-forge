@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.refine
 
 import io.forge.jam.core.{ChainConfig, JamBytes, constants}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.engine.InterpretedModule

@@ -3,10 +3,10 @@ package io.forge.jam.core.types
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.{parseHex, parseHexBytesFixed}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.circe.Decoder
-import _root_.scodec.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import spire.math.UByte
 
 /**
@@ -34,20 +34,15 @@ object tickets:
     val MaxSize: Int = 2 + RingVrfSignatureSize // 786 bytes
 
     private val attemptCodec: Codec[UByte] =
-      JamCodecs.compactInt.exmap[UByte](
-        i =>
-          if i < 0 || i > 255 then
-            Attempt.failure(Err(s"attempt $i out of UByte range"))
-          else Attempt.successful(UByte(i)),
-        ub => Attempt.successful(ub.toInt)
+      JamCodecs.compactInt.emap[UByte](
+        i => if i < 0 || i > 255 then Left(s"attempt $i out of UByte range") else Right(UByte(i)),
+        _.toInt
       )
 
     given Codec[TicketEnvelope] =
-      (attemptCodec :: fixedSizeBytes(RingVrfSignatureSize.toLong, bytes)).xmap(
-        { case (attempt, sigBytes) =>
-          TicketEnvelope(attempt, JamBytes.fromByteVector(sigBytes))
-        },
-        te => (te.attempt, te.signature.toByteVector)
+      (attemptCodec :: bytes(RingVrfSignatureSize)).xmap(
+        { case (attempt, sig) => TicketEnvelope(attempt, sig) },
+        te => (te.attempt, te.signature)
       )
 
     given Decoder[TicketEnvelope] = Decoder.instance { cursor =>
@@ -71,13 +66,15 @@ object tickets:
   object TicketMark:
     val Size: Int = Hash.Size + 1 // 33 bytes
 
-    given Codec[TicketMark] =
-      (fixedSizeBytes(Hash.Size.toLong, bytes) :: byte).xmap(
-        { case (idBytes, attemptByte) =>
-          TicketMark(JamBytes.fromByteVector(idBytes), UByte(attemptByte))
-        },
-        tm => (tm.id.toByteVector, tm.attempt.toByte)
-      )
+    given Codec[TicketMark] = Codec.of(
+      (w, tm) =>
+        w.bytes(tm.id)
+        w.u8(tm.attempt.toInt),
+      r =>
+        val id = JamBytes.wrap(r.bytes(Hash.Size))
+        TicketMark(id, UByte(r.u8())),
+      Size
+    )
 
     given Decoder[TicketMark] = Decoder.instance { cursor =>
       for

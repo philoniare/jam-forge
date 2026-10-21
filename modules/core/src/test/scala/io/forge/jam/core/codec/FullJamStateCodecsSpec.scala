@@ -1,6 +1,6 @@
-package io.forge.jam.core.scodec
+package io.forge.jam.core.codec
 
-import scodec.bits.ByteVector
+import io.forge.jam.core.JamBytes
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -8,8 +8,8 @@ class FullJamStateCodecsSpec extends AnyFlatSpec with Matchers:
 
   "FullJamStateCodecs state decoders" should "round-trip a well-formed value" in {
     val outputs = List(
-      (1L, ByteVector.fill(32L)(0xaa.toByte)),
-      (2L, ByteVector.fill(32L)(0xbb.toByte))
+      (1L, JamBytes.fill(32)(0xaa.toByte)),
+      (2L, JamBytes.fill(32)(0xbb.toByte))
     )
     val encoded = FullJamStateCodecs.encodeLastAccumulationOutputs(outputs).toArray
     FullJamStateCodecs.decodeLastAccumulationOutputs(encoded) shouldBe outputs

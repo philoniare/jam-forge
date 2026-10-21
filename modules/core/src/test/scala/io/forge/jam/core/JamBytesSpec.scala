@@ -109,14 +109,29 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
     JamBytes(Array[Byte](0x0a, 0x0b)).toHexWithPrefix shouldBe "0x0a0b"
   }
 
-  "toByteVector" should "return underlying ByteVector" in {
-    val bytes = JamBytes(Array[Byte](1, 2))
-    bytes.toByteVector.toArray shouldBe Array[Byte](1, 2)
+  "apply(Array)" should "copy its input" in {
+    val src = Array[Byte](1, 2)
+    val bytes = JamBytes(src)
+    src(0) = 9
+    bytes.toArray shouldBe Array[Byte](1, 2)
   }
 
-  "bytes" should "return underlying ByteVector" in {
+  "toArray" should "return a copy" in {
     val bytes = JamBytes(Array[Byte](1, 2))
-    bytes.bytes.toArray shouldBe Array[Byte](1, 2)
+    bytes.toArray(0) = 9
+    bytes.toArray shouldBe Array[Byte](1, 2)
+  }
+
+  "equality" should "compare contents" in {
+    JamBytes(Array[Byte](1, 2)) shouldBe JamBytes(Array[Byte](1, 2))
+    JamBytes(Array[Byte](1, 2)).hashCode shouldBe JamBytes(Array[Byte](1, 2)).hashCode
+    JamBytes(Array[Byte](1, 2)) should not be JamBytes(Array[Byte](1, 3))
+  }
+
+  "ordering" should "compare bytes as unsigned" in {
+    val ord = summon[Ordering[JamBytes]]
+    ord.compare(JamBytes(Array[Byte](0x7f)), JamBytes(Array[Byte](0x80.toByte))) should be < 0
+    ord.compare(JamBytes(Array[Byte](1)), JamBytes(Array[Byte](1, 0))) should be < 0
   }
 
   "++" should "concatenate two JamBytes" in {

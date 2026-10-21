@@ -1,9 +1,9 @@
 package io.forge.jam.core.types
 
-import scodec.*
-import scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.primitives.{Hash, Timeslot}
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, compactInt}
 import io.circe.Decoder
 
 /**

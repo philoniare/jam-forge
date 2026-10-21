@@ -3,8 +3,7 @@ package io.forge.jam.core
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UByte, UShort, UInt}
-import _root_.scodec.{Codec, Attempt, DecodeResult}
-import _root_.scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 
 import primitives.*
 import types.tickets.*
@@ -14,17 +13,15 @@ import types.dispute.*
 
 class SimpleTypesSpec extends AnyFlatSpec with Matchers:
 
-  // Helper method to encode using scodec Codec
+  // Helper method to encode using the given Codec
   private def encode[A](value: A)(using codec: Codec[A]): JamBytes =
-    JamBytes.fromByteVector(codec.encode(value).require.bytes)
+    codec.encodeJam(value)
 
-  // Helper method to decode using scodec Codec
+  // Helper method to decode using the given Codec, returning the value and bytes consumed
   private def decode[A](bytes: JamBytes)(using codec: Codec[A]): (A, Long) =
-    codec.decode(BitVector(bytes.toByteVector)) match
-      case Attempt.Successful(DecodeResult(value, remainder)) =>
-        (value, bytes.length - remainder.bytes.size)
-      case Attempt.Failure(err) =>
-        throw new RuntimeException(s"Decode failed: $err")
+    codec.decodeAt(bytes.toArray, 0) match
+      case Right((value, used)) => (value, used.toLong)
+      case Left(err)            => throw new RuntimeException(s"Decode failed: $err")
 
   // ============================================================================
   // Test 1: TicketEnvelope encode/decode (compact attempt + 784-byte signature)
@@ -372,7 +369,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
     // Use the codec factory for 6 validators
     val codec = EpochMark.epochMarkCodec(6)
-    val encoded = codec.encode(epochMark).require.bytes
+    val encoded = codec.encode(epochMark)
     encoded.length shouldBe EpochMark.size(6)
     encoded.length shouldBe (32 + 32 + 1 + 6 * 64) // 449 bytes
   }
@@ -389,8 +386,8 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
     // Use the codec factory for 3 validators
     val codec = EpochMark.epochMarkCodec(3)
-    val encoded = codec.encode(epochMark).require.bytes
-    val decoded = codec.decode(BitVector(encoded)).require.value
+    val encoded = codec.encode(epochMark)
+    val decoded = codec.decodeUnsafe(encoded)
     decoded.entropy.toHex shouldBe epochMark.entropy.toHex
     decoded.ticketsEntropy.toHex shouldBe epochMark.ticketsEntropy.toHex
     decoded.validators.length shouldBe epochMark.validators.length

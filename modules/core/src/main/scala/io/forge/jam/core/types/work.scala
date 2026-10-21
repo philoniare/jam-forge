@@ -1,12 +1,11 @@
 package io.forge.jam.core.types
 
-import _root_.scodec.*
-import _root_.scodec.bits.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519Signature}
-import io.forge.jam.core.scodec.JamCodecs.{compactInteger, hashCodec}
-import io.forge.jam.core.scodec.PrimitiveCodecs
+import io.forge.jam.core.codec.JamCodecs.hashCodec
+import io.forge.jam.core.codec.PrimitiveCodecs
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.{Decoder, DecodingFailure}
 import spire.math.{UShort, UInt}
@@ -90,47 +89,31 @@ object work:
     private val BadCodeTag: Byte = 0x05
     private val CodeTooLargeTag: Byte = 0x06
 
-    given Codec[ExecutionResult] = new Codec[ExecutionResult]:
-      override def sizeBound: SizeBound = SizeBound.unknown
-
-      override def encode(value: ExecutionResult): Attempt[BitVector] = value match
-        case ExecutionResult.Ok(output) =>
-          for
-            prefix <- byte.encode(OkTag)
-            lengthBits <- compactInteger.encode(output.length.toLong)
-            dataBits <- bytes.encode(output.toByteVector)
-          yield prefix ++ lengthBits ++ dataBits
-        case ExecutionResult.OOG => byte.encode(OOGTag)
-        case ExecutionResult.Panic => byte.encode(PanicTag)
-        case ExecutionResult.BadExports => byte.encode(BadExportsTag)
-        case ExecutionResult.Oversize => byte.encode(OversizeTag)
-        case ExecutionResult.BadCode => byte.encode(BadCodeTag)
-        case ExecutionResult.CodeTooLarge => byte.encode(CodeTooLargeTag)
-
-      override def decode(bits: BitVector): Attempt[DecodeResult[ExecutionResult]] =
-        byte.decode(bits).flatMap { result =>
-          result.value match
-            case OkTag =>
-              compactInteger.decode(result.remainder).flatMap { lenResult =>
-                fixedSizeBytes(lenResult.value, bytes).decode(lenResult.remainder).map { dataResult =>
-                  DecodeResult(ExecutionResult.Ok(JamBytes.fromByteVector(dataResult.value)), dataResult.remainder)
-                }
-              }
-            case OOGTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.OOG, result.remainder))
-            case PanicTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.Panic, result.remainder))
-            case BadExportsTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.BadExports, result.remainder))
-            case OversizeTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.Oversize, result.remainder))
-            case BadCodeTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.BadCode, result.remainder))
-            case CodeTooLargeTag =>
-              Attempt.successful(DecodeResult(ExecutionResult.CodeTooLarge, result.remainder))
-            case other =>
-              Attempt.failure(Err(s"Unknown ExecutionResult tag: $other"))
-        }
+    /** Work execution result: a tag byte, plus the length-prefixed output for `Ok` (GP 0.8.0 appendix C, O). */
+    given Codec[ExecutionResult] = Codec.of(
+      (w, value) =>
+        value match
+          case ExecutionResult.Ok(output) =>
+            w.u8(OkTag)
+            w.compact(output.length.toLong)
+            w.bytes(output)
+          case ExecutionResult.OOG          => w.u8(OOGTag)
+          case ExecutionResult.Panic        => w.u8(PanicTag)
+          case ExecutionResult.BadExports   => w.u8(BadExportsTag)
+          case ExecutionResult.Oversize     => w.u8(OversizeTag)
+          case ExecutionResult.BadCode      => w.u8(BadCodeTag)
+          case ExecutionResult.CodeTooLarge => w.u8(CodeTooLargeTag),
+      r =>
+        r.u8().toByte match
+          case OkTag           => ExecutionResult.Ok(JamBytes.wrap(r.bytes(r.compactInt())))
+          case OOGTag          => ExecutionResult.OOG
+          case PanicTag        => ExecutionResult.Panic
+          case BadExportsTag   => ExecutionResult.BadExports
+          case OversizeTag     => ExecutionResult.Oversize
+          case BadCodeTag      => ExecutionResult.BadCode
+          case CodeTooLargeTag => ExecutionResult.CodeTooLarge
+          case other           => r.fail(s"Unknown ExecutionResult tag: $other")
+    )
 
     given Decoder[ExecutionResult] = Decoder.instance { cursor =>
       val ok = cursor.get[String]("ok").toOption

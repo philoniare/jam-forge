@@ -312,12 +312,12 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
   test("GP: psi.bad without a verdict this block does NOT clear rho (eq:removenonpositive, ADV-4)") {
     import io.forge.jam.core.Hashing
     import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
-    import _root_.scodec.Codec
+    import io.forge.jam.core.codec.Codec
 
     forAll(genWorkReport(tinyConfig), genDisputeState(tinyConfig)) { (workReport, baseState) =>
       // Compute the hash of the work report (same formula as in processDisputes)
       val reportHash = Hashing.blake2b256(
-        summon[Codec[WorkReport]].encode(workReport).require.toByteArray
+        summon[Codec[WorkReport]].encode(workReport)
       )
 
       // Create an AvailabilityAssignment with this report
@@ -354,12 +354,12 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
   test("GP: psi.wonky without a verdict this block does NOT clear rho (eq:removenonpositive, ADV-4)") {
     import io.forge.jam.core.Hashing
     import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
-    import _root_.scodec.Codec
+    import io.forge.jam.core.codec.Codec
 
     forAll(genWorkReport(tinyConfig), genDisputeState(tinyConfig)) { (workReport, baseState) =>
       // Compute the hash of the work report
       val reportHash = Hashing.blake2b256(
-        summon[Codec[WorkReport]].encode(workReport).require.toByteArray
+        summon[Codec[WorkReport]].encode(workReport)
       )
 
       // Create an AvailabilityAssignment with this report at index 1
@@ -391,11 +391,11 @@ class DisputesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyC
   test("GP: good reports in psi.good are NOT cleared from rho") {
     import io.forge.jam.core.Hashing
     import io.forge.jam.core.types.workpackage.{WorkReport, AvailabilityAssignment}
-    import _root_.scodec.Codec
+    import io.forge.jam.core.codec.Codec
 
     forAll(genWorkReport(tinyConfig), genDisputeState(tinyConfig)) { (workReport, baseState) =>
       val reportHash = Hashing.blake2b256(
-        summon[Codec[WorkReport]].encode(workReport).require.toByteArray
+        summon[Codec[WorkReport]].encode(workReport)
       )
 
       val assignment = AvailabilityAssignment(GuaranteeExtrinsic(workReport, Timeslot(300), List.empty), 300L)

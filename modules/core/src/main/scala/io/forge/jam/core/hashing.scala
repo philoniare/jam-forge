@@ -3,8 +3,6 @@ package io.forge.jam.core
 import org.bouncycastle.crypto.digests.Blake2bDigest
 import org.bouncycastle.crypto.digests.KeccakDigest
 import primitives.Hash
-import _root_.scodec.bits.ByteVector
-import scala.annotation.targetName
 
 /**
  * Hashing utilities for JAM protocol.
@@ -53,22 +51,6 @@ object Hashing:
     val output = new Array[Byte](digest.getDigestSize)
     digest.doFinal(output, 0)
     Hash(output)
-
-  /**
-   * Compute Blake2b-256 hash of the given data without copy.
-   *
-   * @param data The input data as ByteVector
-   * @return The 32-byte hash as Hash type
-   */
-  @targetName("blake2b256ByteVector")
-  def blake2b256(data: ByteVector): Hash =
-    val arr = data.toArrayUnsafe // PERF-B2: digest only reads
-    val digest = blake2bLocal.get()
-    digest.reset()
-    digest.update(arr, 0, arr.length)
-    val output = new Array[Byte](digest.getDigestSize)
-    digest.doFinal(output, 0)
-    Hash.fromByteVectorUnsafe(ByteVector(output))
 
   /**
    * Compute Keccak-256 hash of the given data.

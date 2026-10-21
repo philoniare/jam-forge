@@ -7,7 +7,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Hash, ServiceId}
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.network.StreamKind

@@ -3,8 +3,8 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, LittleEndian, constants}
 import io.forge.jam.core.primitives.{Ed25519Signature, Hash, Timeslot, ValidatorIndex}
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.workpackage.WorkPackage
@@ -18,8 +18,7 @@ import io.forge.jam.protocol.refine.{
   HistoricalLookupService,
   WorkPackageBundle
 }
-import scodec.Codec
-import scodec.bits.ByteVector
+import io.forge.jam.core.codec.Codec
 import spire.math.UInt
 
 import scala.collection.mutable
@@ -334,10 +333,10 @@ final class GuarantorService(
     catch case e: Exception => Left(s"decode failed: ${e.getMessage}")
 
   private def decodeWorkPackage(bytes: Array[Byte]): Either[String, WorkPackage] =
-    summon[Codec[WorkPackage]].decode(ByteVector(bytes).bits) match
-      case scodec.Attempt.Successful(res) if res.remainder.isEmpty => Right(res.value)
-      case scodec.Attempt.Successful(_) => Left("trailing bytes")
-      case scodec.Attempt.Failure(err)  => Left(err.message)
+    summon[Codec[WorkPackage]].decodeAt(bytes, 0) match
+      case Right((value, used)) if used == bytes.length => Right(value)
+      case Right(_)                                     => Left("trailing bytes")
+      case Left(err)                                    => Left(err)
 
   /** Split the concatenated extrinsic blob into per-item lists using the
     * work items' declared (hash, len) references.

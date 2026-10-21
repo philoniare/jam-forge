@@ -1,14 +1,14 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.traces.KeyValue
 import io.forge.jam.conformance.ConformanceCodecs.{encode, decodeAs}
 import spire.math.{UByte, UInt}
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.Codec
 
 /**
  * Feature bits for protocol negotiation.
@@ -73,8 +73,8 @@ object PeerInfo:
     )
 
   given Codec[PeerInfo] =
-    import _root_.scodec.codecs.*
-    val stringCodec: Codec[String] = variableSizeBytesLong(JamCodecs.compactInteger, _root_.scodec.codecs.utf8)
+    import io.forge.jam.core.codec.codecs.*
+    val stringCodec: Codec[String] = compactUtf8
 
     (JamCodecs.ubyteCodec :: JamCodecs.uintCodec :: summon[Codec[Version]] ::
       summon[Codec[Version]] :: stringCodec).xmap(
@@ -95,7 +95,7 @@ final case class AncestryItem(
 
 object AncestryItem:
   given Codec[AncestryItem] =
-    import _root_.scodec.codecs.*
+    import io.forge.jam.core.codec.codecs.*
     (uint32L :: JamCodecs.hashCodec).xmap(
       { case (slotVal, headerHash) => AncestryItem(Timeslot(slotVal.toInt), headerHash) },
       a => (a.slot.value.toLong & 0xffffffffL, a.headerHash)
@@ -194,8 +194,8 @@ object Error:
   val DISCRIMINANT: Int = 0xff
 
   given Codec[Error] =
-    import _root_.scodec.codecs.*
-    variableSizeBytesLong(JamCodecs.compactInteger, utf8).xmap(
+    import io.forge.jam.core.codec.codecs.*
+    compactUtf8.xmap(
       message => Error(message),
       e => e.message
     )

@@ -3,13 +3,12 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
-import scodec.bits.ByteVector
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -249,17 +248,14 @@ final class ChainManager(
         true
 
   def decodeBlock(bytes: Array[Byte]): Either[String, Block] =
-    blockCodec.decode(ByteVector(bytes).bits) match
-      case scodec.Attempt.Successful(res) if res.remainder.isEmpty =>
-        Right(res.value)
-      case scodec.Attempt.Successful(_) => Left("trailing bytes after block")
-      case scodec.Attempt.Failure(err)  => Left(err.message)
+    blockCodec.decodeAt(bytes, 0) match
+      case Right((value, used)) if used == bytes.length =>
+        Right(value)
+      case Right(_) => Left("trailing bytes after block")
+      case Left(err)  => Left(err)
 
   def encodeBlock(block: Block): Array[Byte] =
-    blockCodec.encode(block) match
-      case scodec.Attempt.Successful(bits) => bits.toByteArray
-      case scodec.Attempt.Failure(err) =>
-        throw new IllegalStateException(s"block encode failed: ${err.message}")
+    blockCodec.encode(block)
 
   def headerHashOf(block: Block): Hash =
     Hashing.blake2b256(block.header.encode.toArray)

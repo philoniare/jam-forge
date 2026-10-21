@@ -1,12 +1,11 @@
 package io.forge.jam.protocol.traces
 
-import _root_.scodec.{Codec, Attempt, DecodeResult, Err}
-import _root_.scodec.bits.{BitVector, ByteVector}
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
 import io.circe.{Decoder, HCursor}
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 
@@ -23,15 +22,15 @@ object KeyValue:
   val KEY_SIZE: Int = 31
 
   given Codec[KeyValue] =
-    (fixedSizeBytes(KEY_SIZE.toLong, bytes) ::
-     variableSizeBytes(JamCodecs.compactInt, bytes)).xmap(
+    (bytes(KEY_SIZE) ::
+     compactBytes).xmap(
       { case (keyBv, valueBv) =>
         KeyValue(
-          key = JamBytes.fromByteVector(keyBv),
-          value = JamBytes.fromByteVector(valueBv)
+          key = keyBv,
+          value = valueBv
         )
       },
-      kv => (kv.key.toByteVector, kv.value.toByteVector)
+      kv => (kv.key, kv.value)
     )
 
   given Decoder[KeyValue] = new Decoder[KeyValue]:

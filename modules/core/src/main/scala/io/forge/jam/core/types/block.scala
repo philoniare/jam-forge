@@ -1,10 +1,9 @@
 package io.forge.jam.core.types
 
 import io.circe.Decoder
-import scodec.*
-import scodec.bits.ByteVector
+import io.forge.jam.core.codec.*
 import io.forge.jam.core.ChainConfig
-import io.forge.jam.core.scodec.JamCodecs.compactPrefixedList
+import io.forge.jam.core.codec.JamCodecs.compactPrefixedList
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.core.types.extrinsic.{Preimage, GuaranteeExtrinsic, AssuranceExtrinsic, Dispute}
@@ -99,8 +98,8 @@ object block:
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: ByteVector, config: ChainConfig): Attempt[DecodeResult[Block]] =
-      blockCodec(config).decode(bytes.bits)
+    def fromBytes(bytes: Array[Byte], config: ChainConfig): Either[String, Block] =
+      blockCodec(config).decode(bytes)
 
     given Decoder[Block] = Decoder.instance { cursor =>
       for

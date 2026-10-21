@@ -74,7 +74,7 @@ private[accumulation] trait HostCallSupport:
     try StateKey.decodePreimageInfoValue(raw)
     catch
       case _: IllegalStateException | _: IndexOutOfBoundsException |
-          _: io.forge.jam.core.scodec.CodecDecodingException =>
+          _: io.forge.jam.core.codec.CodecDecodingException =>
         panic(s"$label PANIC: malformed preimage-info value at guest-chosen state key")
 
   protected def loadPreimageTimeslots(

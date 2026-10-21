@@ -8,10 +8,10 @@ import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.FullJamStateCodecs
 
 /**
  * Types for the Disputes State Transition Function.
@@ -143,14 +143,12 @@ object DisputeTypes:
     case BadVotesCount               // 15
 
   object DisputeErrorCode:
-    given Codec[DisputeErrorCode] = byte.exmap(
+    given Codec[DisputeErrorCode] = byte.emap(
       b =>
         val ordinal = b.toInt & 0xFF
-        if ordinal < DisputeErrorCode.values.length then
-          _root_.scodec.Attempt.successful(DisputeErrorCode.fromOrdinal(ordinal))
-        else
-          _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid DisputeErrorCode ordinal: $ordinal")),
-      e => _root_.scodec.Attempt.successful(e.ordinal.toByte)
+        if ordinal < DisputeErrorCode.values.length then Right(DisputeErrorCode.fromOrdinal(ordinal))
+        else Left(s"invalid DisputeErrorCode ordinal: $ordinal"),
+      e => e.ordinal.toByte
     )
 
     given Decoder[DisputeErrorCode] =

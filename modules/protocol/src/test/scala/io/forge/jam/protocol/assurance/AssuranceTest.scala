@@ -4,8 +4,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.scodec.JamCodecs.encode
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.primitives.{
   Hash,
   BandersnatchPublicKey,
@@ -303,9 +303,8 @@ class AssuranceTest extends AnyFunSuite with Matchers:
   test("ADV-8: AssuranceErrorCode codec fails cleanly on an out-of-range ordinal") {
     val codec = summon[Codec[AssuranceErrorCode]]
     AssuranceErrorCode.values.foreach { e =>
-      val bits = codec.encode(e).require
-      codec.decode(bits).require.value shouldBe e
+      codec.decodeExact(codec.encode(e)) shouldBe Right(e)
     }
-    val invalid = _root_.scodec.bits.BitVector(Array[Byte](AssuranceErrorCode.values.length.toByte))
-    codec.decode(invalid).isFailure shouldBe true
+    val invalid = Array[Byte](AssuranceErrorCode.values.length.toByte)
+    codec.decode(invalid).isLeft shouldBe true
   }

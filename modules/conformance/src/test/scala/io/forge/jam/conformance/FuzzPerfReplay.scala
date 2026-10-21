@@ -1,12 +1,11 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.protocol.traces.{Genesis, TraceStep}
 import io.forge.jam.conformance.ConformanceCodecs.encode
 import spire.math.{UByte, UInt}
-import _root_.scodec.Codec
-import _root_.scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 
 import java.net.{StandardProtocolFamily, UnixDomainSocketAddress}
 import java.nio.ByteBuffer
@@ -35,7 +34,7 @@ object FuzzPerfReplay:
     case other :: _                 => throw new IllegalArgumentException(s"Unknown argument: $other")
 
   private def decodeFile[A](path: Path, codec: Codec[A]): A =
-    codec.decode(BitVector(Files.readAllBytes(path))).require.value
+    codec.decodeUnsafe(Files.readAllBytes(path))
 
   /** Fuzzer-to-target messages; jam-forge's ProtocolMessage only encodes the target-to-fuzzer direction. */
   private def frame(discriminant: Int, body: JamBytes): Array[Byte] =

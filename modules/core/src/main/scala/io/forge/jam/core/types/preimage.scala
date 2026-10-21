@@ -1,11 +1,10 @@
 package io.forge.jam.core.types
 
-import _root_.scodec.*
-import _root_.scodec.bits.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInt}
+import io.forge.jam.core.codec.JamCodecs.hashCodec
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.circe.Decoder
 
@@ -28,9 +27,9 @@ object preimage:
 
   object PreimageHash:
     given Codec[PreimageHash] =
-      (hashCodec :: variableSizeBytes(compactInt, bytes)).xmap(
-        { case (hash, blob) => PreimageHash(hash, JamBytes.fromByteVector(blob)) },
-        ph => (ph.hash, ph.blob.toByteVector)
+      (hashCodec :: compactBytes).xmap(
+        { case (hash, blob) => PreimageHash(hash, blob) },
+        ph => (ph.hash, ph.blob)
       )
 
     given Decoder[PreimageHash] =

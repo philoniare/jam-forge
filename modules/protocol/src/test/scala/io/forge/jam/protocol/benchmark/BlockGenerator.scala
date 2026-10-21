@@ -19,7 +19,7 @@ import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.core.trie.StateTrieStore
 import io.forge.jam.vrfs.BandersnatchWrapper
 import spire.math.{UInt, UShort}
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.Codec
 
 import scala.util.Random
 
@@ -126,12 +126,12 @@ class BlockGenerator(
       seal = JamBytes.zeros(96)
     )
 
-    val fullHeaderBytes = headerCodec.encode(headerWithEntropy).require.bytes.toArray
+    val fullHeaderBytes = headerCodec.encode(headerWithEntropy)
     val encodedUnsignedHeader = fullHeaderBytes.dropRight(96)
     val seal = BandersnatchWrapper.ietfVrfSign(authorBsSecret, sealVrfInput, encodedUnsignedHeader)
     val finalHeader = headerWithEntropy.copy(seal = JamBytes(seal))
 
-    val finalHeaderBytes = headerCodec.encode(finalHeader).require.bytes.toArray
+    val finalHeaderBytes = headerCodec.encode(finalHeader)
     lastHeaderHash = Some(Hashing.blake2b256(finalHeaderBytes))
 
     Block(finalHeader, extrinsic)
@@ -266,7 +266,7 @@ class BlockGenerator(
       results = results
     )
 
-    val reportEncoded = summon[Codec[WorkReport]].encode(report).require.toByteArray
+    val reportEncoded = summon[Codec[WorkReport]].encode(report)
     val reportHash = Hashing.blake2b256(reportEncoded)
     val sigMessage = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
 
@@ -315,20 +315,20 @@ class BlockGenerator(
         (0, validators(0).bandersnatchSecret)
 
   private def computeExtrinsicHash(ex: Extrinsic): Hash =
-    import io.forge.jam.core.scodec.JamCodecs.{compactPrefixedList, compactInt}
-    val ticketsEncoded = compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets).require.toByteArray
-    val preimagesEncoded = compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages).require.toByteArray
-    val assurancesEncoded = compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)).encode(ex.assurances).require.toByteArray
-    val disputesEncoded = Dispute.codec(config.votesPerVerdict).encode(ex.disputes).require.toByteArray
+    import io.forge.jam.core.codec.JamCodecs.{compactPrefixedList, compactInt}
+    val ticketsEncoded = compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets)
+    val preimagesEncoded = compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages)
+    val assurancesEncoded = compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)).encode(ex.assurances)
+    val disputesEncoded = Dispute.codec(config.votesPerVerdict).encode(ex.disputes)
 
     val guaranteeItems = ex.guarantees.map { g =>
-      val reportEncoded = summon[Codec[WorkReport]].encode(g.report).require.toByteArray
+      val reportEncoded = summon[Codec[WorkReport]].encode(g.report)
       val reportHash = Hashing.blake2b256(reportEncoded)
-      val timeslotEncoded = _root_.scodec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL).require.toByteArray
-      val credentialEncoded = compactPrefixedList(summon[Codec[GuaranteeSignature]]).encode(g.signatures).require.toByteArray
+      val timeslotEncoded = io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL)
+      val credentialEncoded = compactPrefixedList(summon[Codec[GuaranteeSignature]]).encode(g.signatures)
       reportHash.bytes ++ timeslotEncoded ++ credentialEncoded
     }
-    val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length).require.toByteArray
+    val guaranteeListLenEncoded = compactInt.encode(guaranteeItems.length)
     val gEncoded = guaranteeListLenEncoded ++ guaranteeItems.foldLeft(Array.empty[Byte])(_ ++ _)
 
     val hashes = List(ticketsEncoded, preimagesEncoded, gEncoded, assurancesEncoded, disputesEncoded).map(Hashing.blake2b256)

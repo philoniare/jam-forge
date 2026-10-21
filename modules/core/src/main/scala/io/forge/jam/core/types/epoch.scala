@@ -3,11 +3,9 @@ package io.forge.jam.core.types
 import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, blsPublicKeyCodec, compactPrefixedList}
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, compactPrefixedList}
 import io.circe.Decoder
-import _root_.scodec.*
-import _root_.scodec.bits.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.*
 
 /**
  * Epoch-related types
@@ -57,7 +55,7 @@ object epoch:
     /** Calculate size based on validator count (includes the 0.8.0 compact length discriminator) */
     def size(validatorCount: Int): Int =
       Hash.Size + Hash.Size +
-        io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(validatorCount.toLong).length +
+        io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(validatorCount.toLong).length +
         validatorCount * EpochValidatorKey.Size
 
     /**
@@ -72,8 +70,8 @@ object epoch:
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: ByteVector, config: ChainConfig): Attempt[DecodeResult[EpochMark]] =
-      epochMarkCodec(config.validatorCount).decode(bytes.bits)
+    def fromBytes(bytes: Array[Byte], config: ChainConfig): Either[String, EpochMark] =
+      epochMarkCodec(config.validatorCount).decode(bytes)
 
     given Decoder[EpochMark] =
       Decoder.instance { cursor =>
@@ -120,11 +118,21 @@ object epoch:
         metadata = JamBytes(arr.slice(208, 336))
       )
 
-    given Codec[ValidatorKey] =
-      (bandersnatchPublicKeyCodec :: ed25519PublicKeyCodec :: blsPublicKeyCodec :: fixedSizeBytes(128L, bytes)).xmap(
-        { case (b, e, bls, meta) => ValidatorKey(b, e, bls, JamBytes.fromByteVector(meta)) },
-        vk => (vk.bandersnatch, vk.ed25519, vk.bls, vk.metadata.toByteVector)
-      )
+    given Codec[ValidatorKey] = Codec.of(
+      (w, vk) =>
+        w.bytes(vk.bandersnatch.toArrayUnsafe)
+        w.bytes(vk.ed25519.toArrayUnsafe)
+        w.bytes(vk.bls.toArrayUnsafe)
+        w.bytes(vk.metadata),
+      r =>
+        ValidatorKey(
+          BandersnatchPublicKey.wrap(r.bytes(BandersnatchPublicKey.Size)),
+          Ed25519PublicKey.wrap(r.bytes(Ed25519PublicKey.Size)),
+          BlsPublicKey.wrap(r.bytes(BlsPublicKey.Size)),
+          JamBytes.wrap(r.bytes(MetadataSize))
+        ),
+      Size
+    )
 
     given Decoder[ValidatorKey] =
       Decoder.instance { cursor =>

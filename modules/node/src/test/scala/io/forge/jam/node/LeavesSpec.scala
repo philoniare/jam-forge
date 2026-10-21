@@ -6,7 +6,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers

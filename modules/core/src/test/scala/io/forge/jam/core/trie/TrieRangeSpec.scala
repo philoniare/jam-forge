@@ -33,8 +33,8 @@ class TrieRangeSpec extends AnyFlatSpec with Matchers:
 
   private def childHashes(n: TrieNode): Set[Hash] =
     Set(
-      Hash.fromByteVectorUnchecked(n.left.toByteVector),
-      Hash.fromByteVectorUnchecked(n.right.toByteVector)
+      Hash.wrapUnchecked(n.left.toArrayUnsafe),
+      Hash.wrapUnchecked(n.right.toArrayUnsafe)
     )
 
   private def assertBoundaryChain(trie: StateTrie, boundary: List[TrieNode]): Unit =

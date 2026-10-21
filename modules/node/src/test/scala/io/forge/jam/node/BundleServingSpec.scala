@@ -6,7 +6,7 @@ import java.util.concurrent.{Executors, ExecutorService, LinkedBlockingQueue, Ti
 
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{CoreIndex, Gas, Hash, ServiceId, Timeslot}
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.work.{ExecutionResult, PackageSpec}
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -15,8 +15,7 @@ import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.network.{JamnpConfig, JamnpNode, NodeIdentity, StreamKind}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import scodec.Codec
-import scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 import spire.math.{UInt, UShort}
 
 class BundleServingSpec extends AnyFunSuite with Matchers:
@@ -131,7 +130,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       stream.finish()
 
       val respBytes = await(responses)
-      val decoded = summon[Codec[WorkReport]].decode(BitVector(respBytes)).require.value
+      val decoded = summon[Codec[WorkReport]].decodeUnsafe(respBytes)
       decoded shouldBe report
       await(closed) shouldBe true
     finally
@@ -311,7 +310,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
     val out = new java.io.ByteArrayOutputStream()
     groups.foreach { case (root, indices) =>
       out.write(root.bytes.toArray)
-      out.write(io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(indices.length.toLong))
+      out.write(io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(indices.length.toLong))
       indices.foreach(i => out.write(io.forge.jam.core.LittleEndian.encode(i.toLong, 2)))
     }
     out.toByteArray
@@ -350,7 +349,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       msg1.length shouldBe 8208
 
       val msg2 = await(responses)
-      msg2 shouldBe io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(0)
+      msg2 shouldBe io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(0)
 
       await(closed) shouldBe true
     finally
@@ -488,7 +487,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       msg1.length shouldBe 3 * 4104
 
       val msg2 = await(responses)
-      msg2 shouldBe io.forge.jam.core.scodec.JamCodecs.encodeCompactInteger(0)
+      msg2 shouldBe io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(0)
 
       await(closed) shouldBe true
     finally

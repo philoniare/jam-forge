@@ -4,7 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.constants.Csegmentsize
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.work.ExecutionResult

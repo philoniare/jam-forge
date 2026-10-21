@@ -9,10 +9,10 @@ import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
 import io.forge.jam.core.json.JsonHelpers
 import io.circe.Decoder
 import spire.math.UByte
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec}
-import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, ubyteCodec, compactPrefixedList, fixedSizeList, optionCodec, stfResultCodec}
+import io.forge.jam.core.codec.FullJamStateCodecs
 
 /**
  * Types for the Assurances State Transition Function.
@@ -96,14 +96,12 @@ object AssuranceTypes:
 
   object AssuranceErrorCode:
     given Codec[AssuranceErrorCode] =
-      ubyteCodec.exmap(
+      ubyteCodec.emap(
         b =>
           val ordinal = b.toInt
-          if ordinal < AssuranceErrorCode.values.length then
-            _root_.scodec.Attempt.successful(AssuranceErrorCode.fromOrdinal(ordinal))
-          else
-            _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid AssuranceErrorCode ordinal: $ordinal")),
-        e => _root_.scodec.Attempt.successful(UByte(e.ordinal))
+          if ordinal < AssuranceErrorCode.values.length then Right(AssuranceErrorCode.fromOrdinal(ordinal))
+          else Left(s"invalid AssuranceErrorCode ordinal: $ordinal"),
+        e => UByte(e.ordinal)
       )
 
     given Decoder[AssuranceErrorCode] =

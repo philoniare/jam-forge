@@ -6,11 +6,9 @@ import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Timeslot}
 import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.PrimitiveCodecs
-import _root_.scodec.*
-import _root_.scodec.bits.*
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.PrimitiveCodecs
+import io.forge.jam.core.codec.{ByteReader, ByteWriter, Codec}
 
 /**
  * Block header type.
@@ -62,30 +60,34 @@ object header:
      */
     def headerCodec(validatorCount: Int, epochLength: Int): Codec[Header] =
       val epochMarkOpt = JamCodecs.optionCodec(EpochMark.epochMarkCodec(validatorCount))
-      val ticketsMarkOpt = JamCodecs.optionCodec(
-        vectorOfN(provide(epochLength), summon[Codec[TicketMark]]).xmap(_.toList, _.toVector)
-      )
-      val offendersCodec = JamCodecs.compactInteger.flatZip { count =>
-        vectorOfN(provide(count.toInt), JamCodecs.hashCodec).xmap(_.toList, _.toVector)
-      }.xmap(_._2, list => (list.length.toLong, list))
-
-      (JamCodecs.hashCodec ::
-        JamCodecs.hashCodec ::
-        JamCodecs.hashCodec ::
-        PrimitiveCodecs.timeslot ::
-        epochMarkOpt ::
-        ticketsMarkOpt ::
-        PrimitiveCodecs.validatorIndex ::
-        fixedSizeBytes(EntropySourceSize.toLong, bytes) ::
-        offendersCodec ::
-        fixedSizeBytes(SealSize.toLong, bytes)).xmap(
-        { case (parent, parentStateRoot, extrinsicHash, slot, epochMark, ticketsMark,
-                authorIndex, entropySource, offendersMark, seal) =>
-          Header(parent, parentStateRoot, extrinsicHash, slot, epochMark, ticketsMark,
-            authorIndex, JamBytes.fromByteVector(entropySource), offendersMark, JamBytes.fromByteVector(seal))
-        },
-        h => (h.parent, h.parentStateRoot, h.extrinsicHash, h.slot, h.epochMark, h.ticketsMark,
-          h.authorIndex, h.entropySource.toByteVector, h.offendersMark, h.seal.toByteVector)
+      val ticketsMarkOpt = JamCodecs.optionCodec(JamCodecs.fixedSizeList(summon[Codec[TicketMark]], epochLength))
+      val offendersCodec = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
+      Codec.of(
+        (w, h) =>
+          JamCodecs.hashCodec.write(w, h.parent)
+          JamCodecs.hashCodec.write(w, h.parentStateRoot)
+          JamCodecs.hashCodec.write(w, h.extrinsicHash)
+          PrimitiveCodecs.timeslot.write(w, h.slot)
+          epochMarkOpt.write(w, h.epochMark)
+          ticketsMarkOpt.write(w, h.ticketsMark)
+          PrimitiveCodecs.validatorIndex.write(w, h.authorIndex)
+          w.bytes(h.entropySource)
+          offendersCodec.write(w, h.offendersMark)
+          w.bytes(h.seal),
+        r =>
+          val parent = JamCodecs.hashCodec.read(r)
+          val parentStateRoot = JamCodecs.hashCodec.read(r)
+          val extrinsicHash = JamCodecs.hashCodec.read(r)
+          val slot = PrimitiveCodecs.timeslot.read(r)
+          val epochMark = epochMarkOpt.read(r)
+          val ticketsMark = ticketsMarkOpt.read(r)
+          val authorIndex = PrimitiveCodecs.validatorIndex.read(r)
+          val entropySource = JamBytes.wrap(r.bytes(EntropySourceSize))
+          val offendersMark = offendersCodec.read(r)
+          val seal = JamBytes.wrap(r.bytes(SealSize))
+          Header(parent, parentStateRoot, extrinsicHash, slot, epochMark, ticketsMark, authorIndex, entropySource,
+            offendersMark, seal),
+        256
       )
 
     /**
@@ -99,9 +101,7 @@ object header:
      * For decoding, use headerCodec with config parameters.
      */
     given Codec[Header] = new Codec[Header] {
-      def sizeBound: SizeBound = SizeBound.unknown
-
-      def encode(header: Header): Attempt[BitVector] =
+      def write(out: ByteWriter, header: Header): Unit =
         // For encoding, we can infer the sizes from the data
         val validatorCount = header.epochMark.map(_.validators.length).getOrElse(0)
         val epochLength = header.ticketsMark.map(_.length).getOrElse(0)
@@ -109,23 +109,23 @@ object header:
         headerCodec(
           if validatorCount > 0 then validatorCount else 6,
           if epochLength > 0 then epochLength else 12
-        ).encode(header)
+        ).write(out, header)
 
-      def decode(bits: BitVector): Attempt[DecodeResult[Header]] =
-        Attempt.failure(Err("Use headerCodec(validatorCount, epochLength) for decoding"))
+      def read(in: ByteReader): Header =
+        in.fail("Use headerCodec(validatorCount, epochLength) for decoding")
     }
 
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: ByteVector, config: ChainConfig): Attempt[DecodeResult[Header]] =
-      headerCodec(config).decode(bytes.bits)
+    def fromBytes(bytes: Array[Byte], config: ChainConfig): Either[String, Header] =
+      headerCodec(config).decode(bytes)
 
     /**
-     * Convenience method to decode with config at offset.
+     * Convenience method to decode with config at offset, returning the header and the bytes consumed.
      */
-    def fromBytes(bytes: ByteVector, offset: Int, config: ChainConfig): Attempt[DecodeResult[Header]] =
-      headerCodec(config).decode(bytes.drop(offset.toLong).bits)
+    def fromBytes(bytes: Array[Byte], offset: Int, config: ChainConfig): Either[String, (Header, Int)] =
+      headerCodec(config).decodeAt(bytes, offset)
 
 
     // ============================================================================

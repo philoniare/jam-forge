@@ -5,12 +5,11 @@ import java.util.concurrent.{CompletableFuture, ExecutorService, TimeUnit}
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.Hashing
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
-import scodec.Codec
-import scodec.bits.ByteVector
+import io.forge.jam.core.codec.Codec
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -115,7 +114,7 @@ final class DistributionService(
     sendItem(
       conn,
       StreamKind.AssuranceDistribution,
-      AssuranceExtrinsic.codec(coresCount).encode(a).require.toByteArray
+      AssuranceExtrinsic.codec(coresCount).encode(a)
     )
 
   def distributeAssuranceToAll(a: AssuranceExtrinsic): Unit =
@@ -149,7 +148,7 @@ final class DistributionService(
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
 
   private def decodeItem[A](bytes: Array[Byte])(using codec: Codec[A]): Either[String, A] =
-    codec.decode(ByteVector(bytes).bits) match
-      case scodec.Attempt.Successful(res) if res.remainder.isEmpty => Right(res.value)
-      case scodec.Attempt.Successful(_) => Left("trailing bytes")
-      case scodec.Attempt.Failure(err)  => Left(err.message)
+    codec.decodeAt(bytes, 0) match
+      case Right((value, used)) if used == bytes.length => Right(value)
+      case Right(_) => Left("trailing bytes")
+      case Left(err)  => Left(err)

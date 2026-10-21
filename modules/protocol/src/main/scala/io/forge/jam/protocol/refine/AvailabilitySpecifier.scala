@@ -4,7 +4,7 @@ import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.constants.Csegmentsize
 import io.forge.jam.core.merkle.BinaryMerkle
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.crypto.ErasureCoding
 import spire.math.{UInt, UShort}

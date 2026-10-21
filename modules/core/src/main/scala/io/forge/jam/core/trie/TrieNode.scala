@@ -40,7 +40,7 @@ object TrieNode:
     TrieNode(t, l, r)
 
   def branch(left: Hash, right: Hash): TrieNode =
-    TrieNode(TrieNodeType.Branch, JamBytes.fromByteVector(left.toByteVector), JamBytes.fromByteVector(right.toByteVector))
+    TrieNode(TrieNodeType.Branch, left.toJamBytes, right.toJamBytes)
 
   def leaf(key: JamBytes, value: JamBytes): TrieNode =
     require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
@@ -55,7 +55,7 @@ object TrieNode:
       val l = new Array[Byte](32)
       l(0) = 0
       key.copyToArray(l, 1, 0, 31)
-      TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), JamBytes.fromByteVector(Hashing.blake2b256(value).toByteVector))
+      TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), Hashing.blake2b256(value).toJamBytes)
 
   def leafKey(node: TrieNode): JamBytes =
     require(node.nodeType != TrieNodeType.Branch, "leafKey is only defined on leaf nodes")

@@ -7,8 +7,8 @@ import io.forge.jam.core.primitives.{
   BandersnatchPublicKey,
   BlsPublicKey
 }
-import io.forge.jam.core.scodec.{FullJamStateCodecs, JamCodecs}
-import io.forge.jam.core.scodec.FullJamStateCodecs.TicketsOrKeysData
+import io.forge.jam.core.codec.{FullJamStateCodecs, JamCodecs}
+import io.forge.jam.core.codec.FullJamStateCodecs.TicketsOrKeysData
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.TicketMark
@@ -32,8 +32,7 @@ import io.forge.jam.protocol.statistics.ActivityStatisticsCodec
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 import io.forge.jam.protocol.traces.{FullJamState, StateKeys}
 
-import _root_.scodec.Codec
-import _root_.scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 import scala.collection.mutable
 
 final class TrieBackedJamState(
@@ -568,16 +567,14 @@ object TrieBackedJamState:
       case None    => 0L
       case Some(v) =>
         FullJamStateCodecs.timeslotCodec
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readEntropyPool(trie: StateTrie): List[Hash] =
     trie.read(StateKeys.simpleKey(StateKeys.ENTROPY_POOL)) match
       case None    => List.fill(4)(Hash.zero)
       case Some(v) =>
         FullJamStateCodecs.entropyPoolCodec
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readValidators(
       trie: StateTrie,
@@ -589,8 +586,7 @@ object TrieBackedJamState:
       case Some(v) =>
         FullJamStateCodecs
           .validatorListCodec(validatorCount)
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readAuthPools(
       trie: StateTrie,
@@ -622,16 +618,14 @@ object TrieBackedJamState:
       case None    => Psi.empty
       case Some(v) =>
         summon[Codec[Psi]]
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readRecentHistory(trie: StateTrie): HistoricalBetaContainer =
     trie.read(StateKeys.simpleKey(StateKeys.RECENT_HISTORY)) match
       case None    => HistoricalBetaContainer()
       case Some(v) =>
         summon[Codec[HistoricalBetaContainer]]
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readReports(
       trie: StateTrie,
@@ -642,8 +636,7 @@ object TrieBackedJamState:
       case Some(v) =>
         FullJamStateCodecs
           .reportsCodec[AvailabilityAssignment](coresCount)
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readAccumulationQueue(
       trie: StateTrie,
@@ -656,7 +649,7 @@ object TrieBackedJamState:
           JamCodecs.compactPrefixedList(summon[Codec[AccumulationReadyRecord]]),
           epochLength
         )
-        codec.decodeValue(BitVector(v.toByteVector)).require
+        codec.decodeUnsafe(v.toArrayUnsafe)
 
   private def readAccumulationHistory(
       trie: StateTrie,
@@ -666,8 +659,7 @@ object TrieBackedJamState:
       case None    => List.fill(epochLength)(List.empty)
       case Some(v) =>
         FullJamStateCodecs
-          .decodeAccumulationHistory(v.toArray, epochLength)
-          .map(_.map(bv => JamBytes.fromByteVector(bv)))
+          .decodeAccumulationHistory(v.toArrayUnsafe, epochLength)
 
   private def readLastAccumulationOutputs(
       trie: StateTrie
@@ -676,8 +668,7 @@ object TrieBackedJamState:
       case None    => List.empty
       case Some(v) =>
         FullJamStateCodecs
-          .decodeLastAccumulationOutputs(v.toArray)
-          .map { case (id, bv) => (id, JamBytes.fromByteVector(bv)) }
+          .decodeLastAccumulationOutputs(v.toArrayUnsafe)
 
   private def readPrivileges(trie: StateTrie, coresCount: Int): Privileges =
     trie.read(StateKeys.simpleKey(StateKeys.PRIVILEGED_SERVICES)) match
@@ -686,8 +677,7 @@ object TrieBackedJamState:
       case Some(v) =>
         Privileges
           .codec(coresCount)
-          .decodeValue(BitVector(v.toByteVector))
-          .require
+          .decodeUnsafe(v.toArrayUnsafe)
 
   private def readSafroleBlock(
       trie: StateTrie,
@@ -704,15 +694,14 @@ object TrieBackedJamState:
           List.empty
         )
       case Some(v) =>
-        val (k, zBv, sData, a) =
+        val (k, z, sData, a) =
           FullJamStateCodecs
             .safroleGammaStateCodec(config.validatorCount, config.epochLength)
-            .decodeValue(BitVector(v.toByteVector))
-            .require
+            .decodeUnsafe(v.toArrayUnsafe)
         val s = sData match
           case TicketsOrKeysData.Tickets(t) => TicketsOrKeys.Tickets(t)
           case TicketsOrKeysData.Keys(ks)   => TicketsOrKeys.Keys(ks)
-        (k, JamBytes.fromByteVector(zBv), s, a)
+        (k, z, s, a)
 
   private def readActivityStats(
       trie: StateTrie,
@@ -794,7 +783,7 @@ object TrieBackedJamState:
 
 
   private def encodeJB[A](codec: Codec[A], value: A): JamBytes =
-    JamBytes.fromByteVector(codec.encode(value).require.bytes)
+    codec.encodeJam(value)
 
   private def encodeTimeslot(tau: Long): JamBytes =
     encodeJB(FullJamStateCodecs.timeslotCodec, tau)
@@ -844,16 +833,12 @@ object TrieBackedJamState:
   private def encodeAccumulationHistory(
       history: List[List[JamBytes]]
   ): JamBytes =
-    val bvForm = history.map(_.map(_.toByteVector))
-    encodeJB(FullJamStateCodecs.accumulationHistoryCodec(history.length), bvForm)
+    encodeJB(FullJamStateCodecs.accumulationHistoryCodec(history.length), history)
 
   private def encodeLastAccumulationOutputs(
       outputs: List[(Long, JamBytes)]
   ): JamBytes =
-    val bvForm = outputs.map { case (id, jb) => (id, jb.toByteVector) }
-    JamBytes.fromByteVector(
-      FullJamStateCodecs.encodeLastAccumulationOutputs(bvForm)
-    )
+    FullJamStateCodecs.encodeLastAccumulationOutputs(outputs)
 
   private def encodePrivileges(p: Privileges, coresCount: Int): JamBytes =
     encodeJB(Privileges.codec(coresCount), p)
@@ -871,7 +856,7 @@ object TrieBackedJamState:
         (TicketsOrKeysData.Keys(k), k.length)
     encodeJB(
       FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, sLen),
-      (gammaK, gammaZ.toByteVector, sData, gammaA)
+      (gammaK, gammaZ, sData, gammaA)
     )
 
   private def encodeActivityStats(

@@ -1,11 +1,11 @@
 package io.forge.jam.protocol.history
 
-import _root_.scodec.Codec
+import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.history.{ReportedWorkPackage, HistoricalBeta, HistoricalMmr, HistoricalBetaContainer}
 import io.forge.jam.core.json.JsonHelpers.parseHash
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.circe.Decoder
 
 /**
@@ -68,7 +68,7 @@ object HistoryTypes:
   object HistoricalInput:
     given Codec[HistoricalInput] =
       (JamCodecs.hashCodec :: JamCodecs.hashCodec :: JamCodecs.hashCodec ::
-        _root_.scodec.codecs.uint32L :: JamCodecs.compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
+        io.forge.jam.core.codec.codecs.uint32L :: JamCodecs.compactPrefixedList(Codec[ReportedWorkPackage])).xmap(
         { case (headerHash, parentStateRoot, accumulateRoot, slot, workPackages) =>
           HistoricalInput(headerHash, parentStateRoot, accumulateRoot, slot & 0xFFFFFFFFL, workPackages)
         },

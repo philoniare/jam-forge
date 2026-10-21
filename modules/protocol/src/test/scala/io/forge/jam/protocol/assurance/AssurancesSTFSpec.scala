@@ -6,7 +6,7 @@ import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.generators.StfGenerators.*
 import io.forge.jam.protocol.assurance.AssuranceTypes.*
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, jamBytesCodec}
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, jamBytesCodec}
 
 /**
  * - Assurances must be sorted and unique by validator index
@@ -266,7 +266,7 @@ class AssurancesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
 
     // GP: Assurance message = "$jam_available" ++ blake2b(encode(parent, bitfield))
     val messagePayload = io.forge.jam.core.Hashing.blake2b256(
-      io.forge.jam.core.scodec.JamCodecs.encode((anchor, io.forge.jam.core.JamBytes(bitfield)))
+      (hashCodec :: jamBytesCodec).encode((anchor, io.forge.jam.core.JamBytes(bitfield)))
     )
     val message = io.forge.jam.core.constants.JAM_AVAILABLE_BYTES ++ messagePayload.bytes
 
@@ -285,7 +285,7 @@ class AssurancesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
     val badSignature = io.forge.jam.core.primitives.Ed25519Signature(new Array[Byte](64))
 
     val messagePayload = io.forge.jam.core.Hashing.blake2b256(
-      io.forge.jam.core.scodec.JamCodecs.encode((anchor, io.forge.jam.core.JamBytes(bitfield)))
+      (hashCodec :: jamBytesCodec).encode((anchor, io.forge.jam.core.JamBytes(bitfield)))
     )
     val message = io.forge.jam.core.constants.JAM_AVAILABLE_BYTES ++ messagePayload.bytes
 

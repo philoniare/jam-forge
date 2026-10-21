@@ -5,8 +5,8 @@ import java.util.concurrent.{ConcurrentHashMap, Executors, LinkedBlockingQueue, 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.trie.TrieNode
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 

@@ -9,11 +9,11 @@ import io.forge.jam.core.types.service.ServiceAccount
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.json.JsonHelpers.parseHex
 import io.forge.jam.core.json.JsonHelpers
-import io.forge.jam.core.scodec.JamCodecs
-import io.forge.jam.core.scodec.FullJamStateCodecs
+import io.forge.jam.core.codec.JamCodecs
+import io.forge.jam.core.codec.FullJamStateCodecs
 import io.circe.Decoder
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
 
 /**
  * Types for the Reports State Transition Function.
@@ -40,35 +40,20 @@ object ReportTypes:
   object CoreStatisticsRecord:
     def zero: CoreStatisticsRecord = CoreStatisticsRecord()
 
-    given Codec[CoreStatisticsRecord] =
-      (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-        {
-          case (daLoad, popularity, imports, extrinsicCount, extrinsicSize, exports, bundleSize, gasUsed) =>
-            CoreStatisticsRecord(
-              daLoad,
-              popularity,
-              imports,
-              extrinsicCount,
-              extrinsicSize,
-              exports,
-              bundleSize,
-              gasUsed
-            )
-        },
-        record =>
-          (
-            record.daLoad,
-            record.popularity,
-            record.imports,
-            record.extrinsicCount,
-            record.extrinsicSize,
-            record.exports,
-            record.bundleSize,
-            record.gasUsed
-          )
-      )
+    /** Per-core record: 8 compact naturals d, p, i, x, z, e, b, u (GP 0.8.0 appendix D, pi_C). */
+    given Codec[CoreStatisticsRecord] = Codec.of(
+      (w, r) =>
+        w.compact(r.daLoad)
+        w.compact(r.popularity)
+        w.compact(r.imports)
+        w.compact(r.extrinsicCount)
+        w.compact(r.extrinsicSize)
+        w.compact(r.exports)
+        w.compact(r.bundleSize)
+        w.compact(r.gasUsed),
+      r => CoreStatisticsRecord(r.compact(), r.compact(), r.compact(), r.compact(), r.compact(), r.compact(),
+        r.compact(), r.compact())
+    )
 
     given Decoder[CoreStatisticsRecord] =
       Decoder.instance { cursor =>
@@ -111,54 +96,34 @@ object ReportTypes:
   )
 
   object ServiceActivityRecord:
-    given Codec[ServiceActivityRecord] =
-      (JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger ::
-        JamCodecs.compactInteger :: JamCodecs.compactInteger :: JamCodecs.compactInteger).xmap(
-        {
-          case (
-                providedCount,
-                providedSize,
-                refinementCount,
-                refinementGasUsed,
-                extrinsicCount,
-                extrinsicSize,
-                imports,
-                exports,
-                accumulateCount,
-                accumulateTransferCount,
-                accumulateGasUsed
-              ) =>
-            ServiceActivityRecord(
-              providedCount.toInt,
-              providedSize,
-              refinementCount,
-              refinementGasUsed,
-              extrinsicCount,
-              extrinsicSize,
-              imports,
-              exports,
-              accumulateCount,
-              accumulateTransferCount,
-              accumulateGasUsed
-            )
-        },
-        record =>
-          (
-            record.providedCount.toLong,
-            record.providedSize,
-            record.refinementCount,
-            record.refinementGasUsed,
-            record.extrinsicCount,
-            record.extrinsicSize,
-            record.imports,
-            record.exports,
-            record.accumulateCount,
-            record.accumulateTransferCount,
-            record.accumulateGasUsed
-          )
-      )
+    given Codec[ServiceActivityRecord] = Codec.of(
+      (w, r) =>
+        w.compact(r.providedCount.toLong)
+        w.compact(r.providedSize)
+        w.compact(r.refinementCount)
+        w.compact(r.refinementGasUsed)
+        w.compact(r.extrinsicCount)
+        w.compact(r.extrinsicSize)
+        w.compact(r.imports)
+        w.compact(r.exports)
+        w.compact(r.accumulateCount)
+        w.compact(r.accumulateTransferCount)
+        w.compact(r.accumulateGasUsed),
+      r =>
+        ServiceActivityRecord(
+          r.compact().toInt,
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact(),
+          r.compact()
+        )
+    )
 
     given Decoder[ServiceActivityRecord] =
       Decoder.instance { cursor =>
@@ -389,14 +354,12 @@ object ReportTypes:
     case DuplicateGuarantors
 
   object ReportErrorCode:
-    given Codec[ReportErrorCode] = byte.exmap(
+    given Codec[ReportErrorCode] = byte.emap(
       b =>
         val ordinal = b.toInt & 0xff
-        if ordinal < ReportErrorCode.values.length then
-          _root_.scodec.Attempt.successful(ReportErrorCode.fromOrdinal(ordinal))
-        else
-          _root_.scodec.Attempt.failure(_root_.scodec.Err(s"invalid ReportErrorCode ordinal: $ordinal")),
-      e => _root_.scodec.Attempt.successful(e.ordinal.toByte)
+        if ordinal < ReportErrorCode.values.length then Right(ReportErrorCode.fromOrdinal(ordinal))
+        else Left(s"invalid ReportErrorCode ordinal: $ordinal"),
+      e => e.ordinal.toByte
     )
 
     given Decoder[ReportErrorCode] =

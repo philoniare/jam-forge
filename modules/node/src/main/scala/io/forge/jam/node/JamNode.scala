@@ -4,7 +4,7 @@ import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
 

@@ -76,7 +76,7 @@ final class RocksDbTrieBackend private (
       if readCount(nodeRefsCf, h) <= 0 then
         readNode(h).foreach { node =>
           if node.nodeType == TrieNodeType.RegularLeaf then
-            val rawValueHash = Hash.fromByteVectorUnsafe(node.right.toByteVector)
+            val rawValueHash = Hash.wrap(node.right.toArrayUnsafe)
             val c = readCount(valueRefsCf, rawValueHash) - 1
             db.put(valueRefsCf, key(rawValueHash), encodeLE8(c))
             if c <= 0 then deadValueCandidates.add(rawValueHash)

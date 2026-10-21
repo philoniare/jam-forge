@@ -149,7 +149,7 @@ For full project documentation, visit **[jamforge.xyz](http://jamforge.xyz/)**
 
 ### Core Concepts
 
-- **JAM Codec**: Type-class based binary serialization using `scodec`
+- **JAM Codec**: Type-class based binary serialization over byte arrays (`io.forge.jam.core.codec`)
 - **State Transition Functions**: Implementations of Safrole, Statistics, Accumulation, and other STF components
 - **PolkaVM**: RISC-V virtual machine with gas metering and full instruction set support
 

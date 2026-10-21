@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{JamBytes, Hashing}
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
 import spire.math.ULong
 

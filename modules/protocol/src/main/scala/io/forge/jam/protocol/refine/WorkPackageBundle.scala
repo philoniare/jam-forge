@@ -1,10 +1,9 @@
 package io.forge.jam.protocol.refine
 
 import io.forge.jam.core.constants.Csegmentsize
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.workpackage.WorkPackage
-import scodec.Codec
-import scodec.bits.BitVector
+import io.forge.jam.core.codec.Codec
 
 /** The auditable work-package bundle: the encoded work package followed by each
   * work item's extrinsic data, imported segments, and import justifications.
@@ -49,12 +48,10 @@ object WorkPackageBundle:
     * reconstructing a bundle from erasure-coded shards).
     */
   def decode(bytes: Array[Byte]): Either[String, WorkPackageBundle] =
-    val bits = BitVector(bytes)
-    summon[Codec[WorkPackage]].decode(bits) match
-      case scodec.Attempt.Failure(err) => Left(s"work package: ${err.message}")
-      case scodec.Attempt.Successful(result) =>
-        val wp = result.value
-        var offset = (bits.size - result.remainder.size).toInt / 8
+    summon[Codec[WorkPackage]].decodeAt(bytes, 0) match
+      case Left(err) => Left(s"work package: $err")
+      case Right((wp, used)) =>
+        var offset = used
         def take(n: Int): Either[String, Array[Byte]] =
           if offset + n > bytes.length then Left("bundle truncated")
           else

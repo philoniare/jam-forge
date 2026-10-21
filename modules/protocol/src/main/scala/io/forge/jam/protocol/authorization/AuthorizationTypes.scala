@@ -5,9 +5,9 @@ import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.core.json.JsonHelpers.{parseHash, parseHashListList}
 import io.circe.Decoder
 import spire.math.UShort
-import _root_.scodec.Codec
-import _root_.scodec.codecs.*
-import io.forge.jam.core.scodec.JamCodecs
+import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.codec.codecs.*
+import io.forge.jam.core.codec.JamCodecs
 
 /**
  * Types for the Authorization State Transition Function.

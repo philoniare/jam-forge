@@ -1,11 +1,11 @@
 package io.forge.jam.core.types
 
-import scodec.*
-import scodec.codecs.*
+import io.forge.jam.core.codec.*
+import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, ServiceId, CoreIndex, Gas}
-import io.forge.jam.core.scodec.JamCodecs.{hashCodec, compactInteger, compactInt, compactPrefixedList}
-import io.forge.jam.core.scodec.PrimitiveCodecs
+import io.forge.jam.core.codec.JamCodecs.{hashCodec, compactInteger, compactInt, compactPrefixedList}
+import io.forge.jam.core.codec.PrimitiveCodecs
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workresult.WorkResult

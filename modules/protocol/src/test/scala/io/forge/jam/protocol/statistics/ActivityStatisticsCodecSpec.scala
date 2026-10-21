@@ -2,7 +2,7 @@ package io.forge.jam.protocol.statistics
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import io.forge.jam.core.scodec.CodecDecodingException
+import io.forge.jam.core.codec.CodecDecodingException
 import io.forge.jam.protocol.report.ReportTypes.{
   CoreStatisticsRecord,
   ServiceActivityRecord,
@@ -70,15 +70,13 @@ class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
 
   "ActivityStatisticsCodec" should "encode to the pinned wire bytes" in {
     val codec = ActivityStatisticsCodec.activityStatisticsCodec(2, 2)
-    codec.encode(fixture).require.toHex shouldBe PinnedHex
+    io.forge.jam.core.JamBytes.toHex(codec.encode(fixture)) shouldBe PinnedHex
   }
 
   it should "round-trip the pinned bytes back to the domain values" in {
     val bytes = ActivityStatisticsCodec
       .activityStatisticsCodec(2, 2)
       .encode(fixture)
-      .require
-      .toByteArray
     ActivityStatisticsCodec.decodeActivityStatistics(bytes, 2, 2) shouldBe fixture
   }
 
@@ -86,8 +84,6 @@ class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
     val bytes = ActivityStatisticsCodec
       .activityStatisticsCodec(2, 2)
       .encode(fixture)
-      .require
-      .toByteArray
     a[CodecDecodingException] should be thrownBy
       ActivityStatisticsCodec.decodeActivityStatistics(bytes :+ 0xab.toByte, 2, 2)
   }

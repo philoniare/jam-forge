@@ -299,8 +299,7 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
           service = service
         )
       )
-      .require
-    val decoded = codec.decodeValue(encoded).require
+    val decoded = codec.decodeUnsafe(encoded)
     val (decAcc, decPrev, decCore, decSvc) =
       (decoded.accumulator, decoded.previous, decoded.core, decoded.service)
 

@@ -2,7 +2,7 @@ package io.forge.jam.node
 
 import io.forge.jam.core.{Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.scodec.JamCodecs.encode
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
 import io.forge.jam.core.types.tickets.TicketEnvelope
 
