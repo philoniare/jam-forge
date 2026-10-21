@@ -20,7 +20,7 @@ final class ShardStore private (
 ) extends AutoCloseable:
   private def key(erasureRoot: Hash, validatorIndex: Int): Array[Byte] =
     val out = new Array[Byte](34)
-    System.arraycopy(erasureRoot.bytes.toArray, 0, out, 0, 32)
+    System.arraycopy(erasureRoot.toArrayUnsafe, 0, out, 0, 32)
     out(32) = (validatorIndex & 0xff).toByte
     out(33) = ((validatorIndex >> 8) & 0xff).toByte
     out
@@ -36,7 +36,7 @@ final class ShardStore private (
 
   /** All held validator indexes for a report's erasure-root. */
   def heldIndexes(erasureRoot: Hash): List[Int] =
-    val prefix = erasureRoot.bytes.toArray
+    val prefix = erasureRoot.toArrayUnsafe
     val it = db.newIterator(shardsCf)
     try
       val out = List.newBuilder[Int]
@@ -70,7 +70,13 @@ object ShardStore:
     val options = new DBOptions()
       .setCreateIfMissing(true)
       .setCreateMissingColumnFamilies(true)
-    val db = RocksDB.open(options, path.toString, descriptors.asJava, handles)
+    val db =
+      try RocksDB.open(options, path.toString, descriptors.asJava, handles)
+      catch
+        case e: Throwable =>
+          options.close()
+          cfOptions.close()
+          throw e
     val hs = handles.asScala.toSeq
     new ShardStore(
       db,

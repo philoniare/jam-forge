@@ -4,11 +4,12 @@ import io.circe.{Decoder, HCursor}
 import io.circe.parser.*
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature}
 
 import scala.io.Source
 
 /**
- * Tests for Ed25519 signature verification with canonicity checks.
+ * Tests for Ed25519 signature verification (ZIP-215 rules), single and batched.
  */
 class Ed25519Test extends AnyFunSuite with Matchers:
 
@@ -141,4 +142,51 @@ class Ed25519Test extends AnyFunSuite with Matchers:
     ) {
       divergent shouldBe empty
     }
+  }
+
+  private def item(v: TestVector) =
+    (Ed25519PublicKey(hexToBytes(v.pk)), hexToBytes(v.msg), Ed25519Signature(hexToBytes(v.r) ++ hexToBytes(v.s)))
+
+  test("batch verification gives single verification's answer on every ZIP-215 vector") {
+    // The vectors all verify under ZIP-215 (their keys and R are small-order, so any message does too); each also
+    // goes in with the low bit of s flipped, which breaks the equation.
+    def flipS(s: String) = f"${Integer.parseInt(s.take(2), 16) ^ 1}%02x" + s.drop(2)
+    val vectors = loadTestVectors().flatMap(v => List(v, v.copy(s = flipS(v.s))))
+    val single = vectors.map(verifyVector)
+    withClue("the cases should include both accepted and rejected ones: ") {
+      single should contain(true)
+      single should contain(false)
+    }
+    for (v, ok) <- vectors.zip(single) do
+      withClue(s"#${v.number} (${v.desc}, msg ${v.msg}): ") {
+        Ed25519.verifyAll(IndexedSeq(item(v))) shouldBe ok
+      }
+    // All together: the batch finds the same first failure, across several chunks.
+    val items = vectors.map(item).toIndexedSeq
+    Ed25519.firstInvalid(items) shouldBe single.indexWhere(!_)
+    Ed25519.firstInvalid(items.filter(i => Ed25519.verify(i._1, i._2, i._3))) shouldBe -1
+  }
+
+  test("firstInvalid finds the one bad signature in a large batch, wherever it is") {
+    val n = 300
+    val items = (0 until n).map { i =>
+      val sk = Array.tabulate[Byte](32)(j => (i * 31 + j).toByte)
+      val msg = Array.tabulate[Byte](i % 50)(j => (i + j).toByte)
+      (
+        Ed25519PublicKey(Ed25519ZebraWrapper.publicFromSecret(sk)),
+        msg,
+        Ed25519Signature(Ed25519ZebraWrapper.sign(sk, msg))
+      )
+    }
+    Ed25519.verifyAll(items) shouldBe true
+    Ed25519.firstInvalid(IndexedSeq.empty) shouldBe -1
+    for bad <- Seq(0, 63, 64, 150, n - 1) do
+      val sig = items(bad)._3.bytes
+      sig(5) = (sig(5) ^ 0x10).toByte
+      val corrupted = items.updated(bad, items(bad).copy(_3 = Ed25519Signature(sig)))
+      Ed25519.firstInvalid(corrupted) shouldBe bad
+      Ed25519.verifyAll(corrupted) shouldBe false
+      // A later bad one does not hide the first.
+      val alsoLast = corrupted.updated(n - 1, (items(n - 1)._1, items(n - 1)._2, items(0)._3))
+      Ed25519.firstInvalid(alsoLast) shouldBe bad
   }

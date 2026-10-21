@@ -82,11 +82,18 @@ object ReportTransition:
     skipAncestryValidation: Boolean = false,
     ancestry: List[AncestorHeader] = List.empty
   ): ReportOutput =
-    val preState = ReportBridge.extract(view)
-    val (postState, output) =
-      stfInternal(input, preState, view.config, skipAncestryValidation, ancestry)
-    ReportBridge.apply(view, postState)
-    output
+    if input.guarantees.isEmpty then
+      // With no guarantees every check passes, ρ‡ is kept and the guarantee-derived statistics are zero: what
+      // stfInternal gives, without assembling its pre-state (service accounts, package-hash sets).
+      view.cores.statistics = StatsAggregation.coreStatsByCore(Nil, view.config.coresCount)
+      view.serviceStatistics = Nil
+      StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
+    else
+      val preState = ReportBridge.extract(view)
+      val (postState, output) =
+        stfInternal(input, preState, view.config, skipAncestryValidation, ancestry)
+      ReportBridge.apply(view, postState)
+      output
 
   /**
    * Internal Reports STF implementation using ReportState.
@@ -253,25 +260,14 @@ object ReportTransition:
       GuaranteeProducts(guarantee.report, packageLookup, guarantorsBuf.toList)
 
   /**
-   * Verify every collected guarantor signature in one parallel batch.
+   * Verify every collected guarantor signature with batch verification.
    */
   private def verifyGuarantorSignatureBatch(
     sigBuf: scala.collection.mutable.ArrayBuffer[
       (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
     ]
   ): ValidationResult =
-    val n = sigBuf.size
-    if n == 0 then Right(())
-    else
-      val tuples = sigBuf.toArray
-      val allValid = java.util.stream.IntStream
-        .range(0, n)
-        .parallel()
-        .allMatch { i =>
-          val (pk, msg, sig) = tuples(i)
-          Ed25519.verify(pk, msg, sig)
-        }
-      if !allValid then Left(ReportErrorCode.BadSignature) else Right(())
+    if !Ed25519.verifyAll(sigBuf.toIndexedSeq) then Left(ReportErrorCode.BadSignature) else Right(())
 
   /** Validate guarantees are sorted by core index. */
   private def validateGuaranteesOrder(guarantees: List[GuaranteeExtrinsic]): ValidationResult =

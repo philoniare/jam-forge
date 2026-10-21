@@ -1,37 +1,29 @@
-# Stage 1: Build native Rust libraries (using nightly for edition2024 support)
-FROM rust:latest AS rust-builder
-
-RUN rustup install nightly && rustup default nightly
+# Stage 1: Build native Rust libraries.
+FROM rust:1.97.0-bookworm AS rust-builder
 
 WORKDIR /build
 
-COPY modules/crypto/native/ark-vrf ./ark-vrf
 COPY modules/crypto/native/bandersnatch-vrfs-wrapper ./bandersnatch-vrfs-wrapper
 COPY modules/crypto/native/ed25519-zebra-wrapper ./ed25519-zebra-wrapper
 COPY modules/crypto/native/erasure-coding-wrapper ./erasure-coding-wrapper
-COPY modules/pvm/native/pvm-recompiler ./pvm-recompiler
 
 WORKDIR /build/bandersnatch-vrfs-wrapper
-RUN cargo build --release
+RUN cargo build --release --locked
 
 WORKDIR /build/ed25519-zebra-wrapper
-RUN cargo build --release
+RUN cargo build --release --locked
 
 WORKDIR /build/erasure-coding-wrapper
-RUN cargo build --release
-
-WORKDIR /build/pvm-recompiler
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM sbtscala/scala-sbt:eclipse-temurin-24.0.1_9_1.12.11_3.3.7 AS scala-builder
 
 WORKDIR /build
 
-RUN mkdir -p /build/modules/crypto/native/build/linux /build/modules/pvm/native/build/linux
+RUN mkdir -p /build/modules/crypto/native/build/linux
 COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /build/modules/crypto/native/build/linux/
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /build/modules/crypto/native/build/linux/
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /build/modules/crypto/native/build/linux/
-COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /build/modules/pvm/native/build/linux/
 
 COPY build.sbt .
 COPY project/build.properties project/
@@ -46,6 +38,8 @@ COPY modules/pvm ./modules/pvm
 COPY modules/protocol ./modules/protocol
 COPY modules/conformance ./modules/conformance
 
+RUN mkdir -p modules/pvm/native/build/linux && touch modules/pvm/native/build/linux/libpvm_recompiler.so
+
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 ENV JAM_BUILD_GIT_SHA=${GIT_SHA}
@@ -55,7 +49,7 @@ RUN echo "Building for git=${GIT_SHA} at ${BUILD_TIME}" && \
     sbt clean "conformance/assembly"
 
 # Stage 3: Runtime image
-FROM azul/zulu-openjdk:24-jdk-crac-latest
+FROM azul/zulu-openjdk:24.0.2-24.32-jdk-crac
 
 WORKDIR /app
 
@@ -69,8 +63,8 @@ COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure
 
 COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conformance.jar /app/
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
-COPY jamtestvectors/traces/preimages/*.json /app/warmup-traces/preimages/
-COPY jamtestvectors/traces/preimages_light/*.json /app/warmup-traces/preimages_light/
+COPY jamtestvectors/traces/preimages/*.bin /app/warmup-traces/preimages/
+COPY jamtestvectors/traces/preimages_light/*.bin /app/warmup-traces/preimages_light/
 ENV JAM_TRACES_DIR=/app/warmup-traces
 
 ENV LD_LIBRARY_PATH=/app/lib

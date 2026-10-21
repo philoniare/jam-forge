@@ -65,12 +65,14 @@ object DaShards:
           BinaryMerkle.blake2b(bundleChunks(v)) ++
             BinaryMerkle.merklizeWB(segmentColumns(v))
         }
+      // One tree for all the justifications: a trace per validator would rehash the whole tree each time.
+      val tree = BinaryMerkle.Tree(leaves)
       (0 until config.validatorCount).map { v =>
         ValidatorShards(
           validatorIndex = v,
           bundleShard = bundleChunks(v),
           segmentShards = segmentColumns(v),
-          justification = BinaryMerkle.trace(leaves, v)
+          justification = tree.trace(v)
         )
       }
 
@@ -148,13 +150,8 @@ object DaShards:
     val all = exportedSegments ++ AvailabilitySpecifier.pagedProofs(exportedSegments)
     if all.isEmpty then Right(IndexedSeq.fill(config.validatorCount)(IndexedSeq.empty))
     else
-      val perSegment = all.map { seg =>
-        ErasureCoding.chunk(seg, config.ecPieceSize, config.validatorCount)
-      }
-      perSegment.collectFirst { case Left(e) => e } match
-        case Some(e) => Left(s"segment erasure coding failed: ${e.getMessage}")
-        case None =>
-          val matrix = perSegment.map(_.toOption.get)
-          Right(
-            (0 until config.validatorCount).map(v => matrix.map(row => row(v)))
-          )
+      ErasureCoding
+        .chunkSegments(all, config.ecPieceSize, config.validatorCount)
+        .left
+        .map(e => s"segment erasure coding failed: ${e.getMessage}")
+        .map(shards => (0 until config.validatorCount).map(shards.column))

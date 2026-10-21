@@ -195,8 +195,6 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
           GrowHeapCapableHostCalls,
           preDispatch = None
         )
-        // gp 0.8.0 A.7 grow_heap is dispatched through the ordinary ecalli upcall
-        // and mutates the live native region table, so this is a real native run.
         outcome shouldBe Some(NativeRunner.RunOutcome.Halt)
         Some((nativeInstance.gas, nativeInstance.reg(7)))
 
@@ -304,8 +302,12 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
 
   private val authCodeHash = Hash(Array.fill[Byte](32)(0x21))
 
+  private def jamBlob(pvmBlob: Array[Byte]): Array[Byte] =
+    val n = pvmBlob.length
+    new Array[Byte](11) ++ Array[Byte](n.toByte, (n >> 8).toByte, (n >> 16).toByte, (n >> 24).toByte) ++ pvmBlob
+
   private def preimageOf(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
-    Array[Byte](0, 0, 0, code.length.toByte) ++ code ++ bitmask
+    Array[Byte](0) ++ jamBlob(Array[Byte](0, 0, code.length.toByte) ++ code ++ bitmask)
 
   private class HostLookup(hostService: Long, preimage: Option[Array[Byte]]) extends HistoricalLookupService:
     def serviceExists(id: Long): Boolean = id == hostService

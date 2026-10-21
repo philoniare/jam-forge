@@ -100,9 +100,20 @@ public class Ed25519ZebraWrapper {
 	 * @param publicKey 32-byte Ed25519 public key
 	 * @param message   The message that was signed
 	 * @param signature 64-byte Ed25519 signature
-	 * @return Single byte array: [1] if verification succeeds, [0] if it fails
+	 * @return true if verification succeeds
 	 */
-	public static native byte[] verify(byte[] publicKey, byte[] message, byte[] signature);
+	public static native boolean verify(byte[] publicKey, byte[] message, byte[] signature);
+
+	/**
+	 * Verify n Ed25519 signatures at once with ed25519-zebra's batch verifier (same ZIP-215 rules as verify).
+	 *
+	 * @param publicKeys  n 32-byte public keys end to end
+	 * @param messages    the n messages end to end
+	 * @param messageEnds where each message ends in messages
+	 * @param signatures  n 64-byte signatures end to end
+	 * @return true if every signature is valid
+	 */
+	public static native boolean verifyBatch(byte[] publicKeys, byte[] messages, int[] messageEnds, byte[] signatures);
 
 	/**
 	 * Sign a message using Ed25519.

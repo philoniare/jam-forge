@@ -181,10 +181,9 @@ object BandersnatchVrf:
     try
       ensureInitialized(ringSize)
 
-      // Note: The JNI function expects attempt as a long
       val result = JniBandersnatchWrapper.verifierRingVrfVerify(
         entropy.bytes.toArray,
-        attempt.toLong,
+        attempt.toByte,
         signature.toArray,
         ringCommitment.toArray,
         ringSize
@@ -214,7 +213,7 @@ object BandersnatchVrf:
 
       val result = JniBandersnatchWrapper.verifierRingVrfVerify(
         entropy,
-        attempt.toLong,
+        attempt.toByte,
         signature,
         commitment,
         ringSize

@@ -215,35 +215,40 @@ object ProtocolMessage:
   final case class ErrorMsg(error: Error) extends ProtocolMessage
 
   /**
-   * Encode a protocol message with discriminant prefix.
+   * Encode a protocol message with discriminant prefix. Both directions are supported: the server encodes its
+   * replies, and the warmup and test clients encode their requests; `config` sizes the block and header codecs.
    */
-  def encodeMessage(msg: ProtocolMessage): JamBytes =
-    msg match
-      case PeerInfoMsg(info) =>
-        JamBytes(Array(PeerInfo.DISCRIMINANT.toByte)) ++ info.encode
-      case StateRootMsg(root) =>
-        JamBytes(Array(StateRoot.DISCRIMINANT.toByte)) ++ root.encode
-      case StateMsg(state) =>
-        JamBytes(Array(State.DISCRIMINANT.toByte)) ++ state.encode
-      case ErrorMsg(error) =>
-        JamBytes(Array(Error.DISCRIMINANT.toByte)) ++ error.encode
-      case _ =>
-        throw new IllegalArgumentException(s"Cannot encode message type: $msg")
+  def encodeMessage(msg: ProtocolMessage, config: ChainConfig): JamBytes =
+    val (discriminant, body) = discriminantAndBody(msg, config)
+    discriminant.toByte +: body
 
   /**
-   * Encode a protocol message with 32-bit LE length prefix.
+   * Encode a protocol message with 32-bit LE length prefix, as one array.
    */
-  def encodeWithFrame(msg: ProtocolMessage): JamBytes =
-    val body = encodeMessage(msg)
-    val lengthPrefix = JamBytes(JamCodecs.encodeU32LE(UInt(body.length)))
-    lengthPrefix ++ body
+  def encodeWithFrame(msg: ProtocolMessage, config: ChainConfig): Array[Byte] =
+    val (discriminant, body) = discriminantAndBody(msg, config)
+    val framed = new Array[Byte](5 + body.length)
+    System.arraycopy(JamCodecs.encodeU32LE(UInt(1 + body.length)), 0, framed, 0, 4)
+    framed(4) = discriminant.toByte
+    body.copyToArray(framed, 5, 0, body.length)
+    framed
+
+  private def discriminantAndBody(msg: ProtocolMessage, config: ChainConfig): (Int, JamBytes) =
+    msg match
+      case PeerInfoMsg(info)     => (PeerInfo.DISCRIMINANT, info.encode)
+      case InitializeMsg(init)   => (Initialize.DISCRIMINANT, init.encode(using Initialize.codec(config)))
+      case StateRootMsg(root)    => (StateRoot.DISCRIMINANT, root.encode)
+      case ImportBlockMsg(ib)    => (ImportBlock.DISCRIMINANT, ib.encode(using ImportBlock.codec(config)))
+      case GetStateMsg(getState) => (GetState.DISCRIMINANT, getState.encode)
+      case StateMsg(state)       => (State.DISCRIMINANT, state.encode)
+      case ErrorMsg(error)       => (Error.DISCRIMINANT, error.encode)
 
   /**
    * Decode a protocol message from bytes (without length prefix).
    * The discriminant byte indicates message type.
    */
   def decodeMessage(bytes: JamBytes, offset: Int, config: ChainConfig): (ProtocolMessage, Int) =
-    val discriminant = bytes.toArray(offset) & 0xff
+    val discriminant = bytes(offset) & 0xff
     val bodyOffset = offset + 1
 
     discriminant match

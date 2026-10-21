@@ -16,8 +16,12 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
   private val authCodeHash = Hash(Array.fill[Byte](32)(0x21))
 
   /** Deblob wrapper + zero metadata prefix (same as RefineExecutorSpec). */
+  private def jamBlob(pvmBlob: Array[Byte]): Array[Byte] =
+    val n = pvmBlob.length
+    new Array[Byte](11) ++ Array[Byte](n.toByte, (n >> 8).toByte, (n >> 16).toByte, (n >> 24).toByte) ++ pvmBlob
+
   private def preimageOf(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
-    Array[Byte](0, 0, 0, code.length.toByte) ++ code ++ bitmask
+    Array[Byte](0) ++ jamBlob(Array[Byte](0, 0, code.length.toByte) ++ code ++ bitmask)
 
   // JumpIndirect r0 + 0 → halt (echoes args as the trace).
   private val haltCode = Array[Byte](50, 0)

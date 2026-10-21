@@ -33,7 +33,8 @@ object Program:
    */
   def getBitForOffset(bitmask: Array[Byte], codeLen: Int, offset: Int): Boolean =
     val byteIndex = offset >> 3
-    if byteIndex >= bitmask.length || offset > codeLen then false
+    // A negative offset is a jump-table entry ≥ 2^31: never an instruction start, so the jump panics.
+    if offset < 0 || byteIndex >= bitmask.length || offset > codeLen then false
     else
       val shift = offset & 7
       ((bitmask(byteIndex) >> shift) & 1) == 1

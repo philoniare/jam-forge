@@ -3,7 +3,7 @@ package io.forge.jam.db
 import java.nio.file.Path
 
 import io.forge.jam.core.primitives.Hash
-import org.rocksdb.{ColumnFamilyDescriptor, ColumnFamilyHandle, ColumnFamilyOptions, DBOptions, RocksDB}
+import org.rocksdb.{ColumnFamilyDescriptor, ColumnFamilyHandle, ColumnFamilyOptions, DBOptions, RocksDB, WriteBatch, WriteOptions}
 
 import scala.jdk.CollectionConverters.*
 
@@ -24,10 +24,16 @@ final class BlockStore private (
     dbOptions: DBOptions
 ) extends AutoCloseable:
 
-  private inline def key(h: Hash): Array[Byte] = h.bytes.toArray
+  // RocksDB copies keys, so the hash's own array can be passed.
+  private val writeOptions = new WriteOptions()
+
+  private inline def key(h: Hash): Array[Byte] = h.toArrayUnsafe
+
+  // Serialises the read-modify-write of a parent's children list.
+  private val childrenLock = new Object
 
   /** Store a block (and its header) under its header hash, indexing it as a
-    * child of `parent`.
+    * child of `parent`, in one atomic write.
     */
   def putBlock(
       headerHash: Hash,
@@ -35,9 +41,17 @@ final class BlockStore private (
       headerBytes: Array[Byte],
       blockBytes: Array[Byte]
   ): Unit =
-    db.put(blocksCf, key(headerHash), blockBytes)
-    db.put(headersCf, key(headerHash), headerBytes)
-    addChild(parent, headerHash)
+    childrenLock.synchronized {
+      val batch = new WriteBatch()
+      try
+        batch.put(blocksCf, key(headerHash), blockBytes)
+        batch.put(headersCf, key(headerHash), headerBytes)
+        val existing = children(parent)
+        if !existing.contains(headerHash) then
+          batch.put(childrenCf, key(parent), encodeChildren(existing :+ headerHash))
+        db.write(writeOptions, batch)
+      finally batch.close()
+    }
 
   def getBlock(headerHash: Hash): Option[Array[Byte]] =
     Option(db.get(blocksCf, key(headerHash)))
@@ -48,30 +62,34 @@ final class BlockStore private (
   def hasBlock(headerHash: Hash): Boolean =
     db.get(blocksCf, key(headerHash)) != null
 
-  /** Children of a block, for fork-tree traversal. */
+  /** Children of a block, for fork-tree traversal. A truncated trailing entry is ignored. */
   def children(parent: Hash): List[Hash] =
     Option(db.get(childrenCf, key(parent))) match
       case None => Nil
       case Some(bytes) =>
-        bytes
-          .grouped(32)
-          .map(b => Hash(b))
-          .toList
+        (0 until bytes.length / 32).map(i => Hash.wrap(java.util.Arrays.copyOfRange(bytes, i * 32, i * 32 + 32))).toList
 
-  private def addChild(parent: Hash, child: Hash): Unit =
-    val existing = children(parent)
-    if !existing.contains(child) then
-      val out = new Array[Byte]((existing.length + 1) * 32)
-      existing.zipWithIndex.foreach { case (h, i) =>
-        System.arraycopy(h.bytes.toArray, 0, out, i * 32, 32)
-      }
-      System.arraycopy(child.bytes.toArray, 0, out, existing.length * 32, 32)
-      db.put(childrenCf, key(parent), out)
+  private def encodeChildren(hs: List[Hash]): Array[Byte] =
+    val out = new Array[Byte](hs.length * 32)
+    hs.zipWithIndex.foreach((h, i) => System.arraycopy(h.toArrayUnsafe, 0, out, i * 32, 32))
+    out
 
-  def deleteBlock(headerHash: Hash): Unit =
-    db.delete(blocksCf, key(headerHash))
-    db.delete(headersCf, key(headerHash))
-    db.delete(childrenCf, key(headerHash))
+  /** Delete a block, its header and its own children list, and unlink it from `parent`'s children, atomically. */
+  def deleteBlock(headerHash: Hash, parent: Hash): Unit =
+    childrenLock.synchronized {
+      val batch = new WriteBatch()
+      try
+        batch.delete(blocksCf, key(headerHash))
+        batch.delete(headersCf, key(headerHash))
+        batch.delete(childrenCf, key(headerHash))
+        val siblings = children(parent)
+        if siblings.contains(headerHash) then
+          val rest = siblings.filterNot(_ == headerHash)
+          if rest.isEmpty then batch.delete(childrenCf, key(parent))
+          else batch.put(childrenCf, key(parent), encodeChildren(rest))
+        db.write(writeOptions, batch)
+      finally batch.close()
+    }
 
   // --- named pointers / metadata ---
 
@@ -84,11 +102,12 @@ final class BlockStore private (
   def deleteMeta(name: String): Unit =
     db.delete(metaCf, name.getBytes("UTF-8"))
 
-  def setHead(name: String, hash: Hash): Unit = setMeta(name, hash.bytes.toArray)
+  def setHead(name: String, hash: Hash): Unit = setMeta(name, hash.bytes)
 
   def getHead(name: String): Option[Hash] = getMeta(name).map(Hash(_))
 
   override def close(): Unit =
+    writeOptions.close()
     ownedHandles.foreach(_.close())
     db.close()
     cfOptions.close()
@@ -112,7 +131,13 @@ object BlockStore:
     val options = new DBOptions()
       .setCreateIfMissing(true)
       .setCreateMissingColumnFamilies(true)
-    val db = RocksDB.open(options, path.toString, descriptors.asJava, handles)
+    val db =
+      try RocksDB.open(options, path.toString, descriptors.asJava, handles)
+      catch
+        case e: Throwable =>
+          options.close()
+          cfOptions.close()
+          throw e
     val hs = handles.asScala.toSeq
     new BlockStore(
       db,

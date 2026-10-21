@@ -1,14 +1,10 @@
 package io.forge.jam.protocol.traces
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
+import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.vrfs.BandersnatchWrapper
 import io.forge.jam.core.types.block.Block
-import io.forge.jam.core.types.extrinsic.{
-  AssuranceExtrinsic,
-  GuaranteeExtrinsic,
-  Preimage
-}
+import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Preimage}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.history.ReportedWorkPackage
 import io.forge.jam.protocol.safrole.SafroleTypes.*
@@ -20,7 +16,6 @@ import io.forge.jam.protocol.history.HistoryTypes.*
 import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 import io.forge.jam.protocol.preimage.PreimageTypes.*
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
-import io.forge.jam.protocol.statistics.StatsAggregation
 import io.forge.jam.protocol.dispute.DisputeTypes.*
 import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
@@ -30,9 +25,10 @@ import org.slf4j.LoggerFactory
 sealed trait ImportResult
 
 object ImportResult:
+  /** @param headerHash the imported block's header hash, for callers that index blocks by it */
   final case class Success(
       postStateRoot: Hash,
-      safroleState: Option[SafroleState] = None
+      headerHash: Hash
   ) extends ImportResult
 
   final case class Failure(
@@ -91,6 +87,10 @@ class BlockImporter(
   // Re-entrancy guard for the single-threaded-per-instance contract on importBlock.
   private val importInFlight = new java.util.concurrent.atomic.AtomicBoolean(false)
 
+  // Held while the trie backend is changed (bootstrap, save, gc) and while materializePostState walks it, so a walk
+  // run alongside a later import never sees a backend in mid-update.
+  private val backendLock = new Object
+
   private val trieStore: StateTrieStore =
     externalTrieStore.getOrElse(new StateTrieStore(new InMemoryTrieBackend))
 
@@ -135,7 +135,7 @@ class BlockImporter(
         )
 
       if trieStore.currentRoot != block.header.parentStateRoot then
-        trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value)))
+        backendLock.synchronized(trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value))))
         if trieStore.currentRoot != block.header.parentStateRoot then
           return ImportResult.Failure(
             ImportError.InvalidStateRoot,
@@ -165,15 +165,16 @@ class BlockImporter(
           ImportResult.Failure(mapPipelineError(error), error.message)
 
         case Right(result) =>
+          // Reports left the guarantee-derived core and service statistics in the view; add the rest to them.
           val finalCoreStats = computeFinalCoreStatistics(
-            guarantees = block.extrinsic.guarantees,
+            guaranteeStats = view.cores.statistics,
             availableReports = result.availableReports,
             assurances = block.extrinsic.assurances,
             maxCores = config.coresCount
           )
 
           val finalServiceStats = computeFinalServiceStatistics(
-            guarantees = block.extrinsic.guarantees,
+            guaranteeStats = view.serviceStatistics,
             preimages = block.extrinsic.preimages,
             accumulationStats = result.accumulationStats,
             accumulationTransferCounts = result.accumulationTransferCounts
@@ -184,24 +185,13 @@ class BlockImporter(
 
           view.commit(trie)
           storageView.commit(trie)
-          trie.save()
-          trieStore.markCommitted(trie.rootHash)
-          if gcAfterImport then trieStore.gc()
+          backendLock.synchronized {
+            trie.save()
+            trieStore.commitChild(block.header.parentStateRoot, trie.rootHash)
+            if gcAfterImport then trieStore.gc()
+          }
 
-          val safrolePostState = SafroleState(
-            tau = view.timeslot,
-            eta = view.entropy.pool,
-            lambda = view.validators.previous,
-            kappa = view.validators.current,
-            gammaK = view.validators.nextEpoch,
-            iota = view.validators.queue,
-            gammaA = view.gamma.a,
-            gammaS = view.gamma.st,
-            gammaZ = view.gamma.z,
-            postOffenders = view.postOffenders
-          )
-
-          ImportResult.Success(trie.rootHash, Some(safrolePostState))
+          ImportResult.Success(trie.rootHash, result.headerHash)
     catch
       case e: Throwable if BlockImporter.isFatalCrash(e) =>
         throw e
@@ -227,18 +217,18 @@ class BlockImporter(
     case PipelineError.InvalidOffendersMark     => ImportError.InvalidHeader
 
   /** Compute final core statistics by combining:
-    *   1. Guarantee-based stats (bundleSize, gasUsed, extrinsicCount, etc.)
-    *      from block's guarantees
+    *   1. Guarantee-based stats (bundleSize, gasUsed, extrinsicCount, etc.),
+    *      as the Reports STF computed them from the block's guarantees
     *   2. dataSize from available reports
     *   3. assuranceCount/popularity from assurance extrinsics
     */
   private def computeFinalCoreStatistics(
-      guarantees: List[GuaranteeExtrinsic],
+      guaranteeStats: List[CoreStatisticsRecord],
       availableReports: List[WorkReport],
       assurances: List[AssuranceExtrinsic],
       maxCores: Int
   ): List[CoreStatisticsRecord] =
-    val stats = StatsAggregation.coreStatsByCore(guarantees, maxCores).toArray
+    val stats = guaranteeStats.toArray
 
     availableReports.foreach { report =>
       val coreIndex = report.coreIndex.toInt
@@ -274,12 +264,13 @@ class BlockImporter(
 
   /** Compute fresh service statistics by combining:
     *   1. Work reports from guarantees (refinementCount, gasUsed, imports,
-    *      exports, extrinsicCount, extrinsicSize)
+    *      exports, extrinsicCount, extrinsicSize), as the Reports STF
+    *      computed them
     *   2. Preimages (providedCount, providedSize)
     *   3. Accumulation results (accumulateCount, accumulateGasUsed)
     */
   private def computeFinalServiceStatistics(
-      guarantees: List[GuaranteeExtrinsic],
+      guaranteeStats: List[ReportTypes.ServiceStatisticsEntry],
       preimages: List[Preimage],
       accumulationStats: Map[
         Long,
@@ -293,7 +284,7 @@ class BlockImporter(
     def getOrEmpty(id: Long): ReportTypes.ServiceActivityRecord =
       stats.getOrElse(id, ReportTypes.ServiceActivityRecord())
 
-    StatsAggregation.serviceStatsFromGuarantees(guarantees).foreach { entry =>
+    guaranteeStats.foreach { entry =>
       val cur = getOrEmpty(entry.id)
       val g = entry.record
       stats(entry.id) = cur.copy(
@@ -337,11 +328,15 @@ class BlockImporter(
         ReportTypes.ServiceStatisticsEntry(id = id, record = record)
       }
 
+  /** The state at the last imported root. Safe to run alongside a later import, though it then reads that import's
+    * state if the import commits first; callers that need a given block's state must order the two themselves.
+    */
   def materializePostState(config: ChainConfig): RawState =
-    val trie = trieStore.at(trieStore.currentRoot)
-    val pairs = trie.getKeyValues(JamBytes.empty, 0)
-    val kvs = pairs.map { case (k, v) => KeyValue(k, v) }
-    RawState(trieStore.currentRoot, kvs)
+    backendLock.synchronized {
+      val root = trieStore.currentRoot
+      val pairs = trieStore.at(root).getKeyValues(JamBytes.empty, 0)
+      RawState(root, pairs.map { case (k, v) => KeyValue(k, v) })
+    }
 
 /** Extracts STF inputs from block and state.
   */
@@ -406,11 +401,7 @@ object InputExtractor:
 
   /** Extract HistoricalInput from block and accumulate root.
     */
-  def extractHistoryInput(block: Block, accumulateRoot: Hash): HistoricalInput =
-    import io.forge.jam.core.codec.JamCodecs.encode
-    import io.forge.jam.core.codec.Codec
-    val headerHash = Hashing.blake2b256(block.header.encode.toArray)
-
+  def extractHistoryInput(block: Block, accumulateRoot: Hash, headerHash: Hash): HistoricalInput =
     val workPackages = block.extrinsic.guarantees
       .map { guarantee =>
         ReportedWorkPackage(

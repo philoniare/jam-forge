@@ -59,65 +59,6 @@ class ProgramParsingSpec extends AnyFlatSpec with Matchers:
     Varint.getBytesRequired(0xffffffffL) shouldBe 1 // All 1s needs only 1 byte
   }
 
-  // Test 2: PVM blob header parsing
-  "ProgramBlob" should "parse valid header correctly" in {
-    // PVM blob format:
-    // - version (1 byte): 0 = 32-bit, 1 = 64-bit
-    // - ro_data_size (varint)
-    // - rw_data_size (varint)
-    // - stack_size (varint)
-    // - code_size (varint)
-    // - jump_table_entry_count (varint)
-    // - [jump_table_entry_size (varint) if entry_count > 0]
-    // - code section
-    // - jump table
-    // - bitmask
-    // - ro_data
-    // - rw_data
-    val minimalBlob = Array[Byte](
-      0, // version = 0 (32-bit)
-      0, // ro_data_size = 0
-      0, // rw_data_size = 0
-      0, // stack_size = 0
-      0, // code_size = 0
-      0 // jump_table_entry_count = 0 (no jump table entries, so no entry_size varint)
-    )
-
-    val result = ProgramBlob.parse(minimalBlob)
-    result.isDefined shouldBe true
-    result.foreach { blob =>
-      blob.is64Bit shouldBe false
-      blob.code.length shouldBe 0
-    }
-  }
-
-  it should "reject invalid blobs" in {
-    // Empty blob
-    ProgramBlob.parse(Array.emptyByteArray) shouldBe None
-
-    // Blob too short (missing required fields)
-    ProgramBlob.parse(Array[Byte](0)) shouldBe None
-    ProgramBlob.parse(Array[Byte](0, 0)) shouldBe None
-    ProgramBlob.parse(Array[Byte](0, 0, 0)) shouldBe None
-    ProgramBlob.parse(Array[Byte](0, 0, 0, 0)) shouldBe None
-    ProgramBlob.parse(Array[Byte](0, 0, 0, 0, 0)) shouldBe None
-  }
-
-  it should "parse 64-bit program header" in {
-    val blob64 = Array[Byte](
-      1, // version = 1 (64-bit)
-      0, // ro_data_size = 0
-      0, // rw_data_size = 0
-      0, // stack_size = 0
-      0, // code_size = 0
-      0 // jump_table_entry_count = 0
-    )
-
-    val result = ProgramBlob.parse(blob64)
-    result.isDefined shouldBe true
-    result.foreach(blob => blob.is64Bit shouldBe true)
-  }
-
   // Test 3: Jump table extraction
   "JumpTable" should "extract entries correctly" in {
     // Jump table with 2-byte entries

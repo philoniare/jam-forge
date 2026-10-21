@@ -31,8 +31,7 @@ modules/
 │   ├── safrole/         # Safrole STF tests
 │   ├── statistics/      # Statistics STF tests
 │   └── traces/          # Full block import tests
-└── conformance/src/test/scala/
-    └── integration/     # Conformance server tests
+└── conformance/src/test/scala/   # Fuzz server (socket-level), warmup, fuzz-proto and trace tests
 ```
 
 ## Running Tests
@@ -112,10 +111,16 @@ jamtestvectors/
 The conformance server provides a Unix socket interface for testing:
 
 ```bash
-# Start server
-sbt "conformance/run"
+# Build the jar, then start the server (see DEVELOPMENT.md for the JVM flags)
+sbt "conformance/assembly"
+java --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow \
+  -Djava.library.path=modules/crypto/native/build/linux \
+  -jar modules/conformance/target/scala-3.3.7/jam-conformance.jar
 
-# Server listens on: /tmp/jam-conformance.sock
+# Server listens on: /tmp/jam_target.sock (--socket-path changes it)
+
+# Or start it as the Docker image does and replay a public trace into it (fuzz-perf stats)
+scripts/fuzz-perf-local.sh jam-forge fallback
 ```
 
 ### Running Conformance Tests

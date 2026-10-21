@@ -1,11 +1,24 @@
 package io.forge.jam.protocol.accumulation
 
+import io.forge.jam.core.JamBytes
+import io.forge.jam.pvm.engine.{InterpretedModule, ModuleCache}
 import io.forge.jam.pvm.program.ProgramBlob
 
 /** Service-code preimage handling shared by the accumulate and refine executors */
 object ServiceCode:
 
   private val JAM_PAGE_SIZE = 4096
+
+  /** Process-wide module cache shared by the accumulate, refine and is-authorized executors. */
+  private val modules = ModuleCache[JamBytes](256)
+
+  /** The compiled module for the code blob `code` (the preimage after its metadata) found under `codeHash`. Built
+    * once per process and shared, so a new importer or executor does not recompile it. None when the blob is not a
+    * valid JAM program blob.
+    */
+  def module(codeHash: JamBytes, code: Array[Byte]): Option[InterpretedModule] =
+    modules.getOrCreate(codeHash, code)(parseBlob(code).flatMap(blob => InterpretedModule.create(blob).toOption))
+
   def extractCodeBlob(preimage: Array[Byte]): Option[Array[Byte]] =
     if preimage.isEmpty then return None
 
@@ -36,22 +49,8 @@ object ServiceCode:
     if codeStart > preimage.length then return None
     Some(preimage.drop(codeStart))
 
-  /** Parse an extracted code blob into a ProgramBlob */
-  def parseBlob(code: Array[Byte]): Option[ProgramBlob] =
-    var blobOpt = parseJamFormat(code)
-
-    if blobOpt.isEmpty then
-      blobOpt = ProgramBlob.fromCodeAndJumpTable(
-        data = code,
-        roData = Array.empty,
-        rwData = new Array[Byte](262144),
-        stackSize = 65536,
-        is64Bit = true
-      )
-
-    if blobOpt.isEmpty then blobOpt = ProgramBlob.parse(code)
-
-    blobOpt
+  /** Parse an extracted code blob into a ProgramBlob. */
+  def parseBlob(code: Array[Byte]): Option[ProgramBlob] = parseJamFormat(code)
 
   /** Parse JAM SPI blob format: roLen(3) rwLen(3) heapPages(2) stackSize(3)
     * roData rwData codeLen(4) code+jumptable.
@@ -65,8 +64,7 @@ object ServiceCode:
     val heapPages = readLE2(data, offset); offset += 2
     val stackSize = readLE3(data, offset); offset += 3
 
-    if roDataLen > data.length || rwDataLen > data.length || stackSize > 1000000
-    then return None
+    if roDataLen > data.length || rwDataLen > data.length then return None
 
     if offset + roDataLen > data.length then return None
     val roData = new Array[Byte](roDataLen)
@@ -81,7 +79,7 @@ object ServiceCode:
     if offset + 4 > data.length then return None
     val codeLen = readLE4(data, offset); offset += 4
 
-    if offset + codeLen > data.length then return None
+    if codeLen < 0 || offset.toLong + codeLen != data.length then return None
     val codeAndJumpTable = new Array[Byte](codeLen)
     System.arraycopy(data, offset, codeAndJumpTable, 0, codeLen)
 

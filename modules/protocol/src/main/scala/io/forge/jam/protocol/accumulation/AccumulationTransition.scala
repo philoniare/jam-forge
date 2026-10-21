@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Parallel, StfResult}
-import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
@@ -27,6 +26,41 @@ object AccumulationTransition:
       view: TrieBackedJamState,
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor] = None
+  ): AccumulationOutput =
+    idle(input, view, prevSlot).getOrElse(accumulate(input, view, prevSlot, sharedExecutor))
+
+  /**
+   * A block with nothing to accumulate: no new or ready reports and no always-accumulate services
+   */
+  private[accumulation] def idle(
+      input: AccumulationInput,
+      view: TrieBackedJamState,
+      prevSlot: Long
+  ): Option[AccumulationOutput] =
+    if input.reports.nonEmpty || view.accumulation.privileges.alwaysAcc.nonEmpty then None
+    else
+      val config = view.config
+      val m = (input.slot % config.epochLength).toInt
+      val accumulated = view.accumulation.accumulated
+      val partition = partitionAndQueueReports(Nil, view.accumulation.readyQueue, accumulated, m, config)
+      if partition.readyToAccumulate.nonEmpty then None
+      else
+        view.accumulation.readyQueue = rebuildReadyQueue(
+          workingReadyQueue = partition.workingReadyQueue,
+          editedNewRecords = partition.editedNewRecords,
+          actuallyAccumulated = Set.empty,
+          m = m,
+          deltaT = Math.max(input.slot - prevSlot, 1L),
+          config = config
+        )
+        view.accumulation.accumulated = rotateAccumulated(accumulated, Set.empty, config)
+        Some(StfResult.success(AccumulationOutputData(KeccakCommitmentMerkle.computeCommitmentRoot(Set.empty))))
+
+  private[accumulation] def accumulate(
+      input: AccumulationInput,
+      view: TrieBackedJamState,
+      prevSlot: Long,
+      sharedExecutor: Option[AccumulationExecutor]
   ): AccumulationOutput =
     val pre = AccumulationBridge.extract(view)
 
@@ -62,7 +96,7 @@ object AccumulationTransition:
   ): AccumulationStfResult =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max(input.slot - prevSlot, 1L)
-    val partition = partitionAndQueueReports(input.reports, preState, m, config)
+    val partition = partitionAndQueueReports(input.reports, preState.readyQueue, preState.accumulated, m, config)
 
     // 8. Execute PVM for accumulated reports (respecting gas budget)
     val run = runOuterAccumulation(
@@ -141,12 +175,13 @@ object AccumulationTransition:
 
   private def partitionAndQueueReports(
       reports: List[WorkReport],
-      preState: AccumulationState,
+      readyQueue: List[List[AccumulationReadyRecord]],
+      accumulated: List[List[JamBytes]],
       m: Int,
       config: ChainConfig
   ): QueuedReportPartition =
     // 1. Collect all historically accumulated hashes (for dependency checking)
-    val historicallyAccumulated = mutable.Set.from(preState.accumulated.flatten)
+    val historicallyAccumulated = mutable.Set.from(accumulated.flatten)
 
     // 2. Partition new reports into immediate vs queued
     val (immediateReports, queuedReports) = reports.partition { report =>
@@ -167,12 +202,7 @@ object AccumulationTransition:
 
     // 4. Build working copy of ready queue with edited dependencies.
     val workingReadyQueue: Vector[List[AccumulationReadyRecord]] =
-      preState.readyQueue.indices.iterator.map { slotIdx =>
-        editReadyQueueRecords(
-          preState.readyQueue(slotIdx),
-          accumulatedSnapshot
-        )
-      }.toVector
+      readyQueue.iterator.map(editReadyQueueRecords(_, accumulatedSnapshot)).toVector
 
     // Build new queued records
     val newRecords = queuedReports.map { report =>
@@ -740,35 +770,37 @@ object AccumulationTransition:
     serviceOperands
 
   /**
-   * Runs ∆1 for every service of one batch. Each runs against the same initial partial state,
-   * so services run concurrently, each with its own fork of the storage view, and their writes are applied in service
-   * order afterwards. Services sharing a code blob run one after another on the same task, since an interpreted
-   * module's compiled-block buffers are not safe to share between concurrent runs. The recompiler path has not been
-   * checked for concurrent use, so it keeps the sequential loop.
+   * Runs ∆1 for every service of one batch. Each runs against the same initial partial state (GP 0.8.0 eq. (12.18)),
+   * so each service gets its own fork of the storage view, and their writes are applied in service order afterwards.
+   * With [[AccumulationExecutor.parallelServices]] the services run concurrently; services sharing a code blob then
+   * run one after another on the same task, since an interpreted module's compiled-block buffers are not safe to share
+   * between concurrent runs.
    */
   private def accumulateAll(
       sortedServices: List[Long],
       initialState: PartialState,
       executor: AccumulationExecutor
   )(accumulateOne: (Long, Option[ServiceStorageView]) => AccumulationOneResult): List[AccumulationOneResult] =
-    if sortedServices.lengthCompare(1) <= 0 || ExecutionMode.default != ExecutionMode.Interpreted then
-      sortedServices.map(accumulateOne(_, executor.storageView))
-    else
-      val forks = sortedServices.map(s => s -> executor.storageView.map(_.fork())).toMap
-      val groups = sortedServices
-        .groupBy(s => initialState.accounts.get(s).map(a => JamBytes(a.info.codeHash.bytes.toArray)))
-        .values
-        .toList
-      val byService = Parallel
-        .map(groups)(group => group.map(s => s -> accumulateOne(s, forks(s))))
-        .flatten
-        .toMap
-      for
-        s      <- sortedServices
-        parent <- executor.storageView
-        child  <- forks(s)
-      do parent.absorb(child)
-      sortedServices.map(byService)
+    val parallel = sortedServices.lengthCompare(1) > 0 && executor.parallelServices
+    val forks = sortedServices.map(s => s -> executor.storageView.map(_.fork(shareReadCache = !parallel))).toMap
+    val results =
+      if !parallel then sortedServices.map(s => accumulateOne(s, forks(s)))
+      else
+        val groups = sortedServices
+          .groupBy(s => initialState.accounts.get(s).map(a => JamBytes(a.info.codeHash.bytes.toArray)))
+          .values
+          .toList
+        val byService = Parallel
+          .map(groups)(group => group.map(s => s -> accumulateOne(s, forks(s))))
+          .flatten
+          .toMap
+        sortedServices.map(byService)
+    for
+      s      <- sortedServices
+      parent <- executor.storageView
+      child  <- forks(s)
+    do parent.absorb(child)
+    results
 
   /** Everything the per-service execution loop accumulates across one batch.
     */
@@ -1014,8 +1046,10 @@ object AccumulationTransition:
         )
         val request: Option[PreimageRequest] =
           account.preimageRequests.get(preimageKey).orElse {
+            // I checks the request with Y in the batch's merged accounts
+            // so a solicit or forget made earlier in this block counts.
             val rawInfoData = view match
-              case Some(v) => v.readTrie(infoStateKey)
+              case Some(v) => v.getByStateKey(infoStateKey)
               case None    => state.rawServiceDataByStateKey.get(infoStateKey)
             rawInfoData.map { raw =>
               PreimageRequest(StateKey.decodePreimageInfoValue(raw))

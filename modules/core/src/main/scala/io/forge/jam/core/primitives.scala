@@ -39,7 +39,17 @@ object primitives:
       case that: Hash => java.util.Arrays.equals(this.underlying, that.underlying)
       case _ => false
 
-    override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
+    // Cached: hashes key the trie's and the backends' hash maps, so one is hashed many times. Same value as before
+    // (Arrays.hashCode), so hash-map iteration orders do not change. A racy single check: an int write is atomic,
+    // and recomputing gives the same value. 0 means not computed yet.
+    private var hashCodeCache: Int = 0
+
+    override def hashCode(): Int =
+      var h = hashCodeCache
+      if h == 0 then
+        h = java.util.Arrays.hashCode(underlying)
+        hashCodeCache = h
+      h
 
   object Hash:
     val Size: Int = 32
@@ -48,7 +58,8 @@ object primitives:
       require(bytes.length == Size, s"Hash must be $Size bytes, got ${bytes.length}")
       new Hash(bytes.clone())
 
-    def zero: Hash = new Hash(new Array[Byte](Size))
+    /** The all-zero hash. Shared: like every Hash, its array must never be mutated. */
+    val zero: Hash = new Hash(new Array[Byte](Size))
 
     /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
     def wrap(bytes: Array[Byte]): Hash =
@@ -179,6 +190,8 @@ object primitives:
   /** Ed25519 signature (64 bytes) */
   final case class Ed25519Signature private (private val underlying: Array[Byte]):
     def bytes: Array[Byte] = underlying.clone()
+    /** The backing array without a copy; callers must not mutate it. */
+    def toArrayUnsafe: Array[Byte] = underlying
     override def equals(obj: Any): Boolean = obj match
       case that: Ed25519Signature => java.util.Arrays.equals(this.underlying, that.underlying)
       case _ => false

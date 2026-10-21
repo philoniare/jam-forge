@@ -44,7 +44,6 @@ bin/
 .DS_Store
 
 **/target/
-**/Cargo.lock
 **/*.dylib
 
 .editorconfig

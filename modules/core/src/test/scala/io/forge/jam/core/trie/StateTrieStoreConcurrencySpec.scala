@@ -55,10 +55,11 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
           start.await()
           var i = 1
           while i <= writerIters do
-            val trie = StateTrie.at(backend, store.currentRoot)
+            val parent = store.currentRoot
+            val trie = StateTrie.at(backend, parent)
             trie.update(Seq(key(i) -> Some(value(i))))
             trie.save()
-            store.markCommitted(trie.rootHash)
+            store.commitChild(parent, trie.rootHash)
             store.addKnownServiceId(i.toLong)
             i += 1
         } catch {

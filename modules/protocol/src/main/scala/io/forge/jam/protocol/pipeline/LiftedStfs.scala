@@ -98,7 +98,7 @@ object LiftedStfs:
   def history(accumulateRoot: Hash): StfStep =
     liftStateOnly(
       stf = (input, view) => HistoryTransition.stfView(input, view),
-      extractInput = ctx => InputExtractor.extractHistoryInput(ctx.block, accumulateRoot)
+      extractInput = ctx => InputExtractor.extractHistoryInput(ctx.block, accumulateRoot, ctx.header.hash)
     )
 
   // 7. Authorization STF (state-only)

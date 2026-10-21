@@ -46,7 +46,7 @@ JAM-Forge is organized into eight core modules:
 
 ### 📋 Prerequisites
 
-- ☕ **Java 21+** (required for JVM)
+- ☕ **JDK 24**
 - 🦀 **Rust & Cargo** (for building native cryptographic libraries)
 - 📦 **sbt 1.9+** (Scala build tool)
 

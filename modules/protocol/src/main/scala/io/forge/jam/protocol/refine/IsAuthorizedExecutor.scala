@@ -86,9 +86,6 @@ private final class IsAuthorizedHostCalls(
   */
 class IsAuthorizedExecutor(val config: ChainConfig):
 
-  private val MAX_MODULE_CACHE_SIZE = 16
-  private val moduleCache = new BoundedModuleCache(MAX_MODULE_CACHE_SIZE)
-
   /** The work-package's implied authorizer hash:
     * blake(authCodeHash ++ authorizerConfig).
     */
@@ -162,8 +159,4 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       code: Array[Byte],
       codeHash: JamBytes
   ): Option[InterpretedModule] =
-    moduleCache.getOrCompile(codeHash) {
-      ServiceCode.parseBlob(code).flatMap { blob =>
-        InterpretedModule.create(blob).toOption
-      }
-    }
+    ServiceCode.module(codeHash, code)

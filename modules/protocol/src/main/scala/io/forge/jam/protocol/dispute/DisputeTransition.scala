@@ -148,7 +148,7 @@ object DisputeTransition:
           )
         then break(Left(DisputeErrorCode.JudgementsNotSortedUnique))
 
-        // Verify all vote signatures in parallel
+        // Verify all vote signatures as one batch
         val voteCount = verdict.votes.size
         val sigInputs = new Array[
           (
@@ -169,14 +169,8 @@ object DisputeTransition:
           sigInputs(voteIdx) = (validator.ed25519, message, vote.signature)
           voteIdx += 1
 
-        val allValid = java.util.stream.IntStream
-          .range(0, voteCount)
-          .parallel()
-          .allMatch { i =>
-            val (pk, msg, sig) = sigInputs(i)
-            Ed25519.verify(pk, msg, sig)
-          }
-        if !allValid then break(Left(DisputeErrorCode.BadSignature))
+        if !Ed25519.verifyAll(scala.collection.immutable.ArraySeq.unsafeWrapArray(sigInputs)) then
+          break(Left(DisputeErrorCode.BadSignature))
 
         // Validate target has not already been judged
         if psiGoodSet.contains(verdict.target) ||

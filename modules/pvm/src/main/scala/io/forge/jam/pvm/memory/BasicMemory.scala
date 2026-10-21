@@ -48,45 +48,34 @@ final class BasicMemory private (
   private var cachedRegionArray: Array[Byte] = null
   private var cachedRegionOffset: Int = 0
   private val pageShift: Int = java.lang.Integer.numberOfTrailingZeros(memoryMap.pageSize.signed)
-  private var rdWinStart: Long = Long.MaxValue
-  private var rdWinEnd: Long = 0L
-  private var rdWinArr: Array[Byte] = null
-  private var rdWinOff: Int = 0
-  private var rdWinVer: Int = Int.MinValue
-  private var rdWin2Start: Long = Long.MaxValue
-  private var rdWin2End: Long = 0L
-  private var rdWin2Arr: Array[Byte] = null
-  private var rdWin2Off: Int = 0
-  private var rdWin2Ver: Int = Int.MinValue
+  private val rdWinStart = Array.fill(BasicMemory.WindowSlots)(Long.MaxValue)
+  private val rdWinEnd = new Array[Long](BasicMemory.WindowSlots)
+  private val rdWinArr = new Array[Array[Byte]](BasicMemory.WindowSlots)
+  private val rdWinOff = new Array[Int](BasicMemory.WindowSlots)
+  private val rdWinVer = Array.fill(BasicMemory.WindowSlots)(Int.MinValue)
+  private val wrWinStart = Array.fill(BasicMemory.WindowSlots)(Long.MaxValue)
+  private val wrWinEnd = new Array[Long](BasicMemory.WindowSlots)
+  private val wrWinArr = new Array[Array[Byte]](BasicMemory.WindowSlots)
+  private val wrWinOff = new Array[Int](BasicMemory.WindowSlots)
+  private val wrWinVer = Array.fill(BasicMemory.WindowSlots)(Int.MinValue)
 
-  private var wrWinStart: Long = Long.MaxValue
-  private var wrWinEnd: Long = 0L
-  private var wrWinArr: Array[Byte] = null
-  private var wrWinOff: Int = 0
-  private var wrWinVer: Int = Int.MinValue
-  private var wrWin2Start: Long = Long.MaxValue
-  private var wrWin2End: Long = 0L
-  private var wrWin2Arr: Array[Byte] = null
-  private var wrWin2Off: Int = 0
-  private var wrWin2Ver: Int = Int.MinValue
+  // Slot boundaries: regions are laid out in this order, so three unsigned compares pick the slot.
+  private val rwStartU: Long = rwStart.toLong & 0xffffffffL
+  private val stackLowU: Long = stackLow.toLong & 0xffffffffL
+  private val auxStartU: Long = auxStart.toLong & 0xffffffffL
+
+  /** Window slot for an address: 0 = roData, 1 = rwData/heap, 2 = stack, 3 = aux. Only selects a slot; every hit is
+    * still checked against the window's own bounds and version.
+    */
+  private inline def slotOf(ua64: Long): Int =
+    if ua64 < rwStartU then 0 else if ua64 < stackLowU then 1 else if ua64 < auxStartU then 2 else 3
 
   private def invalidateWindows(): Unit =
-    rdWinStart = Long.MaxValue; rdWinEnd = 0L; rdWinArr = null; rdWinVer = Int.MinValue
-    rdWin2Start = Long.MaxValue; rdWin2End = 0L; rdWin2Arr = null; rdWin2Ver = Int.MinValue
-    wrWinStart = Long.MaxValue; wrWinEnd = 0L; wrWinArr = null; wrWinVer = Int.MinValue
-    wrWin2Start = Long.MaxValue; wrWin2End = 0L; wrWin2Arr = null; wrWin2Ver = Int.MinValue
-
-  /** Swap primary and secondary read windows (secondary hit -> promote). */
-  private def swapReadWindows(): Unit =
-    val s0 = rdWinStart; val e0 = rdWinEnd; val a0 = rdWinArr; val o0 = rdWinOff; val v0 = rdWinVer
-    rdWinStart = rdWin2Start; rdWinEnd = rdWin2End; rdWinArr = rdWin2Arr; rdWinOff = rdWin2Off; rdWinVer = rdWin2Ver
-    rdWin2Start = s0; rdWin2End = e0; rdWin2Arr = a0; rdWin2Off = o0; rdWin2Ver = v0
-
-  /** Swap primary and secondary write windows (secondary hit -> promote). */
-  private def swapWriteWindows(): Unit =
-    val s0 = wrWinStart; val e0 = wrWinEnd; val a0 = wrWinArr; val o0 = wrWinOff; val v0 = wrWinVer
-    wrWinStart = wrWin2Start; wrWinEnd = wrWin2End; wrWinArr = wrWin2Arr; wrWinOff = wrWin2Off; wrWinVer = wrWin2Ver
-    wrWin2Start = s0; wrWin2End = e0; wrWin2Arr = a0; wrWin2Off = o0; wrWin2Ver = v0
+    var i = 0
+    while i < BasicMemory.WindowSlots do
+      rdWinStart(i) = Long.MaxValue; rdWinEnd(i) = 0L; rdWinArr(i) = null; rdWinVer(i) = Int.MinValue
+      wrWinStart(i) = Long.MaxValue; wrWinEnd(i) = 0L; wrWinArr(i) = null; wrWinVer(i) = Int.MinValue
+      i += 1
 
   /** Fill the read or write window around `addr`. Preconditions: the permission
     * check for [addr, addr+width) just passed AND findRegionBulk /
@@ -108,18 +97,17 @@ final class BasicMemory private (
     val e = math.min(math.min(regEnd, arrEnd), runEndAddr)
     if e <= s then return
 
+    val slot = slotOf(addr.toLong & 0xffffffffL)
     if writable then
-      swapWriteWindows() // demote old primary to slot 2
-      wrWinStart = s; wrWinEnd = e
-      wrWinArr = cachedRegionArray
-      wrWinOff = (s - regStart).toInt + cachedRegionOffset
-      wrWinVer = _pageMap.version
+      wrWinStart(slot) = s; wrWinEnd(slot) = e
+      wrWinArr(slot) = cachedRegionArray
+      wrWinOff(slot) = (s - regStart).toInt + cachedRegionOffset
+      wrWinVer(slot) = _pageMap.version
     else
-      swapReadWindows() // demote old primary to slot 2
-      rdWinStart = s; rdWinEnd = e
-      rdWinArr = cachedRegionArray
-      rdWinOff = (s - regStart).toInt + cachedRegionOffset
-      rdWinVer = _pageMap.version
+      rdWinStart(slot) = s; rdWinEnd(slot) = e
+      rdWinArr(slot) = cachedRegionArray
+      rdWinOff(slot) = (s - regStart).toInt + cachedRegionOffset
+      rdWinVer(slot) = _pageMap.version
 
   /** Loaded value for the most recent successful fast load. Holds any 64-bit pattern. */
   private var _fastValue: Long = 0L
@@ -138,14 +126,11 @@ final class BasicMemory private (
    */
   def loadUnsignedFast(address: Int, width: Int): Int =
     val ua64 = address.toLong & 0xffffffffL
-    val pmVer = _pageMap.version
-    var winHit = rdWinVer == pmVer && ua64 >= rdWinStart && ua64 + width <= rdWinEnd
-    if !winHit && rdWin2Ver == pmVer && ua64 >= rdWin2Start && ua64 + width <= rdWin2End then
-      swapReadWindows()
-      winHit = true
-    if winHit then
-      val arr = rdWinArr
-      val offset = (ua64 - rdWinStart).toInt + rdWinOff
+    val slot = slotOf(ua64)
+    val winStart = rdWinStart(slot)
+    if rdWinVer(slot) == _pageMap.version && ua64 >= winStart && ua64 + width <= rdWinEnd(slot) then
+      val arr = rdWinArr(slot)
+      val offset = (ua64 - winStart).toInt + rdWinOff(slot)
       val v: Long = width match
         case 1 => arr(offset) & 0xffL
         case 2 =>
@@ -158,8 +143,7 @@ final class BasicMemory private (
           val b2 = arr(offset + 2) & 0xff
           val b3 = arr(offset + 3) & 0xff
           ((b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).toLong) & 0xffffffffL
-        case _ =>
-          ByteBuffer.wrap(arr, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong()
+        case _ => BasicMemory.LongLE.get(arr, offset)
       _fastValue = v
       return BasicMemory.FastOk
 
@@ -186,8 +170,7 @@ final class BasicMemory private (
             val b2 = arr(offset + 2) & 0xff
             val b3 = arr(offset + 3) & 0xff
             ((b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).toLong) & 0xffffffffL
-          case _ =>
-            ByteBuffer.wrap(arr, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong()
+          case _ => BasicMemory.LongLE.get(arr, offset)
         _fastValue = v
         BasicMemory.FastOk
     else
@@ -208,18 +191,17 @@ final class BasicMemory private (
    */
   def storeFast(address: Int, value: Long, width: Int): Int =
     val ua64 = address.toLong & 0xffffffffL
-    val pmVer = _pageMap.version
-    var winHit = wrWinVer == pmVer && ua64 >= wrWinStart && ua64 + width <= wrWinEnd
-    if !winHit && wrWin2Ver == pmVer && ua64 >= wrWin2Start && ua64 + width <= wrWin2End then
-      swapWriteWindows()
-      winHit = true
-    if winHit then
-      val arr = wrWinArr
-      val offset = (ua64 - wrWinStart).toInt + wrWinOff
-      var i = 0
-      while i < width do
-        arr(offset + i) = ((value >> (i * 8)) & 0xff).toByte
-        i += 1
+    val slot = slotOf(ua64)
+    val winStart = wrWinStart(slot)
+    if wrWinVer(slot) == _pageMap.version && ua64 >= winStart && ua64 + width <= wrWinEnd(slot) then
+      val arr = wrWinArr(slot)
+      val offset = (ua64 - winStart).toInt + wrWinOff(slot)
+      if width == 8 then BasicMemory.LongLE.set(arr, offset, value)
+      else
+        var i = 0
+        while i < width do
+          arr(offset + i) = ((value >> (i * 8)) & 0xff).toByte
+          i += 1
       isDirty = true
       return BasicMemory.FastOk
 
@@ -927,6 +909,12 @@ object BasicMemory:
   final val FastOk: Int = 0
   final val FastSegfault: Int = -1
   final val FastOutOfBounds: Int = -2
+
+  private final val WindowSlots = 4
+
+  /** Little-endian 8-byte view of a byte array (unaligned access allowed). */
+  private val LongLE: java.lang.invoke.VarHandle =
+    java.lang.invoke.MethodHandles.byteArrayViewVarHandle(classOf[Array[Long]], java.nio.ByteOrder.LITTLE_ENDIAN)
 
   // Thread-local byte array pools to avoid per-operation allocations
   private val pool4: ThreadLocal[Array[Byte]] = ThreadLocal.withInitial(() => new Array[Byte](4))

@@ -194,28 +194,54 @@ object InstructionDecoder:
   // Main Decode Function
   // ============================================================================
 
+  /**
+   * Decodes the instruction at `offset`, returning it with its distance to the next opcode (1 + skip).
+   */
   def decode(code: Array[Byte], bitmask: Array[Byte], offset: Int): (Instruction, Int) =
     if offset >= code.length then return (Instruction.Panic, 1)
 
     val opcodeByte = code(offset) & 0xFF
     val skip = getSkip(bitmask, code.length, offset)
-    val chunk = readChunk(code, offset + 1, skip - 1)
     val len = skip - 1
+    val b1 = byteAt(code, offset + 1)
 
     val instruction = kindTable(opcodeByte) match
       case KindArgless => arglessTable(opcodeByte)
-      case KindRegs2 => val (a, b) = readRegs2(chunk); regs2Table(opcodeByte)(a, b)
-      case KindRegs3 => val (a, b, c) = readRegs3(chunk); regs3Table(opcodeByte)(a, b, c)
-      case KindRegImm => val (r, i) = readRegImm(chunk, len); regImmTable(opcodeByte)(r, i)
-      case KindRegs2Imm => val (a, b, i) = readRegs2Imm(chunk, len); regs2ImmTable(opcodeByte)(a, b, i)
-      case KindRegs2Offset => val (a, b, o) = readRegs2Offset(chunk, offset, len); regs2OffsetTable(opcodeByte)(a, b, o)
-      case KindRegImmOffset => val (r, i, o) = readRegImmOffset(chunk, offset, len); regImmOffsetTable(opcodeByte)(r, i, o)
-      case KindStoreImm => val (a, v) = readImmImm(chunk, len); storeImmTable(opcodeByte)(a, v)
-      case KindStoreImmIndirect => val (r, o, v) = readRegImmImm(chunk, len); storeImmIndirectTable(opcodeByte)(r, o, v)
-      case KindEcalli => Instruction.Ecalli(signExtend(chunk, math.min(4, len) * 8))
-      case KindJump => Instruction.Jump((offset + signExtend(chunk, math.min(4, len) * 8).toInt).toLong & 0xFFFFFFFFL)
-      case KindLoadImm64 => Instruction.LoadImm64(clampReg(code(offset + 1) & 0xFF), readLong(code, offset + 2))
-      case KindLoadImmAndJumpIndirect => val (a, b, i1, i2) = readRegs2Imm2(chunk, len); Instruction.LoadImmAndJumpIndirect(a, b, i1, i2)
+      case KindRegs2 => regs2Table(opcodeByte)(regLo(b1), regHi(b1))
+      case KindRegs3 => regs3Table(opcodeByte)(clampReg(byteAt(code, offset + 2)), regLo(b1), regHi(b1))
+      case KindRegImm =>
+        regImmTable(opcodeByte)(regLo(b1), readSigned(code, offset + 2, math.min(4, math.max(0, len - 1))))
+      case KindRegs2Imm =>
+        regs2ImmTable(opcodeByte)(regLo(b1), regHi(b1), readSigned(code, offset + 2, math.min(4, math.max(0, len - 1))))
+      case KindRegs2Offset =>
+        val target = relative(offset, readSigned(code, offset + 2, math.min(4, math.max(0, len - 1))))
+        regs2OffsetTable(opcodeByte)(regLo(b1), regHi(b1), target)
+      case KindRegImmOffset =>
+        val lX = math.min(4, (b1 >> 4) & 0x7); val lY = math.min(4, math.max(0, len - lX - 1))
+        val imm = readSigned(code, offset + 2, lX)
+        regImmOffsetTable(opcodeByte)(regLo(b1), imm, relative(offset, readSigned(code, offset + 2 + lX, lY)))
+      case KindStoreImm =>
+        val lX = math.min(4, b1 & 0x7); val lY = math.min(4, math.max(0, len - lX - 1))
+        storeImmTable(opcodeByte)(readSigned(code, offset + 2, lX), readSigned(code, offset + 2 + lX, lY))
+      case KindStoreImmIndirect =>
+        val lX = math.min(4, (b1 >> 4) & 0x7); val lY = math.min(4, math.max(0, len - lX - 1))
+        storeImmIndirectTable(opcodeByte)(
+          regLo(b1),
+          readSigned(code, offset + 2, lX),
+          readSigned(code, offset + 2 + lX, lY)
+        )
+      case KindEcalli => Instruction.Ecalli(readSigned(code, offset + 1, math.min(4, len)))
+      case KindJump => Instruction.Jump(relative(offset, readSigned(code, offset + 1, math.min(4, len))))
+      // GP 0.8.0 §A.5: r_A = min(12, ζ_{ı+1} mod 16), ν_X = E⁻¹_8(ζ_{ı+2..+8})
+      case KindLoadImm64 => Instruction.LoadImm64(regLo(b1), readUnsigned(code, offset + 2, 8))
+      case KindLoadImmAndJumpIndirect =>
+        val lX = math.min(4, byteAt(code, offset + 2) & 0x7); val lY = math.min(4, math.max(0, len - lX - 2))
+        Instruction.LoadImmAndJumpIndirect(
+          regLo(b1),
+          regHi(b1),
+          readSigned(code, offset + 3, lX),
+          readSigned(code, offset + 3 + lX, lY)
+        )
       case _ => Instruction.Panic
 
     (instruction, skip)
@@ -224,15 +250,21 @@ object InstructionDecoder:
   // Helper Functions
   // ============================================================================
 
-  private def readChunk(code: Array[Byte], start: Int, length: Int): Long =
+  /** ζ_i: the code byte at `i`, or 0 past the end of the code (GP 0.8.0 §A.2 eq:instructions). */
+  private inline def byteAt(code: Array[Byte], i: Int): Int = if i < code.length then code(i) & 0xFF else 0
+
+  /** E⁻¹_n(ζ_{start..+n}) for n ≤ 8, little-endian. */
+  private def readUnsigned(code: Array[Byte], start: Int, n: Int): Long =
     var result = 0L; var i = 0
-    while i < length && start + i < code.length do { result |= (code(start + i).toLong & 0xFF) << (i * 8); i += 1 }
+    while i < n do { result |= byteAt(code, start + i).toLong << (i * 8); i += 1 }
     result
 
-  private def readLong(code: Array[Byte], start: Int): Long =
-    var result = 0L; var i = 0
-    while i < 8 && start + i < code.length do { result |= (code(start + i).toLong & 0xFF) << (i * 8); i += 1 }
-    result
+  /** X_n(E⁻¹_n(ζ_{start..+n})): an n-byte immediate sign-extended to 64 bits. */
+  private def readSigned(code: Array[Byte], start: Int, n: Int): Long =
+    signExtend(readUnsigned(code, start, n), n * 8)
+
+  /** ı + offset, as the 32-bit target address the jump table and branch checks use. */
+  private inline def relative(instrOffset: Int, rel: Long): Long = (instrOffset + rel.toInt).toLong & 0xFFFFFFFFL
 
   private[program] def getSkip(bitmask: Array[Byte], codeLength: Int, offset: Int): Int =
     var cur = offset + 1; var skip = 1
@@ -249,36 +281,8 @@ object InstructionDecoder:
   /** Decode a register index: clamp to the 13 registers */
   private inline def clampReg(raw: Int): Int = math.min(12, raw)
 
-  private def readRegImm(chunk: Long, len: Int): (Int, Long) =
-    (clampReg((chunk & 0xF).toInt), signExtend(chunk >>> 8, math.max(0, math.min(4, len - 1)) * 8))
+  /** min(12, b mod 16) */
+  private inline def regLo(b: Int): Int = clampReg(b & 0xF)
 
-  private def readRegs2(chunk: Long): (Int, Int) =
-    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt))
-
-  private def readRegs2Imm(chunk: Long, len: Int): (Int, Int, Long) =
-    (clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt), signExtend(chunk >>> 8, math.max(0, math.min(4, len - 1)) * 8))
-
-  private def readRegs2Offset(chunk: Long, instrOffset: Int, len: Int): (Int, Int, Long) =
-    val (r1, r2, imm) = readRegs2Imm(chunk, len); (r1, r2, (instrOffset + imm.toInt).toLong & 0xFFFFFFFFL)
-
-  private def readRegs3(chunk: Long): (Int, Int, Int) =
-    (clampReg(((chunk >> 8) & 0xFF).toInt), clampReg((chunk & 0xF).toInt), clampReg(((chunk >> 4) & 0xF).toInt))
-
-  private def readImmImm(chunk: Long, len: Int): (Long, Long) =
-    val aux = (chunk & 0x7).toInt; val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
-    val sc = chunk >>> 8; (signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))
-
-  private def readRegImmOffset(chunk: Long, instrOffset: Int, len: Int): (Int, Long, Long) =
-    val reg = clampReg((chunk & 0xF).toInt); val aux = ((chunk >> 4) & 0x7).toInt
-    val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
-    val sc = chunk >>> 8; (reg, signExtend(sc, b1 * 8), (instrOffset + signExtend(sc >>> (b1 * 8), b2 * 8).toInt).toLong & 0xFFFFFFFFL)
-
-  private def readRegImmImm(chunk: Long, len: Int): (Int, Long, Long) =
-    val reg = clampReg((chunk & 0xF).toInt); val aux = ((chunk >> 4) & 0x7).toInt
-    val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 1))
-    val sc = chunk >>> 8; (reg, signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))
-
-  private def readRegs2Imm2(chunk: Long, len: Int): (Int, Int, Long, Long) =
-    val r1 = clampReg((chunk & 0xF).toInt); val r2 = clampReg(((chunk >> 4) & 0xF).toInt)
-    val aux = ((chunk >> 8) & 0x7).toInt; val b1 = math.min(4, aux); val b2 = math.max(0, math.min(4, len - b1 - 2))
-    val sc = chunk >>> 16; (r1, r2, signExtend(sc, b1 * 8), signExtend(sc >>> (b1 * 8), b2 * 8))
+  /** min(12, ⌊b / 16⌋) */
+  private inline def regHi(b: Int): Int = clampReg((b >> 4) & 0xF)

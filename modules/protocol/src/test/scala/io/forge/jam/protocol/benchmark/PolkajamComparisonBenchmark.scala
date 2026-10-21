@@ -101,6 +101,23 @@ object PolkajamComparisonBenchmark:
     result(s"${name}_encode", encodeMs, "ms")
     result(s"${name}_reconstruct", reconstructMs, "ms")
 
+  /** The segments as the DA path codes them: all in one chunkSegments call, all rebuilt in one reconstructSegments. */
+  private def ecSegmentsRoundTrip(name: String, segments: IndexedSeq[Array[Byte]], config: ChainConfig): Unit =
+    val originalCount = config.ecPieceSize / 2
+    val (shards, encodeMs) = timeMs(
+      ErasureCoding.chunkSegments(segments, config.ecPieceSize, config.validatorCount).fold(e => throw e, identity)
+    )
+    // The same recovery-only shards as ecRoundTrip: the last validatorCount - originalCount, of which it needs
+    // originalCount.
+    val held = (originalCount until config.validatorCount).map(v => ErasureCoding.Shard(shards.joinedColumn(v), v))
+    val (_, reconstructMs) = timeMs(
+      ErasureCoding
+        .reconstructSegments(held.toArray, segments.length, config.ecPieceSize, config.validatorCount)
+        .fold(e => throw e, identity)
+    )
+    result(s"${name}_encode", encodeMs, "ms")
+    result(s"${name}_reconstruct", reconstructMs, "ms")
+
   private def ecBenchmark(): Unit =
     val config = ChainConfig.FULL
     val rng = new Random(7)
@@ -109,7 +126,8 @@ object PolkajamComparisonBenchmark:
     // One untimed pass so JIT and native-library loading are out of the measurement.
     ecRoundTrip("ec_warmup", Seq(bundle), config)
     ecRoundTrip("ec_bundle", Seq(bundle), config)
-    ecRoundTrip("ec_segments", segments, config)
+    ecSegmentsRoundTrip("ec_segments_warmup", segments, config)
+    ecSegmentsRoundTrip("ec_segments", segments, config)
 
   private def importBenchmark(rounds: Int): Unit =
     val config = ChainConfig.TINY

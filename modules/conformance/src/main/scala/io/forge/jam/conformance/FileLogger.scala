@@ -1,11 +1,11 @@
 package io.forge.jam.conformance
 
-import cats.effect.{IO, Resource}
 import java.io.{BufferedWriter, FileWriter, PrintWriter, StringWriter}
 import java.nio.file.{Files, Path}
 import java.time.{Instant, Duration}
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
+import scala.util.control.NonFatal
 
 /**
  * Simple append-only file logger for conformance testing sessions.
@@ -60,93 +60,86 @@ class FileLogger(
           writer = new BufferedWriter(new FileWriter(path.toFile, false))
           bytesWritten.set(0)
         catch
-          case _: Throwable =>
+          case NonFatal(_) =>
             // Recovery: ensure we still have a working writer rather than a closed one.
             try writer = new BufferedWriter(new FileWriter(path.toFile, true))
-            catch case _: Throwable => ()
+            catch case NonFatal(_) => ()
       case None => ()
 
-  /** True when gated (per-message) lines go anywhere; when false, logging them is skipped without leaving the fiber. */
+  /** True when gated (per-message) lines go anywhere; when false, logging them returns before building the line. */
   private def gatedEnabled: Boolean = verbose || echoToStderr
 
   /**
    * Log a message with timestamp, direction, type, size, and key fields.
    */
-  def log(direction: String, msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
-    if !gatedEnabled then IO.unit
-    else IO.blocking {
+  def log(direction: String, msgType: String, size: Int, keyFields: => String = ""): Unit =
+    if gatedEnabled then
       val timestamp = timestampFormat.format(Instant.now())
-      val fields = if keyFields.nonEmpty then s" [$keyFields]" else ""
-      writeAndEcho(s"[$timestamp] [$direction] $msgType (${size}b)$fields\n")
-    }
+      val fields = keyFields
+      val suffix = if fields.nonEmpty then s" [$fields]" else ""
+      writeAndEcho(s"[$timestamp] [$direction] $msgType (${size}b)$suffix\n")
 
   /**
    * Log a received message.
    */
-  def logReceived(msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
+  def logReceived(msgType: String, size: Int, keyFields: => String = ""): Unit =
     log("RX", msgType, size, keyFields)
 
   /**
    * Log a sent message.
    */
-  def logSent(msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
+  def logSent(msgType: String, size: Int, keyFields: => String = ""): Unit =
     log("TX", msgType, size, keyFields)
 
   /**
    * Log session start.
    */
-  def logSessionStart(): IO[Unit] =
-    IO.blocking {
-      val now = Instant.now()
-      sessionStart.set(now)
-      errorCount.set(0)
-      val timestamp = timestampFormat.format(now)
-      writeAndEcho(s"[$timestamp] [SESSION] Connected\n", gated = false)
-    }
+  def logSessionStart(): Unit =
+    val now = Instant.now()
+    sessionStart.set(now)
+    errorCount.set(0)
+    val timestamp = timestampFormat.format(now)
+    writeAndEcho(s"[$timestamp] [SESSION] Connected\n", gated = false)
 
   /**
    * Log session end with duration and error counts.
    */
-  def logSessionEnd(): IO[Unit] =
-    IO.blocking {
-      val now = Instant.now()
-      val start = sessionStart.get()
-      val duration = if start != null then Duration.between(start, now) else Duration.ZERO
-      val errors = errorCount.get()
-      val timestamp = timestampFormat.format(now)
-      writeAndEcho(s"[$timestamp] [SESSION] Disconnected (duration=${duration.toMillis}ms, errors=$errors)\n", gated = false)
-    }
+  def logSessionEnd(): Unit =
+    val now = Instant.now()
+    val start = sessionStart.get()
+    val duration = if start != null then Duration.between(start, now) else Duration.ZERO
+    val errors = errorCount.get()
+    val timestamp = timestampFormat.format(now)
+    writeAndEcho(
+      s"[$timestamp] [SESSION] Disconnected (duration=${duration.toMillis}ms, errors=$errors)\n",
+      gated = false,
+      flush = true
+    )
 
   /**
    * Log an error with full stack trace.
    */
-  def logError(message: String, error: Throwable): IO[Unit] =
-    IO.blocking {
-      errorCount.incrementAndGet()
-      val timestamp = timestampFormat.format(Instant.now())
-      val sw = new StringWriter()
-      error.printStackTrace(new PrintWriter(sw))
-      writeAndEcho(s"[$timestamp] [ERROR] $message\n$sw\n", gated = false, flush = true)
-    }
+  def logError(message: String, error: Throwable): Unit =
+    errorCount.incrementAndGet()
+    val timestamp = timestampFormat.format(Instant.now())
+    val sw = new StringWriter()
+    error.printStackTrace(new PrintWriter(sw))
+    writeAndEcho(s"[$timestamp] [ERROR] $message\n$sw\n", gated = false, flush = true)
 
   /**
    * Log a warning message.
    */
-  def logWarning(message: String): IO[Unit] =
-    IO.blocking {
-      val timestamp = timestampFormat.format(Instant.now())
-      writeAndEcho(s"[$timestamp] [WARN] $message\n", gated = false)
-    }
+  def logWarning(message: String): Unit =
+    val timestamp = timestampFormat.format(Instant.now())
+    writeAndEcho(s"[$timestamp] [WARN] $message\n", gated = false)
 
   /**
    * Log an info message.
    */
-  def logInfo(message: => String): IO[Unit] =
-    if !gatedEnabled then IO.unit
-    else IO.blocking {
+  def logInfo(message: => String): Unit =
+    if gatedEnabled then
       val timestamp = timestampFormat.format(Instant.now())
       writeAndEcho(s"[$timestamp] [INFO] $message\n")
-    }
 
   /**
    * Close the writer.
@@ -166,28 +159,20 @@ object FileLogger:
     )
 
   /**
-   * Create a FileLogger resource that manages the file lifecycle.
-   * If LOG_LEVEL is DEBUG/INFO/TRACE, also echoes to stderr
+   * Open a FileLogger appending to `logPath`; the caller closes it. If LOG_LEVEL is DEBUG/INFO/TRACE, also echoes
+   * to stderr.
    */
-  def resource(logPath: Path): Resource[IO, FileLogger] =
-    Resource.make(
-      IO.blocking {
-        val verbose = isVerbose
-        val writer = new BufferedWriter(new FileWriter(logPath.toFile, true))
-        new FileLogger(
-          writer,
-          new AtomicReference[Instant](),
-          new AtomicLong(0),
-          echoToStderr = verbose,
-          verbose = verbose,
-          logPath = Some(logPath)
-        )
-      }
-    ) { logger =>
-      IO.blocking {
-        logger.close()
-      }
-    }
+  def open(logPath: Path): FileLogger =
+    val verbose = isVerbose
+    val writer = new BufferedWriter(new FileWriter(logPath.toFile, true))
+    new FileLogger(
+      writer,
+      new AtomicReference[Instant](),
+      new AtomicLong(0),
+      echoToStderr = verbose,
+      verbose = verbose,
+      logPath = Some(logPath)
+    )
 
   /**
    * Create a no-op logger for testing.

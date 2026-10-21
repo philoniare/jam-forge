@@ -1,6 +1,5 @@
 package io.forge.jam.pvm.engine
 
-import scala.collection.mutable.ArrayBuffer
 import spire.math.UInt
 import io.forge.jam.pvm.types.*
 import io.forge.jam.pvm.{Abi, Instruction, InterruptKind, PvmConstants}
@@ -24,15 +23,24 @@ final class CompiledInstruction private (
   val b: Int,
   val c: Int,
   val x: Long,
-  val y: Long
-)
+  val y: Long,
+  /** Gas cost of the block this instruction starts, or -1 when it is not the first instruction compiled for it. */
+  val blockCost: Long,
+  /** For a conditional branch: both its target and its fall-through are basic-block starts. */
+  val branchValid: Boolean
+):
+  /** Ends a basic block (GP 0.8.0 §A.3), so the next instruction charges a new block's gas. */
+  val isTerminator: Boolean = BlockGasModel.isTerminatorOpcodeValue(opcodeValue)
+
 
 object CompiledInstruction:
   def apply(
     instruction: Instruction,
     pc: ProgramCounter,
     nextPc: ProgramCounter,
-    opcodeValue: Int
+    opcodeValue: Int,
+    blockCost: Long = -1L,
+    branchValid: Boolean = true
   ): CompiledInstruction =
     val ints = new Array[Int](3)
     val longs = new Array[Long](2)
@@ -48,7 +56,9 @@ object CompiledInstruction:
           case other =>
             throw new IllegalArgumentException(s"unsupported operand $other in $instruction")
         }
-    new CompiledInstruction(instruction, pc, nextPc, opcodeValue, ints(0), ints(1), ints(2), longs(0), longs(1))
+    new CompiledInstruction(
+      instruction, pc, nextPc, opcodeValue, ints(0), ints(1), ints(2), longs(0), longs(1), blockCost, branchValid
+    )
 
 /**
  * Interpreted VM instance for host-side execution over [[BasicMemory]].
@@ -67,8 +77,6 @@ final class InterpretedInstance private (
   nextProgramCounter0: Option[ProgramCounter],
   nextProgramCounterChanged0: Boolean,
   gas0: Long,
-  compiledOffsetForBlock0: Array[Int],
-  compiledInstructions0: ArrayBuffer[CompiledInstruction],
   interrupt0: InterruptKind,
   val stepTracing: Boolean,
   val gasMetering: Boolean
@@ -80,8 +88,6 @@ final class InterpretedInstance private (
   nextProgramCounter0,
   nextProgramCounterChanged0,
   gas0,
-  compiledOffsetForBlock0,
-  compiledInstructions0,
   interrupt0
 ):
 
@@ -248,7 +254,6 @@ object InterpretedInstance:
     val pageAlignedRwDataLen = ((actualRwDataLen + pageSize - 1) / pageSize * pageSize).toInt
     val heapEmptyPagesSize = module.heapEmptyPages.toLong * pageSize
     val initialHeapSize = UInt((pageAlignedRwDataLen + heapEmptyPagesSize).toInt)
-    val (sharedInstructions, sharedOffsetMap) = module.compiledState()
 
     new InterpretedInstance(
       module = module,
@@ -259,8 +264,6 @@ object InterpretedInstance:
       nextProgramCounter0 = None,
       nextProgramCounterChanged0 = true,
       gas0 = 0L,
-      compiledOffsetForBlock0 = sharedOffsetMap,
-      compiledInstructions0 = sharedInstructions,
       interrupt0 = InterruptKind.Finished,
       stepTracing = forceStepTracing,
       gasMetering = module.gasMetering

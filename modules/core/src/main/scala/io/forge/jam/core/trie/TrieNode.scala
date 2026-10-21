@@ -21,23 +21,29 @@ final case class TrieNode(nodeType: TrieNodeType, left: JamBytes, right: JamByte
 
   lazy val hash: Hash = TrieNode.computeHash(nodeType, left, right)
 
-  def encode: JamBytes =
-    val out = new Array[Byte](65)
+  def encode: JamBytes = JamBytes.wrap(encodeArray)
+
+  /** The 65-byte storage encoding as a fresh array the caller owns. */
+  def encodeArray: Array[Byte] =
+    val out = new Array[Byte](TrieNode.StorageBytes)
     out(0) = nodeType.tag
     left.copyToArray(out, 1, 0, 32)
     right.copyToArray(out, 33, 0, 32)
-    JamBytes(out)
+    out
 
 object TrieNode:
   val StorageBytes = 65
 
-  def decode(data: JamBytes): TrieNode =
+  def decode(data: JamBytes): TrieNode = decodeArray(data.toArrayUnsafe)
+
+  /** Decodes a 65-byte storage encoding; copies out of `data`, which the caller keeps. */
+  def decodeArray(data: Array[Byte]): TrieNode =
     require(data.length == StorageBytes, s"expected $StorageBytes bytes, got ${data.length}")
     val t = TrieNodeType.fromTag(data(0))
       .getOrElse(throw new IllegalArgumentException(s"unknown trie node type tag ${data(0)}"))
-    val l = data.slice(1, 33)
-    val r = data.slice(33, 65)
-    TrieNode(t, l, r)
+    val l = java.util.Arrays.copyOfRange(data, 1, 33)
+    val r = java.util.Arrays.copyOfRange(data, 33, 65)
+    TrieNode(t, JamBytes.wrap(l), JamBytes.wrap(r))
 
   def branch(left: Hash, right: Hash): TrieNode =
     TrieNode(TrieNodeType.Branch, left.toJamBytes, right.toJamBytes)
@@ -50,16 +56,25 @@ object TrieNode:
       key.copyToArray(l, 1, 0, 31)
       val r = new Array[Byte](32)
       value.copyToArray(r, 0, 0, value.length)
-      TrieNode(TrieNodeType.EmbeddedLeaf, JamBytes(l), JamBytes(r))
+      TrieNode(TrieNodeType.EmbeddedLeaf, JamBytes.wrap(l), JamBytes.wrap(r))
     else
       val l = new Array[Byte](32)
       l(0) = 0
       key.copyToArray(l, 1, 0, 31)
-      TrieNode(TrieNodeType.RegularLeaf, JamBytes(l), Hashing.blake2b256(value).toJamBytes)
+      TrieNode(TrieNodeType.RegularLeaf, JamBytes.wrap(l), Hashing.blake2b256(value).toJamBytes)
 
   def leafKey(node: TrieNode): JamBytes =
     require(node.nodeType != TrieNodeType.Branch, "leafKey is only defined on leaf nodes")
     node.left.slice(1, 32)
+
+  /** The leaf's 31-byte key as a fresh array. */
+  def leafKeyArray(node: TrieNode): Array[Byte] =
+    require(node.nodeType != TrieNodeType.Branch, "leafKey is only defined on leaf nodes")
+    java.util.Arrays.copyOfRange(node.left.toArrayUnsafe, 1, 32)
+
+  /** Whether leaf `node` holds `key`, without slicing its key out. */
+  def leafKeyEquals(node: TrieNode, key: JamBytes): Boolean =
+    key.length == 31 && java.util.Arrays.equals(node.left.toArrayUnsafe, 1, 32, key.toArrayUnsafe, 0, 31)
 
   def embeddedValue(node: TrieNode): Option[JamBytes] =
     node.nodeType match

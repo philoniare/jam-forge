@@ -532,17 +532,17 @@ object InstructionExecutor:
   private def opBranchEqImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) == ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) == ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchNotEqImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) != ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) != ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchLessUnsignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ci.x) < 0,
       pc,
       ci.y.toInt,
@@ -552,12 +552,12 @@ object InstructionExecutor:
   private def opBranchLessSignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) < ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) < ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchGreaterOrEqualUnsignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ci.x) >= 0,
       pc,
       ci.y.toInt,
@@ -567,12 +567,12 @@ object InstructionExecutor:
   private def opBranchGreaterOrEqualSignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) >= ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) >= ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchLessOrEqualUnsignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ci.x) <= 0,
       pc,
       ci.y.toInt,
@@ -582,17 +582,17 @@ object InstructionExecutor:
   private def opBranchLessOrEqualSignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) <= ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) <= ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchGreaterSignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(ctx.getReg(ci.a) > ci.x, pc, ci.y.toInt, nextPc)
+    ctx.branchCompiled(ci, ctx.getReg(ci.a) > ci.x, pc, ci.y.toInt, nextPc)
 
   private def opBranchGreaterUnsignedImm(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ci.x) > 0,
       pc,
       ci.y.toInt,
@@ -602,7 +602,7 @@ object InstructionExecutor:
   private def opBranchEq(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       ctx.getReg(ci.a) == ctx.getReg(ci.b),
       pc,
       ci.x.toInt,
@@ -612,7 +612,7 @@ object InstructionExecutor:
   private def opBranchNotEq(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       ctx.getReg(ci.a) != ctx.getReg(ci.b),
       pc,
       ci.x.toInt,
@@ -622,7 +622,7 @@ object InstructionExecutor:
   private def opBranchLessUnsigned(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ctx.getReg(ci.b)) < 0,
       pc,
       ci.x.toInt,
@@ -632,7 +632,7 @@ object InstructionExecutor:
   private def opBranchLessSigned(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       ctx.getReg(ci.a) < ctx.getReg(ci.b),
       pc,
       ci.x.toInt,
@@ -642,7 +642,7 @@ object InstructionExecutor:
   private def opBranchGreaterOrEqualUnsigned(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       java.lang.Long.compareUnsigned(ctx.getReg(ci.a), ctx.getReg(ci.b)) >= 0,
       pc,
       ci.x.toInt,
@@ -652,7 +652,7 @@ object InstructionExecutor:
   private def opBranchGreaterOrEqualSigned(ci: CompiledInstruction, ctx: InterpreterCore): Int =
     val pc = ci.pc
     val nextPc = ci.nextPc
-    ctx.branch(
+    ctx.branchCompiled(ci, 
       ctx.getReg(ci.a) >= ctx.getReg(ci.b),
       pc,
       ci.x.toInt,

@@ -238,6 +238,29 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           assertAssuranceStateEquals(testCase.postState, postState, testCaseName)
   }
 
+  test("GP: one bad signature among valid assurances fails the block with BadSignature, wherever it is") {
+    // Assurance signatures are checked as one batch; a single bad one must still be found.
+    for (folder, config) <- Seq("stf/assurances/tiny" -> TinyConfig, "stf/assurances/full" -> FullConfig) do
+      val (testCase, _) =
+        TestFileLoader.loadTestDataFromTestVectors[AssuranceCase](folder, "some_assurances-1").toOption.get
+      val assurances = testCase.input.assurances
+      assurances.size should be > 1
+      AssuranceTransition.stfInternal(testCase.input, testCase.preState, config)._2.isRight shouldBe true
+      for bad <- assurances.indices do
+        val corrupted = assurances.zipWithIndex.map { (a, i) =>
+          if i != bad then a
+          else
+            val sig = a.signature.bytes
+            sig(10) = (sig(10) ^ 1).toByte
+            a.copy(signature = Ed25519Signature(sig))
+        }
+        val (_, output) =
+          AssuranceTransition.stfInternal(testCase.input.copy(assurances = corrupted), testCase.preState, config)
+        withClue(s"$folder, bad signature at $bad: ") {
+          output.left.toOption shouldBe Some(AssuranceErrorCode.BadSignature)
+        }
+  }
+
   // Helper method to compare AssuranceOutput instances
   private def assertAssuranceOutputEquals(
     expected: AssuranceOutput,

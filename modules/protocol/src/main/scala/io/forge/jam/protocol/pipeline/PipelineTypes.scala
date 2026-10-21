@@ -1,9 +1,11 @@
 package io.forge.jam.protocol.pipeline
 
 import cats.data.StateT
-import io.forge.jam.core.{ChainConfig, Parallel}
+import io.forge.jam.core.{ChainConfig, Hashing, Parallel}
+import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.block.Block
+import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.state.TrieBackedJamState
@@ -35,6 +37,15 @@ final class PendingChecks:
   def firstFailure(): Option[PipelineError] =
     checks.iterator.map(Parallel.await).collectFirst { case Some(err) => err }
 
+/** The block header's encoding and hash, each computed at most once per block. */
+final class EncodedHeader(header: Header):
+  lazy val bytes: Array[Byte] = summon[Codec[Header]].encode(header)
+
+  /** E_U(H), the encoding without the 96-byte seal (GP 0.8.0 §5). */
+  def unsealed: Array[Byte] = java.util.Arrays.copyOf(bytes, bytes.length - 96)
+
+  lazy val hash: Hash = Hashing.blake2b256(bytes)
+
 /**
  * Context passed through the pipeline.
  * Contains configuration and accumulated intermediate results.
@@ -42,6 +53,7 @@ final class PendingChecks:
 final case class PipelineContext(
   config: ChainConfig,
   block: Block,
+  header: EncodedHeader,
   preTransitionTau: Long,
   preSafroleValidators: List[ValidatorKey] = List.empty,
   preSafroleKappa: List[ValidatorKey] = List.empty,
@@ -62,6 +74,7 @@ object PipelineContext:
     PipelineContext(
       config = config,
       block = block,
+      header = new EncodedHeader(block.header),
       preTransitionTau = view.timeslot,
       preSafroleValidators = view.validators.current,
       preSafroleKappa = view.validators.current,

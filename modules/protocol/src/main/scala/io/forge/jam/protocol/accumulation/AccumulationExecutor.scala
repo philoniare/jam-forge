@@ -11,28 +11,20 @@ import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UByte}
 
 /** Orchestrates PVM execution for accumulation.
+  *
+  * @param parallelServices
+  *   whether the services of one accpar batch run concurrently. The recompiler has not been checked for concurrent
+  *   use, so only the interpreter does by default.
   */
-class AccumulationExecutor(val config: ChainConfig):
+class AccumulationExecutor(
+    val config: ChainConfig,
+    val parallelServices: Boolean = ExecutionMode.default == ExecutionMode.Interpreted
+):
 
   private var currentStorageView: Option[ServiceStorageView] = None
   def setStorageView(view: Option[ServiceStorageView]): Unit =
     currentStorageView = view
   def storageView: Option[ServiceStorageView] = currentStorageView
-
-  // LRU-bounded module cache to prevent unbounded memory growth
-  private val MAX_MODULE_CACHE_SIZE = 256
-  private val moduleCache
-      : java.util.LinkedHashMap[JamBytes, InterpretedModule] =
-    new java.util.LinkedHashMap[JamBytes, InterpretedModule](
-      MAX_MODULE_CACHE_SIZE,
-      0.75f,
-      true
-    ) {
-      override def removeEldestEntry(
-          eldest: java.util.Map.Entry[JamBytes, InterpretedModule]
-      ): Boolean =
-        size() > MAX_MODULE_CACHE_SIZE
-    }
 
   /** Execute accumulation for a single service. Implements the Psi_A function
     * from Gray Paper.
@@ -60,9 +52,12 @@ class AccumulationExecutor(val config: ChainConfig):
     if preimage.isEmpty then
       return createEmptyResult(partialState, Some(serviceId), operands)
 
-    val code = extractCodeBlob(preimage.get.toArray)
+    // The process-wide module cache only returns a module built from identical code bytes, so the blob is read
+    // without an extra copy of the preimage.
+    val code = extractCodeBlob(preimage.get.toArrayUnsafe)
     if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
     then return createEmptyResult(partialState, Some(serviceId), operands)
+    val module: Option[InterpretedModule] = getOrCompileModule(code.get, JamBytes(codeHash.bytes.toArray))
 
     // Apply incoming transfer balances before execution
     val transferBalance = operands.collect {
@@ -105,7 +100,7 @@ class AccumulationExecutor(val config: ChainConfig):
     )
 
     // Execute PVM
-    val execResult = executePvm(context, code.get, gasLimit, operands, JamBytes(codeHash.bytes.toArray), executionMode)
+    val execResult = executePvm(context, module, gasLimit, operands, executionMode)
 
     // Collapse state based on exit reason
     val finalState = context.collapse(execResult.exitReason)
@@ -135,19 +130,16 @@ class AccumulationExecutor(val config: ChainConfig):
     */
   private def executePvm(
       context: AccumulationContext,
-      code: Array[Byte],
+      moduleOpt: Option[InterpretedModule],
       gasLimit: Long,
       operands: List[AccumulationOperand],
-      codeHash: JamBytes,
-      executionMode: ExecutionMode = ExecutionMode.default
+      executionMode: ExecutionMode
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
       JamCodecs.encodeCompactInteger(context.serviceIndex) ++
       JamCodecs.encodeCompactInteger(operands.size.toLong)
 
-    // Get or compile module
-    val moduleOpt = getOrCompileModule(code, codeHash)
     if moduleOpt.isEmpty then
       return PvmExecResult(ExitReason.INVALID_CODE, 0L, None)
 
@@ -178,22 +170,10 @@ class AccumulationExecutor(val config: ChainConfig):
       if exitReason == ExitReason.HALT then Some(output) else None
     )
 
-  /** Get or compile a module from code bytes.
+  /** Get or compile a module from code bytes (process-wide cache).
     */
   private def getOrCompileModule(code: Array[Byte], codeHash: JamBytes): Option[InterpretedModule] =
-    moduleCache.synchronized(getOrCompileModuleUnsynced(code, codeHash))
-
-  private def getOrCompileModuleUnsynced(code: Array[Byte], codeHash: JamBytes): Option[InterpretedModule] =
-    val cached = moduleCache.get(codeHash)
-    if cached != null then Some(cached)
-    else
-      ServiceCode.parseBlob(code).flatMap { blob =>
-        InterpretedModule.create(blob) match
-          case Right(module) =>
-            moduleCache.put(codeHash, module)
-            Some(module)
-          case Left(_) => None
-      }
+    ServiceCode.module(codeHash, code)
 
   /** Extract code blob from preimage data
     */

@@ -44,10 +44,13 @@ object AuthorizationTransition:
     // Group authorizations by core index
     val authsByCoreIndex = input.auths.groupBy(_.core.toInt)
 
+    // Indexed once, so taking each core's queue is not a walk down the list of cores
+    val queues = preState.authQueues.toVector
+
     // Update pools for each core according to the Gray Paper formula
     val updatedPools = preState.authPools.zipWithIndex.map {
       case (pool, coreIndex) =>
-        val coreQueue = preState.authQueues(coreIndex)
+        val coreQueue = queues(coreIndex)
 
         // Step 1: F(c) - Remove consumed authorizers from the pool
         // For each consumed auth, remove first matching hash from pool

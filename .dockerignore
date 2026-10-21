@@ -17,9 +17,10 @@ project/project/
 
 # Test vectors (large)
 jamtestvectors/
-!jamtestvectors/traces/preimages/*.json
-!jamtestvectors/traces/preimages_light/*.json
+!jamtestvectors/traces/preimages/*.bin
+!jamtestvectors/traces/preimages_light/*.bin
 graypaper/
+modules/crypto/native/ark-vrf/
 # Keep jam-conformance/fuzz-reports for CRaC warmup traces
 jam-conformance/crypto/
 jam-conformance/fuzz-perf/

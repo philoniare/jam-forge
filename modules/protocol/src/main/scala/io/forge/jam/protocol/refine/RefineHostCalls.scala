@@ -421,6 +421,7 @@ class RefineHostCalls(
             guestInstance.nextProgramCounter
               .map(_.value.toLong)
               .getOrElse(guest.pc)
+          case InterruptKind.Panic | InterruptKind.Finished => 0L
           case _ =>
             guestInstance.programCounter
               .map(_.value.toLong)

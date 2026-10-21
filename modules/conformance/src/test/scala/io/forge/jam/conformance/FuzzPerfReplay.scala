@@ -1,18 +1,9 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.{ChainConfig, JamBytes}
-import io.forge.jam.core.codec.JamCodecs
-import io.forge.jam.protocol.traces.{Genesis, TraceStep}
-import io.forge.jam.conformance.ConformanceCodecs.encode
-import spire.math.{UByte, UInt}
-import io.forge.jam.core.codec.Codec
+import io.forge.jam.core.ChainConfig
 
-import java.net.{StandardProtocolFamily, UnixDomainSocketAddress}
-import java.nio.ByteBuffer
-import java.nio.channels.SocketChannel
 import java.nio.file.{Files, Path, Paths}
 import java.util.Locale
-import scala.jdk.CollectionConverters.*
 
 object FuzzPerfReplay:
   private final case class Args(
@@ -33,40 +24,6 @@ object FuzzPerfReplay:
     case Nil                        => acc
     case other :: _                 => throw new IllegalArgumentException(s"Unknown argument: $other")
 
-  private def decodeFile[A](path: Path, codec: Codec[A]): A =
-    codec.decodeUnsafe(Files.readAllBytes(path))
-
-  /** Fuzzer-to-target messages; jam-forge's ProtocolMessage only encodes the target-to-fuzzer direction. */
-  private def frame(discriminant: Int, body: JamBytes): Array[Byte] =
-    val payload = JamBytes(Array(discriminant.toByte)) ++ body
-    (JamBytes(JamCodecs.encodeU32LE(UInt(payload.length))) ++ payload).toArray
-
-  private def connect(socket: Path, waitSecs: Int): SocketChannel =
-    val deadline = System.nanoTime() + waitSecs * 1_000_000_000L
-    var channel: SocketChannel = null
-    while channel == null do
-      try
-        val c = SocketChannel.open(StandardProtocolFamily.UNIX)
-        c.connect(UnixDomainSocketAddress.of(socket))
-        channel = c
-      catch
-        case e: java.io.IOException =>
-          if System.nanoTime() > deadline then throw new RuntimeException(s"No target on $socket", e)
-          Thread.sleep(100)
-    channel
-
-  private def readFully(channel: SocketChannel, n: Int): Array[Byte] =
-    val buf = ByteBuffer.allocate(n)
-    while buf.hasRemaining do
-      if channel.read(buf) < 0 then throw new RuntimeException("Target closed the connection")
-    buf.array()
-
-  private def roundTrip(channel: SocketChannel, msg: Array[Byte], config: ChainConfig): ProtocolMessage =
-    val out = ByteBuffer.wrap(msg)
-    while out.hasRemaining do channel.write(out)
-    val len = ByteBuffer.wrap(readFully(channel, 4)).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt
-    ProtocolMessage.decodeMessage(JamBytes(readFully(channel, len)), 0, config)._1
-
   private def percentile(sorted: Array[Double], p: Double): Double =
     sorted(math.min(sorted.length - 1, math.ceil(p / 100.0 * sorted.length).toInt - 1).max(0))
 
@@ -75,36 +32,28 @@ object FuzzPerfReplay:
     val args = parse(argv.toList)
     val traceDir = args.trace.getOrElse(throw new IllegalArgumentException("--trace <dir> is required"))
     val config = args.config
-    val genesis = decodeFile(traceDir.resolve("genesis.bin"), Genesis.codec(config.validatorCount, config.epochLength))
-    val stepCodec = TraceStep.codec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
-    val stepFiles = Files.list(traceDir).iterator().asScala
-      .filter(p => p.getFileName.toString.matches("\\d+\\.bin"))
-      .toVector.sortBy(_.getFileName.toString)
+    val trace = FuzzClient.TraceDir.find(traceDir).getOrElse(throw new IllegalArgumentException(s"No genesis.bin in $traceDir"))
+    val genesis = trace.readGenesis(config)
 
-    val channel = connect(args.socket, args.waitSecs)
-    // Same handshake fuzz-perf's fuzzer sends: forks feature only, no ancestry.
-    val peerInfo = PeerInfo(UByte(1), UInt(Features.FORKS), Version.JAM_VERSION, Version(UByte(0), UByte(1), UByte(0)),
-      "jam-forge-fuzz-perf")
-    val target = roundTrip(channel, frame(PeerInfo.DISCRIMINANT, peerInfo.encode), config) match
+    val client = FuzzClient.connect(args.socket, config, args.waitSecs)
+    val target = client.request(FuzzClient.fuzzerPeerInfo("jam-forge-fuzz-perf")) match
       case ProtocolMessage.PeerInfoMsg(info) => info
       case other => throw new RuntimeException(s"Expected peer_info, got $other")
 
-    given Codec[Initialize] = Initialize.codec(config)
-    val init = Initialize(genesis.header, genesis.state.keyvals, Nil)
-    roundTrip(channel, frame(Initialize.DISCRIMINANT, init.encode), config) match
+    client.request(ProtocolMessage.InitializeMsg(Initialize(genesis.header, genesis.state.keyvals, Nil))) match
       case ProtocolMessage.StateRootMsg(root) if root.hash == genesis.state.stateRoot => ()
       case other => throw new RuntimeException(s"Initialize: unexpected reply $other")
 
-    given Codec[ImportBlock] = ImportBlock.codec(config)
     val times = Array.newBuilder[Double]
     var mismatches = 0
     var maxStep = ""
     var maxMs = -1.0
-    for file <- stepFiles do
-      val step = decodeFile(file, stepCodec)
-      val msg = frame(ImportBlock.DISCRIMINANT, ImportBlock(step.block).encode)
+    for file <- trace.steps do
+      val step = trace.readStep(file, config)
+      val msg = ProtocolMessage.encodeWithFrame(ProtocolMessage.ImportBlockMsg(ImportBlock(step.block)), config)
       val t0 = System.nanoTime()
-      val reply = roundTrip(channel, msg, config)
+      client.sendRaw(msg)
+      val reply = client.readReply()
       val ms = (System.nanoTime() - t0) / 1e6
       reply match
         case ProtocolMessage.StateRootMsg(root) if root.hash == step.postState.stateRoot => ()
@@ -115,7 +64,7 @@ object FuzzPerfReplay:
       if ms > maxMs then
         maxMs = ms
         maxStep = file.getFileName.toString.stripSuffix(".bin")
-    channel.close()
+    client.close()
 
     val all = times.result()
     val sorted = all.sorted

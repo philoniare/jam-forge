@@ -319,10 +319,6 @@ lazy val conformance = (project in file("modules/conformance"))
       "org.typelevel" %% "spire" % "0.18.0",
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
       "ch.qos.logback" % "logback-classic" % "1.4.11",
-      // cats-effect for functional async IO
-      "org.typelevel" %% "cats-effect" % "3.5.4",
-      // fs2-io for Unix domain socket support
-      "co.fs2" %% "fs2-io" % "3.10.2",
       // Monocle for lens-based state access (needed by protocol module at runtime)
       "dev.optics" %% "monocle-core" % "3.2.0",
       "dev.optics" %% "monocle-macro" % "3.2.0",

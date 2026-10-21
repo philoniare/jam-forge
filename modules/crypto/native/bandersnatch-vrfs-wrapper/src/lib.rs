@@ -16,9 +16,17 @@ use jni::sys::{jbyte, jbyteArray, jint};
 use jni::JNIEnv;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-static RING_CONTEXTS: OnceLock<Mutex<HashMap<usize, RingParams>>> = OnceLock::new();
+// Shared, not cloned per use: a context holds the whole SRS-derived setup.
+static RING_CONTEXTS: OnceLock<Mutex<HashMap<usize, Arc<RingParams>>>> = OnceLock::new();
+
+/// Locks `m`, recovering it if a panic poisoned it: every value guarded here is replaced whole or read, never left
+/// half-updated, so a panicking caller cannot leave it inconsistent. Without this one panic turns every later lock
+/// into another panic, and every ring check into a silent failure until restart.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 const ERROR_RESULT: [u8; 32] = [0; 32];
 
 macro_rules! jni_guard {
@@ -40,20 +48,22 @@ macro_rules! jni_guard {
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<BandersnatchSha512Ell2>;
 type RingVerifier = ark_ec_vrfs::ring::RingVerifier<BandersnatchSha512Ell2>;
 
+/// The ring verifier for the most recently used commitment. Building one from a commitment costs about 1 to 2 ms;
+/// the commitment (gamma_z) changes once per epoch, so every ticket of an epoch reuses the same verifier.
 static LAST_VERIFIER: Mutex<Option<(Vec<u8>, usize, Arc<RingVerifier>)>> = Mutex::new(None);
 
 fn ring_verifier(commitment: &[u8], ring_size: jint) -> Result<Arc<RingVerifier>, VrfError> {
     let size = ring_size as usize;
-    if let Some((c, n, v)) = LAST_VERIFIER.lock().unwrap().as_ref() {
+    if let Some((c, n, v)) = lock(&LAST_VERIFIER).as_ref() {
         if *n == size && c.as_slice() == commitment {
             return Ok(v.clone());
         }
     }
     let parsed = RingCommitment::deserialize_compressed(commitment)
         .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
-    let ring_ctx = ring_context(ring_size);
+    let ring_ctx = ring_context(ring_size)?;
     let verifier = Arc::new(ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)));
-    *LAST_VERIFIER.lock().unwrap() = Some((commitment.to_vec(), size, verifier.clone()));
+    *lock(&LAST_VERIFIER) = Some((commitment.to_vec(), size, verifier.clone()));
     Ok(verifier)
 }
 type BanderInput = Input<BandersnatchSha512Ell2>;
@@ -66,6 +76,7 @@ enum VrfError {
     DeserializationError(&'static str),
     VerificationError,
     ConversionError,
+    RingContextMissing(usize),
 }
 
 impl std::fmt::Display for VrfError {
@@ -74,6 +85,7 @@ impl std::fmt::Display for VrfError {
             VrfError::DeserializationError(msg) => write!(f, "Deserialization error: {}", msg),
             VrfError::VerificationError => write!(f, "VRF verification failed"),
             VrfError::ConversionError => write!(f, "Data conversion error"),
+            VrfError::RingContextMissing(n) => write!(f, "Ring context for ring size {} is not initialized", n),
         }
     }
 }
@@ -92,7 +104,7 @@ fn vrf_input_point(vrf_input_data: &[u8]) -> BanderInput {
 fn initialize_ring_context(srs_data: &[u8], ring_size: jint) -> Result<(), String> {
     let ring_size = ring_size as usize;
     let contexts = RING_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut contexts = contexts.lock().unwrap();
+    let mut contexts = lock(contexts);
 
     if !contexts.contains_key(&ring_size) {
         let pcs_params = PcsParams::deserialize_uncompressed_unchecked(&mut &srs_data[..])
@@ -101,26 +113,20 @@ fn initialize_ring_context(srs_data: &[u8], ring_size: jint) -> Result<(), Strin
         let ring_ctx = RingParams::from_pcs_params(ring_size, pcs_params)
             .map_err(|e| format!("Failed to create ring context: {:?}", e))?;
 
-        contexts.insert(ring_size, ring_ctx);
+        contexts.insert(ring_size, Arc::new(ring_ctx));
     }
 
     Ok(())
 }
 
-// "Static" ring context data
-fn ring_context(ring_size: jint) -> Arc<RingParams> {
-    let ring_size = ring_size as usize;
-    let contexts = RING_CONTEXTS
+/// The ring context for `ring_size`, or an error if `initializeContext` has not set it up. Never panics, so the lock
+/// is never poisoned here.
+fn ring_context(ring_size: jint) -> Result<Arc<RingParams>, VrfError> {
+    let size = ring_size as usize;
+    RING_CONTEXTS
         .get()
-        .expect("Ring contexts not initialized")
-        .lock()
-        .unwrap();
-
-    contexts
-        .get(&ring_size)
-        .expect("Ring context not found for given size")
-        .clone()
-        .into()
+        .and_then(|contexts| lock(contexts).get(&size).cloned())
+        .ok_or(VrfError::RingContextMissing(size))
 }
 
 #[no_mangle]
@@ -153,16 +159,15 @@ type RingBuilderPcsParams = ark_ec_vrfs::ring::RingBuilderPcsParams<Bandersnatch
 
 static RING_BUILDERS: Mutex<Vec<(usize, Arc<(RingBuilder, RingBuilderPcsParams)>)>> = Mutex::new(Vec::new());
 
-/// An empty ring builder and the SRS in Lagrangian form, per ring size.
-fn ring_builder(ring_size: jint) -> Arc<(RingBuilder, RingBuilderPcsParams)> {
+fn ring_builder(ring_size: jint) -> Result<Arc<(RingBuilder, RingBuilderPcsParams)>, VrfError> {
     let size = ring_size as usize;
-    let mut builders = RING_BUILDERS.lock().unwrap();
+    let mut builders = lock(&RING_BUILDERS);
     if let Some((_, b)) = builders.iter().find(|(n, _)| *n == size) {
-        return b.clone();
+        return Ok(b.clone());
     }
-    let built = Arc::new(ring_context(ring_size).verifier_key_builder());
+    let built = Arc::new(ring_context(ring_size)?.verifier_key_builder());
     builders.push((size, built.clone()));
-    built
+    Ok(built)
 }
 
 // Verifier actor.
@@ -171,16 +176,17 @@ struct Verifier {
 }
 
 impl Verifier {
-    fn new(ring: Vec<BanderPublic>, ring_size: jint) -> Self {
+    fn new(ring: Vec<BanderPublic>, ring_size: jint) -> Result<Self, VrfError> {
         // Backend currently requires the wrapped type (plain affine points)
         let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
-        let (empty, lagrange) = &*ring_builder(ring_size);
+        let builders = ring_builder(ring_size)?;
+        let (empty, lagrange) = &*builders;
         let mut builder = empty.clone();
         builder
             .append(&pts, lagrange)
-            .expect("ring larger than the ring context it was built for");
+            .map_err(|_| VrfError::DeserializationError("ring larger than the ring context it was built for"))?;
         let commitment = builder.finalize().commitment();
-        Self { commitment }
+        Ok(Self { commitment })
     }
 
     /// Anonymous VRF signature verification.
@@ -277,7 +283,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
     }
 
     // Step 6: Create the Verifier
-    let verifier = Verifier::new(ring, ring_size);
+    let verifier = match Verifier::new(ring, ring_size) {
+        Ok(v) => v,
+        Err(e) => return throw_and_return_null(&mut env, &e.to_string()),
+    };
 
     // Step 7: Serialize the commitment
     let mut buf = Vec::new();
@@ -369,7 +378,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
     let output = secret.output(input);
 
     let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
-    let ring_ctx = ring_context(ring_size);
+    let ring_ctx = match ring_context(ring_size) {
+        Ok(ctx) => ctx,
+        Err(e) => return return_error_local(&mut env, &e.to_string()),
+    };
     let prover_key = ring_ctx.prover_key(&pts);
     let prover = ring_ctx.prover(prover_key, prover_index as usize);
 

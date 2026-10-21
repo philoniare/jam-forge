@@ -1,8 +1,7 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.{ChainConfig, Hashing, Parallel}
+import io.forge.jam.core.{ChainConfig, Parallel}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult}
@@ -35,8 +34,7 @@ object ImportBlockStep:
           AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
         )
         blockImporter.importBlock(block, parentState, ancestry) match
-          case ImportResult.Success(postStateRoot, _) =>
-            val headerHash = Hashing.blake2b256(block.header.encode)
+          case ImportResult.Success(postStateRoot, headerHash) =>
             val postState = Parallel.async(blockImporter.materializePostState(config))
             val isOriginal = stateStore.isOriginalBlock(parentHash)
             // Record parentage for every imported block so any future

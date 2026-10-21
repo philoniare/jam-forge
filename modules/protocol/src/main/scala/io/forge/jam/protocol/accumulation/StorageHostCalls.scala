@@ -34,8 +34,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       case FetchSelector.ALL_OPERANDS   => Some(encodeOperandsList())
       case FetchSelector.SINGLE_OPERAND =>
         index match
-          case Some(i) if i < operands.size =>
-            Some(encodeOperand(operands(i.toInt)))
+          case Some(i) if i < indexedOperands.size =>
+            Some(encodeOperand(indexedOperands(i.toInt)))
           case _ => None
       case _ => None
 
@@ -191,15 +191,14 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val keyBuffer = readGuestBytes(instance, keyAddr, ULong(keyLen), "Write")
 
     val key = JamBytes(keyBuffer)
+    // Hashed once: the read of the old value and the staged write both use it.
+    val stateKey = StateKey.computeStorageStateKey(context.serviceIndex, key)
 
     var oldValue = acc.storage.get(key)
     if oldValue.isEmpty then
       oldValue = context.storageView match
-        case Some(v) => v.get(context.serviceIndex, key)
-        case None    =>
-          val stateKeyForLookup =
-            StateKey.computeStorageStateKey(context.serviceIndex, key)
-          context.x.rawServiceDataByStateKey.get(stateKeyForLookup)
+        case Some(v) => v.getByStateKey(stateKey)
+        case None    => context.x.rawServiceDataByStateKey.get(stateKey)
 
     val oldValueSize = oldValue.map(_.length).getOrElse(0)
     val keyWasPresent = oldValue.isDefined
@@ -235,9 +234,6 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       setReg(instance, 7, HostCallResult.FULL)
       return
 
-    // Compute state key for raw storage updates
-    val stateKey = StateKey.computeStorageStateKey(context.serviceIndex, key)
-
     val viewInstalled = context.storageView.isDefined
     // Functional update of the (immutable) per-account storage map; the rebuilt
     // map replaces the prior one on the account written back below.
@@ -247,7 +243,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
           // Delete key
           if keyWasPresent then
             if viewInstalled then
-              context.storageView.foreach(_.delete(context.serviceIndex, key))
+              context.storageView.foreach(_.deleteByStateKey(stateKey))
             else
               context.x.rawServiceDataByStateKey =
                 context.x.rawServiceDataByStateKey.removed(stateKey)
@@ -255,7 +251,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
           else acc.storage
         case Some(v) =>
           if viewInstalled then
-            context.storageView.foreach(_.put(context.serviceIndex, key, v))
+            context.storageView.foreach(_.putByStateKey(stateKey, v))
           else
             context.x.rawServiceDataByStateKey =
               context.x.rawServiceDataByStateKey.updated(stateKey, v)
@@ -716,6 +712,9 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     buffer.write(JamCodecs.encodeCompactInteger(operands.size.toLong))
     for operand <- operands do buffer.write(operand.encode())
     buffer.toByteArray
+
+  /** The operands for FETCH by index, without walking the list on every call. */
+  private lazy val indexedOperands: IndexedSeq[AccumulationOperand] = operands.toIndexedSeq
 
   /** Encode the full array of inputs.
     */

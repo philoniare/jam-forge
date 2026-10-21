@@ -372,6 +372,9 @@ final class AccumulationContext(
       case Some(v) => v.getByStateKey(stateKey)
       case None    => x.rawServiceDataByStateKey.get(stateKey)
 
+  /** Reads another service's data as it was at the start of this accpar batch: writes
+    * of earlier batches are visible, writes of services in the same batch are not.
+    */
   def readRawDataFor(
       ownerServiceId: Long,
       stateKey: JamBytes
@@ -379,7 +382,7 @@ final class AccumulationContext(
     if ownerServiceId == serviceIndex then readRawData(stateKey)
     else
       storageView match
-        case Some(v) => v.readTrie(stateKey)
+        case Some(v) => v.getAtBatchStart(stateKey)
         case None    => x.rawServiceDataByStateKey.get(stateKey)
 
   def writeRawData(stateKey: JamBytes, value: JamBytes): Unit =

@@ -17,9 +17,7 @@ final class GuestInstance private (
     module: InterpretedModule,
     val ram: GuestRam,
     regs: Array[Long],
-    gas0: Long,
-    sharedInstructions: scala.collection.mutable.ArrayBuffer[CompiledInstruction],
-    sharedOffsetMap: Array[Int]
+    gas0: Long
 ) extends InterpreterCore(
   module,
   regs,
@@ -28,8 +26,6 @@ final class GuestInstance private (
   None, // nextProgramCounter
   true, // nextProgramCounterChanged
   gas0,
-  sharedOffsetMap,
-  sharedInstructions,
   InterruptKind.Finished
 ):
 
@@ -128,14 +124,11 @@ object GuestInstance:
       entryPc: ProgramCounter,
       gasChargedFlag: Boolean = false
   ): GuestInstance =
-    val (sharedInstructions, sharedOffsetMap) = module.compiledState()
     val instance = new GuestInstance(
       module = module,
       ram = ram,
       regs = java.util.Arrays.copyOf(registers, 13),
-      gas0 = gas,
-      sharedInstructions = sharedInstructions,
-      sharedOffsetMap = sharedOffsetMap
+      gas0 = gas
     )
     instance.setNextProgramCounter(entryPc)
     instance.setGasChargedFlag(gasChargedFlag)

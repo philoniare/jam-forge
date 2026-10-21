@@ -59,13 +59,9 @@ object HistoryTransition:
     val history = preState.beta.history
     val currentMmr = preState.beta.mmr
 
-    // Update parent state root in the last history entry
     val updatedHistory =
-      if history.nonEmpty then
-        val lastBlock = history.last.copy(stateRoot = input.parentStateRoot)
-        history.dropRight(1) :+ lastBlock
-      else
-        history
+      if history.isEmpty || history.last.stateRoot == input.parentStateRoot then history
+      else history.init :+ history.last.copy(stateRoot = input.parentStateRoot)
 
     // Append accumulate root to MMR
     val newMmr = appendToMmr(currentMmr, input.accumulateRoot)

@@ -114,7 +114,7 @@ public class BandersnatchWrapper {
      */
     public static native byte[] verifierRingVrfVerify(
         byte[] entropy,
-        long attempt,
+        byte attempt,
         byte[] signature,
         byte[] commitment,
         int ringSize

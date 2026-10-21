@@ -1,10 +1,10 @@
 package io.forge.jam.pvm.engine
 
-import scala.collection.mutable.ArrayBuffer
+import java.lang.invoke.{MethodHandles, VarHandle}
 import spire.math.UInt
 import io.forge.jam.pvm.{MemoryMap, Abi, Instruction}
 import io.forge.jam.pvm.types.ProgramCounter
-import io.forge.jam.pvm.program.{Program, ProgramBlob}
+import io.forge.jam.pvm.program.{InstructionDecoder, Program, ProgramBlob}
 
 /**
  * Holds the static module data for an interpreted PVM instance.
@@ -47,29 +47,25 @@ final class InterpretedModule private (
   def isDynamicPaging: Boolean = false
 
   lazy val isBlobStructurallyValid: Boolean = Program.isValidBlob(blob.code, blob.bitmask)
-  private val blockGasCosts =
-    val arr = new java.util.concurrent.atomic.AtomicLongArray(blob.code.length + 1)
-    var i = 0
-    while i < arr.length do
-      arr.setPlain(i, -1L)
-      i += 1
-    arr
+
+  // Fallback cache for block costs charged away from a compiled block's first instruction (rare: entry mid-block).
+  private val blockGasCosts = new java.util.concurrent.ConcurrentHashMap[Integer, java.lang.Long]()
 
   def blockGasCostAt(chargePc: Int): Long =
-    if chargePc < 0 || chargePc >= blockGasCosts.length() then computeBlockGasCost(chargePc)
+    val cached = blockGasCosts.get(chargePc)
+    if cached != null then cached.longValue
     else
-      val cached = blockGasCosts.getAcquire(chargePc)
-      if cached >= 0 then cached
-      else
-        val cost = computeBlockGasCost(chargePc)
-        blockGasCosts.setRelease(chargePc, cost)
-        cost
+      val cost = computeBlockGasCost(chargePc)
+      blockGasCosts.put(chargePc, cost)
+      cost
 
   private def computeBlockGasCost(chargePc: Int): Long =
     val start = Program
       .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
       .getOrElse(chargePc)
     BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
+
+  // Racy but benign: each slot only ever goes from 0 (unknown) to the same computed value.
   private val jumpTargetValidity = new Array[Byte](blob.code.length + 1)
 
   def isJumpTargetValid(offset: Int): Boolean =
@@ -84,45 +80,95 @@ final class InterpretedModule private (
           jumpTargetValidity(offset) = if valid then 1 else 2
           valid
 
-  private var _compiledInstructions: ArrayBuffer[CompiledInstruction] = null
-  private var _compiledOffsetForBlock: Array[Int] = null
+  // ==========================================================================
+  // Compiled blocks, shared by every instance of this module
+  // ==========================================================================
+  //
+  // Instances of one module may run on several threads at once (accumulation runs services in parallel, and the
+  // module cache is process-wide). Blocks are compiled under `compileLock` and published so that a reader never sees
+  // a compiled offset before the instructions it points to:
+  //   1. the new instructions are written past the published count, then a new CompiledCode is published through a
+  //      volatile field;
+  //   2. only then are the pc -> offset slots written, with release semantics.
+  // A reader that obtains an offset from `targetAt` (acquire) and then reads `compiled` (volatile) therefore sees an
+  // array that contains it. Published entries are never modified.
 
-  private val debugConcurrency: Boolean =
-    sys.props.get("jam.pvm.debugConcurrency").exists(_.toBoolean)
-  private val _mutationGuard = new java.util.concurrent.atomic.AtomicBoolean(false)
+  @volatile private var _compiled: CompiledCode =
+    val first = CompiledInstruction(Instruction.Panic, ProgramCounter(0), ProgramCounter(1), Instruction.Panic.opcode.value)
+    val arr = new Array[CompiledInstruction](64)
+    arr(0) = first
+    CompiledCode(arr, 1)
 
-  private[engine] def beginSharedMutation(): Unit =
-    if debugConcurrency && !_mutationGuard.compareAndSet(false, true) then
-      throw new IllegalStateException(
-        "InterpretedModule shared compiled-block buffers mutated concurrently — " +
-          "the strictly-sequential-execution precondition (see compiledState docs) is violated"
-      )
+  /** pc -> packed compiled offset (bit 31 = valid jump target), -1 when not compiled. Accessed through `Slots`. */
+  private val offsetForPc: Array[Int] =
+    val map = new Array[Int](codeLen.signed + 1)
+    java.util.Arrays.fill(map, InterpretedModule.Absent)
+    map
 
-  private[engine] def endSharedMutation(): Unit =
-    if debugConcurrency then _mutationGuard.set(false)
+  private val compileLock = new Object
 
-  /**
-   * Returns the shared compiled-block buffers for this module
-   */
-  def compiledState(): (ArrayBuffer[CompiledInstruction], Array[Int]) =
-    val ci = _compiledInstructions
-    if ci != null then (ci, _compiledOffsetForBlock)
-    else
-      synchronized {
-        if _compiledInstructions == null then
-          val map = new Array[Int](codeLen.signed + 1)
-          java.util.Arrays.fill(map, -1) // -1 == ABSENT (not yet compiled)
-          val instructions = ArrayBuffer.empty[CompiledInstruction]
-          instructions += CompiledInstruction(
-            Instruction.Panic,
-            ProgramCounter(0),
-            ProgramCounter(1),
-            Instruction.Panic.opcode.value
-          )
-          _compiledOffsetForBlock = map
-          _compiledInstructions = instructions
-        (_compiledInstructions, _compiledOffsetForBlock)
-      }
+  /** The currently published compiled instructions. */
+  def compiled: CompiledCode = _compiled
+
+  /** Packed compiled offset for `pc`, or -1 when it is out of range or not compiled yet. */
+  def targetAt(pc: Int): Int =
+    if pc >= 0 && pc < offsetForPc.length then InterpretedModule.Slots.getAcquire(offsetForPc, pc)
+    else InterpretedModule.Absent
+
+  /** Compiles the basic block starting at `pc` and returns the compiled offset of its first instruction, or -1 when
+    * `pc` is past the code. If another thread compiled `pc` first, returns that offset.
+    */
+  private[engine] def compileBlock(pc: Int): Int =
+    if (pc.toLong & 0xffffffffL) > codeLen.toLong then return -1
+    compileLock.synchronized {
+      val existing = targetAt(pc)
+      if existing != InterpretedModule.Absent then return existing & 0x7fffffff
+
+      val published = _compiled
+      var arr = published.instructions
+      var n = published.count
+      val origin = n
+      val slots = scala.collection.mutable.ArrayBuffer.empty[(Int, Int)]
+      var isTarget = isJumpTargetValid(pc)
+      var currentPc = pc
+      var done = false
+      val code = blob.code
+
+      while !done && (currentPc.toLong & 0xffffffffL) <= codeLen.toLong do
+        slots += ((currentPc, InterpretedModule.packTarget(n, isTarget)))
+        val (instruction, skip) =
+          if currentPc >= code.length then (Instruction.Panic, 1)
+          else InstructionDecoder.decode(code, blob.bitmask, currentPc)
+        val nextPc = currentPc + skip
+        val opcode = instruction.opcode
+        // GP 0.8.0 §A.4 (branch): both the target and the fall-through must be block starts, taken or not.
+        val branchValid = InterpretedModule.branchTarget(instruction) match
+          case Some(target) => isJumpTargetValid(target) && isJumpTargetValid(nextPc)
+          case None => true
+        // GP 0.8.0 §A.4: a block's cost (§A.9) is charged on entry; it is static for the block's first instruction.
+        val blockCost = if n == origin then blockGasCostAt(currentPc) else -1L
+        if n == arr.length then arr = java.util.Arrays.copyOf(arr, arr.length * 2)
+        arr(n) = CompiledInstruction(
+          instruction,
+          ProgramCounter(currentPc),
+          ProgramCounter(nextPc),
+          opcode.value,
+          blockCost,
+          branchValid
+        )
+        n += 1
+        isTarget = false
+        if opcode.startsNewBasicBlock then done = true
+        else currentPc = nextPc
+
+      if n == origin then -1
+      else
+        _compiled = CompiledCode(arr, n)
+        slots.foreach((slotPc, packed) =>
+          if slotPc >= 0 && slotPc < offsetForPc.length then InterpretedModule.Slots.setRelease(offsetForPc, slotPc, packed)
+        )
+        origin
+    }
 
   override def equals(other: Any): Boolean = other match
     case that: InterpretedModule =>
@@ -144,7 +190,36 @@ final class InterpretedModule private (
   override def toString: String =
     s"InterpretedModule(roData.size=${roData.length}, rwData.size=${rwData.length}, heapEmptyPages=$heapEmptyPages, codeLen=$codeLen, is64Bit=$is64Bit)"
 
+/** A published prefix of a module's compiled instructions: `instructions(0 until count)` never change. */
+final class CompiledCode(val instructions: Array[CompiledInstruction], val count: Int)
+
 object InterpretedModule:
+  private[engine] final val Absent = -1
+  private[engine] val Slots: VarHandle = MethodHandles.arrayElementVarHandle(classOf[Array[Int]])
+
+  private[engine] def packTarget(offset: Int, isJumpTargetValid: Boolean): Int =
+    val base = offset & 0x7fffffff
+    if isJumpTargetValid then base | 0x80000000 else base
+
+  /** The static target of a conditional branch, if `instruction` is one. */
+  private def branchTarget(instruction: Instruction): Option[Int] = instruction match
+    case i: Instruction.BranchEq => Some(i.offset.toInt)
+    case i: Instruction.BranchNotEq => Some(i.offset.toInt)
+    case i: Instruction.BranchLessUnsigned => Some(i.offset.toInt)
+    case i: Instruction.BranchLessSigned => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterOrEqualUnsigned => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterOrEqualSigned => Some(i.offset.toInt)
+    case i: Instruction.BranchEqImm => Some(i.offset.toInt)
+    case i: Instruction.BranchNotEqImm => Some(i.offset.toInt)
+    case i: Instruction.BranchLessUnsignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchLessSignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterOrEqualUnsignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterOrEqualSignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchLessOrEqualSignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchLessOrEqualUnsignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterSignedImm => Some(i.offset.toInt)
+    case i: Instruction.BranchGreaterUnsignedImm => Some(i.offset.toInt)
+    case _ => None
 
   /**
    * Creates a new InterpretedModule from a parsed program blob.

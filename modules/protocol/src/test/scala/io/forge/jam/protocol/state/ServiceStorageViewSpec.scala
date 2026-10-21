@@ -65,3 +65,39 @@ class ServiceStorageViewSpec extends AnyFlatSpec with Matchers:
     parent.getByStateKey(key(0x03, 0x00)) shouldBe Some(bytes(3))
     parent.savepointDepth shouldBe 0
   }
+
+  it should "GP: read the batch-start state through getAtBatchStart, without the fork's own writes (eq. 12.18)" in {
+    val trie = StateTrie.empty(new InMemoryTrieBackend())
+    trie.update(Seq((key(0x05, 0x00), Some(bytes(1)))))
+    val parent = new ServiceStorageView(trie)
+    parent.putByStateKey(key(0x05, 0x00), bytes(2)) // an earlier batch's write
+    val a = parent.fork()
+    a.putByStateKey(key(0x05, 0x00), bytes(3))
+
+    a.getByStateKey(key(0x05, 0x00)) shouldBe Some(bytes(3))
+    a.getAtBatchStart(key(0x05, 0x00)) shouldBe Some(bytes(2))
+    parent.getAtBatchStart(key(0x05, 0x00)) shouldBe Some(bytes(2))
+  }
+
+  it should "GP: reject two forks of one batch writing one key differently (text after eq. 12.18)" in {
+    val parent = new ServiceStorageView(StateTrie.empty(new InMemoryTrieBackend()))
+    val a = parent.fork()
+    val b = parent.fork()
+    a.putByStateKey(key(0x06, 0x00), bytes(1))
+    b.putByStateKey(key(0x06, 0x00), bytes(2))
+    parent.absorb(a)
+    val e = intercept[RuntimeException](parent.absorb(b))
+    e.getMessage should include("block invalid")
+  }
+
+  it should "accept two forks of one batch writing one key identically" in {
+    val parent = new ServiceStorageView(StateTrie.empty(new InMemoryTrieBackend()))
+    parent.putByStateKey(key(0x07, 0x00), bytes(1))
+    val a = parent.fork()
+    val b = parent.fork()
+    a.deleteByStateKey(key(0x07, 0x00))
+    b.deleteByStateKey(key(0x07, 0x00))
+    parent.absorb(a)
+    parent.absorb(b)
+    parent.getByStateKey(key(0x07, 0x00)) shouldBe None
+  }

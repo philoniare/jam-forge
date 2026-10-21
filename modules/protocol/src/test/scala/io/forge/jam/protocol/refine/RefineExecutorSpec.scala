@@ -17,17 +17,21 @@ class RefineExecutorSpec extends AnyFunSuite with Matchers:
 
   private val config = ChainConfig.TINY
 
-  /** Wrap raw (code, bitmask) into the deblob format ServiceCode.parseBlob
-    * accepts: varint(0 jump-table entries), entry size 0, varint(code length),
+  /** Wrap raw (code, bitmask) into the deblob format of the PVM blob inside the JAM blob:
+    * varint(0 jump-table entries), entry size 0, varint(code length),
     * code, bitmask.
     */
   private def deblob(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
     require(code.length < 128 && bitmask.length == (code.length + 7) / 8)
     Array[Byte](0, 0, code.length.toByte) ++ code ++ bitmask
 
-  /** Service code preimage: zero metadata prefix + deblob code. */
+  private def jamBlob(pvmBlob: Array[Byte]): Array[Byte] =
+    val n = pvmBlob.length
+    new Array[Byte](11) ++ Array[Byte](n.toByte, (n >> 8).toByte, (n >> 16).toByte, (n >> 24).toByte) ++ pvmBlob
+
+  /** Service code preimage: zero metadata prefix + JAM blob. */
   private def preimageOf(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
-    Array[Byte](0) ++ deblob(code, bitmask)
+    Array[Byte](0) ++ jamBlob(deblob(code, bitmask))
 
   // JumpIndirect r0 + 0 → djump(0xffff0000) → halt.
   private val haltCode = Array[Byte](50, 0)

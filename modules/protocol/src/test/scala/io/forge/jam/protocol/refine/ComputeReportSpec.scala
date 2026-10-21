@@ -22,8 +22,12 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
   private def deblob(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
     Array[Byte](0, 0, code.length.toByte) ++ code ++ bitmask
 
+  private def jamBlob(pvmBlob: Array[Byte]): Array[Byte] =
+    val n = pvmBlob.length
+    new Array[Byte](11) ++ Array[Byte](n.toByte, (n >> 8).toByte, (n >> 16).toByte, (n >> 24).toByte) ++ pvmBlob
+
   private def preimageOf(code: Array[Byte], bitmask: Array[Byte]): Array[Byte] =
-    Array[Byte](0) ++ deblob(code, bitmask)
+    Array[Byte](0) ++ jamBlob(deblob(code, bitmask))
 
   // JumpIndirect r0 + 0 → halt with the args echoed as output.
   private val haltEcho = preimageOf(Array[Byte](50, 0), Array[Byte](1))

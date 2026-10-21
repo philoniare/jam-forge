@@ -10,7 +10,6 @@ import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.DisputeOutputMarks
 import io.forge.jam.protocol.pipeline.PipelineTypes.*
 import io.forge.jam.protocol.pipeline.StfLifters.*
-import io.forge.jam.core.codec.Codec
 
 object IntermediateSteps:
 
@@ -35,9 +34,7 @@ object IntermediateSteps:
 
       val entropy = pool(3).bytes
 
-      val fullHeaderBytes =
-        summon[Codec[io.forge.jam.core.types.header.Header]].encode(block.header)
-      val encodedHeader = fullHeaderBytes.dropRight(96)
+      val encodedHeader = ctx.header.unsealed
 
       view.gamma.st match
         case TicketsOrKeys.Keys(keys) =>
@@ -143,8 +140,11 @@ object IntermediateSteps:
   def storeDisputeOutput(output: DisputeOutputMarks): StfStep =
     modifyContext(_.copy(disputeOffendersMark = output.offenders))
 
+  /** The header's offenders mark must be the keys of this block's culprits and faults */
   val validateOffendersMark: StfStep = validate { (_, ctx) =>
-    if ctx.disputeOffendersMark != ctx.block.header.offendersMark then
+    // The mark holds the keys as hashes; a key never equals a hash, so compare the bytes.
+    val expected = ctx.disputeOffendersMark.map(k => Hash(k.toArrayUnsafe))
+    if expected != ctx.block.header.offendersMark then
       Left(PipelineError.InvalidOffendersMark)
     else
       Right(())

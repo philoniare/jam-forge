@@ -7,9 +7,9 @@ import scala.collection.mutable
 /**
  * Binary Patricia Merkle state trie, with writes buffered until [[save]].
  *
- * Between saves the trie holds only what the backend will need: a node created and then replaced before `save()` is
- * dropped at once, with its raw value if no other pending leaf shares it. So the pending set stays the size of the
- * nodes that are new and still reachable, however many times one batch rewrites the same paths.
+ * Between saves the trie holds only what the backend will need: each [[update]] rebuilds a touched node once, and a
+ * node created and then replaced by a later update before `save()` is dropped at once, with its raw value if no other
+ * pending leaf shares it. So the pending set stays the size of the nodes that are new and still reachable.
  *
  * Invariants between calls: a hash is in `pendingNodes` iff its ref delta is positive, and a raw value is in
  * `pendingValues` iff its ref delta is positive (one per pending regular leaf that holds it). Zero deltas are not kept.
@@ -38,11 +38,16 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           None
     }
 
+  /**
+   * Applies `updates` (a later update to a key overrides an earlier one) as one batch: the keys are sorted, the trie is
+   * descended once with the batch split by key bit at each branch, and every node on a touched path is rebuilt, hashed
+   * and counted once, however many keys pass through it. The result is the canonical trie of the final key set
+   * the same root and ref deltas as applying the updates one key at a time.
+   */
   def update(updates: Seq[(JamBytes, Option[JamBytes])]): Unit =
-    updates.foreach {
-      case (k, Some(v)) => currentRoot = insert(currentRoot, k, v, 0)
-      case (k, None)    => currentRoot = delete(currentRoot, k, 0)
-    }
+    if updates.nonEmpty then
+      val batch = StateTrie.sortedBatch(updates)
+      currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
 
   def save(): Unit =
     val ops = new mutable.ArrayBuffer[BackendOp](
@@ -58,74 +63,81 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     nodeRefDeltas.clear()
     valueRefDeltas.clear()
 
-  private def insert(rootHash: Hash, key: JamBytes, value: JamBytes, depth: Int): Hash =
-    require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
-    getNode(rootHash) match
-      case None =>
-        emitLeaf(TrieNode.leaf(key, value), value)
-      case Some(node) if node.nodeType == TrieNodeType.Branch =>
-        val bit = bitAt(key, depth)
-        val leftHash = Hash.wrapUnchecked(node.left.toArrayUnsafe)
-        val rightHash = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        val oldChildHash = if bit then rightHash else leftHash
-        val newChildHash = insert(oldChildHash, key, value, depth + 1)
-        // Same value written again: nothing below changed, so neither does this branch.
-        if newChildHash == oldChildHash then rootHash
-        else
-          unrefNode(rootHash)
-          if bit then writeBranch(leftHash, newChildHash)
-          else writeBranch(newChildHash, rightHash)
-      case Some(leaf) =>
-        val existingKey = TrieNode.leafKey(leaf)
-        if existingKey == key then
-          val newLeaf = TrieNode.leaf(key, value)
-          if newLeaf.hash == rootHash then rootHash
-          else
-            unrefNode(rootHash)
-            emitLeaf(newLeaf, value)
-        else
-          // The existing leaf moves down under new branches unchanged, so its refcount does not change.
-          splitLeaves(existingKey, rootHash, key, value, depth)
-
-  private def splitLeaves(
-      existingKey: JamBytes,
-      existingHash: Hash,
-      newKey: JamBytes,
-      newValue: JamBytes,
-      depth: Int,
-  ): Hash =
-    val existingBit = bitAt(existingKey, depth)
-    val newBit = bitAt(newKey, depth)
-    if existingBit != newBit then
-      val newLeafHash = emitLeaf(TrieNode.leaf(newKey, newValue), newValue)
-      if newBit then writeBranch(existingHash, newLeafHash)
-      else writeBranch(newLeafHash, existingHash)
+  /** Rewrites the subtree at `hash` (at `depth`) with `batch(lo until hi)`, whose keys all lead to it. */
+  private def updateSubtree(hash: Hash, depth: Int, batch: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
+    if lo == hi then hash
     else
-      val childHash = splitLeaves(existingKey, existingHash, newKey, newValue, depth + 1)
-      if existingBit then writeBranch(Hash.zero, childHash)
-      else writeBranch(childHash, Hash.zero)
+      getNode(hash) match
+        case None =>
+          buildFromBatch(depth, batch, lo, hi, existing = null, existingIndex = lo, existingHash = Hash.zero)
+        case Some(node) if node.nodeType == TrieNodeType.Branch =>
+          val mid = StateTrie.firstWithBit(batch, lo, hi, depth)
+          val leftHash = Hash.wrapUnchecked(node.left.toArrayUnsafe)
+          val rightHash = Hash.wrapUnchecked(node.right.toArrayUnsafe)
+          val newLeft = updateSubtree(leftHash, depth + 1, batch, lo, mid)
+          val newRight = updateSubtree(rightHash, depth + 1, batch, mid, hi)
+          // Same values written again: nothing below changed, so neither does this branch.
+          if newLeft == leftHash && newRight == rightHash then hash
+          else
+            unrefNode(hash)
+            collapseBranch(newLeft, newRight)
+        case Some(leaf) =>
+          // Where the leaf's key sits in the batch: its update if it has one, else its sorted position.
+          val leafArr = leaf.left.toArrayUnsafe
+          var a = lo
+          var b = hi
+          while a < b do
+            val m = (a + b) >>> 1
+            if java.util.Arrays.compareUnsigned(batch(m).key, 0, 31, leafArr, 1, 32) < 0 then a = m + 1 else b = m
+          val updated = a < hi && java.util.Arrays.equals(batch(a).key, 0, 31, leafArr, 1, 32)
+          if !updated then buildFromBatch(depth, batch, lo, hi, existing = leaf, existingIndex = a, existingHash = hash)
+          else
+            val kept = batch(a).value match
+              case Some(v) => TrieNode.leaf(batch(a).keyBytes, v).hash == hash
+              case None => false
+            if kept then buildFromBatch(depth, batch, lo, hi, existing = leaf, existingIndex = a, existingHash = hash)
+            else
+              unrefNode(hash)
+              buildFromBatch(depth, batch, lo, hi, existing = null, existingIndex = lo, existingHash = Hash.zero)
 
-  private def delete(rootHash: Hash, key: JamBytes, depth: Int): Hash =
-    require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
-    getNode(rootHash) match
-      case None => rootHash
-      case Some(node) if node.nodeType == TrieNodeType.Branch =>
-        val bit = bitAt(key, depth)
-        val leftHash = Hash.wrapUnchecked(node.left.toArrayUnsafe)
-        val rightHash = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        val newLeftHash = if bit then leftHash else delete(leftHash, key, depth + 1)
-        val newRightHash = if bit then delete(rightHash, key, depth + 1) else rightHash
-        if newLeftHash == leftHash && newRightHash == rightHash then
-          rootHash
-        else
-          unrefNode(rootHash)
-          collapseBranch(newLeftHash, newRightHash)
-      case Some(leaf) =>
-        if TrieNode.leafKey(leaf) == key then
-          unrefNode(rootHash)
-          Hash.zero
-        else
-          rootHash
+  /**
+   * Builds the subtree at `depth` holding the inserted keys of `batch(lo until hi)` plus, when non-null, the unchanged
+   * leaf `existing` (hash `existingHash`, sorting at `existingIndex`; an update to its own key there is skipped). A
+   * lone remaining leaf is the subtree; two or more make a branch, even with one side empty (GP 0.8.0 §D.2, M).
+   */
+  private def buildFromBatch(
+      depth: Int,
+      batch: Array[StateTrie.Update],
+      lo: Int,
+      hi: Int,
+      existing: TrieNode | Null,
+      existingIndex: Int,
+      existingHash: Hash,
+  ): Hash =
+    val items = new mutable.ArrayBuffer[StateTrie.Update](hi - lo + 1)
+    var i = lo
+    while i <= hi do
+      existing match
+        case leaf: TrieNode if i == existingIndex =>
+          items += StateTrie.Update(TrieNode.leafKeyArray(leaf), null, None, existingHash)
+          if i < hi && java.util.Arrays.equals(batch(i).key, 0, 31, leaf.left.toArrayUnsafe, 1, 32) then i += 1
+        case _ => ()
+      if i < hi && batch(i).value.isDefined then items += batch(i)
+      i += 1
+    val arr = items.toArray
+    buildItems(depth, arr, 0, arr.length)
+
+  private def buildItems(depth: Int, items: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
+    if lo == hi then Hash.zero
+    else if hi - lo == 1 then
+      val item = items(lo)
+      if item.existing != null then item.existing
+      else
+        val v = item.value.get
+        emitLeaf(TrieNode.leaf(item.keyBytes, v), v)
+    else
+      val mid = StateTrie.firstWithBit(items, lo, hi, depth)
+      writeBranch(buildItems(depth + 1, items, lo, mid), buildItems(depth + 1, items, mid, hi))
 
   private def collapseBranch(leftHash: Hash, rightHash: Hash): Hash =
     val leftEmpty = leftHash == Hash.zero
@@ -230,20 +242,29 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       i += 1
     true
 
+  /** Fails on a node or value the trie refers to but the backend no longer holds (e.g. removed by a concurrent gc),
+    * so a walk never returns a silently truncated state.
+    */
   private def collectLeaves(node: TrieNode, buf: mutable.ArrayBuffer[(JamBytes, JamBytes)]): Unit =
     node.nodeType match
       case TrieNodeType.Branch =>
-        getNode(Hash.wrapUnchecked(node.left.toArrayUnsafe)).foreach(collectLeaves(_, buf))
-        getNode(Hash.wrapUnchecked(node.right.toArrayUnsafe)).foreach(collectLeaves(_, buf))
+        collectChild(Hash.wrapUnchecked(node.left.toArrayUnsafe), buf)
+        collectChild(Hash.wrapUnchecked(node.right.toArrayUnsafe), buf)
       case TrieNodeType.EmbeddedLeaf =>
         TrieNode.embeddedValue(node).foreach { v =>
           buf += ((TrieNode.leafKey(node), v))
         }
       case TrieNodeType.RegularLeaf =>
         val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        pendingValues.get(vh).orElse(backend.readRawValue(vh)).foreach { v =>
-          buf += ((TrieNode.leafKey(node), v))
-        }
+        val v = pendingValues.get(vh).orElse(backend.readRawValue(vh)).getOrElse(
+          throw new IllegalStateException(s"State trie value ${vh.toHex} is missing")
+        )
+        buf += ((TrieNode.leafKey(node), v))
+
+  private def collectChild(hash: Hash, buf: mutable.ArrayBuffer[(JamBytes, JamBytes)]): Unit =
+    if hash != Hash.zero then
+      val child = getNode(hash).getOrElse(throw new IllegalStateException(s"State trie node ${hash.toHex} is missing"))
+      collectLeaves(child, buf)
 
   def range(start: JamBytes, end: JamBytes, maxSize: Int): (List[TrieNode], List[(JamBytes, JamBytes)]) =
     require(start.length == 31, s"start must be 31 bytes, got ${start.length}")
@@ -277,9 +298,9 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
               if !stop then visit(rightHash, depth + 1, boundedByStart = false)
           case Some(leaf) =>
             val key = TrieNode.leafKey(leaf)
-            if boundedByStart && JamBytes.compareUnsigned(key.toArray, start.toArray) < 0 then
+            if boundedByStart && JamBytes.compareUnsigned(key.toArrayUnsafe, start.toArrayUnsafe) < 0 then
               () // before the range; skip
-            else if JamBytes.compareUnsigned(key.toArray, end.toArray) > 0 then
+            else if JamBytes.compareUnsigned(key.toArrayUnsafe, end.toArrayUnsafe) > 0 then
               stop = true
             else
               leafValue(leaf).foreach { v =>
@@ -328,7 +349,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
             else Hash.wrapUnchecked(node.left.toArrayUnsafe)
           findLeaf(childHash, key, depth + 1)
         case _ =>
-          if TrieNode.leafKey(node) == key then Some(node)
+          if TrieNode.leafKeyEquals(node, key) then Some(node)
           else None
     }
 
@@ -339,5 +360,47 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     else (data(byteIndex) & (1 << bitIndex)) != 0
 
 object StateTrie:
+
+  /** One key of a batch: an update (`existing` null; `value` None deletes) or a kept leaf being rebuilt around. */
+  private[trie] final class Update(
+      val key: Array[Byte],
+      val keyBytes: JamBytes,
+      val value: Option[JamBytes],
+      val existing: Hash,
+  )
+
+  private val updateOrder: java.util.Comparator[Update] =
+    (a, b) => java.util.Arrays.compareUnsigned(a.key, b.key)
+
+  /** The updates sorted by key, keeping only the last update to each key. */
+  private def sortedBatch(updates: Seq[(JamBytes, Option[JamBytes])]): Array[Update] =
+    val arr = new Array[Update](updates.size)
+    var n = 0
+    updates.foreach { (k, v) =>
+      require(k.length == 31, s"key must be 31 bytes, got ${k.length}")
+      arr(n) = Update(k.toArrayUnsafe, k, v, null)
+      n += 1
+    }
+    java.util.Arrays.sort(arr, updateOrder) // stable, so equal keys stay in update order
+    var kept = 0
+    var i = 0
+    while i < arr.length do
+      if i + 1 == arr.length || !java.util.Arrays.equals(arr(i).key, arr(i + 1).key) then
+        arr(kept) = arr(i)
+        kept += 1
+      i += 1
+    if kept == arr.length then arr else java.util.Arrays.copyOf(arr, kept)
+
+  /** First index in `items(lo until hi)`, sorted and sharing their first `depth` bits, whose bit `depth` is set. */
+  private def firstWithBit(items: Array[Update], lo: Int, hi: Int, depth: Int): Int =
+    val byteIndex = depth >>> 3
+    val mask = 0x80 >>> (depth & 7)
+    var a = lo
+    var b = hi
+    while a < b do
+      val m = (a + b) >>> 1
+      if (items(m).key(byteIndex) & mask) != 0 then b = m else a = m + 1
+    a
+
   def empty(backend: StateTrieBackend): StateTrie = new StateTrie(backend, Hash.zero)
   def at(backend: StateTrieBackend, root: Hash): StateTrie = new StateTrie(backend, root)

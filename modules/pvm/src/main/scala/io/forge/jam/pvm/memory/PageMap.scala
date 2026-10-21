@@ -341,25 +341,38 @@ final class PageMap(val pageSize: UInt):
         writableBits(wordIndex) = writableBits(wordIndex) & ~shiftedMask
     }
 
+  /** The run of pages around `pageIndex` that all have the permission, as (first << 32) | end, end exclusive; capped
+    * at 64Ki pages each way. An empty run (first == end == pageIndex) when `pageIndex` itself lacks it. Scans a
+    * 64-page word at a time.
+    */
   def accessibleRun(pageIndex: Int, writable: Boolean): Long =
     val bits = if writable then writableBits else readableBits
-    inline def isSet(p: Int): Boolean =
-      val w = p >>> 6
-      w < bits.length && (bits(w) & (1L << (p & 63))) != 0L
-
-    if pageIndex < 0 || !isSet(pageIndex) then
+    val pageLimit = bits.length << 6
+    if pageIndex < 0 || pageIndex >= pageLimit || (bits(pageIndex >>> 6) & (1L << (pageIndex & 63))) == 0L then
       return (pageIndex.toLong << 32) | (pageIndex.toLong & 0xffffffffL)
 
     val MaxRunScanPages = 1 << 16 // 64Ki pages = 256 MiB window cap
-    var lo = pageIndex
-    var scanned = 0
-    while lo > 0 && scanned < MaxRunScanPages && isSet(lo - 1) do
-      lo -= 1; scanned += 1
-    var hi = pageIndex + 1
-    val pageLimit = bits.length << 6
-    scanned = 0
-    while hi < pageLimit && scanned < MaxRunScanPages && isSet(hi) do
-      hi += 1; scanned += 1
+
+    // Upwards: the first clear bit above pageIndex.
+    var w = pageIndex >>> 6
+    var clear = ~bits(w) & (-1L << (pageIndex & 63))
+    while clear == 0L && w + 1 < bits.length && ((w + 1) << 6) - pageIndex <= MaxRunScanPages do
+      w += 1
+      clear = ~bits(w)
+    val hiUncapped = if clear == 0L then (w + 1) << 6 else (w << 6) + java.lang.Long.numberOfTrailingZeros(clear)
+    val hi = math.min(math.min(hiUncapped, pageLimit), pageIndex + 1 + MaxRunScanPages)
+
+    // Downwards: the last clear bit below pageIndex.
+    w = pageIndex >>> 6
+    val below = pageIndex & 63
+    clear = if below == 0 then 0L else ~bits(w) & ((1L << below) - 1L)
+    while clear == 0L && w > 0 && pageIndex - (w << 6) <= MaxRunScanPages do
+      w -= 1
+      clear = ~bits(w)
+    val loUncapped =
+      if clear == 0L then w << 6 else (w << 6) + 64 - java.lang.Long.numberOfLeadingZeros(clear)
+    val lo = math.max(loUncapped, pageIndex - MaxRunScanPages)
+
     (lo.toLong << 32) | (hi.toLong & 0xffffffffL)
 
   /**

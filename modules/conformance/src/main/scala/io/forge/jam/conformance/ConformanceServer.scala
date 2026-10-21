@@ -1,10 +1,8 @@
 package io.forge.jam.conformance
 
-import cats.effect.{IO, IOApp, ExitCode, Resource}
-import cats.syntax.all.*
-import fs2.io.net.unixsocket.{UnixSocketAddress, UnixSockets}
 import io.forge.jam.core.ChainConfig
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
+import scala.util.control.NonFatal
 
 /** Configuration for the conformance testing server.
   *
@@ -64,14 +62,15 @@ object ServerConfig:
 
 /** Main entry point for the JAM Forge Conformance Testing Server.
   *
-  * Commands: warmup [--iterations=N] - Run JVM warmup and trigger CRaC
-  * checkpoint fuzz <socket-path> [--spec tiny|full] - Start conformance server
-  * on Unix socket (default: tiny) (default) - Start server with
-  * --socket-path/--log-path options
+  * Commands: warmup - Run JVM warmup and trigger CRaC checkpoint; fuzz <socket-path> [--spec
+  * tiny|full] - Start conformance server on Unix socket (default: tiny); (default) - Start server with
+  * --socket-path/--log-path options. With `JAM_FUZZ` set, the fuzz packaging env decides and the arguments are ignored.
+  *
+  * A plain `main`: the server is one blocking thread ([[FuzzServer]]), and SIGTERM stops it from a shutdown hook.
   */
-object ConformanceServerApp extends IOApp:
+object ConformanceServerApp:
 
-  override def run(args: List[String]): IO[ExitCode] =
+  def main(args: Array[String]): Unit =
     // Install JVM-level uncaught exception handler so crashes are always visible
     Thread.setDefaultUncaughtExceptionHandler { (thread, throwable) =>
       throwable match
@@ -86,30 +85,25 @@ object ConformanceServerApp extends IOApp:
           throwable.printStackTrace(System.err)
     }
 
-    Runtime.getRuntime.addShutdownHook(new Thread(() => {
-      System.err.println(
-        "[JAM-FORGE] Shutting down (if this is unexpected, check for OOM / cgroup kill)."
-      )
-      System.err.flush()
-    }))
-
-    FuzzEnv.fromSystemEnv() match
+    val exitCode = FuzzEnv.fromSystemEnv() match
       case Left(err) =>
-        IO.println(s"[JAM-FORGE FATAL] $err").as(ExitCode.Error)
+        println(s"[JAM-FORGE FATAL] $err")
+        1
       case Right(Some(cfg)) =>
         cfg.dataPath.foreach(FuzzEnv.ensureDataPath)
-        IO.blocking(WarmupRunner.warmupIfEnabled()) *> runServer(cfg)
+        WarmupRunner.warmupIfEnabled()
+        runServer(cfg)
       case Right(None) =>
-        runFromArgs(args)
+        runFromArgs(args.toList)
+    // Exiting with 0 is left to the JVM: when the server stopped from the shutdown hook, System.exit would block.
+    if exitCode != 0 then sys.exit(exitCode)
 
-  private def runFromArgs(args: List[String]): IO[ExitCode] =
-    args.toList match
+  private def runFromArgs(args: List[String]): Int =
+    args match
       // CRaC warmup command (warm + checkpoint + exit)
-      case "warmup" :: warmupArgs =>
-        IO.blocking {
-          WarmupRunner.run(warmupArgs)
-          ExitCode.Success
-        }
+      case "warmup" :: _ =>
+        WarmupRunner.run()
+        0
 
       // CRaC warm-and-serve: warm on all traces, checkpoint, post-restore
       // start fuzz server. Args: --socket-path <p> [--spec tiny|full]
@@ -119,27 +113,28 @@ object ConformanceServerApp extends IOApp:
           .collectFirst { case List("--socket-path", p) => Paths.get(p) }
           .getOrElse(Paths.get("/tmp/jam_target.sock"))
         parseSpec(rest) match
-          case Left(msg) => IO.println(msg).as(ExitCode.Error)
+          case Left(msg) =>
+            println(msg)
+            1
           case Right(chainConfig) =>
-            IO.blocking(WarmupRunner.warmupAndCheckpoint(socketPath)) *>
-              runServer(ServerConfig(socketPath = socketPath, chainConfig = chainConfig))
+            WarmupRunner.warmupAndCheckpoint(socketPath)
+            runServer(ServerConfig(socketPath = socketPath, chainConfig = chainConfig))
 
       // Fuzz command (used by conformance harness). Args: <socket-path> [--spec tiny|full]
       case "fuzz" :: socketPath :: rest =>
         parseSpec(rest) match
-          case Left(msg) => IO.println(msg).as(ExitCode.Error)
+          case Left(msg) =>
+            println(msg)
+            1
           case Right(chainConfig) =>
             runServer(ServerConfig(socketPath = Paths.get(socketPath), chainConfig = chainConfig))
 
       // Legacy/default: parse --socket-path, --log-path options
       case _ =>
-        ServerConfig.fromArgs(args.toList) match
+        ServerConfig.fromArgs(args) match
           case Left(msg) =>
-            IO.println(msg)
-              .as(
-                if msg.contains("Usage:") then ExitCode.Success
-                else ExitCode.Error
-              )
+            println(msg)
+            if msg.contains("Usage:") then 0 else 1
           case Right(config) =>
             runServer(config)
 
@@ -156,76 +151,41 @@ object ConformanceServerApp extends IOApp:
     val v = Version.JAM_VERSION
     s"${v.major}.${v.minor}.${v.patch}"
 
-  private def runServer(config: ServerConfig): IO[ExitCode] =
+  /** Serve until SIGTERM (exit code 0) or until the server thread dies from an error (1). */
+  private def runServer(config: ServerConfig): Int =
     val specName = config.chainConfig match
       case ChainConfig.TINY => "tiny"
       case ChainConfig.FULL => "full"
       case _                => "custom"
-    for
-      _ <- IO.println(s"JAM Forge Conformance Testing Server v$jamVersionString")
-      _ <- IO.println(s"Socket path: ${config.socketPath}")
-      _ <- IO.println(s"Log path: ${config.logPath}")
-      _ <- IO.println(s"Chain spec: $specName")
-      _ <- config.dataPath.fold(IO.unit)(p => IO.println(s"Data path: $p"))
-      _ <- IO.println("Starting server...")
+    println(s"JAM Forge Conformance Testing Server v$jamVersionString")
+    println(s"Socket path: ${config.socketPath}")
+    println(s"Log path: ${config.logPath}")
+    println(s"Chain spec: $specName")
+    config.dataPath.foreach(p => println(s"Data path: $p"))
+    println("Starting server...")
 
-      // Clean up existing socket file if present
-      _ <- IO.blocking {
-        Files.deleteIfExists(config.socketPath)
-      }
+    val logger = FileLogger.open(config.logPath)
+    val server =
+      try FuzzServer.start(config.socketPath, config.chainConfig, logger)
+      catch
+        case NonFatal(error) =>
+          println(
+            s"[JAM-FORGE ERROR] Server error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
+          )
+          error.printStackTrace(System.err)
+          logger.close()
+          return 1
+    Runtime.getRuntime.addShutdownHook(new Thread(() => {
+      System.err.println("[JAM-FORGE] Shutting down (if this is unexpected, check for OOM / cgroup kill).")
+      server.close()
+      logger.close()
+      System.err.flush()
+    }, "jam-shutdown"))
+    println("Server started, waiting for connections...")
 
-      // Run the server
-      exitCode <- SocketServer.run(config)
-    yield exitCode
-
-/** Unix domain socket server for handling conformance testing protocol.
-  */
-object SocketServer:
-
-  /** Run the conformance testing server.
-    */
-  def run(config: ServerConfig): IO[ExitCode] =
-    serverResource(config)
-      .use { _ =>
-        IO.println("Server started, waiting for connections...") *>
-          IO.never[ExitCode]
-      }
-      .handleErrorWith { error =>
-        IO.println(
-          s"[JAM-FORGE ERROR] Server error: ${error.getClass.getSimpleName} - ${Option(error.getMessage).getOrElse("unknown")}"
-        ) *>
-          IO.blocking(error.printStackTrace(System.err)) *>
-          IO.pure(ExitCode.Error)
-      }
-
-  /** Create a resource that manages the server lifecycle.
-    */
-  def serverResource(config: ServerConfig): Resource[IO, Unit] =
-    for
-      logger <- FileLogger.resource(config.logPath)
-      stateStore = new StateStore(config.chainConfig)
-      handler = new ProtocolHandler(stateStore, logger, config.chainConfig)
-      _ <- acceptConnections(config.socketPath, handler, logger)
-    yield ()
-
-  private def acceptConnections(
-      socketPath: Path,
-      handler: ProtocolHandler,
-      logger: FileLogger
-  ): Resource[IO, Unit] =
-    val unixSockets = UnixSockets.forIO
-    unixSockets
-      .server(UnixSocketAddress(socketPath.toString))
-      .evalMap { socket =>
-        logger.logSessionStart() *>
-          handler
-            .handleConnection(socket)
-            .guarantee(logger.logSessionEnd())
-            .handleErrorWith(error =>
-              logger.logError("Connection error", error)
-            )
-      }
-      .compile
-      .drain
-      .background
-      .void
+    server.awaitTermination()
+    server.failed match
+      case Some(error) =>
+        println(s"[JAM-FORGE ERROR] Server stopped: ${error.getClass.getSimpleName} - ${error.getMessage}")
+        1
+      case None => 0

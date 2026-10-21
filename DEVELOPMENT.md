@@ -4,14 +4,14 @@
 
 ### Required
 
-- **Java Development Kit (JDK) 17 or higher**
+- **Java Development Kit (JDK) 24** 
   ```bash
   # Check Java version
   java -version
 
   # Install via SDKMAN (recommended)
   curl -s "https://get.sdkman.io" | bash
-  sdk install java 17.0.9-tem
+  sdk install java 24.0.2-tem
   ```
 
 - **Scala Build Tool (sbt) 1.9+**
@@ -103,7 +103,7 @@ sbt scalafmtCheckAll
 
 Configuration in `.scalafmt.conf`:
 - 2-space indentation
-- 100-character line width
+- 120-character line width
 - Scala 3 syntax
 
 ### Running Specific Tests
@@ -196,18 +196,25 @@ sbt "conformance/assembly"
 
 # Output: modules/conformance/target/scala-3.3.7/jam-conformance.jar
 
-# Run the server
-java -jar modules/conformance/target/scala-3.3.7/jam-conformance.jar
+# Run the server (listens on /tmp/jam_target.sock; the native libraries come from the sbt build)
+java --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow \
+  -Djava.library.path=modules/crypto/native/build/linux \
+  -jar modules/conformance/target/scala-3.3.7/jam-conformance.jar
 ```
 
 ### Docker Build
 
 ```bash
-# Build Docker image
-docker build -t jam-scala:latest .
+# Build Docker image (scripts/build-and-push.sh --skip-push does the same and smoke-tests the jar)
+docker build -t jam-forge:latest .
 
-# Run container
-docker run -v /path/to/socket:/var/run/jam jam-scala:latest
+# Run it the way W3F's target.py does: the JAM_FUZZ env selects the fuzz server, replays the bundled warmup traces
+# through it, then opens the socket in the shared directory. JAM_WARMUP=0 skips the warmup.
+mkdir -p /tmp/jam_fuzz && chmod 777 /tmp/jam_fuzz
+docker run --rm -v /tmp/jam_fuzz:/tmp/jam_fuzz \
+  -e JAM_FUZZ=1 -e JAM_FUZZ_SPEC=tiny -e JAM_FUZZ_DATA_PATH=/tmp/jam_fuzz/data \
+  -e JAM_FUZZ_SOCK_PATH=/tmp/jam_fuzz/fuzz.sock \
+  jam-forge:latest
 ```
 
 ## Testing Against Conformance Server
@@ -215,8 +222,9 @@ docker run -v /path/to/socket:/var/run/jam jam-scala:latest
 ### Running Local Conformance Tests
 
 ```bash
-# Start the conformance server
-sbt "conformance/run"
+# Start the conformance server (same JVM flags and warmup as the image), replay a public trace against it and
+# print the fuzz-perf stats
+scripts/fuzz-perf-local.sh jam-forge fallback
 
 # In another terminal, run fuzzing tests
 cd jam-conformance

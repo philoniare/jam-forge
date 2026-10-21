@@ -42,8 +42,6 @@ final class TrieBackedJamState(
     private val store: Option[StateTrieStore] = None
 ):
 
-
-
   private var _tau: Long = 0L
   private var _tauLoaded: Boolean = false
   private var _tauDirty: Boolean = false
@@ -148,9 +146,10 @@ final class TrieBackedJamState(
     _tau
 
   def timeslot_=(v: Long): Unit =
-    _tau = v
-    _tauLoaded = true
-    _tauDirty = true
+    if !_tauLoaded || _tau != v then
+      _tau = v
+      _tauLoaded = true
+      _tauDirty = true
 
   def authPools: List[List[Hash]] =
     if !_authPoolsLoaded then
@@ -159,9 +158,10 @@ final class TrieBackedJamState(
     _authPools
 
   def authPools_=(v: List[List[Hash]]): Unit =
-    _authPools = v
-    _authPoolsLoaded = true
-    _authPoolsDirty = true
+    if !_authPoolsLoaded || _authPools != v then
+      _authPools = v
+      _authPoolsLoaded = true
+      _authPoolsDirty = true
 
   def authQueues: List[List[Hash]] =
     if !_authQueuesLoaded then
@@ -170,9 +170,10 @@ final class TrieBackedJamState(
     _authQueues
 
   def authQueues_=(v: List[List[Hash]]): Unit =
-    _authQueues = v
-    _authQueuesLoaded = true
-    _authQueuesDirty = true
+    if !_authQueuesLoaded || _authQueues != v then
+      _authQueues = v
+      _authQueuesLoaded = true
+      _authQueuesDirty = true
 
   def psi: Psi =
     if !_psiLoaded then
@@ -181,9 +182,10 @@ final class TrieBackedJamState(
     _psi
 
   def psi_=(v: Psi): Unit =
-    _psi = v
-    _psiLoaded = true
-    _psiDirty = true
+    if !_psiLoaded || _psi != v then
+      _psi = v
+      _psiLoaded = true
+      _psiDirty = true
 
   def beta: HistoricalBetaContainer =
     if !_betaLoaded then
@@ -192,9 +194,10 @@ final class TrieBackedJamState(
     _beta
 
   def beta_=(v: HistoricalBetaContainer): Unit =
-    _beta = v
-    _betaLoaded = true
-    _betaDirty = true
+    if !_betaLoaded || _beta != v then
+      _beta = v
+      _betaLoaded = true
+      _betaDirty = true
 
   def serviceStatistics: List[ServiceStatisticsEntry] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -202,8 +205,9 @@ final class TrieBackedJamState(
 
   def serviceStatistics_=(v: List[ServiceStatisticsEntry]): Unit =
     if !_activityStatsLoaded then loadActivityStats()
-    _serviceStatistics = v
-    _activityStatsDirty = true
+    if _serviceStatistics != v then
+      _serviceStatistics = v
+      _activityStatsDirty = true
 
   def postOffenders: List[Ed25519PublicKey] = _postOffenders
 
@@ -217,9 +221,10 @@ final class TrieBackedJamState(
     _lastAccumulationOutputs
 
   def lastAccumulationOutputs_=(v: List[(Long, JamBytes)]): Unit =
-    _lastAccumulationOutputs = v
-    _lastAccumulationOutputsLoaded = true
-    _lastAccumulationOutputsDirty = true
+    if !_lastAccumulationOutputsLoaded || _lastAccumulationOutputs != v then
+      _lastAccumulationOutputs = v
+      _lastAccumulationOutputsLoaded = true
+      _lastAccumulationOutputsDirty = true
 
 
   val validators: ValidatorsRef = new ValidatorsRef(this)
@@ -241,9 +246,10 @@ final class TrieBackedJamState(
     _kappa
 
   private[state] def kappa_=(v: List[ValidatorKey]): Unit =
-    _kappa = v
-    _kappaLoaded = true
-    _kappaDirty = true
+    if !_kappaLoaded || _kappa != v then
+      _kappa = v
+      _kappaLoaded = true
+      _kappaDirty = true
 
   private[state] def lambda: List[ValidatorKey] =
     if !_lambdaLoaded then
@@ -256,9 +262,10 @@ final class TrieBackedJamState(
     _lambda
 
   private[state] def lambda_=(v: List[ValidatorKey]): Unit =
-    _lambda = v
-    _lambdaLoaded = true
-    _lambdaDirty = true
+    if !_lambdaLoaded || _lambda != v then
+      _lambda = v
+      _lambdaLoaded = true
+      _lambdaDirty = true
 
   private[state] def iota: List[ValidatorKey] =
     if !_iotaLoaded then
@@ -271,9 +278,10 @@ final class TrieBackedJamState(
     _iota
 
   private[state] def iota_=(v: List[ValidatorKey]): Unit =
-    _iota = v
-    _iotaLoaded = true
-    _iotaDirty = true
+    if !_iotaLoaded || _iota != v then
+      _iota = v
+      _iotaLoaded = true
+      _iotaDirty = true
 
   private[state] def gammaK: List[ValidatorKey] =
     if !_safroleLoaded then loadSafrole()
@@ -281,8 +289,9 @@ final class TrieBackedJamState(
 
   private[state] def gammaK_=(v: List[ValidatorKey]): Unit =
     if !_safroleLoaded then loadSafrole()
-    _gammaK = v
-    _safroleDirty = true
+    if _gammaK != v then
+      _gammaK = v
+      _safroleDirty = true
 
   private[state] def gammaZ: JamBytes =
     if !_safroleLoaded then loadSafrole()
@@ -290,8 +299,9 @@ final class TrieBackedJamState(
 
   private[state] def gammaZ_=(v: JamBytes): Unit =
     if !_safroleLoaded then loadSafrole()
-    _gammaZ = v
-    _safroleDirty = true
+    if _gammaZ != v then
+      _gammaZ = v
+      _safroleDirty = true
 
   private[state] def gammaS: TicketsOrKeys =
     if !_safroleLoaded then loadSafrole()
@@ -299,8 +309,9 @@ final class TrieBackedJamState(
 
   private[state] def gammaS_=(v: TicketsOrKeys): Unit =
     if !_safroleLoaded then loadSafrole()
-    _gammaS = v
-    _safroleDirty = true
+    if _gammaS != v then
+      _gammaS = v
+      _safroleDirty = true
 
   private[state] def gammaA: List[TicketMark] =
     if !_safroleLoaded then loadSafrole()
@@ -308,8 +319,9 @@ final class TrieBackedJamState(
 
   private[state] def gammaA_=(v: List[TicketMark]): Unit =
     if !_safroleLoaded then loadSafrole()
-    _gammaA = v
-    _safroleDirty = true
+    if _gammaA != v then
+      _gammaA = v
+      _safroleDirty = true
 
   private[state] def entropyPool: List[Hash] =
     if !_entropyPoolLoaded then
@@ -319,9 +331,10 @@ final class TrieBackedJamState(
 
   private[state] def entropyPool_=(v: List[Hash]): Unit =
     require(v.size == 4, s"entropy pool must be 4 hashes, got ${v.size}")
-    _entropyPool = v
-    _entropyPoolLoaded = true
-    _entropyPoolDirty = true
+    if !_entropyPoolLoaded || _entropyPool != v then
+      _entropyPool = v
+      _entropyPoolLoaded = true
+      _entropyPoolDirty = true
 
   private[state] def coreReports: List[Option[AvailabilityAssignment]] =
     if !_reportsLoaded then
@@ -330,9 +343,10 @@ final class TrieBackedJamState(
     _reports
 
   private[state] def coreReports_=(v: List[Option[AvailabilityAssignment]]): Unit =
-    _reports = v
-    _reportsLoaded = true
-    _reportsDirty = true
+    if !_reportsLoaded || _reports != v then
+      _reports = v
+      _reportsLoaded = true
+      _reportsDirty = true
 
   private[state] def coreStatistics: List[CoreStatisticsRecord] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -340,8 +354,9 @@ final class TrieBackedJamState(
 
   private[state] def coreStatistics_=(v: List[CoreStatisticsRecord]): Unit =
     if !_activityStatsLoaded then loadActivityStats()
-    _coreStatistics = v
-    _activityStatsDirty = true
+    if _coreStatistics != v then
+      _coreStatistics = v
+      _activityStatsDirty = true
 
   private[state] def readyQueue: List[List[AccumulationReadyRecord]] =
     if !_readyQueueLoaded then
@@ -351,9 +366,10 @@ final class TrieBackedJamState(
     _readyQueue
 
   private[state] def readyQueue_=(v: List[List[AccumulationReadyRecord]]): Unit =
-    _readyQueue = v
-    _readyQueueLoaded = true
-    _readyQueueDirty = true
+    if !_readyQueueLoaded || _readyQueue != v then
+      _readyQueue = v
+      _readyQueueLoaded = true
+      _readyQueueDirty = true
 
   private[state] def accumulated: List[List[JamBytes]] =
     if !_accumulatedLoaded then
@@ -363,9 +379,10 @@ final class TrieBackedJamState(
     _accumulated
 
   private[state] def accumulated_=(v: List[List[JamBytes]]): Unit =
-    _accumulated = v
-    _accumulatedLoaded = true
-    _accumulatedDirty = true
+    if !_accumulatedLoaded || _accumulated != v then
+      _accumulated = v
+      _accumulatedLoaded = true
+      _accumulatedDirty = true
 
   private[state] def privileges: Privileges =
     if !_privilegesLoaded then
@@ -374,9 +391,10 @@ final class TrieBackedJamState(
     _privileges
 
   private[state] def privileges_=(v: Privileges): Unit =
-    _privileges = v
-    _privilegesLoaded = true
-    _privilegesDirty = true
+    if !_privilegesLoaded || _privileges != v then
+      _privileges = v
+      _privilegesLoaded = true
+      _privilegesDirty = true
 
   private[state] def serviceAccounts: List[AccumulationServiceItem] =
     if !_serviceAccountsLoaded then loadServiceAccounts()
@@ -384,8 +402,10 @@ final class TrieBackedJamState(
 
   private[state] def serviceAccounts_=(v: List[AccumulationServiceItem]): Unit =
     if !_serviceAccountsLoaded then loadServiceAccounts()
-    _serviceAccounts = v
-    _serviceAccountsDirty = true
+    // commit compares each account's info with its pre-state, so a deep comparison here would only repeat that
+    if !(_serviceAccounts eq v) then
+      _serviceAccounts = v
+      _serviceAccountsDirty = true
 
   private[state] def statsCurrent: List[StatCount] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -393,8 +413,9 @@ final class TrieBackedJamState(
 
   private[state] def statsCurrent_=(v: List[StatCount]): Unit =
     if !_activityStatsLoaded then loadActivityStats()
-    _statsCurrent = v
-    _activityStatsDirty = true
+    if _statsCurrent != v then
+      _statsCurrent = v
+      _activityStatsDirty = true
 
   private[state] def statsLast: List[StatCount] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -402,8 +423,9 @@ final class TrieBackedJamState(
 
   private[state] def statsLast_=(v: List[StatCount]): Unit =
     if !_activityStatsLoaded then loadActivityStats()
-    _statsLast = v
-    _activityStatsDirty = true
+    if _statsLast != v then
+      _statsLast = v
+      _activityStatsDirty = true
 
 
   private def loadSafrole(): Unit =
@@ -432,6 +454,14 @@ final class TrieBackedJamState(
 
 
   
+  /** How many components [[commit]] would re-encode (all service accounts count as one). */
+  private[protocol] def dirtyComponents: Int =
+    Seq(
+      _tauDirty, _entropyPoolDirty, _kappaDirty, _lambdaDirty, _iotaDirty, _authPoolsDirty, _authQueuesDirty,
+      _betaDirty, _reportsDirty, _readyQueueDirty, _accumulatedDirty, _lastAccumulationOutputsDirty,
+      _privilegesDirty, _psiDirty, _safroleDirty, _activityStatsDirty, _serviceAccountsDirty
+    ).count(identity)
+
   def commit(target: StateTrie): Unit =
     val updates =
       mutable.ArrayBuffer.empty[(JamBytes, Option[JamBytes])]

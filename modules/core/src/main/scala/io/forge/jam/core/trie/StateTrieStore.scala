@@ -3,12 +3,19 @@ package io.forge.jam.core.trie
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * The pinned state root, plus caches of service-account records and of the set of service ids, keyed by service id
+ * only. The caches describe the pinned root: an import updates them as it commits the child of the pinned root
+ * ([[commitChild]]); moving the pin anywhere else ([[markCommitted]], e.g. a reorg back to a common ancestor) drops
+ * them, since they would otherwise answer with the abandoned branch's accounts.
+ */
 final class StateTrieStore(val backend: StateTrieBackend):
 
   @volatile private var pinned: Hash = Hash.zero
   private val serviceInfoCache = new ConcurrentHashMap[java.lang.Long, JamBytes]()
-  @volatile private var knownServiceIdsCache: Option[Set[Long]] = None
+  private val knownServiceIdsCache = new AtomicReference[Option[Set[Long]]](None)
 
   def currentRoot: Hash = pinned
 
@@ -24,13 +31,30 @@ final class StateTrieStore(val backend: StateTrieBackend):
     val trie = StateTrie.at(backend, Hash.zero)
     trie.update(keyvals.map { case (k, v) => (k, Some(v)) })
     trie.save()
-    pinned = trie.rootHash
-    serviceInfoCache.clear()
-    knownServiceIdsCache = None
+    synchronized {
+      pinned = trie.rootHash
+      clearCaches()
+    }
     pinned
 
-  def markCommitted(root: Hash): Unit =
+  /**
+   * Pins `root`, the state an import just saved on top of `parent`, having updated the caches as it committed. They
+   * stay only if `parent` is the root they described, the pinned one.
+   */
+  def commitChild(parent: Hash, root: Hash): Unit = synchronized {
+    if parent != pinned then clearCaches()
     pinned = root
+  }
+
+  /** Pins an arbitrary `root` (a restart, or a reorg's rewind); the caches go unless it is already the pinned root. */
+  def markCommitted(root: Hash): Unit = synchronized {
+    if root != pinned then clearCaches()
+    pinned = root
+  }
+
+  private def clearCaches(): Unit =
+    serviceInfoCache.clear()
+    knownServiceIdsCache.set(None)
 
   def gc(): Unit = backend.gc()
 
@@ -45,13 +69,20 @@ final class StateTrieStore(val backend: StateTrieBackend):
     serviceInfoCache.remove(id)
     ()
 
-  def cachedServiceIds: Option[Set[Long]] = knownServiceIdsCache
+  def cachedServiceIds: Option[Set[Long]] = knownServiceIdsCache.get
 
+  /**
+   * Seeds the id set when there is none yet. Once set it changes only through add/remove, so a reader that computed
+   * `ids` from an older state cannot overwrite a set an import has since extended.
+   */
   def primeKnownServiceIds(ids: Set[Long]): Unit =
-    knownServiceIdsCache = Some(ids)
+    knownServiceIdsCache.compareAndSet(None, Some(ids))
+    ()
 
   def addKnownServiceId(id: Long): Unit =
-    knownServiceIdsCache = knownServiceIdsCache.map(_ + id)
+    knownServiceIdsCache.updateAndGet(_.map(_ + id))
+    ()
 
   def removeKnownServiceId(id: Long): Unit =
-    knownServiceIdsCache = knownServiceIdsCache.map(_ - id)
+    knownServiceIdsCache.updateAndGet(_.map(_ - id))
+    ()

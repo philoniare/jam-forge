@@ -19,7 +19,8 @@ final case class BlockPipelineResult(
     availableReports: List[WorkReport],
     accumulateRoot: Option[Hash],
     accumulationStats: Map[Long, (Long, Int)],
-    accumulationTransferCounts: Map[Long, Int]
+    accumulationTransferCounts: Map[Long, Int],
+    headerHash: Hash
 )
 
 object BlockPipeline:
@@ -99,7 +100,8 @@ object BlockPipeline:
           availableReports = ctx.availableReports,
           accumulateRoot = ctx.accumulateRoot,
           accumulationStats = ctx.accumulationStats,
-          accumulationTransferCounts = ctx.accumulationTransferCounts
+          accumulationTransferCounts = ctx.accumulationTransferCounts,
+          headerHash = ctx.header.hash
         )
       )
     } yield finalResult

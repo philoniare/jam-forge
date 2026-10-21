@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.assurance
 
 import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -33,23 +34,21 @@ object AssuranceTransition:
     else (bytes(byteIndex).toInt & (1 << bitIndex)) != 0
 
   /**
-   * Verify Ed25519 signature on an assurance extrinsic.
+   * The Ed25519 check of an assurance: its validator's key, the signed message and the signature.
    *
    * The signature message is: "jam_available" + blake2b(anchor + bitfield)
    */
-  private def verifyAssuranceSignature(
+  private def assuranceSignatureItem(
     assurance: AssuranceExtrinsic,
     validatorKey: ValidatorKey
-  ): Boolean =
+  ): (Ed25519PublicKey, Array[Byte], Ed25519Signature) =
     // First create combined data and hash it
     val serializedData = assurance.anchor.bytes ++ assurance.bitfield.toArray
     val dataHash = Hashing.blake2b256(serializedData)
 
     // Create final message by prepending context
     val signatureMessage = constants.JAM_AVAILABLE_BYTES ++ dataHash.bytes
-
-    // Verify using centralized Ed25519 module
-    Ed25519.verify(validatorKey.ed25519, signatureMessage, assurance.signature)
+    (validatorKey.ed25519, signatureMessage, assurance.signature)
 
   /**
    * Check if a report has timed out.
@@ -115,17 +114,10 @@ object AssuranceTransition:
         if !ValidationHelpers.isSortedUniqueByInt(input.assurances)(_.validatorIndex.toInt) then
           Some(AssuranceErrorCode.NotSortedOrUniqueAssurers)
         else
-          val assurances = input.assurances.toArray
-          val n = assurances.length
           val validators = state.currValidators.toIndexedSeq
-          val allValid = java.util.stream.IntStream
-            .range(0, n)
-            .parallel()
-            .allMatch { i =>
-              val a = assurances(i)
-              verifyAssuranceSignature(a, validators(a.validatorIndex.toInt))
-            }
-          if !allValid then Some(AssuranceErrorCode.BadSignature) else None
+          // One batch verification for up to V signatures; it fails exactly when some signature does.
+          val items = input.assurances.toIndexedSeq.map(a => assuranceSignatureItem(a, validators(a.validatorIndex.toInt)))
+          if !Ed25519.verifyAll(items) then Some(AssuranceErrorCode.BadSignature) else None
       }
 
   /**

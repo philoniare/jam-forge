@@ -43,75 +43,6 @@ object ErasureCoding:
     override def getMessage: String = "Erasure coding recover failed"
 
   /**
-   * Split data into chunks of size n (with zero-padding if needed).
-   */
-  def split(data: Array[Byte], n: Int): Array[Array[Byte]] =
-    if n <= 0 then return Array.empty
-
-    val padded =
-      val remainder = data.length % n
-      if remainder != 0 then
-        data ++ Array.fill(n - remainder)(0.toByte)
-      else
-        data
-
-    val k = padded.length / n
-    (0 until k).map(i => padded.slice(i * n, (i + 1) * n)).toArray
-
-  /**
-   * Join array of chunks into single array.
-   */
-  def join(arr: Array[Array[Byte]]): Array[Byte] =
-    arr.flatten
-
-  /**
-   * Transpose a 2D array.
-   */
-  def transpose[T: reflect.ClassTag](matrix: Array[Array[T]]): Array[Array[T]] =
-    if matrix.isEmpty || matrix(0).isEmpty then return Array.empty
-    val rows = matrix.length
-    val cols = matrix(0).length
-    Array.tabulate(cols, rows)((col, row) => matrix(row)(col))
-
-  /**
-   * Encode original shards into recovery shards.
-   *
-   * @param original Array of original shards (each must have even length)
-   * @param recoveryCount Number of recovery shards to generate
-   * @return Array of recovery shards
-   */
-  def encode(original: Array[Array[Byte]], recoveryCount: Int): Either[ErasureCodingError, Array[Array[Byte]]] =
-    if original.isEmpty then return Right(Array.empty)
-
-    ensureInitialized()
-    val result = ErasureCodingWrapper.encode(original, recoveryCount)
-    if result == null then Left(EncodeFailed)
-    else Right(result)
-
-  /**
-   * Recover original shards from a subset of shards.
-   *
-   * @param originalCount Total number of original shards
-   * @param recoveryCount Total number of recovery shards
-   * @param shards Available shards with their indices
-   * @return Recovered original shards
-   */
-  def recover(
-    originalCount: Int,
-    recoveryCount: Int,
-    shards: Array[Shard]
-  ): Either[ErasureCodingError, Array[Array[Byte]]] =
-    if shards.length < originalCount then return Left(InvalidShardsCount)
-
-    ensureInitialized()
-    val shardData = shards.map(_.data)
-    val indices = shards.map(_.index)
-
-    val result = ErasureCodingWrapper.recover(shardData, indices, originalCount, recoveryCount)
-    if result == null then Left(RecoverFailed)
-    else Right(result)
-
-  /**
    * C_k: Erasure-code chunking function.
    *
    * @param data The original data
@@ -165,3 +96,97 @@ object ErasureCoding:
           ErasureCodingWrapper.reconstruct(shards.map(_.data), shards.map(_.index), originalCount, recoveryCount)
         if result == null then Left(RecoverFailed)
         else Right(result)
+
+  /** The shards of many segments: validator v's chunk of segment j for every v and j. */
+  sealed trait SegmentShards:
+    def segmentCount: Int
+
+    /** Validator v's chunk of segment j. */
+    def chunk(v: Int, j: Int): Array[Byte]
+
+    /** Validator v's chunks of every segment, in segment order. */
+    def column(v: Int): IndexedSeq[Array[Byte]] = (0 until segmentCount).map(chunk(v, _))
+
+    /** Validator v's chunks of every segment end to end: the shard [[reconstructSegments]] takes back. */
+    def joinedColumn(v: Int): Array[Byte] = column(v).toArray.flatten
+
+  /** Chunks of `shardBytes` bytes each, validator v's chunk of segment j at `(v * segmentCount + j) * shardBytes`. */
+  private final class FlatSegmentShards(flat: Array[Byte], val segmentCount: Int, shardBytes: Int)
+      extends SegmentShards:
+    def chunk(v: Int, j: Int): Array[Byte] =
+      val at = (v * segmentCount + j) * shardBytes
+      java.util.Arrays.copyOfRange(flat, at, at + shardBytes)
+
+    override def joinedColumn(v: Int): Array[Byte] =
+      val at = v * segmentCount * shardBytes
+      java.util.Arrays.copyOfRange(flat, at, at + segmentCount * shardBytes)
+
+  /** One [[chunk]] result per segment. */
+  private final class PerSegmentShards(shards: IndexedSeq[Array[Array[Byte]]]) extends SegmentShards:
+    def segmentCount: Int = shards.length
+    def chunk(v: Int, j: Int): Array[Byte] = shards(j)(v)
+
+  /**
+   * C_k of each of `segments` 
+   */
+  def chunkSegments(
+    segments: IndexedSeq[Array[Byte]],
+    basicSize: Int,
+    validatorCount: Int
+  ): Either[ErasureCodingError, SegmentShards] =
+    if basicSize % 2 != 0 then Left(InvalidBasicSize(basicSize))
+    else if basicSize / 2 > validatorCount then Left(InvalidRecoveryCount(validatorCount - basicSize / 2))
+    else if segments.isEmpty then Right(PerSegmentShards(IndexedSeq.empty))
+    else
+      val len = segments(0).length
+      if len == 0 || segments.exists(_.length != len) then chunkEach(segments, basicSize, validatorCount)
+      else
+        ensureInitialized()
+        val originalCount = basicSize / 2
+        val k = Math.max(1, (len + basicSize - 1) / basicSize)
+        val data = new Array[Byte](len * segments.length)
+        var j = 0
+        while j < segments.length do
+          System.arraycopy(segments(j), 0, data, j * len, len)
+          j += 1
+        val flat = ErasureCodingWrapper.chunkSegments(data, segments.length, originalCount, validatorCount - originalCount, k)
+        if flat == null then Left(EncodeFailed) else Right(FlatSegmentShards(flat, segments.length, 2 * k))
+
+  /** [[chunkSegments]] for segments of differing lengths: one [[chunk]] each. */
+  private def chunkEach(
+    segments: IndexedSeq[Array[Byte]],
+    basicSize: Int,
+    validatorCount: Int
+  ): Either[ErasureCodingError, SegmentShards] =
+    val perSegment = segments.map(chunk(_, basicSize, validatorCount))
+    perSegment.collectFirst { case Left(e) => e } match
+      case Some(e) => Left(e)
+      case None => Right(PerSegmentShards(perSegment.map(_.toOption.get)))
+
+  /**
+   * R_k of each of `segmentCount` segments at once
+   */
+  def reconstructSegments(
+    shards: Array[Shard],
+    segmentCount: Int,
+    basicSize: Int,
+    validatorCount: Int
+  ): Either[ErasureCodingError, IndexedSeq[Array[Byte]]] =
+    if segmentCount <= 0 || shards.isEmpty || shards(0).data.length % segmentCount != 0 then Left(InvalidShardsCount)
+    else
+      val shardBytes = shards(0).data.length / segmentCount
+      if shardBytes % 2 != 0 then Left(RaggedShards)
+      else
+        reconstruct(shards, basicSize, validatorCount).map { joined =>
+          // joined holds original shard i (every segment's chunk i in turn) for each i in order.
+          val originalCount = basicSize / 2
+          val row = segmentCount * shardBytes
+          (0 until segmentCount).map { j =>
+            val out = new Array[Byte](originalCount * shardBytes)
+            var i = 0
+            while i < originalCount do
+              System.arraycopy(joined, i * row + j * shardBytes, out, i * shardBytes, shardBytes)
+              i += 1
+            out
+          }
+        }

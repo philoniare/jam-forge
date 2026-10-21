@@ -1,11 +1,10 @@
 package io.forge.jam.pvm.engine
 
-import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 import com.typesafe.scalalogging.Logger
 import spire.math.UInt
-import io.forge.jam.pvm.{Abi, Instruction, InterruptKind, SegfaultInfo}
-import io.forge.jam.pvm.program.{InstructionDecoder, Program}
+import io.forge.jam.pvm.{Abi, InterruptKind, SegfaultInfo}
+import io.forge.jam.pvm.program.Program
 import io.forge.jam.pvm.types.*
 
 /** Shared interpreter core: register file, gas, program-counter/interrupt
@@ -27,8 +26,6 @@ abstract class InterpreterCore protected (
     protected var _nextProgramCounter: Option[ProgramCounter],
     protected var _nextProgramCounterChanged: Boolean,
     protected var _gas: Long,
-    protected val compiledOffsetForBlock: Array[Int],
-    protected val compiledInstructions: ArrayBuffer[CompiledInstruction],
     protected var _interrupt: InterruptKind
 ) extends ExecutionContext:
 
@@ -58,14 +55,8 @@ abstract class InterpreterCore protected (
     */
   protected def stepTracingEnabled: Boolean
   protected inline val TargetAbsent: -1 = -1
-  protected inline def packTarget(offset: Int, isJumpTargetValid: Boolean): Int =
-    val base = offset & 0x7fffffff
-    if isJumpTargetValid then base | 0x80000000 else base
-  // Reads the slot for a pc.value, returning ABSENT (-1) when out of range.
-  protected inline def targetAt(pcValue: UInt): Int =
-    val idx = pcValue.signed
-    if idx >= 0 && idx < compiledOffsetForBlock.length then compiledOffsetForBlock(idx)
-    else TargetAbsent
+  // Reads the slot for a pc.value, returning ABSENT (-1) when out of range or not compiled.
+  protected inline def targetAt(pcValue: UInt): Int = module.targetAt(pcValue.signed)
 
   // ==========================================================================
   // Public API — registers, gas, program counter
@@ -172,6 +163,22 @@ abstract class InterpreterCore protected (
       val r = resolveJump(nextPc)
       if r < 0 then panic(pc) else r
 
+  /** [[branch]] for a compiled branch, whose target validity was checked when its block was compiled. */
+  final def branchCompiled(
+      ci: CompiledInstruction,
+      condition: Boolean,
+      pc: ProgramCounter,
+      target: Int,
+      nextPc: ProgramCounter
+  ): Int =
+    if !ci.branchValid then panic(pc)
+    else if condition then
+      val r = resolveJump(ProgramCounter(target))
+      if r < 0 then panic(pc) else r
+    else
+      val r = resolveJump(nextPc)
+      if r < 0 then panic(pc) else r
+
   override def panic(pc: ProgramCounter): Int =
     _programCounter = pc
     _programCounterValid = true
@@ -234,31 +241,39 @@ abstract class InterpreterCore protected (
           _compiledOffsetInt = resolved.getOrElse(TargetOutOfRange).signed
           _nextProgramCounterChanged = false
 
-    // Cache values locally for faster access in hot loop
+    // Cache values locally for faster access in hot loop. The published compiled code only grows; an offset past
+    // the local snapshot came from a block compiled since, so re-read the snapshot before giving up.
     var offset = _compiledOffsetInt
-    val instructions = compiledInstructions
-    var instructionsSize = instructions.size
+    var snapshot = module.compiled
+    var instructions = snapshot.instructions
+    var instructionsSize = snapshot.count
     val isGasMetered = gasMeteringEnabled
     val isStepTracing = stepTracingEnabled
+    // Only host calls set it, and they run between run() calls.
+    val forcedOutOfGas = isGasMetered && _forcedOutOfGas
 
     // Main execution loop - optimized for JIT
     while true do
-      // Bounds check - use primitive comparison
       if offset >= instructionsSize then
-        _interrupt = InterruptKind.Panic
+        snapshot = module.compiled
+        instructions = snapshot.instructions
+        instructionsSize = snapshot.count
+        if offset >= instructionsSize then
+          _interrupt = InterruptKind.Panic
+          _compiledOffsetInt = offset
+          return _interrupt
+
+      val compiled = instructions(offset)
+
+      if forcedOutOfGas then
+        outOfGas(compiled.pc)
         _compiledOffsetInt = offset
         return _interrupt
 
-      // Get compiled instruction - ArrayBuffer.apply is O(1)
-      val compiled = instructions(offset)
-
       if isGasMetered then
-        if _forcedOutOfGas then
-          outOfGas(compiled.pc)
-          _compiledOffsetInt = offset
-          return _interrupt
         if !_gasChargedFlag then
-          val blockCost = module.blockGasCostAt(compiled.pc.toInt)
+          val static = compiled.blockCost
+          val blockCost = if static >= 0 then static else module.blockGasCostAt(compiled.pc.toInt)
           if _gas < blockCost then
             outOfGas(compiled.pc)
             _compiledOffsetInt = offset
@@ -279,11 +294,9 @@ abstract class InterpreterCore protected (
         // Interrupt occurred - exit loop
         return _interrupt
       else
-        if BlockGasModel.isTerminatorOpcodeValue(compiled.opcodeValue) then
+        if compiled.isTerminator then
           _gasChargedFlag = false
         offset = next
-        if next >= instructionsSize then
-          instructionsSize = instructions.size
         if isStepTracing then
           _compiledOffsetInt = offset
           _interrupt = InterruptKind.Step
@@ -319,40 +332,5 @@ abstract class InterpreterCore protected (
   // ==========================================================================
 
   private def compileBlock(pc: ProgramCounter): Int =
-    if pc.value > module.codeLen then return Step.Interrupt
-    module.beginSharedMutation()
-    try
-      val origin = UInt(compiledInstructions.size)
-      var isJumpTargetValid = this.isJumpTargetValid(pc)
-      var currentPc = pc
-      var done = false
-
-      while !done && currentPc.value <= module.codeLen do
-        val packedTarget = packTarget(compiledInstructions.size, isJumpTargetValid)
-        val insertIdx = currentPc.value.signed
-        if insertIdx >= 0 && insertIdx < compiledOffsetForBlock.length then
-          compiledOffsetForBlock(insertIdx) = packedTarget
-        isJumpTargetValid = false
-
-        val (instruction, nextPc) = parseInstructionAt(currentPc)
-        compiledInstructions += CompiledInstruction(instruction, currentPc, nextPc, instruction.opcode.value)
-
-        if instruction.opcode.startsNewBasicBlock then
-          done = true
-        else
-          currentPc = nextPc
-
-      if compiledInstructions.size == origin.signed then Step.Interrupt
-      else origin.signed
-    finally module.endSharedMutation()
-
-  private def parseInstructionAt(pc: ProgramCounter): (Instruction, ProgramCounter) =
-    val code = module.blob.code
-    val bitmask = module.blob.bitmask
-    val offset = pc.toInt
-
-    if offset >= code.length then
-      return (Instruction.Panic, ProgramCounter(offset + 1))
-
-    val (instruction, skip) = InstructionDecoder.decode(code, bitmask, offset)
-    (instruction, ProgramCounter(offset + skip))
+    val r = module.compileBlock(pc.toInt)
+    if r < 0 then Step.Interrupt else r

@@ -6,23 +6,20 @@ import io.forge.jam.protocol.accumulation.StateKey
 
 import scala.collection.mutable
 
-final class ServiceStorageView(trie: StateTrie):
+final class ServiceStorageView private (
+    trie: StateTrie,
+    readCache: mutable.HashMap[JamBytes, Option[JamBytes]]
+):
+
+  def this(trie: StateTrie) = this(trie, mutable.HashMap.empty)
 
   private var pending = Map.empty[JamBytes, Option[JamBytes]]
 
-  private val readCache = mutable.HashMap.empty[JamBytes, Option[JamBytes]]
+  /** The staged writes this view was forked from: the state its accpar batch started from (None for a root view). */
+  private var batchStart: Option[Map[JamBytes, Option[JamBytes]]] = None
 
   def get(serviceId: Long, storageKey: JamBytes): Option[JamBytes] =
-    val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
-    pending.get(stateKey) match
-      case Some(staged) => staged
-      case None         =>
-        readCache.get(stateKey) match
-          case Some(cached) => cached
-          case None         =>
-            val v = trie.read(stateKey)
-            readCache.update(stateKey, v)
-            v
+    getByStateKey(StateKey.computeStorageStateKey(serviceId, storageKey))
 
   def put(serviceId: Long, storageKey: JamBytes, value: JamBytes): Unit =
     val stateKey = StateKey.computeStorageStateKey(serviceId, storageKey)
@@ -37,9 +34,20 @@ final class ServiceStorageView(trie: StateTrie):
     trie.read(stateKey)
 
   def getByStateKey(stateKey: JamBytes): Option[JamBytes] =
-    pending.get(stateKey) match
-      case Some(staged) => staged
-      case None         =>
+    readStaged(pending, stateKey)
+
+  /**
+   * Reads `stateKey` as it was when this view was forked, ignoring this view's own writes since. Every service of an
+   * accpar batch starts from the same state, the posterior of the previous batch, so this is what a service sees
+   * of another service's data. A root view reads its current staged state.
+   */
+  def getAtBatchStart(stateKey: JamBytes): Option[JamBytes] =
+    readStaged(batchStart.getOrElse(pending), stateKey)
+
+  private def readStaged(staged: Map[JamBytes, Option[JamBytes]], stateKey: JamBytes): Option[JamBytes] =
+    staged.get(stateKey) match
+      case Some(value) => value
+      case None        =>
         readCache.get(stateKey) match
           case Some(cached) => cached
           case None         =>
@@ -94,17 +102,34 @@ final class ServiceStorageView(trie: StateTrie):
   def pendingStateKeys: collection.Set[JamBytes] = pending.keySet
 
   /**
-   * A view for one service's accumulation run concurrently with others in the same accpar batch 
-   * It starts from this view's staged writes and keeps its own writes, savepoints and read cache until
-   * [[absorb]]. This view must not change while forks are in use.
+   * A view for one service's accumulation run in an accpar batch. It starts from this view's
+   * staged writes and keeps its own writes and savepoints until [[absorb]]. Forks run concurrently must not share the
+   * read cache; forks run one after another may. This view must not change while forks are in use, except through
+   * [[absorb]].
    */
-  def fork(): ServiceStorageView =
-    val child = new ServiceStorageView(trie)
+  def fork(shareReadCache: Boolean = false): ServiceStorageView =
+    val child = new ServiceStorageView(trie, if shareReadCache then readCache else mutable.HashMap.empty)
     child.pending = pending
+    child.batchStart = Some(pending)
     child
 
-  /** Applies the writes `child` (from [[fork]]) made since it was forked. */
+  /**
+   * Applies the writes `child` (from [[fork]]) made since it was forked. Two services of one batch may not both alter
+   * the same service, so a key that another absorbed fork already set to a
+   * different value makes the block invalid, as conflicting account updates do.
+   */
   def absorb(child: ServiceStorageView): Unit =
+    val base = child.batchStart.getOrElse(
+      throw new IllegalArgumentException("absorb expects a view made by fork")
+    )
     child.pending.foreach { (k, v) =>
-      if !pending.get(k).contains(v) then pending = pending.updated(k, v)
+      val inherited = base.get(k)
+      // The fork shares its base's entries, so an entry it did not write is the very same Option instance.
+      if !inherited.exists(_ eq v) then
+        pending.get(k) match
+          case Some(current) if !inherited.exists(_ eq current) && current != v =>
+            throw new RuntimeException(
+              s"Conflicting parallel storage updates for key ${k.toHex}: block invalid"
+            )
+          case _ => pending = pending.updated(k, v)
     }

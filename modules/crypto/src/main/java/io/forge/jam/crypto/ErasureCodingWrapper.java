@@ -92,27 +92,6 @@ public class ErasureCodingWrapper {
 	// Native method declarations
 
 	/**
-	 * Encode original shards into recovery shards using Reed-Solomon erasure coding.
-	 *
-	 * @param original      2D byte array of original shards (each shard must have even length)
-	 * @param recoveryCount Number of recovery shards to generate
-	 * @return 2D byte array of recovery shards, or null on failure
-	 */
-	public static native byte[][] encode(byte[][] original, int recoveryCount);
-
-	/**
-	 * Recover original shards from a subset of recovery/original shards.
-	 *
-	 * @param shards        2D byte array of available shards
-	 * @param indices       Array of shard indices (index < originalCount means original shard,
-	 *                      index >= originalCount means recovery shard at index - originalCount)
-	 * @param originalCount Total number of original shards
-	 * @param recoveryCount Total number of recovery shards
-	 * @return 2D byte array of recovered original shards, or null on failure
-	 */
-	public static native byte[][] recover(byte[][] shards, int[] indices, int originalCount, int recoveryCount);
-
-	/**
 	 * Erasure-code a whole piece of data (GP C_k) in one call, coding every 2-byte position of the shards at once.
 	 *
 	 * @param data          The data, at most originalCount * 2 * k bytes; the remainder is zero padding
@@ -122,6 +101,20 @@ public class ErasureCodingWrapper {
 	 * @return originalCount + recoveryCount shards of 2 * k bytes, or null on failure
 	 */
 	public static native byte[][] chunk(byte[] data, int originalCount, int recoveryCount, int k);
+
+	/**
+	 * Erasure-code many pieces of one length (GP C_k of each) in one call, as one code over every piece's words.
+	 *
+	 * @param data          The pieces end to end, each at most originalCount * 2 * k bytes
+	 * @param segmentCount  Number of pieces in data
+	 * @param originalCount Number of original shards (basic size / 2)
+	 * @param recoveryCount Number of recovery shards to generate
+	 * @param k             Number of 2-byte words per shard of one piece
+	 * @return originalCount + recoveryCount shards end to end, each segmentCount * 2 * k bytes holding every piece's
+	 *         shard in order, or null on failure
+	 */
+	public static native byte[] chunkSegments(byte[] data, int segmentCount, int originalCount, int recoveryCount,
+			int k);
 
 	/**
 	 * Reconstruct a whole piece of data (GP R_k) in one call from equal-length shards.

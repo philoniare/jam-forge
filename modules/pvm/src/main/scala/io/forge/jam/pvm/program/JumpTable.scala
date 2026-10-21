@@ -44,7 +44,8 @@ final case class JumpTable(blob: Array[Byte], entrySize: Int) extends Iterable[I
    * @return Some(target) if valid, None otherwise
    */
   def getByIndex(index: Int): Option[Int] =
-    if entrySize == 0 then None
+    // A negative index comes from a djump address ≥ 2^31 + 2; it is past |j| so the jump panics
+    if entrySize == 0 || index < 0 then None
     else
       val start = index.toLong * entrySize
       if start > Int.MaxValue then None

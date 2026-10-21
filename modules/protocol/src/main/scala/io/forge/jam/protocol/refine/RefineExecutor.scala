@@ -24,10 +24,6 @@ final case class RefineResult(
   */
 class RefineExecutor(val config: ChainConfig):
 
-  // LRU-bounded module cache keyed by the work item's code hash, mirroring the
-  // accumulate executor's cache.
-  private val MAX_MODULE_CACHE_SIZE = 64
-  private val moduleCache = new BoundedModuleCache(MAX_MODULE_CACHE_SIZE)
   private val MAX_MACHINE_MODULE_CACHE_SIZE = 32
   private val machineModuleCache = new BoundedModuleCache(
     MAX_MACHINE_MODULE_CACHE_SIZE
@@ -136,8 +132,4 @@ class RefineExecutor(val config: ChainConfig):
       code: Array[Byte],
       codeHash: JamBytes
   ): Option[InterpretedModule] =
-    moduleCache.getOrCompile(codeHash) {
-      ServiceCode.parseBlob(code).flatMap { blob =>
-        InterpretedModule.create(blob).toOption
-      }
-    }
+    ServiceCode.module(codeHash, code)

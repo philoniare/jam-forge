@@ -94,3 +94,46 @@ class BinaryMerkleSpec extends AnyFunSuite with Matchers:
     BinaryMerkle.subtreePage(leaves, 6, 0).length shouldBe 64
     BinaryMerkle.subtreePage(leaves, 6, 1).length shouldBe 6
   }
+
+  private def nodeRef(v: IndexedSeq[Array[Byte]]): Array[Byte] =
+    if v.isEmpty then BinaryMerkle.ZeroHash
+    else if v.length == 1 then v.head
+    else
+      val mid = (v.length + 1) / 2
+      h(nodeP, nodeRef(v.take(mid)), nodeRef(v.drop(mid)))
+
+  private def traceRef(v: IndexedSeq[Array[Byte]], i: Int): List[Array[Byte]] =
+    if v.length <= 1 then Nil
+    else
+      val mid = (v.length + 1) / 2
+      if i < mid then nodeRef(v.drop(mid)) :: traceRef(v.take(mid), i)
+      else nodeRef(v.take(mid)) :: traceRef(v.drop(mid), i - mid)
+
+  private def values(n: Int): IndexedSeq[Array[Byte]] =
+    (0 until n).map(i => Array[Byte](i.toByte, (i >> 8).toByte, 7))
+
+  test("GP: Tree gives N and every trace T of the per-call functions") {
+    for n <- (0 to 40) ++ Seq(63, 64, 65, 341, 1023) do
+      withClue(s"n=$n: ") {
+        val vs = values(n)
+        val tree = BinaryMerkle.Tree(vs)
+        tree.root shouldBe nodeRef(vs)
+        BinaryMerkle.node(vs) shouldBe nodeRef(vs)
+        for i <- vs.indices do
+          tree.trace(i).map(_.toSeq) shouldBe traceRef(vs, i).map(_.toSeq)
+          BinaryMerkle.trace(vs, i).map(_.toSeq) shouldBe traceRef(vs, i).map(_.toSeq)
+          if n > 1 then BinaryMerkle.verifyTrace(tree.root, vs(i), i, n, tree.trace(i)) shouldBe true
+      }
+  }
+
+  test("GP: pagedJustifications gives every page's justifySubPath and subtreePage") {
+    for n <- Seq(0, 1, 2, 63, 64, 65, 130, 1000, 3072) do
+      withClue(s"n=$n: ") {
+        val vs = values(n)
+        val paged = BinaryMerkle.pagedJustifications(vs, 6)
+        paged.length shouldBe (n + 63) / 64
+        for (page, (path, leaves)) <- paged.indices.zip(paged) do
+          path.map(_.toSeq) shouldBe BinaryMerkle.justifySubPath(vs, 6, page).map(_.toSeq)
+          leaves.map(_.toSeq) shouldBe BinaryMerkle.subtreePage(vs, 6, page).map(_.toSeq)
+      }
+  }

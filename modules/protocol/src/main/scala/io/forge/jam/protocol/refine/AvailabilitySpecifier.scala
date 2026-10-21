@@ -20,10 +20,7 @@ object AvailabilitySpecifier:
     * zero-padded to Csegmentsize.
     */
   def pagedProofs(segments: IndexedSeq[Array[Byte]]): IndexedSeq[Array[Byte]] =
-    val pageCount = (segments.length + 63) / 64
-    (0 until pageCount).map { i =>
-      val path = BinaryMerkle.justifySubPath(segments, 6, i)
-      val page = BinaryMerkle.subtreePage(segments, 6, i)
+    BinaryMerkle.pagedJustifications(segments, 6).map { (path, page) =>
       val out = new java.io.ByteArrayOutputStream(Csegmentsize.toInt)
       out.write(JamCodecs.encodeCompactInteger(path.length.toLong))
       path.foreach(out.write)
@@ -88,17 +85,9 @@ object AvailabilitySpecifier:
     if all.isEmpty then
       Right(IndexedSeq.fill(config.validatorCount)(BinaryMerkle.ZeroHash))
     else
-      // Erasure-code each segment: validatorCount chunks per segment.
-      val perSegment = all.map { seg =>
-        ErasureCoding.chunk(seg, config.ecPieceSize, config.validatorCount)
-      }
-      perSegment.collectFirst { case Left(e) => e } match
-        case Some(e) => Left(s"segment erasure coding failed: ${e.getMessage}")
-        case None =>
-          val matrix = perSegment.map(_.toOption.get) // segment -> validator -> chunk
-          Right(
-            (0 until config.validatorCount).map { v =>
-              val column: IndexedSeq[Array[Byte]] = matrix.map(row => row(v))
-              BinaryMerkle.merklizeWB(column)
-            }
-          )
+      // Erasure-code every segment in one call: validatorCount chunks per segment.
+      ErasureCoding
+        .chunkSegments(all, config.ecPieceSize, config.validatorCount)
+        .left
+        .map(e => s"segment erasure coding failed: ${e.getMessage}")
+        .map(shards => (0 until config.validatorCount).map(v => BinaryMerkle.merklizeWB(shards.column(v))))

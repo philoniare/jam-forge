@@ -1,26 +1,35 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.{ChainConfig, Hashing}
+import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.primitives.Hash
 import org.crac.{Context, Core, Resource}
 
 import java.nio.file.{Files, Path, Paths}
+import java.util.Comparator
+import scala.jdk.CollectionConverters.*
+import scala.util.Using
+import scala.util.control.NonFatal
 
-/** CRaC warmup + checkpoint runner.
-  */
+/** JIT warmup before the fuzz socket opens, plus the legacy CRaC checkpoint commands.  */
 object WarmupRunner extends Resource:
 
-  /** Warm the JVM by replaying all available traces, take a CRaC checkpoint,
-    * and on restore launch the fuzz server. Returns only after restore (the
-    * original process exits inside Core.checkpointRestore()).
+  /** Passes over the warmup corpus unless `JAM_WARMUP_ROUNDS` says otherwise. */
+  val DefaultRounds: Int = 2
+
+  /** What a warmup run imported. */
+  final case class Summary(traces: Int, imported: Int, mismatches: Int, millis: Long)
+
+  /** Warm the JVM by replaying all available traces, take a CRaC checkpoint, and on restore launch the fuzz server.
+    * Returns only after restore (the original process exits inside Core.checkpointRestore()).
     *
     * @param socketPath
     *   socket the restored server binds (must exist at restore time)
     * @return
-    *   true if restore-path executed cleanly; false if checkpoint was
-    *   unavailable
+    *   true if restore-path executed cleanly; false if checkpoint was unavailable
     */
   def warmupAndCheckpoint(socketPath: Path): Boolean =
-    runWarmup()
+    runWarmup(resolveTracesDir(baseDir), DefaultRounds)
 
     Core.getGlobalContext.register(WarmupRunner)
 
@@ -33,6 +42,8 @@ object WarmupRunner extends Resource:
       println("Restored from CRaC checkpoint.")
       true
     catch
+      // No CRaC JVM, no -XX:CRaCCheckpointTo, or CRIU refused (unprivileged container): the warmup already
+      // happened in this process, so serve from it rather than dying before the socket opens.
       case e: Exception =>
         println(
           s"CRaC checkpoint not available (${e.getClass.getSimpleName}: ${e.getMessage}); " +
@@ -40,18 +51,28 @@ object WarmupRunner extends Resource:
         )
         false
 
-  def warmupIfEnabled(env: String => Option[String] = sys.env.get): Unit =
-    if env("JAM_WARMUP").contains("0") then println("Warmup disabled (JAM_WARMUP=0).")
+  /** Warm the JIT before the fuzz server binds its socket, without a CRaC checkpoint. Used when the target is started
+    * through the fuzz packaging env (`JAM_FUZZ`), which is how W3F's `target.py` launches every target. Skipped when
+    * `JAM_WARMUP=0` or when no binary warmup traces are found, so a missing corpus never stops the server from
+    * starting. `JAM_WARMUP_ROUNDS` sets the number of passes over the corpus.
+    */
+  def warmupIfEnabled(env: String => Option[String] = sys.env.get): Option[Summary] =
+    if env("JAM_WARMUP").contains("0") then
+      println("Warmup disabled (JAM_WARMUP=0).")
+      None
     else
       val tracesDir = resolveTracesDir(baseDir, env)
-      if Files.isDirectory(tracesDir) then runWarmup(tracesDir)
-      else println(s"No warmup traces at $tracesDir; starting cold.")
+      val rounds = env("JAM_WARMUP_ROUNDS").flatMap(_.toIntOption).filter(_ >= 0).getOrElse(DefaultRounds)
+      if Files.isDirectory(tracesDir) then runWarmup(tracesDir, rounds)
+      else
+        println(s"No warmup traces at $tracesDir; starting cold.")
+        None
 
-  /** Standalone warmup for the legacy `warmup` CLI. Warms then checkpoints,
-    * then exits — does not start a server post-restore.
+  /** Standalone warmup for the legacy `warmup` CLI. Warms then checkpoints, then exits — does not start a server
+    * post-restore.
     */
-  def run(_args: List[String]): Unit =
-    runWarmup()
+  def run(): Unit =
+    runWarmup(resolveTracesDir(baseDir), DefaultRounds)
     Core.getGlobalContext.register(WarmupRunner)
     println("\nTriggering CRaC checkpoint...")
     try
@@ -65,48 +86,83 @@ object WarmupRunner extends Resource:
         e.printStackTrace()
         sys.exit(1)
 
-  private def runWarmup(): Unit = runWarmup(resolveTracesDir(baseDir))
+  /** The binary traces to warm on: `tracesDir` itself if it holds one, else each subdirectory that does, by name. */
+  private[conformance] def findTraces(tracesDir: Path): Vector[FuzzClient.TraceDir] =
+    FuzzClient.TraceDir.find(tracesDir) match
+      case Some(trace) => Vector(trace)
+      case None =>
+        Using.resource(Files.list(tracesDir))(_.iterator().asScala.filter(Files.isDirectory(_)).toVector)
+          .sortBy(_.getFileName.toString)
+          .flatMap(FuzzClient.TraceDir.find)
 
-  private def runWarmup(tracesDir: Path): Unit =
-
-    println("=== CRaC Warmup Runner ===")
-    println(s"Base directory: $baseDir")
+  /** Replay every trace under `tracesDir` `rounds` times through a temporary fuzz server. Never throws: a warmup
+    * problem is reported and the caller starts the real server anyway.
+    */
+  private[conformance] def runWarmup(tracesDir: Path, rounds: Int): Option[Summary] =
+    println("=== Warmup ===")
     println(s"Traces directory: $tracesDir")
+    try
+      val traces = if Files.isDirectory(tracesDir) then findTraces(tracesDir) else Vector.empty
+      if traces.isEmpty || rounds == 0 then
+        println(s"No binary traces (genesis.bin + NNNNNNNN.bin) under $tracesDir; starting cold.")
+        None
+      else
+        val summary = replayThroughSocket(traces, rounds)
+        println(
+          s"Warmup complete: ${summary.traces} trace replays, ${summary.imported} blocks in ${summary.millis}ms, " +
+            s"${summary.mismatches} root mismatches"
+        )
+        if summary.imported == 0 then
+          println("WARNING: No successful block imports during warmup; JIT may not be fully warmed.")
+        Some(summary)
+    catch
+      case NonFatal(e) =>
+        println(s"WARNING: warmup failed (${e.getClass.getSimpleName}: ${e.getMessage}); starting anyway.")
+        None
 
-    if !Files.exists(tracesDir) then
-      println(s"ERROR: Traces directory not found: $tracesDir")
-      println(
-        "Set JAM_TRACES_DIR or place traces under jam-conformance/fuzz-reports/0.8.0/traces"
-      )
-      sys.exit(1)
+  // The warmup corpus is TINY (the image ships jamtestvectors' preimages traces), whatever spec the real server uses;
+  // the code paths compiled are the same.
+  private val warmupConfig = ChainConfig.TINY
 
-    println("Processing all available trace directories...")
+  private def replayThroughSocket(traces: Vector[FuzzClient.TraceDir], rounds: Int): Summary =
+    val dir = Files.createTempDirectory("jam-warmup")
+    val server = FuzzServer.start(dir.resolve("warmup.sock"), warmupConfig, FileLogger.noop)
+    val start = System.nanoTime()
+    var imported = 0
+    var mismatches = 0
+    try
+      for _ <- 1 to rounds; trace <- traces do
+        val (ok, bad) = replay(server.socketPath, trace)
+        imported += ok
+        mismatches += bad
+    finally
+      server.close()
+      Using.resource(Files.walk(dir))(_.sorted(Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p)))
+    Summary(traces.size * rounds, imported, mismatches, (System.nanoTime() - start) / 1_000_000)
 
-    val runner = new JsonTraceRunner(
-      ChainConfig.TINY,
-      verbose = false,
-      compareKeyvals = false
-    )
-
-    val startTime = System.nanoTime()
-    val results = runner.runAllTraces(tracesDir, maxTraces = 3)
-    val elapsed = (System.nanoTime() - startTime) / 1_000_000
-
-    val successes = results.count(_.isInstanceOf[JsonTraceResult.Success])
-    val failures = results.count(_.isInstanceOf[JsonTraceResult.Failure])
-    val errors = results.count(_.isInstanceOf[JsonTraceResult.Error])
-
-    println(s"\n=== Warmup Complete ===")
-    println(s"Processed: ${results.size} blocks in ${elapsed}ms")
-    println(s"Success: $successes, Failures: $failures, Errors: $errors")
-    println(s"Throughput: ${
-        if elapsed > 0 then results.size * 1000 / elapsed else 0
-      } blocks/sec")
-
-    if successes == 0 then
-      println(
-        "WARNING: No successful block imports during warmup; JIT may not be fully warmed."
-      )
+  /** One fuzzer session: handshake, Initialize from the genesis, every step as ImportBlock, then a GetState for the
+    * last imported block. Returns (blocks whose reply root matched, blocks that did not).
+    */
+  private def replay(socket: Path, trace: FuzzClient.TraceDir): (Int, Int) =
+    Using.resource(FuzzClient.connect(socket, warmupConfig)) { client =>
+      client.request(FuzzClient.fuzzerPeerInfo("jam-forge-warmup"))
+      val genesis = trace.readGenesis(warmupConfig)
+      client.request(ProtocolMessage.InitializeMsg(Initialize(genesis.header, genesis.state.keyvals, Nil)))
+      var ok = 0
+      var bad = 0
+      var lastHeader = Option.empty[Hash]
+      for step <- trace.steps do
+        val traceStep = trace.readStep(step, warmupConfig)
+        client.request(ProtocolMessage.ImportBlockMsg(ImportBlock(traceStep.block))) match
+          case ProtocolMessage.StateRootMsg(root) if root.hash == traceStep.postState.stateRoot =>
+            ok += 1
+            lastHeader = Some(Hashing.blake2b256(traceStep.block.header.encode))
+          case _ => bad += 1
+      // A trace whose later blocks were rejected may have pruned that state; the server then ends the session.
+      try lastHeader.foreach(h => client.request(ProtocolMessage.GetStateMsg(GetState(h))))
+      catch case NonFatal(_) => ()
+      (ok, bad)
+    }
 
   private def baseDir: String = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
 

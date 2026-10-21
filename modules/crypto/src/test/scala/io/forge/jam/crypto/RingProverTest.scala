@@ -92,3 +92,44 @@ class RingProverTest extends AnyFunSuite with Matchers:
     BandersnatchVrf.verifyRingProof(proof, commitment, otherEntropy, UByte(0), ringSize) shouldBe None
     BandersnatchVrf.verifyRingProof(proof, commitment, entropy, UByte(1), ringSize) shouldBe None
   }
+
+  test("a ring call for a ring size never initialised fails on its own and leaves ring checks working") {
+    assume(available)
+    val ringSize = 6
+    val secrets = (0 until ringSize).map(devSecret)
+    val ringKeys = secrets.map(s => BandersnatchPublicKey(BandersnatchWrapper.publicFromSecret(s))).toList
+    val commitment = BandersnatchVrf.generateRingRoot(ringKeys, ringSize).get
+    val entropy = Hash(Array.fill[Byte](32)(3))
+    val proof = BandersnatchVrf.createRingProof(secrets(1), ringKeys, 1, entropy, UByte(200)).get
+
+    // Size 11 was never set up: each call fails with an exception instead of panicking under the context lock.
+    val uninitialised = 11
+    an[RuntimeException] should be thrownBy
+      BandersnatchWrapper.getVerifierCommitment(uninitialised, new Array[Byte](uninitialised * 32))
+    an[RuntimeException] should be thrownBy BandersnatchWrapper.verifierRingVrfVerify(
+      entropy.bytes,
+      200.toByte,
+      proof.toArray,
+      commitment.toArray,
+      uninitialised
+    )
+    an[RuntimeException] should be thrownBy BandersnatchWrapper.ringVrfSign(
+      secrets(1),
+      new Array[Byte](uninitialised * 32),
+      1,
+      uninitialised,
+      entropy.bytes,
+      0.toByte
+    )
+
+    // A poisoned lock would make every one of these fail from here on.
+    // (The reversed ring misses the Scala-side ring-root cache, so this reaches the native builder.)
+    BandersnatchVrf.generateRingRoot(ringKeys.reverse, ringSize).isDefined shouldBe true
+    BandersnatchVrf.verifyRingProof(proof, commitment, entropy, UByte(200), ringSize).isDefined shouldBe true
+    BandersnatchVrf.createRingProof(secrets(4), ringKeys, 4, entropy, UByte(7)).isDefined shouldBe true
+  }
+
+  test("verifierRingVrfVerify takes the attempt as a byte, as the native side reads it (jbyte)") {
+    val m = classOf[BandersnatchWrapper].getMethods.find(_.getName == "verifierRingVrfVerify").get
+    m.getParameterTypes()(1) shouldBe java.lang.Byte.TYPE
+  }

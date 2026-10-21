@@ -14,7 +14,8 @@ object BinaryMerkle:
   private val NodePrefix = "node".getBytes("UTF-8")
   private val LeafPrefix = "leaf".getBytes("UTF-8")
 
-  val blake2b: Hasher = data => Hashing.blake2b256(data).bytes.toArray
+  // The digest's own array: the Hash wrapping it is dropped here, so nothing else holds it.
+  val blake2b: Hasher = data => Hashing.blake2b256(data).toArrayUnsafe
 
   private def hashConcat(h: Hasher, parts: Array[Byte]*): Array[Byte] =
     val total = parts.map(_.length).sum
@@ -31,17 +32,16 @@ object BinaryMerkle:
     * ceil(n/2).
     */
   def node(values: IndexedSeq[Array[Byte]], h: Hasher = blake2b): Array[Byte] =
-    values.length match
+    nodeOf(values, 0, values.length, h)
+
+  /** N over `values(lo until hi)`, without slicing. */
+  private def nodeOf(values: IndexedSeq[Array[Byte]], lo: Int, hi: Int, h: Hasher): Array[Byte] =
+    hi - lo match
       case 0 => ZeroHash
-      case 1 => values.head
+      case 1 => values(lo)
       case n =>
-        val mid = (n + 1) / 2
-        hashConcat(
-          h,
-          NodePrefix,
-          node(values.slice(0, mid), h),
-          node(values.slice(mid, n), h)
-        )
+        val mid = lo + (n + 1) / 2
+        hashConcat(h, NodePrefix, nodeOf(values, lo, mid, h), nodeOf(values, mid, hi, h))
 
   /** Well-balanced binary Merkle root, merklizewb:
     * H(v0) for singletons, N(v) otherwise (zero hash for empty).
@@ -59,13 +59,62 @@ object BinaryMerkle:
       index: Int,
       h: Hasher = blake2b
   ): List[Array[Byte]] =
-    if values.length <= 1 then Nil
-    else
-      val mid = (values.length + 1) / 2
-      val (opposite, into, nextIndex) =
-        if index < mid then (values.slice(mid, values.length), values.slice(0, mid), index)
-        else (values.slice(0, mid), values.slice(mid, values.length), index - mid)
-      node(opposite, h) :: trace(into, nextIndex, h)
+    val out = List.newBuilder[Array[Byte]]
+    var lo = 0
+    var hi = values.length
+    while hi - lo > 1 do
+      val mid = lo + (hi - lo + 1) / 2
+      if index < mid then
+        out += nodeOf(values, mid, hi, h)
+        hi = mid
+      else
+        out += nodeOf(values, lo, mid, h)
+        lo = mid
+    out.result()
+
+  /**
+   * N over `values`, with the value of every subtree kept, so its root and all its traces T cost one hash per inner
+   * node in total. Calling [[trace]] for each of n leaves instead rehashes about n nodes per call.
+   */
+  final class Tree(values: IndexedSeq[Array[Byte]], h: Hasher = blake2b):
+    // Children are null at the leaves.
+    private final class Node(val value: Array[Byte], val left: Node, val right: Node)
+
+    private def build(lo: Int, hi: Int): Node =
+      hi - lo match
+        case 0 => Node(ZeroHash, null, null)
+        case 1 => Node(values(lo), null, null)
+        case n =>
+          val mid = lo + (n + 1) / 2
+          val l = build(lo, mid)
+          val r = build(mid, hi)
+          Node(hashConcat(h, NodePrefix, l.value, r.value), l, r)
+
+    private val top = build(0, values.length)
+
+    /** N(values). */
+    def root: Array[Byte] = top.value
+
+    /** T(values, index): the sibling of each node from the root down to leaf `index`. */
+    def trace(index: Int): List[Array[Byte]] =
+      val out = List.newBuilder[Array[Byte]]
+      var node = top
+      var count = values.length
+      var i = index
+      while count > 1 do
+        val mid = (count + 1) / 2
+        val l = node.left
+        val r = node.right
+        if i < mid then
+          out += r.value
+          node = l
+          count = mid
+        else
+          out += l.value
+          node = r
+          i -= mid
+          count -= mid
+      out.result()
 
   /** Verify a trace T(values, index) against a well-balanced root: recompute
     * the root from `leaf` (the raw value at `index` among `leafCount` leaves)
@@ -133,6 +182,24 @@ object BinaryMerkle:
   ): List[Array[Byte]] =
     val full = trace(constancyPreprocess(values, h), (1 << x) * pageIndex, h)
     full.take(pathLength(values.length, x))
+
+  /**
+   * For every 2^x-leaf page of `values` in order, its [[justifySubPath]] and its [[subtreePage]], from one
+   * preprocessing and one tree: each segment is hashed once, not once per page.
+   */
+  def pagedJustifications(
+      values: IndexedSeq[Array[Byte]],
+      x: Int,
+      h: Hasher = blake2b
+  ): IndexedSeq[(List[Array[Byte]], IndexedSeq[Array[Byte]])] =
+    val pageSize = 1 << x
+    val leaves = constancyPreprocess(values, h)
+    val tree = Tree(leaves, h)
+    val depth = pathLength(values.length, x)
+    (0 until (values.length + pageSize - 1) / pageSize).map { i =>
+      val start = i * pageSize
+      (tree.trace(start).take(depth), leaves.slice(start, math.min(values.length, start + pageSize)))
+    }
 
   /** ceil(log2(max(1, n))) - x, floored at 0: the number of path elements
     * from the root to a 2^x-leaf subtree.

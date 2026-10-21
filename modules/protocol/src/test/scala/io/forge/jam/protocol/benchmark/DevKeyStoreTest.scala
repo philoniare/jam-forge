@@ -39,7 +39,7 @@ class DevKeyStoreTest extends AnyFunSpec with Matchers:
       signature.length shouldBe 64
 
       val verified = io.forge.jam.crypto.Ed25519ZebraWrapper.verify(v0.ed25519Public, message, signature)
-      verified(0) shouldBe 1.toByte
+      verified shouldBe true
 
     it("should produce valid Bandersnatch VRF signatures"):
       val v0 = DevKeyStore.getValidator(0)

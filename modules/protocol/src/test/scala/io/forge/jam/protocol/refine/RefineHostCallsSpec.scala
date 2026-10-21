@@ -612,6 +612,42 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     regsAfter(0) shouldBe 0xffff0000L
   }
 
+  test("GP: INVOKE stores pc 0 after a guest halt, and EXPUNGE returns it") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // LoadImm r7 = 42; JumpIndirect r0 + 0 (r0 = 0xffff0000 → halt at pc 3).
+    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
+    ctx.innerPvms(0L).pc shouldBe 0L
+
+    instance.setReg(7, 0L)
+    hc.dispatch(HostCall.EXPUNGE, instance)
+    instance.reg(7) shouldBe 0L
+  }
+
+  test("GP: INVOKE stores pc 0 after a guest panic") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+
+    // LoadImm r7 = 42; trap at pc 3.
+    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L)
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.PANIC
+    ctx.innerPvms(0L).pc shouldBe 0L
+  }
+
   test("INVOKE reports HOST on guest ecalli and resumes past it") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)

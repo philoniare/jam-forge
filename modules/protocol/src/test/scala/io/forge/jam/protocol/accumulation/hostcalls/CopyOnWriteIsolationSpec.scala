@@ -59,15 +59,18 @@ class CopyOnWriteIsolationSpec extends HostCallTestBase:
     ctx.x.accounts(100L).info.balance shouldBe 1L // current state changed
   }
 
-  test("a foreign-service raw read bypasses pending writes (trace-00002244)") {
+  test("GP: a foreign-service raw read sees the batch start, not a sibling's writes (trace-00002244, eq. 12.18)") {
     val key = JamBytes(Array.fill[Byte](31)(0xab.toByte))
     val preBlock = JamBytes(Array[Byte](1, 1, 1))
-    val pendingWrite = JamBytes(Array[Byte](2, 2, 2))
+    val earlierBatch = JamBytes(Array[Byte](2, 2, 2))
+    val sameBatch = JamBytes(Array[Byte](3, 3, 3))
 
     val trie = StateTrie.empty(new InMemoryTrieBackend())
     trie.update(Seq((key, Some(preBlock)))) // committed pre-block value
-    val view = new ServiceStorageView(trie)
-    view.putByStateKey(key, pendingWrite) // an in-flight staged write
+    val parent = new ServiceStorageView(trie)
+    parent.putByStateKey(key, earlierBatch) // written by an earlier batch of this block
+    val view = parent.fork() // this service's view of the current batch
+    view.putByStateKey(key, sameBatch) // an in-flight write of this batch
 
     val ownService = 100L
     val foreignService = 200L
@@ -81,9 +84,9 @@ class CopyOnWriteIsolationSpec extends HostCallTestBase:
       storageView = Some(view)
     )
 
-    // The owning service observes its own in-flight pending write...
-    ctx.readRawDataFor(ownService, key) shouldBe Some(pendingWrite)
-    // ...but a foreign service must observe only the pre-block (trie) value,
-    // never another service's staged pending write.
-    ctx.readRawDataFor(foreignService, key) shouldBe Some(preBlock)
+    // The owning service observes its own in-flight write...
+    ctx.readRawDataFor(ownService, key) shouldBe Some(sameBatch)
+    // ...while a read of another service's data sees the state the batch started from: earlier batches' writes, but
+    // no write made during this batch.
+    ctx.readRawDataFor(foreignService, key) shouldBe Some(earlierBatch)
   }
