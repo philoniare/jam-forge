@@ -32,10 +32,12 @@ class BlockGenerator(
   config: ChainConfig,
   validators: Array[DevKeyStore.ValidatorKeys],
   store: StateTrieStore,
-  seed: Long = 42L
+  seed: Long = 42L,
+  /** Hash of the genesis header, the first block's parent (default: the last recent-history entry). */
+  genesisHeaderHash: Option[Hash] = None
 ):
 
-  private var lastHeaderHash: Option[Hash] = None
+  private var lastHeaderHash: Option[Hash] = genesisHeaderHash
   private var blockCounter = 0L
   private var packageNonce = 0
   private val rng = new Random(seed)
@@ -154,7 +156,7 @@ class BlockGenerator(
       val parentHash = lastHeaderHash.getOrElse {
         recentHistory.lastOption.map(_.headerHash).getOrElse(Hash.zero)
       }
-      val assurances = buildAssurances(parentHash, bitfield)
+      val assurances = buildAssurances(parentHash, bitfield, view.validators.current.size)
       (List.empty, assurances)
     else if recentHistory.size >= 2 then
       val guarantees = scala.collection.mutable.ListBuffer[GuaranteeExtrinsic]()
@@ -170,15 +172,18 @@ class BlockGenerator(
     else
       (List.empty, List.empty)
 
+  /** One bit per core, `ceil(C/8)` octets (GP 0.8.0 §reporting_assurance). */
   private def buildAssuranceBitfield(core0: Boolean, core1: Boolean): Array[Byte] =
-    val b = (if core0 then 1 else 0) | (if core1 then 2 else 0)
-    Array(b.toByte)
+    val bits = new Array[Byte]((config.coresCount + 7) / 8)
+    bits(0) = ((if core0 then 1 else 0) | (if core1 then 2 else 0)).toByte
+    bits
 
-  private def buildAssurances(parentHash: Hash, bitfield: Array[Byte]): List[AssuranceExtrinsic] =
+  private def buildAssurances(parentHash: Hash, bitfield: Array[Byte], setSize: Int): List[AssuranceExtrinsic] =
     val serializedData = parentHash.bytes ++ bitfield
     val dataHash = Hashing.blake2b256(serializedData)
     val message = constants.JAM_AVAILABLE_BYTES ++ dataHash.bytes
-    (0 until 5).map { vi =>
+    // A core becomes available with more than two-thirds of the validators assuring it.
+    (0 until (2 * setSize) / 3 + 1).map { vi =>
       val sig = Ed25519ZebraWrapper.sign(validators(vi).ed25519Secret, message)
       AssuranceExtrinsic(parentHash, JamBytes(bitfield), ValidatorIndex(vi), Ed25519Signature(sig))
     }.toList
@@ -247,7 +252,9 @@ class BlockGenerator(
     else List.empty
 
     val report = WorkReport(
-      packageSpec = PackageSpec(packageHash, UInt(100 + rng.nextInt(5000)), Hash.zero, UShort(config.validatorCount), Hash.zero, UShort(0)),
+      packageSpec = PackageSpec(packageHash, UInt(100 + rng.nextInt(5000)), Hash.zero, UShort(view.validators.current.size), Hash.zero,
+        // Segment count = exports reported by the digests (other targets reject a mismatch as bad_exports_count).
+        UShort(results.map(_.refineLoad.exports.toInt).sum)),
       context = Context(
         anchor = anchorEntry.headerHash,
         anchorSlot = Timeslot(anchorEntry.slot.toInt),
@@ -271,7 +278,7 @@ class BlockGenerator(
     val sigMessage = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
 
     val entropy = view.entropy.pool
-    val coreAssignments = calculateCoreAssignments(entropy(2), slot, config)
+    val coreAssignments = calculateCoreAssignments(entropy(2), slot, view.validators.current.size)
     val assignedValidators = coreAssignments.zipWithIndex
       .filter(_._1 == coreIndex).map(_._2).take(3)
 
@@ -294,11 +301,12 @@ class BlockGenerator(
 
   // --- Helpers ---
 
-  private def calculateCoreAssignments(randomness: Hash, slot: Long, config: ChainConfig): List[Int] =
-    val source = (0 until config.validatorCount).map(i => (config.coresCount * i) / config.validatorCount).toList
-    val shuffledIndices = Shuffle.jamComputeShuffle(config.validatorCount, randomness)
+  /** P(|kappa'|, eta'_2, t): guarantor cores for the active set (GP 0.8.0 §reporting_assurance "Guarantor Assignments"). */
+  private def calculateCoreAssignments(randomness: Hash, slot: Long, setSize: Int): List[Int] =
+    val cores = math.max(1, setSize / 3)
+    val shuffledIndices = Shuffle.jamComputeShuffle(setSize, randomness)
     val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
-    shuffledIndices.map(idx => math.floorMod(source(idx) + shift, config.coresCount))
+    shuffledIndices.map(idx => math.floorMod(idx / 3 + shift, cores))
 
   private def findSealingValidator(view: TrieBackedJamState, slotIndex: Int): (Int, Array[Byte]) =
     view.gamma.st match
@@ -338,7 +346,7 @@ class BlockGenerator(
     hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
   def reset(): Unit =
-    lastHeaderHash = None
+    lastHeaderHash = genesisHeaderHash
     blockCounter = 0
     packageNonce = 0
     recentPackageHashes.clear()

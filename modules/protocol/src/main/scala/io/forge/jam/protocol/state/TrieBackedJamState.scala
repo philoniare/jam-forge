@@ -896,15 +896,15 @@ object TrieBackedJamState:
       svc: List[ServiceStatisticsEntry],
       config: ChainConfig
   ): JamBytes =
-    val curPadded = cur.padTo(config.validatorCount, StatCount.zero)
-    val prevPadded = prev.padTo(config.validatorCount, StatCount.zero)
+    // |pi_V| = |kappa| and |pi_L| = |lambda| (GP 0.8.0 §statistics), which differ from
+    // `config.validatorCount` once a designate has resized the set, so never pad them to it.
     val corePadded = core.padTo(config.coresCount, CoreStatisticsRecord.zero)
     encodeJB(
       ActivityStatisticsCodec
         .activityStatisticsCodec(config.validatorCount, config.coresCount),
       ActivityStatisticsCodec.ActivityStatistics(
-        accumulator = curPadded,
-        previous = prevPadded,
+        accumulator = cur,
+        previous = prev,
         core = corePadded,
         service = svc
       )

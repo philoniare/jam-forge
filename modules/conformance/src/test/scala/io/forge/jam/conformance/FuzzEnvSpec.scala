@@ -46,6 +46,16 @@ class FuzzEnvSpec extends AnyFunSpec with Matchers:
       res.toOption.flatten.map(_.chainConfig) shouldBe Some(ChainConfig.FULL)
     }
 
+    it("parses fuzz spec into ChainConfig.FUZZ (davxy/jam-conformance#215)") {
+      val res = FuzzEnv.fromEnv(envOf(
+        "JAM_FUZZ"           -> "1",
+        "JAM_FUZZ_SPEC"      -> "fuzz",
+        "JAM_FUZZ_DATA_PATH" -> "/tmp",
+        "JAM_FUZZ_SOCK_PATH" -> "/tmp/x.sock"
+      ))
+      res.toOption.flatten.map(_.chainConfig) shouldBe Some(ChainConfig.FUZZ)
+    }
+
     it("rejects an unknown spec value") {
       val res = FuzzEnv.fromEnv(envOf(
         "JAM_FUZZ"           -> "1",

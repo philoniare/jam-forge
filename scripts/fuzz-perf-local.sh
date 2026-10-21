@@ -5,6 +5,10 @@ cd "$(dirname "$0")/.."
 TARGET="${1:?usage: $0 <target> [trace ...]}"; shift
 [[ $# -gt 0 ]] || set -- fallback safrole storage storage_light
 TRACES=("$@")
+# Chain spec for the target and the replayer: tiny (default), full or fuzz (jam-conformance#215).
+SPEC="${JAM_FUZZ_SPEC:-tiny}"
+# Trace directory: jamtestvectors/traces by default; point it elsewhere for traces of another spec.
+TRACE_ROOT="${FUZZ_TRACE_ROOT:-jamtestvectors/traces}"
 CONF_DIR="${JAM_CONFORMANCE_DIR:-$PWD/jam-conformance}"
 OUT="${FUZZ_PERF_OUT:-target/fuzz-perf/$TARGET}"
 mkdir -p "$OUT"
@@ -45,15 +49,15 @@ for trace in "${TRACES[@]}"; do
   echo "== $TARGET / $trace =="
   rm -rf "$DATA" && mkdir -p "$DATA" && chmod 777 "$DATA"
   if [[ "$TARGET" == jam-forge ]]; then
-    JAM_FUZZ=1 JAM_FUZZ_SPEC=tiny JAM_FUZZ_DATA_PATH="$DATA" JAM_FUZZ_SOCK_PATH="$DATA/fuzz.sock" LOG_LEVEL=ERROR \
+    JAM_FUZZ=1 JAM_FUZZ_SPEC="$SPEC" JAM_FUZZ_DATA_PATH="$DATA" JAM_FUZZ_SOCK_PATH="$DATA/fuzz.sock" LOG_LEVEL=ERROR \
       JAM_TRACES_DIR="$WARMUP_DIR" JAM_WARMUP="${JAM_WARMUP:-1}" \
       java "${JOPTS[@]}" -cp "$CP" io.forge.jam.conformance.ConformanceServerApp > "$OUT/$trace.target.log" 2>&1 &
   else
-    JAM_FUZZ_DATA_PATH="$DATA" python3 "$CONF_DIR/scripts/target.py" run "$TARGET" > "$OUT/$trace.target.log" 2>&1 &
+    JAM_FUZZ_SPEC="$SPEC" JAM_FUZZ_DATA_PATH="$DATA" python3 "$CONF_DIR/scripts/target.py" run "$TARGET" > "$OUT/$trace.target.log" 2>&1 &
   fi
   TARGET_PID=$!
   java -cp "$CP" io.forge.jam.conformance.FuzzPerfReplay --socket "$DATA/fuzz.sock" \
-    --trace "jamtestvectors/traces/$trace" --out "$OUT/$trace.json" --wait-secs 600 2>&1 | grep -E '^RESULT|unexpected' || true
+    --trace "$TRACE_ROOT/$trace" --spec "$SPEC" --out "$OUT/$trace.json" --wait-secs 600 2>&1 | grep -E '^RESULT|unexpected' || true
   stop_target
 done
 

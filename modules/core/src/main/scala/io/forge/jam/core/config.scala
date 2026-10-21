@@ -127,3 +127,40 @@ object ChainConfig:
     additionalMinBalancePerStateItem = 10L,
     additionalMinBalancePerStateByte = 1L
   )
+
+  /**
+   * Fuzz configuration from davxy/jam-conformance#215: `FULL` with shorter periods and fewer cores, so a fuzz
+   * session crosses many epochs and the validator set can be resized by `designate`.
+   *
+   * Genesis has `V = 3C = 255` validators. Designates may resize the set to any size in
+   * `{6, 9, ..., 255}` (GP 0.8.0 §safrole `eq:valcount`), so code must size validator lists from the
+   * state (`|kappa|`, `|lambda|`), not from `validatorCount`.
+   */
+  val FUZZ: ChainConfig = FULL.copy(
+    validatorCount = 255,
+    coresCount = 85,
+    preimageExpungePeriod = 900,
+    epochLength = 60,
+    contestDuration = 50,
+    maxTicketsPerExtrinsic = 4,
+    rotationPeriod = 5,
+    maxBlockGas = 875_000_000L,
+    maxRefineGas = 1_250_000_000L,
+    maxLookupAnchorAge = 600L,
+    ticketCutoff = 50,
+    ecPieceSize = ecPieceSizeFor(255),
+    numEcPiecesPerSegment = 4104 / ecPieceSizeFor(255)
+  )
+
+  /** Spec names accepted by `JAM_FUZZ_SPEC`, `--spec` and chain-spec files. */
+  val byName: Map[String, ChainConfig] = Map("tiny" -> TINY, "full" -> FULL, "fuzz" -> FUZZ)
+
+  /** Parse a spec name (case-insensitive, surrounding whitespace ignored). */
+  def fromName(name: String): Either[String, ChainConfig] =
+    byName.get(name.trim.toLowerCase).toRight(
+      s"unknown spec '${name.trim}' (expected ${byName.keys.toList.sorted.mkString("|")})"
+    )
+
+  /** The spec name of `config`, or "custom" for a config not in [[byName]]. */
+  def nameOf(config: ChainConfig): String =
+    byName.collectFirst { case (n, c) if c == config => n }.getOrElse("custom")

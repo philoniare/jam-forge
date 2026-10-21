@@ -43,13 +43,13 @@ object ServerConfig:
               |
               |Usage:
               |  ConformanceServerApp [options]
-              |  ConformanceServerApp fuzz <socket-path> [--spec tiny|full]
-              |  ConformanceServerApp warmup-and-serve --socket-path <path> [--spec tiny|full]
+              |  ConformanceServerApp fuzz <socket-path> [--spec tiny|full|fuzz]
+              |  ConformanceServerApp warmup-and-serve --socket-path <path> [--spec tiny|full|fuzz]
               |
               |Options:
               |  --socket-path <path>  Path to Unix domain socket (default: /tmp/jam_target.sock)
               |  --log-path <path>     Path to log file (default: /tmp/jam_conformance.log)
-              |  --spec tiny|full      Chain spec for fuzz/warmup-and-serve (default: tiny)
+              |  --spec tiny|full|fuzz Chain spec for fuzz/warmup-and-serve (default: tiny)
               |  --help                Show this help message
               |""".stripMargin
           )
@@ -63,7 +63,7 @@ object ServerConfig:
 /** Main entry point for the JAM Forge Conformance Testing Server.
   *
   * Commands: warmup - Run JVM warmup and trigger CRaC checkpoint; fuzz <socket-path> [--spec
-  * tiny|full] - Start conformance server on Unix socket (default: tiny); (default) - Start server with
+  * tiny|full|fuzz] - Start conformance server on Unix socket (default: tiny); (default) - Start server with
   * --socket-path/--log-path options. With `JAM_FUZZ` set, the fuzz packaging env decides and the arguments are ignored.
   *
   * A plain `main`: the server is one blocking thread ([[FuzzServer]]), and SIGTERM stops it from a shutdown hook.
@@ -106,7 +106,7 @@ object ConformanceServerApp:
         0
 
       // CRaC warm-and-serve: warm on all traces, checkpoint, post-restore
-      // start fuzz server. Args: --socket-path <p> [--spec tiny|full]
+      // start fuzz server. Args: --socket-path <p> [--spec tiny|full|fuzz]
       case "warmup-and-serve" :: rest =>
         val socketPath = rest
           .sliding(2)
@@ -120,7 +120,7 @@ object ConformanceServerApp:
             WarmupRunner.warmupAndCheckpoint(socketPath)
             runServer(ServerConfig(socketPath = socketPath, chainConfig = chainConfig))
 
-      // Fuzz command (used by conformance harness). Args: <socket-path> [--spec tiny|full]
+      // Fuzz command (used by conformance harness). Args: <socket-path> [--spec tiny|full|fuzz]
       case "fuzz" :: socketPath :: rest =>
         parseSpec(rest) match
           case Left(msg) =>
@@ -138,13 +138,11 @@ object ConformanceServerApp:
           case Right(config) =>
             runServer(config)
 
-  /** Parse an optional `--spec tiny|full` flag, defaulting to TINY. */
+  /** Parse an optional `--spec tiny|full|fuzz` flag, defaulting to TINY. */
   private def parseSpec(args: List[String]): Either[String, ChainConfig] =
     args.sliding(2).collectFirst { case List("--spec", v) => v } match
-      case None              => Right(ChainConfig.TINY)
-      case Some("tiny")      => Right(ChainConfig.TINY)
-      case Some("full")      => Right(ChainConfig.FULL)
-      case Some(other)       => Left(s"Unknown spec '$other' (expected tiny|full)")
+      case None    => Right(ChainConfig.TINY)
+      case Some(v) => ChainConfig.fromName(v).left.map(_.capitalize)
 
   /** Protocol version string derived from the wire-level Version.JAM_VERSION. */
   private val jamVersionString: String =
@@ -153,10 +151,7 @@ object ConformanceServerApp:
 
   /** Serve until SIGTERM (exit code 0) or until the server thread dies from an error (1). */
   private def runServer(config: ServerConfig): Int =
-    val specName = config.chainConfig match
-      case ChainConfig.TINY => "tiny"
-      case ChainConfig.FULL => "full"
-      case _                => "custom"
+    val specName = ChainConfig.nameOf(config.chainConfig)
     println(s"JAM Forge Conformance Testing Server v$jamVersionString")
     println(s"Socket path: ${config.socketPath}")
     println(s"Log path: ${config.logPath}")

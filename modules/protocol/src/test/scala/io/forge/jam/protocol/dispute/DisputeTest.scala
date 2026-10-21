@@ -261,6 +261,22 @@ class DisputeTest extends AnyFunSuite with Matchers:
           assertDisputeStateEquals(testCase.postState, postState, testCaseName)
   }
 
+  test("GP: tiny vectors still pass when |kappa| differs from ChainConfig.validatorCount (resized set)") {
+    // Under the fuzz spec a designate can shrink the set below V, so verdict thresholds must come from the
+    // verdict's own key-set (GP 0.8.0 §judgments eq:verdicts), never from the configured V.
+    val resized = TinyConfig.copy(validatorCount = ChainConfig.FUZZ.validatorCount)
+    val folderPath = "stf/disputes/tiny"
+    val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath).getOrElse(List.empty)
+    testCaseNames should not be empty
+
+    for testCaseName <- testCaseNames do
+      val testCase = TestFileLoader.loadJsonFromTestVectors[DisputeCase](folderPath, testCaseName)
+        .fold(error => fail(s"Failed to load test case $testCaseName: $error"), identity)
+      val (postState, output) = DisputeTransition.stfInternal(testCase.input, testCase.preState, resized)
+      assertDisputeOutputEquals(testCase.output, output, testCaseName)
+      assertDisputeStateEquals(testCase.postState, postState, testCaseName)
+  }
+
   // Helper method to compare DisputeOutput instances
   private def assertDisputeOutputEquals(
     expected: DisputeOutput,

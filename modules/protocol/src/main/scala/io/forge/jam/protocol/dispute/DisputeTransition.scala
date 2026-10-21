@@ -343,12 +343,15 @@ object DisputeTransition:
         Set.empty
       )
     ) { (state, verdict) =>
+      // Thresholds follow the verdict's own key-set (kappa or lambda), whose size may differ from
+      // `config.validatorCount` once a designate has resized the set (GP 0.8.0 §judgments eq:verdicts).
+      val setSize = getValidatorSet(verdict, preState, config.epochLength).size
       val positiveVotes = verdict.votes.count(_.vote)
-      if positiveVotes >= config.votesPerVerdict then
+      if positiveVotes >= superMajorityOf(setSize) then
         state.copy(good = state.good :+ verdict.target)
       else if positiveVotes == 0 then
         state.copy(bad = state.bad :+ verdict.target)
-      else if positiveVotes == config.oneThird then
+      else if positiveVotes == oneThirdOf(setSize) then
         state.copy(wonky = state.wonky :+ verdict.target)
       else state
     }
@@ -397,8 +400,9 @@ object DisputeTransition:
       config: ChainConfig
   ): List[Option[AvailabilityAssignment]] =
     val clearedHashes: Set[Hash] = disputes.verdicts.flatMap { verdict =>
+      val setSize = getValidatorSet(verdict, preState, config.epochLength).size
       val positiveVotes = verdict.votes.count(_.vote)
-      if positiveVotes == 0 || positiveVotes == config.oneThird then
+      if positiveVotes == 0 || positiveVotes == oneThirdOf(setSize) then
         Some(verdict.target)
       else None
     }.toSet

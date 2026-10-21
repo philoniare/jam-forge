@@ -503,7 +503,7 @@ class TracesTest extends AnyFunSuite with Matchers:
   // ════════════════════════════════════════════════════════════════════════════
 
   /** Imports every step of a trace and checks it reaches the expected post-state root. */
-  private def assertFullImport(traceName: String): Unit =
+  private def assertFullImport(traceName: String, config: ChainConfig = config): Unit =
     assume(TestFileLoader.canLocateTestVectors, "Test vectors not available")
     val stepNames = TestFileLoader.getTraceStepFilenames(traceName).toOption.getOrElse(Nil)
     assume(stepNames.nonEmpty, s"No $traceName trace steps available")
@@ -522,6 +522,17 @@ class TracesTest extends AnyFunSuite with Matchers:
   for traceName <- Seq("preimages", "preimages_light", "fuzzy", "fuzzy_light") do
     test(s"$traceName trace: full block import matches every post-state root") {
       assertFullImport(traceName)
+    }
+
+  // Under the fuzz spec (davxy/jam-conformance#215) V = 255 at genesis, but a designate can resize the set to any
+  // size in {6, 9, ..., 3C} (GP 0.8.0 §safrole eq:valcount). Importing the 6-validator traces with V configured as
+  // 255 shows block import sizes validator data from the state (|kappa|, |lambda|, |gamma_P|), not from V.
+  // The ring commitment is unaffected: ark-vrf uses the same 512-point domain for any ring of 6..255 keys.
+  private val resizedConfig = ChainConfig.TINY.copy(validatorCount = ChainConfig.FUZZ.validatorCount)
+
+  for traceName <- Seq("fallback", "safrole", "storage", "preimages") do
+    test(s"GP: $traceName trace imports unchanged when |kappa| < V (validator set resized below V)") {
+      assertFullImport(traceName, resizedConfig)
     }
 
   test("BP-13: isFatalCrash routes JVM-fatal errors to session-termination, not block rejection") {

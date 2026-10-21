@@ -70,6 +70,18 @@ class BandersnatchVrfTest extends AnyFunSuite with Matchers:
     resultHex shouldBe expectedTestGammaZ
   }
 
+  test("GP: a resized ring padded to V = 255 commits like the bare ring (fuzz spec, GP 0.8.0 appendix bandersnatch)") {
+    assume(BandersnatchVrf.isAvailable, "Native library not available - skipping JNI tests")
+
+    // Under the fuzz spec gamma_Z is built with ring size V = 255 even when a designate shrank the set to 6.
+    // Missing keys become the padding point, and ark-vrf uses the same 512-point PIOP domain for every ring of
+    // 6..255 keys, so the commitment must equal the one over the 6 keys alone.
+    val padded = tinyValidatorKeys.padTo(255, BandersnatchPublicKey(new Array[Byte](32)))
+    val result = BandersnatchVrf.generateRingRoot(padded, 255)
+
+    result.map(_.toArray.map(b => f"${b & 0xff}%02x").mkString) shouldBe Some(expectedGammaZ)
+  }
+
   test("Ring root generation should handle padding for invalid keys") {
     assume(BandersnatchVrf.isAvailable, "Native library not available - skipping JNI tests")
 

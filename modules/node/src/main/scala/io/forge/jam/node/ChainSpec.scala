@@ -32,7 +32,7 @@ object Bootnode:
   * {{{
   * {
   *   "id": "dev",
-  *   "config": "tiny" | "full",
+  *   "config": "tiny" | "full" | "fuzz",
   *   "genesis_header": "0x…",          // optional if genesis_header_hash given
   *   "genesis_header_hash": "0x…",     // optional; derived from header if absent
   *   "genesis_state": [{"key": "0x…31-bytes…", "value": "0x…"}, …],
@@ -76,11 +76,10 @@ object ChainSpec:
       devnetFinalityDepth <- c.getOrElse[Int]("devnet_finality_depth")(5)
     yield ChainSpec(
       id = id,
-      config = configName match
-        case "tiny" => ChainConfig.TINY
-        case "full" => ChainConfig.FULL
-        case other  => throw new IllegalArgumentException(s"unknown config: $other")
-      ,
+      config = ChainConfig.fromName(configName).fold(
+        _ => throw new IllegalArgumentException(s"unknown config: $configName"),
+        identity
+      ),
       genesisHeaderBytes = header.map(parseHex),
       explicitGenesisHash = headerHash.map(h => Hash(parseHex(h))),
       genesisState = state,

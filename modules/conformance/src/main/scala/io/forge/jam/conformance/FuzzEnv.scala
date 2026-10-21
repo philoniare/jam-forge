@@ -41,10 +41,9 @@ object FuzzEnv:
     )
 
   private def parseSpec(value: String): Either[String, ChainConfig] =
-    value.trim.toLowerCase match
-      case "tiny" => Right(ChainConfig.TINY)
-      case "full" => Right(ChainConfig.FULL)
-      case other => Left(s"JAM_FUZZ_SPEC must be 'tiny' or 'full', got: '$other'")
+    ChainConfig.fromName(value).left.map(_ =>
+      s"JAM_FUZZ_SPEC must be 'tiny', 'full' or 'fuzz', got: '${value.trim.toLowerCase}'"
+    )
 
   def ensureDataPath(path: Path): Unit =
     if !Files.exists(path) then Files.createDirectories(path)

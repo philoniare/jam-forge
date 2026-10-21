@@ -17,8 +17,8 @@ object FuzzPerfReplay:
   private def parse(args: List[String], acc: Args = Args()): Args = args match
     case "--socket" :: p :: rest    => parse(rest, acc.copy(socket = Paths.get(p)))
     case "--trace" :: p :: rest     => parse(rest, acc.copy(trace = Some(Paths.get(p))))
-    case "--spec" :: "full" :: rest => parse(rest, acc.copy(config = ChainConfig.FULL))
-    case "--spec" :: "tiny" :: rest => parse(rest, acc.copy(config = ChainConfig.TINY))
+    case "--spec" :: name :: rest =>
+      parse(rest, acc.copy(config = ChainConfig.fromName(name).fold(e => throw new IllegalArgumentException(e), identity)))
     case "--out" :: p :: rest       => parse(rest, acc.copy(out = Some(Paths.get(p))))
     case "--wait-secs" :: n :: rest => parse(rest, acc.copy(waitSecs = n.toInt))
     case Nil                        => acc
