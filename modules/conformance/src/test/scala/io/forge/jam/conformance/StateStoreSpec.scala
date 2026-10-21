@@ -46,3 +46,21 @@ class StateStoreSpec extends AnyFlatSpec with Matchers:
     // The reconstructable ancestry is capped at L (24), not 60.
     store.ancestryFor(h(60)).size should be <= store.maxAncestryLength
   }
+
+  "StateStore.storeDeferred" should "make get and awaitPending wait for the state being computed" in {
+    val store = new StateStore(ChainConfig.TINY)
+    store.initialize(h(0), RawState.empty, List.empty)
+    val latch = new java.util.concurrent.CountDownLatch(1)
+    val pending = java.util.concurrent.CompletableFuture.supplyAsync { () =>
+      latch.await()
+      RawState(h(7), List.empty)
+    }
+    store.storeDeferred(h(1), pending, parent = Some((h(0), Timeslot(1))))
+    store.contains(h(1)) shouldBe true
+    pending.isDone shouldBe false
+
+    latch.countDown()
+    store.get(h(1)).map(_.stateRoot) shouldBe Some(h(7))
+    store.awaitPending()
+    pending.isDone shouldBe true
+  }

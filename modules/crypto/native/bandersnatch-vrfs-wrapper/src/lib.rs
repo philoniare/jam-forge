@@ -38,6 +38,24 @@ macro_rules! jni_guard {
 }
 
 type RingCommitment = ark_ec_vrfs::ring::RingCommitment<BandersnatchSha512Ell2>;
+type RingVerifier = ark_ec_vrfs::ring::RingVerifier<BandersnatchSha512Ell2>;
+
+static LAST_VERIFIER: Mutex<Option<(Vec<u8>, usize, Arc<RingVerifier>)>> = Mutex::new(None);
+
+fn ring_verifier(commitment: &[u8], ring_size: jint) -> Result<Arc<RingVerifier>, VrfError> {
+    let size = ring_size as usize;
+    if let Some((c, n, v)) = LAST_VERIFIER.lock().unwrap().as_ref() {
+        if *n == size && c.as_slice() == commitment {
+            return Ok(v.clone());
+        }
+    }
+    let parsed = RingCommitment::deserialize_compressed(commitment)
+        .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
+    let ring_ctx = ring_context(ring_size);
+    let verifier = Arc::new(ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)));
+    *LAST_VERIFIER.lock().unwrap() = Some((commitment.to_vec(), size, verifier.clone()));
+    Ok(verifier)
+}
 type BanderInput = Input<BandersnatchSha512Ell2>;
 type BanderOutput = Output<BandersnatchSha512Ell2>;
 type BanderPublic = Public<BandersnatchSha512Ell2>;
@@ -158,9 +176,6 @@ impl Verifier {
     ) -> Result<[u8; 32], VrfError> {
         use ark_ec_vrfs::ring::Verifier as _;
 
-        let commitment = RingCommitment::deserialize_compressed(commitment)
-            .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
-
         let signature = RingVrfSignature::deserialize_compressed(signature)
             .map_err(|_| VrfError::DeserializationError("invalid signature format"))?;
         let input_data = [b"jam_ticket_seal", &entropy[..], &[attempt]].concat();
@@ -168,10 +183,7 @@ impl Verifier {
         let input = vrf_input_point(&input_data);
         let output = signature.output;
 
-        let ring_ctx = ring_context(ring_size);
-
-        let verifier_key = ring_ctx.verifier_key_from_commitment(commitment);
-        let verifier = ring_ctx.verifier(verifier_key);
+        let verifier = ring_verifier(commitment, ring_size)?;
         if BanderPublic::verify(input, output, &[], &signature.proof, &verifier).is_err() {
             return Err(VrfError::VerificationError);
         }

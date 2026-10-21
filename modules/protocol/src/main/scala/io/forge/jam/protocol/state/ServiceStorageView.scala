@@ -92,3 +92,19 @@ final class ServiceStorageView(trie: StateTrie):
     target.update(updates)
 
   def pendingStateKeys: collection.Set[JamBytes] = pending.keySet
+
+  /**
+   * A view for one service's accumulation run concurrently with others in the same accpar batch 
+   * It starts from this view's staged writes and keeps its own writes, savepoints and read cache until
+   * [[absorb]]. This view must not change while forks are in use.
+   */
+  def fork(): ServiceStorageView =
+    val child = new ServiceStorageView(trie)
+    child.pending = pending
+    child
+
+  /** Applies the writes `child` (from [[fork]]) made since it was forked. */
+  def absorb(child: ServiceStorageView): Unit =
+    child.pending.foreach { (k, v) =>
+      if !pending.get(k).contains(v) then pending = pending.updated(k, v)
+    }

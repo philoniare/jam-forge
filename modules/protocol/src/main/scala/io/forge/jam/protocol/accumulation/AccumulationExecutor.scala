@@ -44,7 +44,8 @@ class AccumulationExecutor(val config: ChainConfig):
       gasLimit: Long,
       entropy: JamBytes,
       operands: List[AccumulationOperand],
-      executionMode: ExecutionMode = ExecutionMode.default
+      executionMode: ExecutionMode = ExecutionMode.default,
+      storageView: Option[ServiceStorageView] = currentStorageView
   ): AccumulationOneResult =
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
@@ -100,7 +101,7 @@ class AccumulationExecutor(val config: ChainConfig):
       entropy = entropy,
       nextAccountIndex = nextAccountIndex,
       minPublicServiceIndex = minPublicServiceIndex,
-      storageView = currentStorageView
+      storageView = storageView
     )
 
     // Execute PVM
@@ -180,6 +181,9 @@ class AccumulationExecutor(val config: ChainConfig):
   /** Get or compile a module from code bytes.
     */
   private def getOrCompileModule(code: Array[Byte], codeHash: JamBytes): Option[InterpretedModule] =
+    moduleCache.synchronized(getOrCompileModuleUnsynced(code, codeHash))
+
+  private def getOrCompileModuleUnsynced(code: Array[Byte], codeHash: JamBytes): Option[InterpretedModule] =
     val cached = moduleCache.get(codeHash)
     if cached != null then Some(cached)
     else

@@ -12,6 +12,8 @@ import io.forge.jam.protocol.pipeline.LiftedStfs.*
 import io.forge.jam.protocol.pipeline.IntermediateSteps.*
 import io.forge.jam.protocol.pipeline.StfLifters.inspect
 
+import scala.util.control.NonFatal
+
 final case class BlockPipelineResult(
     safroleOutput: Option[SafroleOutputData],
     availableReports: List[WorkReport],
@@ -102,4 +104,14 @@ object BlockPipeline:
       )
     } yield finalResult
 
-    pipeline.run((view, initialContext)).map(_._2)
+    val pending = initialContext.pendingChecks
+    val result =
+      try pipeline.run((view, initialContext))
+      catch
+        case NonFatal(e) =>
+          pending.firstFailure() match
+            case Some(err) => Left(err)
+            case None      => throw e
+    result match
+      case Left(err)          => Left(pending.firstFailure().getOrElse(err))
+      case Right((_, output)) => pending.firstFailure().toLeft(output)

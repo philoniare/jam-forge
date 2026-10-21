@@ -49,14 +49,16 @@ object IntermediateSteps:
               Left(PipelineError.HeaderVerificationErr("UnexpectedAuthor"))
             else
               val vrfInput = SigningContext.fallbackSealInputData(entropy)
-              val vrfResult = BandersnatchVrf.ietfVrfVerify(
-                blockAuthorKey.bytes,
-                vrfInput,
-                encodedHeader,
-                block.header.seal.toArray
-              )
-              if vrfResult.isEmpty then Left(PipelineError.InvalidBlockSeal)
-              else Right(())
+              ctx.pendingChecks.start {
+                val vrfResult = BandersnatchVrf.ietfVrfVerify(
+                  blockAuthorKey.bytes,
+                  vrfInput,
+                  encodedHeader,
+                  block.header.seal.toArray
+                )
+                if vrfResult.isEmpty then Some(PipelineError.InvalidBlockSeal) else None
+              }
+              Right(())
 
         case TicketsOrKeys.Tickets(tickets) =>
           if slotIndex < 0 || slotIndex >= tickets.length then
@@ -64,18 +66,21 @@ object IntermediateSteps:
           else
             val ticket = tickets(slotIndex)
             val vrfInput = SigningContext.safroleTicketInputData(entropy, ticket.attempt.toByte)
-            val vrfResult = BandersnatchVrf.ietfVrfVerify(
-              blockAuthorKey.bytes,
-              vrfInput,
-              encodedHeader,
-              block.header.seal.toArray
-            )
-            vrfResult match
-              case None => Left(PipelineError.InvalidBlockSeal)
-              case Some(vrfOutput) =>
-                if !java.util.Arrays.equals(ticket.id.toArray, vrfOutput) then
-                  Left(PipelineError.HeaderVerificationErr("InvalidAuthorTicket"))
-                else Right(())
+            ctx.pendingChecks.start {
+              val vrfResult = BandersnatchVrf.ietfVrfVerify(
+                blockAuthorKey.bytes,
+                vrfInput,
+                encodedHeader,
+                block.header.seal.toArray
+              )
+              vrfResult match
+                case None => Some(PipelineError.InvalidBlockSeal)
+                case Some(vrfOutput) =>
+                  if !java.util.Arrays.equals(ticket.id.toArray, vrfOutput) then
+                    Some(PipelineError.HeaderVerificationErr("InvalidAuthorTicket"))
+                  else None
+            }
+            Right(())
   }
 
   val validateExtrinsicHash: StfStep = validate { (_, ctx) =>
@@ -106,16 +111,17 @@ object IntermediateSteps:
         Left(PipelineError.HeaderVerificationErr("Cannot extract VRF output from seal"))
       else
         val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
-        val vrfResult = BandersnatchVrf.ietfVrfVerify(
-          blockAuthorKey.bytes,
-          vrfInput,
-          Array.empty[Byte],
-          block.header.entropySource.toArray
-        )
-        if vrfResult.isEmpty then
-          Left(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
-        else
-          Right(())
+        ctx.pendingChecks.start {
+          val vrfResult = BandersnatchVrf.ietfVrfVerify(
+            blockAuthorKey.bytes,
+            vrfInput,
+            Array.empty[Byte],
+            block.header.entropySource.toArray
+          )
+          if vrfResult.isEmpty then Some(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
+          else None
+        }
+        Right(())
   }
 
   val validateEpochMark: StfStep = validate { (_, ctx) =>

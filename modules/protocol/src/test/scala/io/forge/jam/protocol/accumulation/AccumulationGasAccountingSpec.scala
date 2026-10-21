@@ -9,6 +9,7 @@ import io.forge.jam.core.types.work.{ExecutionResult, PackageSpec}
 import io.forge.jam.core.types.workresult.{WorkResult, RefineLoad}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.pvm.ExecutionMode
+import io.forge.jam.protocol.state.ServiceStorageView
 import spire.math.{UInt, UShort}
 
 import scala.collection.mutable
@@ -97,7 +98,8 @@ class AccumulationGasAccountingSpec extends AnyFunSuite with Matchers:
           gasLimit: Long,
           entropy: JamBytes,
           operands: List[AccumulationOperand],
-          executionMode: ExecutionMode
+          executionMode: ExecutionMode,
+          storageView: Option[ServiceStorageView]
       ): AccumulationOneResult =
         if serviceId == destService then
           AccumulationOneResult(partialState, List.empty, None, 500L, Set.empty)
@@ -150,7 +152,8 @@ class AccumulationGasAccountingSpec extends AnyFunSuite with Matchers:
           gasLimit: Long,
           entropy: JamBytes,
           operands: List[AccumulationOperand],
-          executionMode: ExecutionMode
+          executionMode: ExecutionMode,
+          storageView: Option[ServiceStorageView]
       ): AccumulationOneResult =
         if serviceId == sx then
           AccumulationOneResult(partialState, List(outputTransfer), None, 80L, Set.empty)

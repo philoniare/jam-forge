@@ -5,6 +5,7 @@ import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicK
 import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
+import io.forge.jam.core.Parallel
 import io.forge.jam.protocol.safrole.SafroleTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.SafroleBridge
@@ -248,10 +249,18 @@ object SafroleTransition extends StrictLogging:
       Left(SafroleErrorCode.Reserved)
     else
       val accumulatorIds = scala.collection.mutable.HashSet.from(postState.gammaA.iterator.map(_.id))
+      val proofs = Parallel.map(tickets) { ticket =>
+        BandersnatchWrapper.verifyRingProof(
+          ticket.signature,
+          verificationGammaZ,
+          postState.eta(2),
+          ticket.attempt,
+          config.validatorCount
+        )
+      }
       processTickets(
         postState,
-        tickets,
-        verificationGammaZ,
+        tickets.zip(proofs),
         config,
         None,
         accumulatorIds,
@@ -265,8 +274,7 @@ object SafroleTransition extends StrictLogging:
   @scala.annotation.tailrec
   private def processTickets(
     postState: SafroleState,
-    remainingTickets: List[TicketEnvelope],
-    verificationGammaZ: JamBytes,
+    remainingTickets: List[(TicketEnvelope, Option[TicketMark])],
     config: ChainConfig,
     previousId: Option[JamBytes],
     accumulatorIds: scala.collection.mutable.HashSet[JamBytes],
@@ -288,18 +296,11 @@ object SafroleTransition extends StrictLogging:
         else
           Right(postState)
 
-      case ticket :: rest =>
+      case (ticket, proof) :: rest =>
         if ticket.attempt.toInt >= maxTicketEntries(postState.gammaK.size, config) then
           Left(SafroleErrorCode.BadTicketAttempt)
         else
-          // Verify ring VRF proof using post-epoch ring root over the pending set
-          BandersnatchWrapper.verifyRingProof(
-            ticket.signature,
-            verificationGammaZ,
-            postState.eta(2),
-            ticket.attempt,
-            config.validatorCount
-          ) match
+          proof match
             case None =>
               Left(SafroleErrorCode.BadTicketProof)
             case Some(ticketBody) =>
@@ -320,7 +321,6 @@ object SafroleTransition extends StrictLogging:
                 processTickets(
                   postState,
                   rest,
-                  verificationGammaZ,
                   config,
                   Some(currentId),
                   accumulatorIds,

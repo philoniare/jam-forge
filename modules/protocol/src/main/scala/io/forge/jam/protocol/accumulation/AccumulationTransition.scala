@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
+import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Parallel, StfResult}
+import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
@@ -738,6 +739,37 @@ object AccumulationTransition:
 
     serviceOperands
 
+  /**
+   * Runs ∆1 for every service of one batch. Each runs against the same initial partial state,
+   * so services run concurrently, each with its own fork of the storage view, and their writes are applied in service
+   * order afterwards. Services sharing a code blob run one after another on the same task, since an interpreted
+   * module's compiled-block buffers are not safe to share between concurrent runs. The recompiler path has not been
+   * checked for concurrent use, so it keeps the sequential loop.
+   */
+  private def accumulateAll(
+      sortedServices: List[Long],
+      initialState: PartialState,
+      executor: AccumulationExecutor
+  )(accumulateOne: (Long, Option[ServiceStorageView]) => AccumulationOneResult): List[AccumulationOneResult] =
+    if sortedServices.lengthCompare(1) <= 0 || ExecutionMode.default != ExecutionMode.Interpreted then
+      sortedServices.map(accumulateOne(_, executor.storageView))
+    else
+      val forks = sortedServices.map(s => s -> executor.storageView.map(_.fork())).toMap
+      val groups = sortedServices
+        .groupBy(s => initialState.accounts.get(s).map(a => JamBytes(a.info.codeHash.bytes.toArray)))
+        .values
+        .toList
+      val byService = Parallel
+        .map(groups)(group => group.map(s => s -> accumulateOne(s, forks(s))))
+        .flatten
+        .toMap
+      for
+        s      <- sortedServices
+        parent <- executor.storageView
+        child  <- forks(s)
+      do parent.absorb(child)
+      sortedServices.map(byService)
+
   /** Everything the per-service execution loop accumulates across one batch.
     */
   private final case class ServiceRunResults(
@@ -768,7 +800,7 @@ object AccumulationTransition:
     // Collect account changes from all services for merging
     val allAccountChanges = new AccountChanges()
 
-    for serviceId <- sortedServices do
+    def accumulateOne(serviceId: Long, storageView: Option[ServiceStorageView]): AccumulationOneResult =
       val operands =
         serviceOperands.getOrElse(serviceId, mutable.ListBuffer.empty).toList
       val alwaysAccGas = alwaysAccers.getOrElse(serviceId, 0L)
@@ -781,15 +813,19 @@ object AccumulationTransition:
       }
       val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
-      val execResult = executor.executeService(
+      executor.executeService(
         partialState = initialState,
         timeslot = timeslot,
         serviceId = serviceId,
         gasLimit = totalGasLimit,
         entropy = entropy,
-        operands = operands
+        operands = operands,
+        storageView = storageView
       )
 
+    val results = accumulateAll(sortedServices, initialState, executor)(accumulateOne)
+
+    for (serviceId, execResult) <- sortedServices.zip(results) do
       // Compute changes this service made
       val serviceChanges =
         computeServiceChanges(serviceId, initialState, execResult.postState)

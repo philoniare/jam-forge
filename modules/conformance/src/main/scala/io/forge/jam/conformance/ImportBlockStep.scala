@@ -1,6 +1,6 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.{ChainConfig, Hashing}
+import io.forge.jam.core.{ChainConfig, Hashing, Parallel}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
@@ -27,6 +27,7 @@ object ImportBlockStep:
       case None =>
         Left(s"Parent state not found: ${parentHash.toHex.take(16)}...")
       case Some(parentState) =>
+        stateStore.awaitPending()
         // Derive this block's ancestry per-chain by walking parent links
         // from its parent, so fork mutations do not pollute a shared
         // global ancestry list (header.tex eq:ancestors).
@@ -36,11 +37,11 @@ object ImportBlockStep:
         blockImporter.importBlock(block, parentState, ancestry) match
           case ImportResult.Success(postStateRoot, _) =>
             val headerHash = Hashing.blake2b256(block.header.encode)
-            val postState = blockImporter.materializePostState(config)
+            val postState = Parallel.async(blockImporter.materializePostState(config))
             val isOriginal = stateStore.isOriginalBlock(parentHash)
             // Record parentage for every imported block so any future
             // block can derive its own per-chain ancestry.
-            stateStore.store(
+            stateStore.storeDeferred(
               headerHash,
               postState,
               isOriginal,

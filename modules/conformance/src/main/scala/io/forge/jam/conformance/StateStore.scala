@@ -1,9 +1,10 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.{ChainConfig, Parallel}
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.protocol.traces.RawState
 
+import java.util.concurrent.CompletableFuture
 import scala.collection.mutable
 
 /** In-memory state store indexed by header hash.
@@ -21,7 +22,11 @@ import scala.collection.mutable
   */
 class StateStore(config: ChainConfig = ChainConfig.TINY):
   // State indexed by header hash
-  private val states: mutable.Map[Hash, RawState] = mutable.Map.empty
+  // A state may still be being read out of the trie (see `storeDeferred`); `get` waits for it.
+  private val states: mutable.Map[Hash, CompletableFuture[RawState]] = mutable.Map.empty
+
+  // The most recent deferred state, which may still be reading the trie.
+  @volatile private var lastDeferred: CompletableFuture[RawState] = CompletableFuture.completedFuture(null)
 
   // Track which header hashes are "original" blocks (not mutations/forks)
   private val originalBlocks: mutable.Set[Hash] = mutable.Set.empty
@@ -70,7 +75,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
   ): Unit =
     synchronized {
       clear()
-      states.put(headerHash, state)
+      states.put(headerHash, CompletableFuture.completedFuture(state))
       originalBlocks.add(headerHash)
       genesisParent.foreach { p =>
         parentage.put(headerHash, p)
@@ -98,7 +103,19 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       isOriginal: Boolean = true,
       parent: Option[(Hash, Timeslot)] = None
   ): Unit =
+    storeDeferred(headerHash, CompletableFuture.completedFuture(state), isOriginal, parent)
+
+  /** Like [[store]], with the state still being computed. Callers that will change whatever `state` reads from must
+    * first call [[awaitPending]].
+    */
+  def storeDeferred(
+      headerHash: Hash,
+      state: CompletableFuture[RawState],
+      isOriginal: Boolean = true,
+      parent: Option[(Hash, Timeslot)] = None
+  ): Unit =
     synchronized {
+      lastDeferred = state
       states.put(headerHash, state)
       if isOriginal then originalBlocks.add(headerHash)
       parent.foreach { p =>
@@ -162,9 +179,12 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
     *   Some(state) if found, None otherwise
     */
   def get(headerHash: Hash): Option[RawState] =
-    synchronized {
-      states.get(headerHash)
-    }
+    synchronized(states.get(headerHash)).map(Parallel.await)
+
+  /** Waits until the most recently deferred state has been computed. */
+  def awaitPending(): Unit =
+    Parallel.await(lastDeferred)
+    ()
 
   /** Check if a header hash exists in the store.
     */

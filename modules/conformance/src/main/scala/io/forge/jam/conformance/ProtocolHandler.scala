@@ -120,7 +120,7 @@ class ProtocolHandler(
                )
              else
                readExactly(socket, length).flatMap { bodyBytes =>
-                 IO.blocking {
+                 IO {
                    try
                      val jamBytes = JamBytes(bodyBytes)
                      val (msg, _) =

@@ -66,11 +66,15 @@ class FileLogger(
             catch case _: Throwable => ()
       case None => ()
 
+  /** True when gated (per-message) lines go anywhere; when false, logging them is skipped without leaving the fiber. */
+  private def gatedEnabled: Boolean = verbose || echoToStderr
+
   /**
    * Log a message with timestamp, direction, type, size, and key fields.
    */
-  def log(direction: String, msgType: String, size: Int, keyFields: String = ""): IO[Unit] =
-    IO.blocking {
+  def log(direction: String, msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
+    if !gatedEnabled then IO.unit
+    else IO.blocking {
       val timestamp = timestampFormat.format(Instant.now())
       val fields = if keyFields.nonEmpty then s" [$keyFields]" else ""
       writeAndEcho(s"[$timestamp] [$direction] $msgType (${size}b)$fields\n")
@@ -79,13 +83,13 @@ class FileLogger(
   /**
    * Log a received message.
    */
-  def logReceived(msgType: String, size: Int, keyFields: String = ""): IO[Unit] =
+  def logReceived(msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
     log("RX", msgType, size, keyFields)
 
   /**
    * Log a sent message.
    */
-  def logSent(msgType: String, size: Int, keyFields: String = ""): IO[Unit] =
+  def logSent(msgType: String, size: Int, keyFields: => String = ""): IO[Unit] =
     log("TX", msgType, size, keyFields)
 
   /**
@@ -137,8 +141,9 @@ class FileLogger(
   /**
    * Log an info message.
    */
-  def logInfo(message: String): IO[Unit] =
-    IO.blocking {
+  def logInfo(message: => String): IO[Unit] =
+    if !gatedEnabled then IO.unit
+    else IO.blocking {
       val timestamp = timestampFormat.format(Instant.now())
       writeAndEcho(s"[$timestamp] [INFO] $message\n")
     }
