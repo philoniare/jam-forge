@@ -38,7 +38,11 @@ final class PreimageService(
     chain: ChainManager,
     pools: ExtrinsicPools,
     egress: ExecutorService,
-    announcedMetaCap: Int = PreimageService.DefaultAnnouncedMetaCap
+    announcedMetaCap: Int = PreimageService.DefaultAnnouncedMetaCap,
+    /** Peers a newly obtained preimage is announced to: our grid neighbours
+      * (JAMNP-S CE 142).
+      */
+    gossipTargets: () => Iterable[JamnpConnection] = () => Nil
 ) extends LazyLogging:
 
   private val announcedMeta =
@@ -69,7 +73,8 @@ final class PreimageService(
               val infoKey =
                 StateKey.computePreimageInfoStateKey(serviceId, length.toInt, JamBytes(hash.bytes))
               val solicited = view.storage.readTrie(infoKey).exists(StateKey.isUnprovidedRequest)
-              if solicited then requestPreimage(connection, serviceId, hash, length)
+              if solicited && pools.findPreimage(hash).isEmpty then
+                requestPreimage(connection, serviceId, hash, length)
         catch case e: Exception => logger.warn(s"CE142 handler failed: ${e.getMessage}")
         stream.finish()
       }
@@ -83,15 +88,21 @@ final class PreimageService(
   def requestHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        try
-          if msg.length != 32 then logger.warn(s"CE143: expected 32-byte hash, got ${msg.length}")
-          else
-            val hash = Hash(msg)
-            lookupBlob(hash) match
-              case Some(blob) => stream.send(blob)
-              case None       => logger.info(s"CE143: preimage ${hash.toHex.take(18)} not held")
-        catch case e: Exception => logger.warn(s"CE143 handler failed: ${e.getMessage}")
-        stream.finish()
+        val blob =
+          try
+            if msg.length != 32 then
+              logger.warn(s"CE143: expected 32-byte hash, got ${msg.length}")
+              None
+            else lookupBlob(Hash(msg))
+          catch
+            case e: Exception =>
+              logger.warn(s"CE143 handler failed: ${e.getMessage}")
+              None
+        blob match
+          case Some(b) =>
+            stream.send(b)
+            stream.finish()
+          case None => stream.reset() // not held: reject
       }
 
   private[node] def announcedMetaSize: Int = announcedMeta.size()
@@ -139,6 +150,9 @@ final class PreimageService(
             then
               pools.addPreimage(Preimage(requester = ServiceId(serviceId.toInt), blob = JamBytes(blob)))
               announcedMeta.put(hash, (serviceId, expectedLength))
+              // Validators announce a preimage they obtained to their grid
+              // neighbours (JAMNP-S CE 142), but not back to its source.
+              announce(serviceId, blob, gossipTargets().filterNot(_ eq conn))
             else logger.warn(s"CE143 response invalid for ${hash.toHex.take(18)}")
           catch case e: Exception => logger.warn(s"CE143 fetch failed: ${e.getMessage}")
       })

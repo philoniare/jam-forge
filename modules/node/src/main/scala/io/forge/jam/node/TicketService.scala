@@ -29,8 +29,15 @@ final class TicketService(
     chain: ChainManager,
     pools: ExtrinsicPools,
     distribution: DistributionService,
-    egress: ExecutorService
+    egress: ExecutorService,
+    /** CE 132 recipients: the current validators (JAMNP-S CE 131/132). */
+    forwardTargets: () => Iterable[JamnpConnection] = () => Nil
 ) extends LazyLogging:
+
+  /** Tickets accepted as proxy (or generated for ourselves as proxy) and
+    * waiting for their CE 132 send, with their contest epoch.
+    */
+  private val pendingForwards = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope)]()
 
   /** Our tickets: id bytes → (keys, attempt), consulted when sealing a
     * ticketed slot.
@@ -167,21 +174,32 @@ final class TicketService(
   def ticketHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        try
-          TicketCodec.decode(msg) match
-            case Left(err) => logger.warn(s"${StreamKind.name(stream.kind)}: $err")
-            case Right((epoch, env)) =>
-              val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
-              val asProxy = stream.kind == StreamKind.TicketDistributionStep1
-              if epoch == currentEpoch then accept(epoch, env, asProxy)
-              else if epoch == currentEpoch + 1 then
-                // The sender's head reached the new epoch before ours: its
-                // proof is against the next epoch's η_2/γ_z, which our state
-                // will hold once we import that epoch's first block.
-                deferred.add((epoch, env, asProxy))
-              else logger.debug(s"ticket for epoch $epoch, current $currentEpoch — dropped")
-        catch case e: Exception => logger.warn(s"ticket handler failed: ${e.getMessage}")
-        stream.finish()
+        val accepted =
+          try
+            TicketCodec.decode(msg) match
+              case Left(err) =>
+                logger.warn(s"${StreamKind.name(stream.kind)}: $err")
+                false
+              case Right((epoch, env)) =>
+                val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
+                val asProxy = stream.kind == StreamKind.TicketDistributionStep1
+                if epoch == currentEpoch then accept(epoch, env, asProxy)
+                else if epoch == currentEpoch + 1 then
+                  // The sender's head reached the new epoch before ours: its
+                  // proof is against the next epoch's η_2/γ_z, which our state
+                  // will hold once we import that epoch's first block.
+                  deferred.add((epoch, env, asProxy))
+                  true
+                else
+                  // JAMNP-S CE 131/132: reset when the state needed to verify
+                  // the ticket is not known.
+                  logger.debug(s"ticket for epoch $epoch, current $currentEpoch — rejected")
+                  false
+          catch
+            case e: Exception =>
+              logger.warn(s"ticket handler failed: ${e.getMessage}")
+              false
+        if accepted then stream.finish() else stream.reset()
       }
 
   /** Tickets received for the epoch after our head's, checked once our head
@@ -200,12 +218,15 @@ final class TicketService(
       val (epoch, env, asProxy) = it.next()
       if epoch <= currentEpoch then
         it.remove()
-        if epoch == currentEpoch then accept(epoch, env, asProxy)
+        if epoch == currentEpoch && !accept(epoch, env, asProxy) then
+          logger.debug(s"deferred ticket for epoch $epoch rejected")
 
-  /** Verify a ticket for the current epoch against γ_z and η_2, pool it,
-    * and forward it on CE 132 when we received it as proxy.
+  /** Verify a ticket for the current epoch against γ_z and η_2 and pool it.
+    * A CE 131 ticket is queued for CE 132 forwarding only when we hold the
+    * key of its proxy validator (JAMNP-S CE 131: "verify that they are the
+    * correct proxy"). False when a check fails.
     */
-  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean): Unit =
+  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean): Boolean =
     val view = chain.stateView()
     val entropy = TicketService.contestEntropy(view)
     BandersnatchVrf.verifyRingProof(
@@ -215,18 +236,63 @@ final class TicketService(
       env.attempt,
       view.validators.nextEpoch.size
     ) match
-      case None => logger.warn("CE131/132 ticket failed ring verification — dropped")
+      case None =>
+        logger.warn("CE131/132 ticket failed ring verification — dropped")
+        false
       case Some(result) =>
         val id = Hash(result.ticketId.toArray)
-        pools.addTicket(id, env, epoch, entropy)
-        if asProxy then forwardAsProxy(epoch, env)
+        if asProxy && !holdsProxyKey(view, id) then
+          logger.debug(s"CE131 ticket ${id.toHex.take(18)} sent to the wrong proxy — rejected")
+          false
+        else
+          pools.addTicket(id, env, epoch, entropy)
+          if asProxy then pendingForwards.add((epoch, env))
+          true
 
-  /** Forward a ticket we accepted as proxy (CE 131) to every connected
-    * validator on CE 132.
+  /** True when we hold the Ed25519 key of `id`'s proxy in γ_k. */
+  private def holdsProxyKey(view: io.forge.jam.protocol.state.TrieBackedJamState, id: Hash): Boolean =
+    val next = view.validators.nextEpoch
+    next.nonEmpty && next.lift(TicketService.proxyIndexFor(id, next.size)).exists(vk =>
+      validatorKeys.exists(k => java.util.Arrays.equals(k.ed25519Public, vk.ed25519.bytes.toArray))
+    )
+
+  /** Send queued proxy tickets on CE 132, spread evenly from
+    * max(⌊E/20⌋, 1) slots after connectivity changes were applied
+    * (`appliedSlot`) until half-way through the lottery period Y (JAMNP-S
+    * CE 131). Tickets of an earlier contest epoch are dropped. Called once
+    * per slot.
+    */
+  def releaseForwards(slot: Long, appliedSlot: Long): Unit =
+    val e = chain.config.epochLength
+    val epoch = slot / e
+    pendingForwards.removeIf(_._1 < epoch)
+    val start = appliedSlot + math.max(e / 20, 1)
+    if pendingForwards.isEmpty || slot < start then return
+    val end = math.max(epoch * e + chain.config.ticketCutoff / 2, start + 1)
+    val slotsLeft = math.max(end - slot, 1L)
+    val n = math.ceil(pendingForwards.size.toDouble / slotsLeft).toInt
+    forwardQueued(n)
+
+  /** Send every queued proxy ticket now. */
+  def flushForwards(): Unit = forwardQueued(Int.MaxValue)
+
+  private def forwardQueued(n: Int): Unit =
+    var left = n
+    while left > 0 do
+      Option(pendingForwards.poll()) match
+        case Some((epoch, env)) =>
+          forwardAsProxy(epoch, env)
+          left -= 1
+        case None => left = 0
+
+  /** Forward a ticket we accepted as proxy on CE 132 to the current
+    * validators, or to every peer when none of them is connected under its
+    * validator key.
     */
   private def forwardAsProxy(epoch: Long, env: TicketEnvelope): Unit =
     val payload = TicketCodec.encode(epoch, env)
-    distribution.peers.foreach { conn =>
+    val targets = forwardTargets()
+    (if targets.nonEmpty then targets else distribution.peers).foreach { conn =>
       submitSend(
         () => conn.openStream(StreamKind.TicketDistributionStep2),
         StreamKind.TicketDistributionStep2,
@@ -259,7 +325,8 @@ final class TicketService(
       val ownProxy = view.validators.nextEpoch.lift(proxyIndex).exists(vk =>
         validatorKeys.exists(k => java.util.Arrays.equals(k.ed25519Public, vk.ed25519.bytes.toArray))
       )
-      if ownProxy then forwardAsProxy(epoch, env)
+      // As our own proxy we send on CE 132 ourselves, on the proxy schedule.
+      if ownProxy then pendingForwards.add((epoch, env))
       else byValidatorIndex(proxyIndex) match
         case Some(proxyConn) =>
           submitSend(
@@ -323,18 +390,26 @@ object TicketService:
 
 /** CE 131/132 wire format (jamnp-s): Epoch Index (u32 LE) ++ Attempt (1) ++
   * RingVRF proof (784). Both kinds carry the identical message.
+  *
+  * The wire epoch is the epoch the ticket will be *used* in (JAMNP-S CE 131:
+  * "Epoch index should identify the epoch that the ticket will be used in"),
+  * one after the contest epoch whose γ_z and η_2 the proof is made against.
+  * Callers work in contest epochs; the codec adds and removes the one.
   */
 object TicketCodec:
   val MessageLength: Int = 4 + 1 + RingVrfSignatureSize
 
-  def encode(epoch: Long, env: TicketEnvelope): Array[Byte] =
-    LittleEndian.encode(epoch, 4) ++ Array(env.attempt.toByte) ++ env.signature.toArray
+  def encode(contestEpoch: Long, env: TicketEnvelope): Array[Byte] =
+    LittleEndian.encode(contestEpoch + 1, 4) ++ Array(env.attempt.toByte) ++ env.signature.toArray
 
+  /** Decodes to `(contest epoch, ticket)`. */
   def decode(bytes: Array[Byte]): Either[String, (Long, TicketEnvelope)] =
     if bytes.length != MessageLength then
       Left(s"CE131/132: expected $MessageLength bytes, got ${bytes.length}")
     else
-      val epoch = LittleEndian.get(bytes, 0, 4)
-      val attempt = UByte(bytes(4))
-      val proof = JamBytes(java.util.Arrays.copyOfRange(bytes, 5, MessageLength))
-      Right((epoch, TicketEnvelope(attempt, proof)))
+      val useEpoch = LittleEndian.get(bytes, 0, 4)
+      if useEpoch == 0 then Left("CE131/132: epoch 0 cannot be a ticket's use epoch")
+      else
+        val attempt = UByte(bytes(4))
+        val proof = JamBytes(java.util.Arrays.copyOfRange(bytes, 5, MessageLength))
+        Right((useEpoch - 1, TicketEnvelope(attempt, proof)))

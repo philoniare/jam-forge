@@ -139,7 +139,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       egress.shutdownNow()
   }
 
-  test("CE136: an unknown hash produces FIN with no response message") {
+  test("CE136: an unknown hash is rejected with no response message") {
     val egress = newEgress()
     val distribution = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
     distribution.recordReport(sampleReport(0x02)) // populate the cache with something else
@@ -171,7 +171,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       egress.shutdownNow()
   }
 
-  test("CE136: a non-32-byte request does not crash the handler and still gets FIN") {
+  test("CE136: a non-32-byte request does not crash the handler and is rejected") {
     val egress = newEgress()
     val distribution = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
 
@@ -240,7 +240,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
-  test("CE147: an unknown erasure root produces FIN with no response message") {
+  test("CE147: an unknown erasure root is rejected with no response message") {
     val (guarantor, _, dir) = newGuarantor()
     guarantor.recordBundle(Hashing.blake2b256(Array.fill[Byte](4)(0x04)), Array[Byte](1, 2, 3))
 
@@ -271,7 +271,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
-  test("CE147: a non-32-byte request does not crash the handler and still gets FIN") {
+  test("CE147: a non-32-byte request does not crash the handler and is rejected") {
     val (guarantor, _, dir) = newGuarantor()
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
@@ -319,7 +319,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
   private def fakeSegments(count: Int): IndexedSeq[Array[Byte]] =
     (0 until count).map(i => Array.fill[Byte](4104)(i.toByte)).toIndexedSeq
 
-  test("CE148: requested segments are served concatenated, followed by an empty proof list") {
+  test("CE148: requested segments are served concatenated, followed by their import proofs") {
     val (guarantor, pool, dir) = newGuarantor()
     val root = Hashing.blake2b256(Array.fill[Byte](4)(0x05))
     val segs = fakeSegments(3)
@@ -348,8 +348,13 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       msg1 shouldBe (segs(0) ++ segs(2))
       msg1.length shouldBe 8208
 
+      // One J_0 proof per segment: len++[Hash], T(C(s), i) over 3 segments is 2 deep.
+      val proofs = io.forge.jam.core.merkle.BinaryMerkle.pagedJustifications(segs, 0).map(_._1)
       val msg2 = await(responses)
-      msg2 shouldBe io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(0)
+      msg2 shouldBe Seq(0, 2).flatMap { i =>
+        io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(proofs(i).size.toLong) ++ proofs(i).flatten
+      }.toArray
+      msg2.length shouldBe 2 * (1 + 2 * 32)
 
       await(closed) shouldBe true
     finally
@@ -358,7 +363,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
-  test("CE148: an unknown segments-root produces FIN with no response message") {
+  test("CE148: an unknown segments-root is rejected with no response message") {
     val (guarantor, pool, dir) = newGuarantor()
     pool.put(Hashing.blake2b256(Array.fill[Byte](4)(0x06)), fakeSegments(1))
 
@@ -389,7 +394,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
-  test("CE148: an out-of-range index produces FIN with no response message") {
+  test("CE148: an out-of-range index is rejected with no response message") {
     val (guarantor, pool, dir) = newGuarantor()
     val root = Hashing.blake2b256(Array.fill[Byte](4)(0x07))
     pool.put(root, fakeSegments(3)) // valid indices are 0..2
@@ -421,7 +426,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
-  test("CE148: a malformed request does not crash the handler and still gets FIN") {
+  test("CE148: a malformed request does not crash the handler and is rejected") {
     val (guarantor, _, dir) = newGuarantor()
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
@@ -486,8 +491,11 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       msg1 shouldBe (segsA(1) ++ segsA(2) ++ segsB(0))
       msg1.length shouldBe 3 * 4104
 
+      def proofBytes(segs: IndexedSeq[Array[Byte]], i: Int): Array[Byte] =
+        val proof = io.forge.jam.core.merkle.BinaryMerkle.pagedJustifications(segs, 0)(i)._1
+        io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(proof.size.toLong) ++ proof.flatten
       val msg2 = await(responses)
-      msg2 shouldBe io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(0)
+      msg2 shouldBe (proofBytes(segsA, 1) ++ proofBytes(segsA, 2) ++ proofBytes(segsB, 0))
 
       await(closed) shouldBe true
     finally

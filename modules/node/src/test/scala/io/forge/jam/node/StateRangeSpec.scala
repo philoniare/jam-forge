@@ -109,10 +109,12 @@ class StateRangeSpec extends AnyFunSuite with Matchers:
         next = received.poll()
 
       messages.size shouldBe 2 // boundary-node message, then pairs message
-      val boundaryNodes = SyncCodec.decodeBoundaryNodes(messages(0))
+      val Right(boundaryNodes) = SyncCodec.decodeBoundaryNodes(messages(0)): @unchecked
       val pairs = SyncCodec.decodeStatePairs(messages(1))
 
       boundaryNodes should not be empty
+      // The first boundary node is the root: its 64 bytes hash to the state root.
+      io.forge.jam.core.Hashing.blake2b256(boundaryNodes.head) shouldBe nodeA.chain.best.stateRoot
       pairs.map(_._1) shouldBe expectedKeys
       pairs shouldBe expected
     finally

@@ -6,13 +6,14 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.crypto.ErasureCoding
 
-/** One validator's custody unit for a work package:
-  * its erasure chunk of the audit bundle, its chunk column across all
-  * exported + paged-proof segments, and the Merkle co-path justifying the
-  * pair against the report's erasure-root.
+/** One shard index's custody unit for a work package: its erasure chunk of
+  * the audit bundle, its chunk column across all exported + paged-proof
+  * segments, and the Merkle co-path justifying the pair against the
+  * report's erasure-root. Validator v of a report on core c holds shard
+  * index (c·R + v) mod V ([[DaShards.shardIndexFor]]).
   */
 final case class ValidatorShards(
-    validatorIndex: Int,
+    shardIndex: Int,
     bundleShard: Array[Byte],
     segmentShards: IndexedSeq[Array[Byte]],
     justification: List[Array[Byte]]
@@ -27,7 +28,7 @@ final case class ValidatorShards(
     def writeBlob(b: Array[Byte]): Unit =
       out.write(JamCodecs.encodeCompactInteger(b.length.toLong))
       out.write(b)
-    out.write(JamCodecs.encodeCompactInteger(validatorIndex.toLong))
+    out.write(JamCodecs.encodeCompactInteger(shardIndex.toLong))
     writeBlob(bundleShard)
     out.write(JamCodecs.encodeCompactInteger(segmentShards.length.toLong))
     segmentShards.foreach(writeBlob)
@@ -40,6 +41,56 @@ final case class ValidatorShards(
   * `DaShardsSpec` asserts the two agree on the erasure-root.
   */
 object DaShards:
+
+  /** R: the minimum number of shards that recover the data (V/3 + 1, i.e.
+    * 342 of 1023 or 3 of 6), half the erasure-coding piece size in octets.
+    */
+  def recoveryThreshold(config: ChainConfig): Int = config.ecPieceSize / 2
+
+  /** Bytes of one segment shard: a 4104-byte segment split R ways
+    * (JAMNP-S common types: `Segment Shard = [u8; 4104 / R]`).
+    */
+  def segmentShardSize(config: ChainConfig): Int =
+    io.forge.jam.core.constants.Csegmentsize.toInt / recoveryThreshold(config)
+
+  /** Shard index assigned to `validatorIndex` for a report from
+    * `coreIndex`: i = (c·R + v) mod V (JAMNP-S §Shard assignment).
+    */
+  def shardIndexFor(coreIndex: Int, validatorIndex: Int, config: ChainConfig): Int =
+    ((coreIndex.toLong * recoveryThreshold(config) + validatorIndex) % config.validatorCount).toInt
+
+  /** The CE 138 justification: the CE 137 co-path with the shard's
+    * segment-shard root appended, so the bundle shard alone can be checked.
+    */
+  def auditJustification(shards: ValidatorShards): List[Array[Byte]] =
+    shards.justification :+ BinaryMerkle.merklizeWB(shards.segmentShards)
+
+  /** Verify a bundle shard served over CE 138 against the erasure-root. */
+  def verifyAuditShard(
+      erasureRoot: Hash,
+      validatorCount: Int,
+      shardIndex: Int,
+      bundleShard: Array[Byte],
+      justification: List[Array[Byte]]
+  ): Boolean =
+    justification.nonEmpty && shardIndex >= 0 && shardIndex < validatorCount && {
+      val segmentRoot = justification.last
+      BinaryMerkle.verifyTrace(
+        erasureRoot.bytes.toArray,
+        BinaryMerkle.blake2b(bundleShard) ++ segmentRoot,
+        shardIndex,
+        validatorCount,
+        justification.init
+      )
+    }
+
+  /** The CE 140 justification for segment shard `segmentIndex`: the CE 137
+    * co-path, the bundle shard hash, then T over the segment shards
+    * (JAMNP-S CE 139/140: j ++ [b] ++ T(s, i, H)).
+    */
+  def segmentJustification(shards: ValidatorShards, segmentIndex: Int): List[Array[Byte]] =
+    shards.justification ++
+      (BinaryMerkle.blake2b(shards.bundleShard) :: BinaryMerkle.trace(shards.segmentShards, segmentIndex))
 
   /** Build every validator's shards for a computed report.
     *
@@ -69,7 +120,7 @@ object DaShards:
       val tree = BinaryMerkle.Tree(leaves)
       (0 until config.validatorCount).map { v =>
         ValidatorShards(
-          validatorIndex = v,
+          shardIndex = v,
           bundleShard = bundleChunks(v),
           segmentShards = segmentColumns(v),
           justification = tree.trace(v)
@@ -84,11 +135,11 @@ object DaShards:
       validatorCount: Int,
       shards: ValidatorShards
   ): Boolean =
-    shards.validatorIndex >= 0 && shards.validatorIndex < validatorCount &&
+    shards.shardIndex >= 0 && shards.shardIndex < validatorCount &&
       BinaryMerkle.verifyTrace(
         erasureRoot.bytes.toArray,
         shards.leaf,
-        shards.validatorIndex,
+        shards.shardIndex,
         validatorCount,
         shards.justification
       )

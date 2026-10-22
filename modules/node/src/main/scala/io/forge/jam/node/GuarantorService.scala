@@ -67,7 +67,9 @@ final class GuarantorService(
     /** CE 146 cumulative-message cap; overridable so tests can exercise the
       * breach path cheaply. See [[GuarantorService.DefaultMaxSubmissionBytes]].
       */
-    maxSubmissionBytes: Long = GuarantorService.DefaultMaxSubmissionBytes
+    maxSubmissionBytes: Long = GuarantorService.DefaultMaxSubmissionBytes,
+    /** This node's network (TLS) Ed25519 key, preferred when signing CE 134. */
+    ownNetworkKey: Option[Array[Byte]] = None
 ) extends LazyLogging:
 
   private val computeReport = new ComputeReport(chain.config)
@@ -102,54 +104,57 @@ final class GuarantorService(
   def recordBundle(erasureRoot: Hash, bundleBytes: Array[Byte]): Unit =
     heldBundles.put(erasureRoot, bundleBytes)
 
-  /** CE 147: Erasure-Root (32) -> Bundle. */
+  /** CE 147: Erasure-Root (32) -> Bundle; reset when we don't hold it. */
   def bundleRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        try
-          if msg.length == 32 then
-            Option(heldBundles.get(Hash(msg))).foreach(b => stream.send(b))
-        catch case e: Exception => logger.warn(s"CE147 failed: ${e.getMessage}")
-        stream.finish()
+        val bundle =
+          if msg.length == 32 then Option(heldBundles.get(Hash(msg)))
+          else None
+        bundle match
+          case Some(b) =>
+            stream.send(b)
+            stream.finish()
+          case None => stream.reset()
       }
 
   /** CE 148: repeated `(segments-root(32) ++ compact-len ++ [u16 LE index])`
     * groups; message 1 is every requested segment (`Csegmentsize` bytes
-    * each) concatenated in request order, message 2 is the import-proof
-    * list (`compact-len ++ [hash(32)]` per proof). Any unknown root or
-    * out-of-range index for any group aborts the whole request (FIN, no
-    * messages) rather than returning a partial result.
-    *
-    * TODO(proofs): message 2 is currently always an empty list —
-    * generating proofs over the export Merkle tree is follow-up work;
-    * acceptable for devnet, where peers re-verify a served segment by
-    * re-executing the work package instead of trusting an unproven one.
+    * each) concatenated in request order, message 2 one import proof
+    * (`len++[Hash]`, J_0 in GP 0.8.0 §14) per segment in the same order. An
+    * unknown root, an out-of-range index or more than W_M segments rejects
+    * the whole request with a reset.
     */
   def segmentRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        try
-          decodeSegmentRequest(msg) match
-            case Some(groups) =>
-              val resolved = groups.foldLeft(Option(IndexedSeq.empty[Array[Byte]])) { (acc, group) =>
+        val served =
+          try
+            decodeSegmentRequest(msg)
+              .filter(_.map(_._2.size).sum <= GuarantorService.MaxSegmentsPerRequest)
+              .flatMap(_.foldLeft(Option(IndexedSeq.empty[(Array[Byte], List[Array[Byte]])])) { (acc, group) =>
                 val (root, indices) = group
-                acc.flatMap(collected => segments.get(root, indices).map(collected ++ _))
-              }
-              resolved match
-                case Some(segs) =>
-                  val out = new java.io.ByteArrayOutputStream()
-                  segs.foreach(out.write)
-                  stream.send(out.toByteArray)
-                  stream.send(JamCodecs.encodeCompactInteger(0))
-                  logger.info(
-                    "CE148: served segments with an empty import-proof list " +
-                      "(proof generation not yet implemented; peer must re-verify via re-execution)"
-                  )
-                case None => () // unknown root or out-of-range index anywhere in the request
-            case None =>
-              logger.warn("CE148: malformed segment request")
-        catch case e: Exception => logger.warn(s"CE148 failed: ${e.getMessage}")
-        stream.finish()
+                acc.flatMap(collected => segments.getWithProofs(root, indices).map(collected ++ _))
+              })
+          catch
+            case e: Exception =>
+              logger.warn(s"CE148 failed: ${e.getMessage}")
+              None
+        served match
+          case Some(found) =>
+            val segs = new java.io.ByteArrayOutputStream()
+            val proofs = new java.io.ByteArrayOutputStream()
+            found.foreach { (seg, proof) =>
+              segs.write(seg)
+              proofs.write(JamCodecs.encodeCompactInteger(proof.size.toLong))
+              proof.foreach(h => proofs.write(h))
+            }
+            stream.send(segs.toByteArray)
+            stream.send(proofs.toByteArray)
+            stream.finish()
+          case None =>
+            logger.debug("CE148: request not servable")
+            stream.reset()
       }
 
   /** Decode CE 148's repeated `(root(32) ++ compact-len ++ [u16 LE index])`
@@ -178,6 +183,7 @@ final class GuarantorService(
     catch case _: Exception => None
 
   def shutdown(): Unit =
+    coSignPool.shutdownNow()
     executor.shutdown()
     executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
 
@@ -190,22 +196,34 @@ final class GuarantorService(
   def workPackageSubmissionHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
-      stream.onMessage(messages += _)
+      var rejected = false
+      stream.onMessage { msg =>
+        if !rejected then
+          // JAMNP-S CE 133: `Core Index ++ Work-Package` is at most 2 + 200 KiB,
+          // so a guarantor never downloads a huge package before authorizing it.
+          if messages.isEmpty && msg.length > 2 + GuarantorService.MaxWorkPackageBytes then
+            rejected = true
+            logger.warn(s"CE133: work-package message of ${msg.length} bytes exceeds the limit")
+            stream.reset()
+          else messages += msg
+      }
       stream.onClosed { () =>
-        executor.submit { (() =>
-          try
-            if messages.nonEmpty then
-              val first = messages.head
-              val coreIndex = ((first(0) & 0xff) | ((first(1) & 0xff) << 8))
-              val wpBytes = java.util.Arrays.copyOfRange(first, 2, first.length)
-              decodeWorkPackage(wpBytes) match
-                case Left(err) =>
-                  logger.warn(s"CE133: bad work package: $err")
-                case Right(wp) =>
-                  val extrinsicBlob = messages.drop(1).headOption.getOrElse(Array.emptyByteArray)
-                  onWorkPackage(coreIndex, wp, extrinsicBlob)
-          catch case e: Exception => logger.error("CE133 handling failed", e)
-        ): Runnable }
+        if !rejected then
+          stream.finish() // `<-- FIN`: the submission was received in full
+          executor.submit { (() =>
+            try
+              if messages.nonEmpty then
+                val first = messages.head
+                val coreIndex = ((first(0) & 0xff) | ((first(1) & 0xff) << 8))
+                val wpBytes = java.util.Arrays.copyOfRange(first, 2, first.length)
+                decodeWorkPackage(wpBytes) match
+                  case Left(err) =>
+                    logger.warn(s"CE133: bad work package: $err")
+                  case Right(wp) =>
+                    val extrinsicBlob = messages.drop(1).headOption.getOrElse(Array.emptyByteArray)
+                    onWorkPackage(coreIndex, wp, extrinsicBlob)
+            catch case e: Exception => logger.error("CE133 handling failed", e)
+          ): Runnable }
       }
 
   /** CE 146 handler: the multi-message sibling of CE 133, for builders that
@@ -270,6 +288,11 @@ final class GuarantorService(
               s"CE146: cumulative submission size $totalBytes exceeds the $maxSubmissionBytes-byte cap; aborting"
             )
             stream.finish()
+          else if messages.size == 1 && msg.length > GuarantorService.MaxWorkPackageBytes then
+            // JAMNP-S CE 146: the Work-Package message is at most 200 KiB.
+            dispatched = true
+            logger.warn(s"CE146: work-package message of ${msg.length} bytes exceeds the limit")
+            stream.reset()
           else
             messages += msg
             if messages.size == 5 then dispatch()
@@ -421,7 +444,7 @@ final class GuarantorService(
       ) match
         case Right(all) =>
           val root = computed.report.packageSpec.erasureRoot
-          all.foreach(s => store.put(root, s.validatorIndex, s.encode))
+          all.foreach(s => store.put(root, s.shardIndex, s.encode))
           logger.debug(s"custodied ${all.size} shard sets for ${root.toHex.take(18)}")
         case Left(err) =>
           logger.error(s"shard construction failed (report still distributed): $err")
@@ -454,9 +477,10 @@ final class GuarantorService(
       )
     }
 
-    // Top up to the required >= 2 credentials via CE 134 co-signing.
+    // Share with the core's other guarantors via CE 134 unless we already
+    // hold all three credentials.
     val signatures =
-      (if ownSignatures.size >= 2 then ownSignatures
+      (if ownSignatures.size >= 3 then ownSignatures
        else ownSignatures ++ requestCoSignatures(computed, slot, reportHash, ownSignatures.map(_.validatorIndex.value.toInt).toSet))
         .distinctBy(_.validatorIndex.value.toInt)
         .sortBy(_.validatorIndex.value.toInt)
@@ -480,77 +504,82 @@ final class GuarantorService(
   // CE 134 — work-package sharing (co-signing)
   // =========================================================================
 
-  /** Responder: re-execute the shared bundle and return signatures from every
-    * held key assigned to the core.
+  /** Responder: check the shard count, re-execute the shared bundle and
+    * return one signature (`Work-Report Hash ++ Ed25519 Signature`) from a
+    * held key assigned to the core: the key we use as network identity when
+    * it is assigned, else the lowest assigned index we hold. Messages that
+    * cannot be co-signed are rejected by resetting the stream.
     */
   def workPackageSharingHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
+      val messages = mutable.ListBuffer.empty[Array[Byte]]
       stream.onMessage { msg =>
-        executor.submit { (() =>
-          try respondCoSign(stream, msg)
-          catch case e: Exception => logger.error("CE134 handling failed", e)
-        ): Runnable }
+        messages += msg
+        if messages.size == 2 then
+          val Seq(header, bundle) = messages.toSeq: @unchecked
+          executor.submit { (() =>
+            try respondCoSign(stream, header, bundle)
+            catch
+              case e: Exception =>
+                logger.error("CE134 handling failed", e)
+                stream.reset()
+          ): Runnable }
       }
 
-  private def respondCoSign(stream: JamnpStream, msg: Array[Byte]): Unit =
-    val slot = (msg(0) & 0xffL) | ((msg(1) & 0xffL) << 8) |
-      ((msg(2) & 0xffL) << 16) | ((msg(3) & 0xffL) << 24)
-    val coreIndex = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)
-    var offset = 6
-    val (n, c) = JamCodecs.decodeCompactInteger(msg, offset)
-    offset += c
-    val lookup = (0 until n.toInt).map { _ =>
-      val wpHash = Hash(java.util.Arrays.copyOfRange(msg, offset, offset + 32))
-      val segRoot = Hash(java.util.Arrays.copyOfRange(msg, offset + 32, offset + 64))
-      offset += 64
-      wpHash -> segRoot
-    }.toMap
-    val bundleBytes = java.util.Arrays.copyOfRange(msg, offset, msg.length)
-
-    val held = ownAssignedKeys(slot, coreIndex)
-    if held.isEmpty then
-      logger.debug(s"CE134: no key assigned to core $coreIndex at slot $slot; ignoring")
-      stream.finish()
-      return
-
-    val result = for
-      bundle <- WorkPackageBundle.decode(bundleBytes)
-      computed <- computeReport
-        .compute(
-          workPackage = bundle.workPackage,
-          coreIndex = coreIndex,
-          segmentRootLookup = lookup,
-          importSegments = bundle.importSegments,
-          extrinsicData = bundle.extrinsicData,
-          justifications = bundle.justifications,
-          accounts = accounts
-        )
-        .left
-        .map(e => s"re-execution refused: $e")
-    yield computed
-
-    result match
+  private def respondCoSign(stream: JamnpStream, header: Array[Byte], bundleBytes: Array[Byte]): Unit =
+    GuarantorService.decodeSharingHeader(header) match
       case Left(err) =>
-        logger.warn(s"CE134: cannot co-sign: $err")
-        stream.finish()
-      case Right(computed) =>
-        storeShards(computed) // co-guarantors custody shards too
-        val reportHash = Hashing.blake2b256(computed.report.encode.toArray)
-        val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
-        val out = new java.io.ByteArrayOutputStream()
-        out.write(reportHash.bytes.toArray)
-        out.write(JamCodecs.encodeCompactInteger(held.length.toLong))
-        held.foreach { (idx, keys) =>
-          out.write(idx & 0xff)
-          out.write((idx >> 8) & 0xff)
-          out.write(Ed25519ZebraWrapper.sign(keys.ed25519Secret, message))
-        }
-        stream.send(out.toByteArray)
-        stream.finish()
-        logger.info(s"CE134: co-signed report ${reportHash.toHex.take(18)} with ${held.size} key(s)")
+        logger.warn(s"CE134: $err")
+        stream.reset()
+      case Right((coreIndex, shardCount, lookup)) =>
+        // JAMNP-S CE 134: the shard count must be the active validator count
+        // at a slot the report could be included in; ours is fixed per chain.
+        val slot = chain.best.slot + 1
+        val held = ownAssignedKeys(slot, coreIndex)
+        if shardCount != chain.config.validatorCount then
+          logger.warn(s"CE134: shard count $shardCount is not the validator count ${chain.config.validatorCount}")
+          stream.reset()
+        else if held.isEmpty then
+          logger.debug(s"CE134: no key assigned to core $coreIndex at slot $slot; rejecting")
+          stream.reset()
+        else
+          val result = for
+            bundle <- WorkPackageBundle.decode(bundleBytes)
+            computed <- computeReport
+              .compute(
+                workPackage = bundle.workPackage,
+                coreIndex = coreIndex,
+                segmentRootLookup = lookup,
+                importSegments = bundle.importSegments,
+                extrinsicData = bundle.extrinsicData,
+                justifications = bundle.justifications,
+                accounts = accounts
+              )
+              .left
+              .map(e => s"re-execution refused: $e")
+          yield computed
 
-  /** Initiator: ask every peer for co-signatures, accepting only signatures
-    * from core-assigned validators over our own report hash.
+          result match
+            case Left(err) =>
+              logger.warn(s"CE134: cannot co-sign: $err")
+              stream.reset()
+            case Right(computed) =>
+              storeShards(computed) // co-guarantors custody shards too
+              val reportHash = Hashing.blake2b256(computed.report.encode.toArray)
+              val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
+              val (_, keys) = held
+                .find((_, k) => ownNetworkKey.exists(java.util.Arrays.equals(_, k.ed25519Public)))
+                .getOrElse(held.minBy(_._1))
+              stream.send(reportHash.bytes ++ Ed25519ZebraWrapper.sign(keys.ed25519Secret, message))
+              stream.finish()
+              logger.info(s"CE134: co-signed report ${reportHash.toHex.take(18)}")
+
+  /** Initiator: share the bundle with the other guarantors assigned to the
+    * core (every peer when none can be told apart by key, as on devnets
+    * whose nodes hold several validator keys), in parallel. Once two
+    * credentials are in hand the rest get [[GuarantorService.ThirdGuarantorGraceMillis]]
+    * to answer (JAMNP-S CE 135). A signature counts for the assigned
+    * validator whose key it verifies under, preferring the peer's own key.
     */
   private def requestCoSignatures(
       computed: ComputedReport,
@@ -564,53 +593,74 @@ final class GuarantorService(
     val assignments = GuarantorService.coreAssignments(view.entropy.pool(2), slot, chain.config)
     val activeSet = view.validators.current
     val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
+    val assigned =
+      activeSet.indices.filter(i => assignments.lift(i).contains(report.coreIndex.toInt) && !alreadyHave(i))
+    if assigned.isEmpty then return Nil
 
-    val request = new java.io.ByteArrayOutputStream(computed.bundleBytes.length + 64)
-    request.write((slot & 0xff).toInt); request.write(((slot >> 8) & 0xff).toInt)
-    request.write(((slot >> 16) & 0xff).toInt); request.write(((slot >> 24) & 0xff).toInt)
-    request.write(report.coreIndex.toInt & 0xff)
-    request.write((report.coreIndex.toInt >> 8) & 0xff)
-    request.write(JamCodecs.encodeCompactInteger(report.segmentRootLookup.length.toLong))
-    report.segmentRootLookup.foreach { l =>
-      request.write(l.workPackageHash.bytes.toArray)
-      request.write(l.segmentTreeRoot.bytes.toArray)
+    val header = GuarantorService.encodeSharingHeader(
+      report.coreIndex.toInt,
+      chain.config.validatorCount,
+      report.segmentRootLookup.map(l => l.workPackageHash -> l.segmentTreeRoot)
+    )
+    val peers = distribution.peers
+    val keyed = peers.filter(c =>
+      assigned.exists(i => java.util.Arrays.equals(activeSet(i).ed25519.bytes.toArray, c.peerKey))
+    )
+    val targets = if keyed.nonEmpty then keyed else peers
+
+    val responses = new java.util.concurrent.LinkedBlockingQueue[(JamnpConnection, Option[Array[Byte]])]()
+    targets.foreach { conn =>
+      coSignPool.submit { (() =>
+        responses.put(conn -> coSignRoundTrip(conn, header, computed.bundleBytes))
+      ): Runnable }
     }
-    request.write(computed.bundleBytes)
-    val requestBytes = request.toByteArray
 
     val collected = mutable.ListBuffer.empty[GuaranteeSignature]
     val seen = mutable.Set.empty[Int] ++ alreadyHave
-    distribution.peers.iterator.takeWhile(_ => seen.size < 3).foreach { conn =>
-      coSignRoundTrip(conn, requestBytes).foreach { response =>
-        try
-          val theirHash = Hash(java.util.Arrays.copyOfRange(response, 0, 32))
-          if theirHash == reportHash then
-            var off = 32
-            val (n, c) = JamCodecs.decodeCompactInteger(response, off)
-            off += c
-            (0 until n.toInt).foreach { _ =>
-              val idx = (response(off) & 0xff) | ((response(off + 1) & 0xff) << 8)
-              val sig = java.util.Arrays.copyOfRange(response, off + 2, off + 66)
-              off += 66
-              val valid = !seen.contains(idx) &&
-                assignments.lift(idx).contains(report.coreIndex.toInt) &&
-                activeSet.lift(idx).exists(vk =>
-                  Ed25519.verify(vk.ed25519.bytes.toArray, message, sig)
-                )
-              if valid then
+    var pending = targets.size
+    val deadline = System.currentTimeMillis() + GuarantorService.CoSignTimeoutMillis
+    var graceDeadline = Long.MaxValue
+    while pending > 0 && seen.size < 3 && System.currentTimeMillis() < math.min(deadline, graceDeadline) do
+      val wait = math.min(deadline, graceDeadline) - System.currentTimeMillis()
+      Option(responses.poll(math.max(wait, 1), java.util.concurrent.TimeUnit.MILLISECONDS)).foreach { (conn, resp) =>
+        pending -= 1
+        resp.foreach { r =>
+          if r.length != 96 then logger.warn(s"CE134: bad response length ${r.length}")
+          else if Hash(java.util.Arrays.copyOfRange(r, 0, 32)) != reportHash then
+            logger.warn("CE134: peer computed a different report; rejecting its signature")
+          else
+            val sig = java.util.Arrays.copyOfRange(r, 32, 96)
+            def verifies(i: Int) = Ed25519.verify(activeSet(i).ed25519.bytes.toArray, message, sig)
+            val candidates = assigned.filterNot(seen)
+            val signer = candidates
+              .find(i => java.util.Arrays.equals(activeSet(i).ed25519.bytes.toArray, conn.peerKey))
+              .filter(verifies)
+              .orElse(candidates.find(verifies))
+            signer match
+              case Some(idx) =>
                 seen += idx
                 collected += GuaranteeSignature(ValidatorIndex(idx), Ed25519Signature(sig))
-            }
-          else logger.warn(s"CE134: peer computed a different report; rejecting its signatures")
-        catch case e: Exception => logger.warn(s"CE134: bad response: ${e.getMessage}")
+                if seen.size >= 2 && graceDeadline == Long.MaxValue then
+                  graceDeadline = System.currentTimeMillis() + GuarantorService.ThirdGuarantorGraceMillis
+              case None => logger.warn("CE134: signature from no assigned validator")
+        }
       }
-    }
     collected.toList
 
-  /** One CE 134 request/response round trip. */
+  /** Runs CE 134 round trips in parallel, off the guarantor thread. */
+  private val coSignPool = java.util.concurrent.Executors.newCachedThreadPool(r =>
+    val t = new Thread(r, "jam-cosign")
+    t.setDaemon(true)
+    t
+  )
+
+  /** One CE 134 round trip: header and bundle messages, FIN, then the
+    * 96-byte response; None when the peer resets or times out.
+    */
   private def coSignRoundTrip(
-      conn: io.forge.jam.network.JamnpConnection,
-      request: Array[Byte]
+      conn: JamnpConnection,
+      header: Array[Byte],
+      bundle: Array[Byte]
   ): Option[Array[Byte]] =
     try
       val stream = conn
@@ -618,11 +668,11 @@ final class GuarantorService(
         .get(10, java.util.concurrent.TimeUnit.SECONDS)
       val response = new java.util.concurrent.CompletableFuture[Array[Byte]]()
       stream.onMessage(response.complete(_))
-      stream.onClosed(() => response.complete(null)) // peer declined/lacks the protocol
-      stream.send(request)
-      val r = response.get(30, java.util.concurrent.TimeUnit.SECONDS)
+      stream.onClosed(() => response.complete(null)) // peer rejected or lacks the protocol
+      stream.send(header)
+      stream.send(bundle)
       stream.finish()
-      Option(r)
+      Option(response.get(GuarantorService.CoSignTimeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
     catch
       case e: Exception =>
         logger.debug(s"CE134 round trip failed: ${e.getMessage}")
@@ -637,6 +687,54 @@ object GuarantorService:
     * the node to buffer before any structural validation runs.
     */
   val DefaultMaxSubmissionBytes: Long = 48L * 1024 * 1024
+
+  /** Largest encoded work-package a builder may send before authorization
+    * (JAMNP-S CE 133 and CE 146: `200 * 1024` bytes).
+    */
+  val MaxWorkPackageBytes: Int = 200 * 1024
+
+  /** Most segments one CE 148 stream may request: W_M = 3072 (GP 0.8.0). */
+  val MaxSegmentsPerRequest: Int = 3072
+
+  /** Upper bound on one CE 134 exchange (the peer refines the bundle). */
+  val CoSignTimeoutMillis: Long = 30000L
+
+  /** How long the third guarantor gets once two credentials are in hand
+    * (JAMNP-S CE 135: "a reasonable amount of time (e.g. two seconds)").
+    */
+  val ThirdGuarantorGraceMillis: Long = 2000L
+
+  /** CE 134 first message: `Core Index(u16) ++ Shard Count(u16) ++
+    * len++[Work-Package Hash ++ Segments-Root]` (JAMNP-S CE 134).
+    */
+  def encodeSharingHeader(coreIndex: Int, shardCount: Int, mappings: Seq[(Hash, Hash)]): Array[Byte] =
+    val out = new java.io.ByteArrayOutputStream(4 + 1 + 64 * mappings.size)
+    out.write(LittleEndian.encode(coreIndex.toLong, 2))
+    out.write(LittleEndian.encode(shardCount.toLong, 2))
+    out.write(JamCodecs.encodeCompactInteger(mappings.size.toLong))
+    mappings.foreach { (wp, root) =>
+      out.write(wp.bytes)
+      out.write(root.bytes)
+    }
+    out.toByteArray
+
+  def decodeSharingHeader(bytes: Array[Byte]): Either[String, (Int, Int, Map[Hash, Hash])] =
+    try
+      if bytes.length < 5 then Left(s"header too short (${bytes.length} bytes)")
+      else
+        val core = LittleEndian.get(bytes, 0, 2).toInt
+        val shards = LittleEndian.get(bytes, 2, 2).toInt
+        val (n, c) = JamCodecs.decodeCompactInteger(bytes, 4)
+        val end = 4 + c + 64 * n
+        if n < 0 || end != bytes.length then Left("mapping list length does not match the message")
+        else
+          val mappings = (0 until n.toInt).map { i =>
+            val off = 4 + c + 64 * i
+            Hash(java.util.Arrays.copyOfRange(bytes, off, off + 32)) ->
+              Hash(java.util.Arrays.copyOfRange(bytes, off + 32, off + 64))
+          }.toMap
+          Right((core, shards, mappings))
+    catch case e: Exception => Left(s"bad header: ${e.getMessage}")
 
   /** Validator→core assignment (gp guarantor rotation). */
   def coreAssignments(

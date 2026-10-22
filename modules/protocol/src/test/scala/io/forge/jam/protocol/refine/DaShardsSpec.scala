@@ -33,7 +33,7 @@ class DaShardsSpec extends AnyFunSuite with Matchers:
     val all = DaShards.buildAll(bundle, segments, config).toOption.get
     all.size shouldBe config.validatorCount
     all.foreach { s =>
-      withClue(s"validator ${s.validatorIndex}") {
+      withClue(s"validator ${s.shardIndex}") {
         DaShards.verify(root, config.validatorCount, s) shouldBe true
       }
     }
@@ -53,7 +53,7 @@ class DaShardsSpec extends AnyFunSuite with Matchers:
     )
     DaShards.verify(root, config.validatorCount, tamperedSegment) shouldBe false
 
-    val wrongIndex = s.copy(validatorIndex = 3)
+    val wrongIndex = s.copy(shardIndex = 3)
     DaShards.verify(root, config.validatorCount, wrongIndex) shouldBe false
 
     val otherRoot = erasureRootOf(bundle :+ 1.toByte, segments)
@@ -76,11 +76,11 @@ class DaShardsSpec extends AnyFunSuite with Matchers:
     val originalCount = config.ecPieceSize / 2
 
     // From the first `originalCount` shards.
-    val first = all.take(originalCount).map(s => (s.validatorIndex, s.bundleShard))
+    val first = all.take(originalCount).map(s => (s.shardIndex, s.bundleShard))
     DaShards.reconstructBundle(bundle.length, first, config).toOption.get shouldBe bundle
 
     // From the last `originalCount` shards (pure recovery shards).
-    val last = all.takeRight(originalCount).map(s => (s.validatorIndex, s.bundleShard))
+    val last = all.takeRight(originalCount).map(s => (s.shardIndex, s.bundleShard))
     DaShards.reconstructBundle(bundle.length, last, config).toOption.get shouldBe bundle
 
     // Too few shards fails.
@@ -94,7 +94,7 @@ class DaShardsSpec extends AnyFunSuite with Matchers:
     val all = DaShards.buildAll(bundle, segments, config).toOption.get
     all.foreach { s =>
       val decoded = DaShards.decode(s.encode).toOption.get
-      decoded.validatorIndex shouldBe s.validatorIndex
+      decoded.shardIndex shouldBe s.shardIndex
       decoded.bundleShard shouldBe s.bundleShard
       decoded.segmentShards.size shouldBe s.segmentShards.size
       decoded.segmentShards.zip(s.segmentShards).foreach((a, b) => a shouldBe b)

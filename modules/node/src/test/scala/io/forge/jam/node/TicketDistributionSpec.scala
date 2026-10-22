@@ -27,6 +27,12 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
     env.signature.length shouldBe 784
   }
 
+  test("JAMNP-S: CE 131 wire epoch is the epoch the ticket is used in (contest epoch + 1)") {
+    val bytes = TicketCodec.encode(42L, envelope(7))
+    io.forge.jam.core.LittleEndian.get(bytes, 0, 4) shouldBe 43L
+    TicketCodec.decode(bytes).map(_._1) shouldBe Right(42L)
+  }
+
   test("TicketCodec rejects wrong-length messages") {
     TicketCodec.decode(new Array[Byte](788)).isLeft shouldBe true
   }
@@ -118,9 +124,10 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
       nodeA.tickets.maybeGenerate()
       nodeA.pools.ticketCount should be > 0
 
-      // No validator-index -> connection map on this devnet, so this exercises
-      // the CE132 direct-broadcast fallback.
+      // Node A holds every dev key, so it is each ticket's proxy: the tickets
+      // wait on the CE 132 forwarding schedule, which flushForwards skips.
       nodeA.tickets.distributeTickets(nodeA.distribution.peers, _ => None)
+      nodeA.tickets.flushForwards()
 
       val deadline = System.currentTimeMillis() + 15000
       while nodeB.pools.ticketCount == 0 && System.currentTimeMillis() < deadline do

@@ -63,12 +63,17 @@ object SyncCodec:
   def encodeBlockRequest(from: Hash, ascending: Boolean, maxBlocks: Long): Array[Byte] =
     from.bytes.toArray ++ Array[Byte](if ascending then 0 else 1) ++ encodeU32(maxBlocks)
 
-  def decodeBlockRequest(bytes: Array[Byte]): (Hash, Boolean, Long) =
-    (
-      Hash(java.util.Arrays.copyOfRange(bytes, 0, 32)),
-      bytes(32) == 0,
-      decodeU32(bytes, 33)
-    )
+  def decodeBlockRequest(bytes: Array[Byte]): Either[String, (Hash, Boolean, Long)] =
+    if bytes.length != 37 then Left(s"expected 37 bytes, got ${bytes.length}")
+    else if bytes(32) != 0 && bytes(32) != 1 then Left(s"bad direction ${bytes(32)}")
+    else
+      Right(
+        (
+          Hash(java.util.Arrays.copyOfRange(bytes, 0, 32)),
+          bytes(32) == 0,
+          decodeU32(bytes, 33)
+        )
+      )
 
   /** CE 129 request: Header Hash(32) ++ Start Key(31) ++ End Key(31) ++
     * Maximum Size(4 LE) = 98 bytes.
@@ -88,19 +93,21 @@ object SyncCodec:
       val maxSize = decodeU32(bytes, 94)
       Right((headerHash, start, end, maxSize))
 
-  /** CE 129 response message 1: concatenated 65-byte boundary-node
-    * encodings (may be empty).
+  /** CE 129 response message 1: concatenated 64-byte boundary nodes, each
+    * "as returned by B/L" in GP 0.8.0 appendix D (may be empty).
     */
   def encodeBoundaryNodes(nodes: List[TrieNode]): Array[Byte] =
-    val out = new java.io.ByteArrayOutputStream(nodes.length * TrieNode.StorageBytes)
-    nodes.foreach(n => out.write(n.encode.toArray))
+    val out = new java.io.ByteArrayOutputStream(nodes.length * TrieNode.GpEncodingBytes)
+    nodes.foreach(n => out.write(n.gpEncoding))
     out.toByteArray
 
-  def decodeBoundaryNodes(bytes: Array[Byte]): List[TrieNode] =
-    bytes
-      .grouped(TrieNode.StorageBytes)
-      .map(chunk => TrieNode.decode(JamBytes(chunk)))
-      .toList
+  /** The 64-byte boundary nodes of a CE 129 response; a node's hash is the
+    * blake2b-256 of its bytes.
+    */
+  def decodeBoundaryNodes(bytes: Array[Byte]): Either[String, List[Array[Byte]]] =
+    if bytes.length % TrieNode.GpEncodingBytes != 0 then
+      Left(s"boundary nodes: ${bytes.length} bytes is not a multiple of ${TrieNode.GpEncodingBytes}")
+    else Right(bytes.grouped(TrieNode.GpEncodingBytes).toList)
 
   /** CE 129 response message 2: concatenated `key(31) ++ compactLen(value)
     * ++ value` pairs.
@@ -177,6 +184,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
 
   private val StateRequestMaxSizeCap: Long = 16L * 1024 * 1024
 
+  /** Cap on blocks per CE 128 response, whatever the requested maximum. */
+  private val MaxBlocksPerResponse: Long = 256L
+  private val MaxBlockResponseBytes: Long = 16L * 1024 * 1024
+
   /** Single-threaded import pipeline so block application stays sequential. */
   private val importExecutor = Executors.newSingleThreadExecutor { r =>
     val t = new Thread(r, "jam-sync-import")
@@ -204,41 +215,52 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   // UP 0 — block announcement
   // =========================================================================
 
+  /** The live UP 0 stream on each connection. */
+  private val upStreams = new ConcurrentHashMap[JamnpConnection, JamnpStream]()
+
   /** Handler for peer-opened UP 0 streams (we are the acceptor). */
   def blockAnnouncementHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
-      var handshaken = false
-      announceStreams.add(stream)
-      stream.onClosed { () =>
-        announceStreams.remove(stream)
-        peerFinals.remove(conn)
-        peerBestHeads.remove(conn)
-      }
-      stream.onMessage { msg =>
-        if !handshaken then
-          handshaken = true
-          val (peerFinal, peerLeaves) = decodeHandshake(msg)
-          peerFinals.put(conn, peerFinal)
-          logger.info(
-            s"UP0 handshake decoded from accepted peer: final=${peerFinal.hash.toHex.take(18)} " +
-              s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
-          )
-          stream.send(ourHandshake)
-          onPeerLeaves(conn, peerLeaves, peerFinal)
-        else onAnnouncement(conn, msg)
-      }
+    (conn: JamnpConnection, stream: JamnpStream) => attachAnnouncementStream(conn, stream, "accepted")
 
   /** Open UP 0 to a peer we connected to (we are the initiator). */
   def openAnnouncementStream(conn: JamnpConnection): JamnpStream =
     val stream = conn
       .openStream(StreamKind.BlockAnnouncement)
       .get(10, TimeUnit.SECONDS)
+    attachAnnouncementStream(conn, stream, "dialed")
+    stream
+
+  /** True when `conn` has an open UP 0 stream. */
+  def hasAnnouncementStream(conn: JamnpConnection): Boolean =
+    Option(upStreams.get(conn)).exists(_.isOpen)
+
+  /** Close the UP 0 stream on `conn`, if any (e.g. the peer stopped being a
+    * grid neighbour at an epoch change).
+    */
+  def closeAnnouncementStream(conn: JamnpConnection): Unit =
+    Option(upStreams.get(conn)).foreach(_.close())
+
+  /** Both sides send their handshake as soon as the stream is open (JAMNP-S
+    * UP 0). A UP kind has one stream per connection: when a second one
+    * shows up, the one with the greatest QUIC stream ID is kept and the
+    * others reset (JAMNP-S "Protocols and streams").
+    */
+  private def attachAnnouncementStream(conn: JamnpConnection, stream: JamnpStream, side: String): Unit =
     var handshaken = false
+    val previous = upStreams.merge(conn, stream, (old, nu) => if old.isOpen && old.id > nu.id then old else nu)
+    if previous ne stream then
+      logger.debug(s"UP0: duplicate stream ${stream.id} on one connection; keeping ${previous.id}")
+      stream.reset()
+      return
+    announceStreams.forEach(s => if s.ne(stream) && streamConnection.get(s) == conn then dropDuplicate(s))
+    streamConnection.put(stream, conn)
     announceStreams.add(stream)
     stream.onClosed { () =>
       announceStreams.remove(stream)
-      peerFinals.remove(conn)
-      peerBestHeads.remove(conn)
+      streamConnection.remove(stream)
+      if upStreams.remove(conn, stream) then
+        peerFinals.remove(conn)
+        peerBestHeads.remove(conn)
     }
     stream.onMessage { msg =>
       if !handshaken then
@@ -246,14 +268,22 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         val (peerFinal, peerLeaves) = decodeHandshake(msg)
         peerFinals.put(conn, peerFinal)
         logger.info(
-          s"UP0 handshake decoded from dialed peer: final=${peerFinal.hash.toHex.take(18)} " +
+          s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
             s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
         )
         onPeerLeaves(conn, peerLeaves, peerFinal)
       else onAnnouncement(conn, msg)
     }
     stream.send(ourHandshake)
-    stream
+
+  /** The connection each UP 0 stream belongs to. */
+  private val streamConnection = new ConcurrentHashMap[JamnpStream, JamnpConnection]()
+
+  private def dropDuplicate(old: JamnpStream): Unit =
+    logger.debug(s"UP0: stream ${old.id} superseded by a newer stream on the same connection; resetting")
+    announceStreams.remove(old)
+    streamConnection.remove(old)
+    old.reset()
 
   /** Announce a newly imported/authored block on all UP 0 streams. */
   def announce(headerBytes: Array[Byte]): Unit =
@@ -287,17 +317,31 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   // CE 128 — block request
   // =========================================================================
 
-  /** Handler serving peer block requests. */
+  /** Handler serving peer block requests. The response is one message
+    * holding the block sequence (JAMNP-S CE 128 `<-- [Block]`). A request
+    * for an unknown block, or one that can no longer be finalized, is reset.
+    */
   def blockRequestHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
-        val (from, ascending, maxBlocks) = decodeBlockRequest(msg)
-        val max = math.min(maxBlocks, 256L).toInt
-        val blocks =
-          if ascending then chain.blocksAscending(from, max)
-          else chain.blocksDescending(from, max)
-        blocks.foreach(stream.send)
-        stream.finish()
+        decodeBlockRequest(msg) match
+          case Left(err) =>
+            logger.warn(s"CE128: $err")
+            stream.reset()
+          case Right((from, ascending, maxBlocks)) =>
+            if !chain.hasBlock(from) || !chain.canBeFinalized(from) then stream.reset()
+            else
+              val max = math.min(maxBlocks, MaxBlocksPerResponse).toInt
+              val blocks =
+                if ascending then chain.blocksAscending(from, max)
+                else chain.blocksDescending(from, max)
+              // Keep the one message under the peer's frame cap.
+              val out = new java.io.ByteArrayOutputStream()
+              blocks.iterator
+                .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
+                .foreach(b => out.write(b))
+              stream.send(out.toByteArray)
+              stream.finish()
       }
 
   /** Fetch blocks descending (inclusive) from `from` on a fresh CE 128 stream
@@ -323,7 +367,9 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             val blocks = mutable.ListBuffer.empty[Array[Byte]]
             var next = received.poll()
             while next != null do
-              blocks += next
+              chain.splitBlocks(next) match
+                case Right(bs) => blocks ++= bs
+                case Left(err) => logger.warn(s"CE128 response undecodable: $err")
               next = received.poll()
             // Oldest first; skip blocks until one extends our best head.
             var imported = 0
@@ -353,17 +399,22 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       stream.onMessage { msg =>
         try
           decodeStateRequest(msg) match
-            case Left(err) => logger.warn(s"CE129 request decode failed: $err")
+            case Left(err) =>
+              logger.warn(s"CE129 request decode failed: $err")
+              stream.reset()
             case Right((headerHash, start, end, maxSize)) =>
               chain.stateAt(headerHash) match
                 case None =>
                   logger.debug(s"CE129: state request for unknown header ${headerHash.toHex.take(18)}")
+                  stream.reset()
                 case Some(trie) =>
                   val cap = math.min(maxSize, StateRequestMaxSizeCap).toInt
                   val (boundary, pairs) = trie.range(start, end, cap)
                   stream.send(encodeBoundaryNodes(boundary))
                   stream.send(encodeStatePairs(pairs))
+                  stream.finish()
         catch
-          case e: Exception => logger.warn(s"CE129 handler failed: ${e.getMessage}")
-        stream.finish()
+          case e: Exception =>
+            logger.warn(s"CE129 handler failed: ${e.getMessage}")
+            stream.reset()
       }

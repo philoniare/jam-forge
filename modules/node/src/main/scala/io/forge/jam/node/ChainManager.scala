@@ -337,6 +337,21 @@ final class ChainManager(
   def encodeBlock(block: Block): Array[Byte] =
     blockCodec.encode(block)
 
+  /** Split a CE 128 response (`[Block]`, the sequence length implied by the
+    * message size) into the encoded blocks, decoding one at a time.
+    */
+  def splitBlocks(bytes: Array[Byte]): Either[String, List[Array[Byte]]] =
+    val out = mutable.ListBuffer.empty[Array[Byte]]
+    var offset = 0
+    while offset < bytes.length do
+      blockCodec.decodeAt(bytes, offset) match
+        case Right((_, used)) if used > 0 =>
+          out += java.util.Arrays.copyOfRange(bytes, offset, offset + used)
+          offset += used
+        case Right(_)  => return Left(s"empty block at offset $offset")
+        case Left(err) => return Left(s"block at offset $offset: $err")
+    Right(out.toList)
+
   def headerHashOf(block: Block): Hash =
     Hashing.blake2b256(block.header.encode.toArray)
 
@@ -526,6 +541,18 @@ final class ChainManager(
     )
   }
 
+  /** Whether stored block `hash` can still be finalized from our view: it
+    * is the finalized block, one of its ancestors, or one of its descendants
+    * (JAMNP-S CE 128 must not return any other block).
+    */
+  def canBeFinalized(hash: Hash): Boolean =
+    val fin = finalized
+    (blockHeight(hash), blockHeight(fin.hash)) match
+      case (Some(h), Some(fh)) =>
+        if h <= fh then ancestorAtHeight(fin.hash, h).contains(hash)
+        else ancestorAtHeight(hash, fh).contains(fin.hash)
+      case _ => false
+
   /** Walk `max` blocks from `from` following parents (descending, inclusive).
     */
   def blocksDescending(from: Hash, max: Int): List[Array[Byte]] =
@@ -552,7 +579,7 @@ final class ChainManager(
     var cursor = from
     var continue = true
     while out.size < max && continue do
-      blockStore.children(cursor) match
+      blockStore.children(cursor).filter(canBeFinalized) match
         case child :: _ =>
           blockStore.getBlock(child) match
             case Some(bytes) if bytes.nonEmpty =>

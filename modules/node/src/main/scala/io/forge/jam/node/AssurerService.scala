@@ -6,7 +6,7 @@ import io.forge.jam.core.primitives.{Ed25519Signature, Hash, ValidatorIndex}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.crypto.Ed25519ZebraWrapper
-import io.forge.jam.network.StreamKind
+import io.forge.jam.protocol.refine.DaShards
 
 /** Assurer role: after each imported block, acquires and verifies DA custody
   * for every pending report, then signs a per-validator
@@ -19,8 +19,17 @@ final class AssurerService(
     pools: ExtrinsicPools,
     validatorKeys: Seq[ValidatorKeySet],
     shards: ShardService,
-    shardStore: io.forge.jam.db.ShardStore
+    shardStore: io.forge.jam.db.ShardStore,
+    /** Runs a distribution at its JAMNP-S time: about 2 s before the next
+      * slot when the node keeps slot time, at once otherwise.
+      */
+    scheduleDistribution: (() => Unit) => Unit = f => f()
 ) extends LazyLogging:
+
+  /** Assurances made at the latest import, not yet sent on CE 141. A newer
+    * import replaces them, so only the freshest anchor is distributed.
+    */
+  private val pending = new java.util.concurrent.atomic.AtomicReference[List[AssuranceExtrinsic]](Nil)
 
   private val ed25519ByPublic: Map[Seq[Byte], ValidatorKeySet] =
     validatorKeys.map(k => k.ed25519Public.toSeq -> k).toMap
@@ -45,9 +54,10 @@ final class AssurerService(
         (idx, _) <- heldIndexes
       yield
         val root = assignment.report.packageSpec.erasureRoot
-        (core, idx) -> acquireCustody(root, idx)
+        (core, idx) -> acquireCustody(root, DaShards.shardIndexFor(core, idx, chain.config))
       ).toMap
 
+    val batch = List.newBuilder[AssuranceExtrinsic]
     var produced = 0
     heldIndexes.foreach { case (idx, keys) =>
       val bitfield = new Array[Byte]((chain.config.coresCount + 7) / 8)
@@ -68,32 +78,36 @@ final class AssurerService(
             Ed25519Signature(Ed25519ZebraWrapper.sign(keys.ed25519Secret, message))
         )
         pools.addAssurance(assurance)
-        distribution.distributeAssuranceToAll(assurance)
+        batch += assurance
         produced += 1
     }
+    if produced > 0 then
+      pending.set(batch.result())
+      // JAMNP-S CE 141: distribute approximately 2 seconds before each slot.
+      scheduleDistribution(() => pending.getAndSet(Nil).foreach(distribution.distributeAssuranceToAll))
     if produced > 0 then
       logger.debug(
         s"assured ${reports.count(_.isDefined)} pending core(s) with $produced key(s) " +
           s"at anchor ${head.hash.toHex.take(18)}"
       )
 
-  /** True when verified shards for (erasure-root, validator index) are in
+  /** True when verified shards for (erasure-root, shard index) are in
     * custody, pulling them from peers via CE 137 when absent.
     */
-  private def acquireCustody(erasureRoot: Hash, validatorIndex: Int): Boolean =
-    if shardStore.has(erasureRoot, validatorIndex) then true
+  private def acquireCustody(erasureRoot: Hash, shardIndex: Int): Boolean =
+    if shardStore.has(erasureRoot, shardIndex) then true
     else
       distribution.peers.exists { conn =>
         shards
-          .fetchShards(conn, StreamKind.ShardDistribution, erasureRoot, validatorIndex)
+          .fetchShards(conn, erasureRoot, shardIndex)
           .map { s =>
-            shardStore.put(erasureRoot, validatorIndex, s.encode)
+            shardStore.put(erasureRoot, shardIndex, s.encode)
             true
           }
           .getOrElse(false)
       } || {
         logger.warn(
-          s"no custody for shard $validatorIndex of ${erasureRoot.toHex.take(18)}; withholding assurance"
+          s"no custody for shard $shardIndex of ${erasureRoot.toHex.take(18)}; withholding assurance"
         )
         false
       }
