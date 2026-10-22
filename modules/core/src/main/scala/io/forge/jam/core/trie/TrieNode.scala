@@ -23,6 +23,13 @@ final case class TrieNode(nodeType: TrieNodeType, left: JamBytes, right: JamByte
 
   def encode: JamBytes = JamBytes.wrap(encodeArray)
 
+  /** The 64-byte node encoding of GP 0.8.0 appendix D (functions B and L),
+    * which the node's hash commits to; what JAMNP-S CE 129 calls a boundary
+    * node. Unlike the storage form it drops the type tag, and a branch loses
+    * its left child hash's first bit.
+    */
+  def gpEncoding: Array[Byte] = TrieNode.gpEncoding(nodeType, left, right)
+
   /** The 65-byte storage encoding as a fresh array the caller owns. */
   def encodeArray: Array[Byte] =
     val out = new Array[Byte](TrieNode.StorageBytes)
@@ -33,6 +40,9 @@ final case class TrieNode(nodeType: TrieNodeType, left: JamBytes, right: JamByte
 
 object TrieNode:
   val StorageBytes = 65
+
+  /** Size of [[TrieNode.gpEncoding]]. */
+  val GpEncodingBytes = 64
 
   def decode(data: JamBytes): TrieNode = decodeArray(data.toArrayUnsafe)
 
@@ -85,6 +95,9 @@ object TrieNode:
       case _ => None
 
   private def computeHash(t: TrieNodeType, left: JamBytes, right: JamBytes): Hash =
+    Hashing.blake2b256(gpEncoding(t, left, right), 0, 64)
+
+  private def gpEncoding(t: TrieNodeType, left: JamBytes, right: JamBytes): Array[Byte] =
     val preimage = new Array[Byte](64)
     left.copyToArray(preimage, 0, 0, 32)
     right.copyToArray(preimage, 32, 0, 32)
@@ -96,4 +109,4 @@ object TrieNode:
         preimage(0) = (0x80 | len).toByte
       case TrieNodeType.RegularLeaf =>
         preimage(0) = 0xc0.toByte
-    Hashing.blake2b256(preimage, 0, 64)
+    preimage

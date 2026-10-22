@@ -10,7 +10,7 @@ import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.ByteToMessageDecoder
 import io.netty.handler.ssl.ClientAuth
-import io.netty.handler.ssl.util.{InsecureTrustManagerFactory, SimpleKeyManagerFactory}
+import io.netty.handler.ssl.util.{SimpleKeyManagerFactory, SimpleTrustManagerFactory}
 import io.netty.incubator.codec.quic.{
   BoringSSLContextOption,
   InsecureQuicTokenHandler,
@@ -25,7 +25,14 @@ import io.netty.incubator.codec.quic.{
 
 import java.security.{KeyStore, Principal, PrivateKey}
 import java.security.cert.X509Certificate
-import javax.net.ssl.{KeyManager, ManagerFactoryParameters, SSLEngine, X509ExtendedKeyManager}
+import javax.net.ssl.{
+  KeyManager,
+  ManagerFactoryParameters,
+  SSLEngine,
+  TrustManager,
+  X509ExtendedKeyManager,
+  X509TrustManager
+}
 import scala.jdk.CollectionConverters.*
 
 /** Configuration for a JAMNP-S endpoint.
@@ -48,11 +55,32 @@ final case class JamnpConfig(
     /** Frame size cap; must exceed the largest protocol message (bundles can
       * approach Cmaxbundlesize ≈ 13.8 MB).
       */
-    maxFrameBytes: Int = 32 * 1024 * 1024
+    maxFrameBytes: Int = 32 * 1024 * 1024,
+    /** Cap on accepted (inbound) connections. */
+    maxInboundConnections: Int = 1200,
+    /** Inbound slots only work-package builders (ALPN `/builder`) may use
+      * (JAMNP-S "Required connectivity": "e.g. 20").
+      */
+    builderSlots: Int = 20
 ):
+  private def baseAlpn: String = s"jamnp-s/${JamnpConfig.ProtocolVersion}/$genesisHashPrefix"
+
+  /** The ALPN identifier this endpoint dials with: `jamnp-s/V/H`, plus
+    * `/builder` when connecting as a work-package builder (JAMNP-S §ALPN).
+    */
   def alpn: String =
-    val base = s"jamnp-s/0/$genesisHashPrefix"
-    if builder then s"$base/builder" else base
+    if builder then s"$baseAlpn/builder" else baseAlpn
+
+  /** ALPN identifiers accepted on inbound connections: the acceptor always
+    * permits the `/builder` suffix (JAMNP-S §ALPN).
+    */
+  def acceptedAlpns: Seq[String] = Seq(baseAlpn, s"$baseAlpn/builder")
+
+object JamnpConfig:
+  /** JAMNP-S protocol version `V` in the ALPN identifier (jam-np 56ce86c). */
+  val ProtocolVersion: Int = 1
+
+  def isBuilderAlpn(alpn: String): Boolean = alpn != null && alpn.endsWith("/builder")
 
 /** A single message-framed JAMNP stream. Messages are framed as a 32-bit
   * little-endian content length followed by the content.
@@ -124,7 +152,21 @@ final class JamnpStream private[network] (
   def close(): Unit =
     channel.close()
 
+  /** Reset both halves (QUIC RESET_STREAM and STOP_SENDING). JAMNP-S reads an
+    * acceptor's reset as rejection or failure of the request and an
+    * initiator's as cancellation (JAMNP-S §Protocols and streams).
+    */
+  def reset(): Unit =
+    channel.shutdown(JamnpStream.ResetErrorCode).addListener(io.netty.channel.ChannelFutureListener.CLOSE)
+
   def isOpen: Boolean = channel.isActive
+
+  /** The QUIC stream ID. */
+  def id: Long = channel.streamId()
+
+object JamnpStream:
+  /** Application error code sent with a stream reset. */
+  val ResetErrorCode: Int = 0
 
 /** A JAMNP connection to a single peer, wrapping a QUIC channel. */
 final class JamnpConnection private[network] (
@@ -224,6 +266,9 @@ final class JamnpNode(
   private final class ConnectionTracker extends ChannelInboundHandlerAdapter:
     override def channelActive(ctx: ChannelHandlerContext): Unit =
       val conn = new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false)
+      if !admitInbound(conn) then
+        ctx.close()
+        return
       ctx.channel().attr(ConnectionKey).set(conn)
       connections.add(conn)
       fireConnectionChange(conn, true)
@@ -235,15 +280,25 @@ final class JamnpNode(
         fireConnectionChange(conn, false)
       ctx.fireChannelInactive()
 
+  /** Inbound admission: builders may use any free slot, other nodes all but
+    * the `builderSlots` reserved for builders.
+    */
+  private def admitInbound(conn: JamnpConnection): Boolean =
+    val inbound = connections.asScala.filter(c => !c.initiator && c.isOpen)
+    if JamnpConfig.isBuilderAlpn(conn.negotiatedAlpn) then inbound.size < config.maxInboundConnections
+    else
+      val others = inbound.count(c => !JamnpConfig.isBuilderAlpn(c.negotiatedAlpn))
+      others < config.maxInboundConnections - config.builderSlots
+
   def boundPort: Int =
     serverChannel.localAddress().asInstanceOf[InetSocketAddress].getPort
 
   private def sslServer(): QuicSslContext =
     QuicSslContextBuilder
       .forServer(new IdentityKeyManagerFactory(identity), null)
-      .trustManager(InsecureTrustManagerFactory.INSTANCE)
+      .trustManager(PeerCertificateTrustManagerFactory)
       .clientAuth(ClientAuth.REQUIRE)
-      .applicationProtocols(config.alpn)
+      .applicationProtocols(config.acceptedAlpns*)
       .option(
         BoringSSLContextOption.SERVER_KEY_TYPES,
         Map("ECDHE_ECDSA" -> Ed25519KeyType).asJava
@@ -255,7 +310,7 @@ final class JamnpNode(
     QuicSslContextBuilder
       .forClient()
       .keyManager(new IdentityKeyManagerFactory(identity), null)
-      .trustManager(InsecureTrustManagerFactory.INSTANCE)
+      .trustManager(PeerCertificateTrustManagerFactory)
       .applicationProtocols(config.alpn)
       .option(BoringSSLContextOption.CLIENT_KEY_TYPES, Set(Ed25519KeyType).asJava)
       .option(BoringSSLContextOption.SIGNATURE_ALGORITHMS, Array("ed25519"))
@@ -389,6 +444,25 @@ object JamnpNode:
     override def engineGetKeyManagers(): Array[KeyManager] =
       Array(new IdentityKeyManager(id))
 
+  /** Accepts a peer only when its certificate meets JAMNP-S
+    * (`NodeIdentity.validateCertificate`); the handshake fails otherwise, so
+    * the connection is never established. No chain of trust is checked.
+    */
+  private object PeerCertificateTrust extends X509TrustManager:
+    private def check(chain: Array[X509Certificate]): Unit =
+      if chain == null || chain.isEmpty then throw new java.security.cert.CertificateException("no peer certificate")
+      NodeIdentity.validateCertificate(chain(0)) match
+        case Left(why) => throw new java.security.cert.CertificateException(why)
+        case Right(_)  => ()
+    override def checkClientTrusted(chain: Array[X509Certificate], authType: String): Unit = check(chain)
+    override def checkServerTrusted(chain: Array[X509Certificate], authType: String): Unit = check(chain)
+    override def getAcceptedIssuers: Array[X509Certificate] = Array.empty
+
+  private[network] object PeerCertificateTrustManagerFactory extends SimpleTrustManagerFactory:
+    override def engineInit(keyStore: KeyStore): Unit = ()
+    override def engineInit(spec: ManagerFactoryParameters): Unit = ()
+    override def engineGetTrustManagers(): Array[TrustManager] = Array(PeerCertificateTrust)
+
   /** Splits the byte stream into JAMNP frames (u32-LE length + content) and
     * emits the content as byte arrays.
     */
@@ -425,6 +499,11 @@ object JamnpNode:
         evt.isInstanceOf[io.netty.channel.socket.ChannelInputShutdownReadComplete]
       then stream.dispatchClosed()
       ctx.fireUserEventTriggered(evt)
+    // A peer's RESET_STREAM surfaces as a read error: the stream is over.
+    override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable): Unit =
+      stream.dispatchClosed()
+      ctx.close()
+      ()
 
   /** First reads the stream-kind byte of a peer-opened stream, then installs
     * framing and hands the stream to the registered handler. Streams of

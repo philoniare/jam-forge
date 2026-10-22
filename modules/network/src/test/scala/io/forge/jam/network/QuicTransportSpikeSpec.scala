@@ -31,7 +31,7 @@ import scala.jdk.CollectionConverters.*
 
 class QuicTransportSpikeSpec extends AnyFunSuite with Matchers:
 
-  private val Alpn = "jamnp-s/0/deadbeef"
+  private val Alpn = "jamnp-s/1/deadbeef"
   private val Ed25519KeyType = "Ed25519"
 
   /** Key manager that always serves the node's Ed25519 identity. */

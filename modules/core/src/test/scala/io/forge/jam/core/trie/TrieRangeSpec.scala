@@ -106,3 +106,29 @@ class TrieRangeSpec extends AnyFlatSpec with Matchers:
     allLinks.contains(TrieNode.leaf(firstKey, firstValue).hash) shouldBe true
     allLinks.contains(TrieNode.leaf(lastKey, lastValue).hash) shouldBe true
   }
+
+  it should "end the path to the start key at the leaf it reaches (JAMNP-S CE 129)" in {
+    val trie = buildTrie()
+    val (boundary, _) = trie.range(key(3), key(7), maxSize = Int.MaxValue)
+    boundary.exists(n => n.nodeType != TrieNodeType.Branch && TrieNode.leafKey(n) == key(3)) shouldBe true
+    boundary.exists(n => n.nodeType != TrieNodeType.Branch && TrieNode.leafKey(n) == key(7)) shouldBe true
+  }
+
+  it should "keep the encoded response (64-byte nodes, keys, length prefixes, values) within maxSize" in {
+    val trie = buildTrie()
+    for maxSize <- Seq(300, 500, 800, 1200) do
+      val (boundary, pairs) = trie.range(key(1), key(10), maxSize)
+      val encoded = boundary.size * TrieNode.GpEncodingBytes + pairs.map((_, v) => 31 + 1 + v.length).sum
+      withClue(s"maxSize=$maxSize: ") {
+        if pairs.size > 1 then encoded should be <= maxSize
+      }
+  }
+
+  "gpEncoding" should "be the 64-byte preimage of the node hash" in {
+    val trie = buildTrie()
+    val (boundary, _) = trie.range(key(1), key(10), maxSize = Int.MaxValue)
+    boundary.foreach { n =>
+      n.gpEncoding.length shouldBe 64
+      io.forge.jam.core.Hashing.blake2b256(n.gpEncoding) shouldBe n.hash
+    }
+  }

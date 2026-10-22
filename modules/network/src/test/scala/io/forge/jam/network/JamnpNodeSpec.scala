@@ -53,7 +53,7 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
         .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
         .get(10, TimeUnit.SECONDS)
 
-      conn.negotiatedAlpn shouldBe "jamnp-s/0/deadbeef"
+      conn.negotiatedAlpn shouldBe "jamnp-s/1/deadbeef"
       conn.peerKey shouldBe serverNode.identity.publicKeyBytes
 
       val responses = new LinkedBlockingQueue[Array[Byte]]()
@@ -203,5 +203,41 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
       java.util.Arrays.equals(echoed, payload) shouldBe true
     finally
       clientNode.shutdown()
+      serverNode.shutdown()
+  }
+
+  test("JAMNP-S: certificates are checked for an Ed25519 key and a matching alternative name") {
+    val id = NodeIdentity.generate()
+    NodeIdentity.validateCertificate(id.certificate).map(_.toSeq) shouldBe Right(id.publicKeyBytes.toSeq)
+    // Another identity's certificate validates to that identity's key only.
+    val other = NodeIdentity.generate()
+    NodeIdentity.validateCertificate(other.certificate).map(_.toSeq) should not be Right(id.publicKeyBytes.toSeq)
+  }
+
+  test("JAMNP-S: inbound slots reserved for builders admit only /builder connections") {
+    val serverNode =
+      new JamnpNode(NodeIdentity.generate(), config.copy(maxInboundConnections = 1, builderSlots = 1))
+    val plainNode = new JamnpNode(NodeIdentity.generate(), config)
+    val builderNode = new JamnpNode(NodeIdentity.generate(), config.copy(builder = true))
+    val accepted = new LinkedBlockingQueue[String]()
+    serverNode.onConnectionChange((c, up) => if up then accepted.offer(c.negotiatedAlpn))
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val address = new InetSocketAddress("127.0.0.1", serverNode.boundPort)
+
+      val plain = scala.util.Try(plainNode.connect(address).get(10, TimeUnit.SECONDS))
+      // The server closes a non-builder connection as soon as it is up.
+      val deadline = System.currentTimeMillis() + 5000
+      while plain.toOption.exists(_.isOpen) && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      plain.toOption.forall(!_.isOpen) shouldBe true
+
+      val builder = builderNode.connect(address).get(10, TimeUnit.SECONDS)
+      builder.negotiatedAlpn shouldBe "jamnp-s/1/deadbeef/builder"
+      await(accepted) shouldBe "jamnp-s/1/deadbeef/builder"
+      Thread.sleep(300)
+      builder.isOpen shouldBe true
+    finally
+      builderNode.shutdown()
+      plainNode.shutdown()
       serverNode.shutdown()
   }

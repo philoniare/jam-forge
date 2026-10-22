@@ -5,6 +5,8 @@ import java.security.cert.X509Certificate
 import java.security.{KeyPair, KeyPairGenerator, PrivateKey, SecureRandom, Security}
 import java.util.Date
 
+import scala.jdk.CollectionConverters.*
+
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.{Extension, GeneralName, GeneralNames}
 import org.bouncycastle.cert.jcajce.{JcaX509CertificateConverter, JcaX509v3CertificateBuilder}
@@ -61,6 +63,28 @@ object NodeIdentity:
       spkiEncoded.length - 32,
       spkiEncoded.length
     )
+
+  private val Ed25519Oid = "1.3.101.112"
+  private val DnsNameType = 2
+
+  /** Check a peer certificate against JAMNP-S §Encryption and handshake: an
+    * Ed25519 key, an Ed25519 signature algorithm, and a single subject
+    * alternative name equal to N(key). Self-signing is not checked (the
+    * spec does not require it). Returns the raw key.
+    */
+  def validateCertificate(cert: X509Certificate): Either[String, Array[Byte]] =
+    val spki = cert.getPublicKey.getEncoded
+    if spki.length != SpkiPrefix.length + 32 || !spki.startsWith(SpkiPrefix) then
+      Left("certificate key is not Ed25519")
+    else if cert.getSigAlgOID != Ed25519Oid then
+      Left(s"certificate signature algorithm ${cert.getSigAlgName} is not Ed25519")
+    else
+      val key = rawEd25519PublicKey(spki)
+      val names = Option(cert.getSubjectAlternativeNames).map(_.asScala.toList).getOrElse(Nil)
+      names match
+        case List(entry) if entry.get(0) == DnsNameType && entry.get(1) == altName(key) => Right(key)
+        case List(_) => Left("certificate alternative name does not match its key")
+        case other   => Left(s"certificate has ${other.size} alternative names, expected 1")
 
   /** The peer's raw Ed25519 public key from its TLS certificate. */
   def peerPublicKey(cert: X509Certificate): Array[Byte] =

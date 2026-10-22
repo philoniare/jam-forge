@@ -266,12 +266,23 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       val child = getNode(hash).getOrElse(throw new IllegalStateException(s"State trie node ${hash.toHex} is missing"))
       collectLeaves(child, buf)
 
+  /** JAMNP-S CE 129 range read: the key/value pairs with keys in
+    * `[start, end]`, in key order, plus the boundary nodes on the paths from
+    * the root to `start` and to the last pair returned (parents first, no
+    * duplicates). A path ends at the leaf it reaches, whatever its key, or
+    * at the branch whose child on the key's side is empty.
+    *
+    * The response's encoded size (64 bytes per boundary node, 31-byte key,
+    * compact length and value per pair) stays within `maxSize` unless it
+    * holds a single pair. The bound is checked against each path's depth,
+    * an upper bound on what the deduplicated node list adds.
+    */
   def range(start: JamBytes, end: JamBytes, maxSize: Int): (List[TrieNode], List[(JamBytes, JamBytes)]) =
     require(start.length == 31, s"start must be 31 bytes, got ${start.length}")
     require(end.length == 31, s"end must be 31 bytes, got ${end.length}")
 
     val pairs = mutable.ArrayBuffer[(JamBytes, JamBytes)]()
-    var accumulated = 0L
+    var pairBytes = 0L
     var stop = false
     var lastIncludedKey: Option[JamBytes] = None
 
@@ -282,6 +293,28 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
           pendingValues.get(vh).orElse(backend.readRawValue(vh))
         case TrieNodeType.Branch => None
+
+    def descentPath(key: JamBytes): List[TrieNode] =
+      val path = mutable.ArrayBuffer[TrieNode]()
+      var cur = currentRoot
+      var depth = 0
+      var continue = true
+      while continue do
+        getNode(cur) match
+          case Some(node) if node.nodeType == TrieNodeType.Branch =>
+            path += node
+            cur =
+              if bitAt(key, depth) then Hash.wrapUnchecked(node.right.toArrayUnsafe)
+              else Hash.wrapUnchecked(node.left.toArrayUnsafe)
+            depth += 1
+          case Some(leaf) =>
+            path += leaf
+            continue = false
+          case None => continue = false
+      path.toList
+
+    val startPath = descentPath(start)
+    val startPathBytes = startPath.size.toLong * TrieNode.GpEncodingBytes
 
     def visit(hash: Hash, depth: Int, boundedByStart: Boolean): Unit =
       if !stop then
@@ -304,9 +337,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
               stop = true
             else
               leafValue(leaf).foreach { v =>
-                if pairs.isEmpty || accumulated + v.length <= maxSize then
+                val entry = 31L + compactLength(v.length.toLong) + v.length
+                val lastPathBytes = (depth + 1).toLong * TrieNode.GpEncodingBytes
+                if pairs.isEmpty || startPathBytes + lastPathBytes + pairBytes + entry <= maxSize then
                   pairs += ((key, v))
-                  accumulated += v.length
+                  pairBytes += entry
                   lastIncludedKey = Some(key)
                 else
                   stop = true
@@ -314,27 +349,14 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
     visit(currentRoot, depth = 0, boundedByStart = true)
 
-    def descentPath(key: JamBytes): List[TrieNode] =
-      val path = mutable.ArrayBuffer[TrieNode]()
-      var cur = currentRoot
-      var depth = 0
-      var continue = true
-      while continue do
-        getNode(cur) match
-          case Some(node) if node.nodeType == TrieNodeType.Branch =>
-            path += node
-            cur =
-              if bitAt(key, depth) then Hash.wrapUnchecked(node.right.toArrayUnsafe)
-              else Hash.wrapUnchecked(node.left.toArrayUnsafe)
-            depth += 1
-          case _ => continue = false
-      path.toList
-
     val boundaryNodes = mutable.LinkedHashSet[TrieNode]()
-    descentPath(start).foreach(boundaryNodes += _)
+    startPath.foreach(boundaryNodes += _)
     lastIncludedKey.foreach(k => descentPath(k).foreach(boundaryNodes += _))
 
     (boundaryNodes.toList, pairs.toList)
+
+  private def compactLength(v: Long): Int =
+    io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(v).length
 
   private[trie] def getNode(hash: Hash): Option[TrieNode] =
     if hash == Hash.zero then None
