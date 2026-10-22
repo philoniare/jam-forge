@@ -176,6 +176,16 @@ final class DistributionService(
       case _: java.util.concurrent.RejectedExecutionException =>
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
 
+  /** Run a request/response exchange on the egress pool. */
+  private[node] def submitRequest(task: () => Unit): Unit =
+    try
+      egress.submit(new Runnable {
+        def run(): Unit =
+          try task()
+          catch case e: Exception => logger.warn(s"request failed: ${e.getMessage}")
+      })
+    catch case _: java.util.concurrent.RejectedExecutionException => ()
+
   private def decodeItem[A](bytes: Array[Byte])(using codec: Codec[A]): Either[String, A] =
     codec.decodeAt(bytes, 0) match
       case Right((value, used)) if used == bytes.length => Right(value)

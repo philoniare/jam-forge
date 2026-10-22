@@ -23,6 +23,8 @@ final case class NodeConfig(
     reusePort: Boolean = false,
     /** JIP-3 telemetry server, from `--telemetry HOST:PORT`. */
     telemetry: Option[InetSocketAddress] = None,
+    /** GRANDPA finality instead of the devnet quorum rule and following peers' finality. */
+    grandpa: Boolean = false,
     /** First retry delay for a lost bootnode connection; doubles per failed
       * attempt up to [[JamNode.MaxRedialMillis]].
       */
@@ -344,14 +346,24 @@ final class JamNode(
   def start(): JamNode =
     chain.initializeOrRestore(spec)
 
-    if spec.devnetFinalityDepth > 0 then
-      chain.onImported((_, _) =>
-        chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests, spec.finalityQuorum)
-      )
-    chain.onImported((_, _) => sync.followPeerFinality(peerFinalityQuorum))
+    if !nodeConfig.grandpa then
+      if spec.devnetFinalityDepth > 0 then
+        chain.onImported((_, _) =>
+          chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests, spec.finalityQuorum)
+        )
+      chain.onImported((_, _) => sync.followPeerFinality(peerFinalityQuorum))
 
     chain.onImported((head, block) => preimages.onImported(head, block))
     chain.onImported((head, block) => pruneTickets(head, block))
+    // Peers' blocks consume pooled extrinsics too, not only our own.
+    chain.onImported((_, block) =>
+      pools.pruneAfterImport(
+        block.extrinsic.guarantees,
+        block.extrinsic.assurances,
+        block.extrinsic.preimages,
+        chain.best.hash
+      )
+    )
     telemetry.foreach(_ => chain.onImported((_, _) => reportHeads()))
 
     network.onConnectionChange { (conn, up) =>
@@ -676,8 +688,21 @@ final class JamNode(
       head
     }
 
+  /** Run GRANDPA, voting with `keys` when they are in the voter set. Set 0's voters are the validators of the state
+    * at start, which is genesis on a fresh node.
+    */
+  def enableGrandpa(keys: Option[ValidatorKeySet]): GrandpaService =
+    val g = new GrandpaService(chain, sync, distribution, keys)
+    g.register(network)
+    g.start(spec.genesisHeaderHash, chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq)
+    grandpaService = Some(g)
+    g
+
+  @volatile private var grandpaService: Option[GrandpaService] = None
+
   def shutdown(): Unit =
     shuttingDown = true
+    grandpaService.foreach(_.shutdown())
     if redialer != null then redialer.shutdownNow()
     dialer.shutdownNow()
     if assuranceTimer != null then assuranceTimer.shutdownNow()

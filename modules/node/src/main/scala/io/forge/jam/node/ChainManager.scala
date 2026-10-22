@@ -149,22 +149,65 @@ final class ChainManager(
         case None => Right(None)
         case Some((x, _)) if !blockStore.hasBlock(x) || blockHeight(x).isEmpty => Left(x)
         case Some((x, _)) =>
-          val onBest = blockRoot(x).isDefined && ancestorAtHeight(bestHead.hash, blockHeight(x).get).contains(x)
-          val adopted =
-            if onBest then Right(bestHead)
-            else
-              val xHeight = blockHeight(x).get
-              val tips = (x :: leafMap.keySet.asScala.toList).filter(l => ancestorAtHeight(l, xHeight).contains(x))
-              val tip = tips.maxBy(l => (weightOf(l), blockHeight(l).getOrElse(0L)))
-              if blockRoot(tip).isDefined then Right(bestHead)
-              else
-                logger.warn(s"following peer finality: adopting ${tip.toHex.take(18)}, which contains ${x.toHex.take(18)}")
-                reorgTo(tip, events, ignoreFinality = true)
-          adopted.left.foreach(e => logger.warn(s"cannot follow peer finality of ${x.toHex.take(18)}: $e"))
-          Right(adopted.toOption.flatMap(_ => if blockRoot(x).isDefined then finalize(x, belowCurrent = true).toOption else None))
+          val r = adoptAndFinalize(x, events, belowCurrent = true)
+          r.left.foreach(e => logger.warn(s"cannot follow peer finality of ${x.toHex.take(18)}: $e"))
+          Right(r.toOption)
     }
     events.foreach((head, block) => postImportBus.publish(head, block))
     result
+
+  /** Finalize stored block `x` (GRANDPA), first reorging to the heaviest leaf containing it when it is off our best
+    * chain.
+    */
+  def finalizeAdopting(x: Hash): Either[String, Head] =
+    val events = mutable.ListBuffer.empty[(Head, Block)]
+    val result = synchronized(adoptAndFinalize(x, events, belowCurrent = false))
+    events.foreach((head, block) => postImportBus.publish(head, block))
+    result
+
+  private def adoptAndFinalize(
+      x: Hash,
+      events: mutable.ListBuffer[(Head, Block)],
+      belowCurrent: Boolean
+  ): Either[String, Head] =
+    blockHeight(x) match
+      case None => Left("unknown block")
+      case Some(xHeight) =>
+        val onBest = blockRoot(x).isDefined && ancestorAtHeight(bestHead.hash, xHeight).contains(x)
+        val adopted =
+          if onBest then Right(bestHead)
+          else
+            val tips = (x :: leafMap.keySet.asScala.toList).filter(l => ancestorAtHeight(l, xHeight).contains(x))
+            val tip = tips.maxBy(l => (weightOf(l), blockHeight(l).getOrElse(0L)))
+            if blockRoot(tip).isDefined then Right(bestHead)
+            else
+              logger.warn(s"adopting ${tip.toHex.take(18)}, which contains finalized ${x.toHex.take(18)}")
+              reorgTo(tip, events, ignoreFinality = true)
+        adopted.flatMap(_ =>
+          if blockRoot(x).isDefined then finalize(x, belowCurrent) else Left("block not on a validated chain")
+        )
+
+  /** Parent of a stored block. */
+  def parentHash(h: Hash): Option[Hash] = parentOf(h)
+
+  /** Slot of a stored block, from its header. */
+  def slotOf(h: Hash): Option[Long] =
+    blockStore.getHeader(h).filter(_.length >= 100).map(b => io.forge.jam.core.LittleEndian.get(b, 96, 4))
+
+  /** Posterior state root of a validated block. */
+  def postStateRoot(h: Hash): Option[Hash] = blockRoot(h)
+
+  /** Encoded header of a stored block. */
+  def headerBytes(h: Hash): Option[Array[Byte]] = blockStore.getHeader(h)
+
+  /** Decoded header of a stored block. */
+  def header(h: Hash): Option[io.forge.jam.core.types.header.Header] =
+    blockStore.getHeader(h).flatMap(b => headerCodec.decodeExact(b).toOption)
+
+  val headerCodec = io.forge.jam.core.types.header.Header.headerCodec(config.validatorCount, config.epochLength)
+
+  def meta(name: String): Option[Array[Byte]] = blockStore.getMeta(name)
+  def putMeta(name: String, value: Array[Byte]): Unit = blockStore.setMeta(name, value)
 
   /** Ancestor of stored block `hash` (inclusive) at `height`, following
     * parent links from the stored headers; None when the walk leaves the

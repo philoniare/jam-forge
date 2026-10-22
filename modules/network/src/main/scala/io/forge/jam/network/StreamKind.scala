@@ -30,6 +30,13 @@ object StreamKind:
   val WorkPackageBundleSubmission: Byte = 146.toByte
   val BundleRequest: Byte = 147.toByte
   val SegmentRequest: Byte = 148.toByte
+  // GRANDPA (draft)
+  val GrandpaJustificationRequest: Byte = 130.toByte
+  val GrandpaVote: Byte = 149.toByte
+  val GrandpaCommit: Byte = 150.toByte
+  val GrandpaState: Byte = 151.toByte
+  val GrandpaCatchUp: Byte = 152.toByte
+  val WarpSyncRequest: Byte = 153.toByte
 
   inline def isUp(kind: Byte): Boolean = (kind & 0x80) == 0
   inline def isCe(kind: Byte): Boolean = (kind & 0x80) != 0
@@ -56,6 +63,12 @@ object StreamKind:
     case WorkPackageBundleSubmission => "CE146/work-package-bundle-submission"
     case BundleRequest               => "CE147/bundle-request"
     case SegmentRequest              => "CE148/segment-request"
+    case GrandpaJustificationRequest => "CE130/grandpa-justification-request"
+    case GrandpaVote                 => "CE149/grandpa-vote"
+    case GrandpaCommit               => "CE150/grandpa-commit"
+    case GrandpaState                => "CE151/grandpa-state"
+    case GrandpaCatchUp              => "CE152/grandpa-catch-up"
+    case WarpSyncRequest             => "CE153/warp-sync-request"
     case other                       => s"unknown($other)"
 
 /** The preferred-initiator rule (jamnp-s spec): between validators with

@@ -10,7 +10,7 @@ import io.forge.jam.core.JamBytes
   * jam-node --spec <chain-spec.json> --data <data-dir> [--port N]
   *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
-  *          [--telemetry <host:port>] [--reuse-port]
+  *          [--telemetry <host:port>] [--reuse-port] [--grandpa]
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -31,7 +31,7 @@ object Main:
 
   private def run(args: Array[String]): Unit =
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (flags, rest) = afterPeers.partition(_ == "--reuse-port")
+    val (flags, rest) = afterPeers.partition(a => a == "--reuse-port" || a == "--grandpa")
     val opts = parseArgs(rest, Map.empty)
 
     val specPath = opts.getOrElse("spec", fail("--spec <chain-spec.json> is required"))
@@ -61,12 +61,18 @@ object Main:
         .get("era-start")
         .map(_.toLong)
         .getOrElse(SlotClock.JamCommonEraSeconds),
-      reusePort = flags.nonEmpty,
+      reusePort = flags.contains("--reuse-port"),
+      grandpa = flags.contains("--grandpa"),
       telemetry = opts.get("telemetry").map(parseHostPort)
     )
 
     val node = new JamNode(spec, config).start()
-    authorKeys.foreach(k => node.enableAuthoring(Seq(k)))
+    authorKeys.foreach { k =>
+      node.enableAuthoring(Seq(k))
+      node.enableGuaranteeing(Seq(k))
+      node.enableAssuring(Seq(k))
+    }
+    if config.grandpa then node.enableGrandpa(authorKeys)
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized

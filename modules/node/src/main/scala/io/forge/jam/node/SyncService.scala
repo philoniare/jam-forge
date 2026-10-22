@@ -198,6 +198,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
 
   private val fetching = ConcurrentHashMap.newKeySet[Hash]()
 
+  /** Fetch block `hash` and its missing ancestors from `conn`, once at a time per block. */
+  def fetchBlock(conn: JamnpConnection, hash: Hash): Unit =
+    if fetching.add(hash) then requestAndImport(conn, hash, () => fetching.remove(hash))
+
   private def notePeerBest(conn: JamnpConnection, head: HashSlot): Unit =
     peerBestHeads.merge(conn, head, (old, nu) => if nu.slot >= old.slot then nu else old)
     ()
