@@ -121,7 +121,7 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
 
       nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
 
-      nodeA.tickets.maybeGenerate()
+      nodeA.tickets.maybeGenerate(nodeA.chain.best.slot)
       nodeA.pools.ticketCount should be > 0
 
       // Node A holds every dev key, so it is each ticket's proxy: the tickets

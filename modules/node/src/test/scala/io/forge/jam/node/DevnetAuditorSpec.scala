@@ -15,7 +15,7 @@ import io.forge.jam.network.StreamKind
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UInt, UShort}
+import spire.math.UShort
 
 /** The auditor path over the network: after a report lands on-chain, both
   * nodes reconstruct the audit bundle from DA custody, re-execute is-authorized + refine in the
@@ -97,8 +97,8 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
-          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-          lookupAnchorStateRoot = Hash.zero,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,

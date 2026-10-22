@@ -154,6 +154,8 @@ final class ExtrinsicPools:
     // Assurances only ever anchor at the parent of the next block: drop stale.
     assurances.keySet.asScala.filterNot(_._2 == newBestHash).toList.foreach(assurances.remove)
 
+  def clearGuarantees(): Unit = guarantees.clear()
+
   def clear(): Unit =
     guarantees.clear()
     assurances.clear()

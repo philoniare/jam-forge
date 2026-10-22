@@ -87,8 +87,8 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
         stateRoot = anchor.stateRoot,
         beefyRoot = anchor.beefyRoot,
         lookupAnchor = anchor.headerHash,
-        lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-        lookupAnchorStateRoot = Hash.zero,
+        lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+        lookupAnchorStateRoot = anchor.stateRoot,
         prerequisites = List.empty
       ),
       coreIndex = CoreIndex(0),

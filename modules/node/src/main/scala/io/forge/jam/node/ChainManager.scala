@@ -7,6 +7,7 @@ import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
+import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
 
@@ -70,7 +71,7 @@ final class ChainManager(
   /** Mark a main-chain block as finalized: the finalized head advances and
     * side branches forking at or below it are no longer adoptable
     */
-  def finalize(hash: Hash): Either[String, Head] =
+  def finalize(hash: Hash, belowCurrent: Boolean = false): Either[String, Head] =
     synchronized {
       blockRoot(hash) match
         case None => Left("cannot finalize a non-main-chain block")
@@ -82,8 +83,8 @@ final class ChainManager(
             .map(_.header.slot.value.toLong)
             .getOrElse(0L)
           val current = finalized
-          if metaLong(s"height:${hash.toHex}").getOrElse(0L) <
-            metaLong(s"height:${current.hash.toHex}").getOrElse(0L)
+          if !belowCurrent && metaLong(s"height:${hash.toHex}").getOrElse(0L) <
+              metaLong(s"height:${current.hash.toHex}").getOrElse(0L)
           then Left("cannot finalize below the finalized head")
           else
             blockStore.setHead(BlockStore.FinalizedHead, hash)
@@ -123,6 +124,47 @@ final class ChainManager(
             )
             None
           else finalize(target).toOption
+
+  /** Follow the finality that `needed` distinct peers announce on UP 0 (their `Final`): finalize the newest such
+    * block, first reorging to the heaviest leaf that contains it when it is off our best chain. This keeps a node
+    * that runs no GRANDPA voter (GP 0.8.0 §grandpa) on the chain the voters finalized, even below our own devnet
+    * finality, which is only a local guess. Returns the block to fetch when the agreed block is not stored yet.
+    */
+  def followPeerFinality(peerFinals: Iterable[(Hash, Long)], needed: Int): Either[Hash, Option[Head]] =
+    val events = mutable.ListBuffer.empty[(Head, Block)]
+    val result = synchronized {
+      val finals = peerFinals.toList
+      val current = finalized
+      def supports(f: Hash, x: Hash, xHeight: Long): Boolean = f == x || ancestorAtHeight(f, xHeight).contains(x)
+      val agreed = finals
+        .filter(_._2 > current.slot)
+        .distinctBy(_._1)
+        .sortBy(-_._2)
+        .find { case (x, _) =>
+          blockHeight(x) match
+            case Some(h) => finals.count(f => supports(f._1, x, h)) >= needed
+            case None    => finals.count(_._1 == x) >= needed
+        }
+      agreed match
+        case None => Right(None)
+        case Some((x, _)) if !blockStore.hasBlock(x) || blockHeight(x).isEmpty => Left(x)
+        case Some((x, _)) =>
+          val onBest = blockRoot(x).isDefined && ancestorAtHeight(bestHead.hash, blockHeight(x).get).contains(x)
+          val adopted =
+            if onBest then Right(bestHead)
+            else
+              val xHeight = blockHeight(x).get
+              val tips = (x :: leafMap.keySet.asScala.toList).filter(l => ancestorAtHeight(l, xHeight).contains(x))
+              val tip = tips.maxBy(l => (weightOf(l), blockHeight(l).getOrElse(0L)))
+              if blockRoot(tip).isDefined then Right(bestHead)
+              else
+                logger.warn(s"following peer finality: adopting ${tip.toHex.take(18)}, which contains ${x.toHex.take(18)}")
+                reorgTo(tip, events, ignoreFinality = true)
+          adopted.left.foreach(e => logger.warn(s"cannot follow peer finality of ${x.toHex.take(18)}: $e"))
+          Right(adopted.toOption.flatMap(_ => if blockRoot(x).isDefined then finalize(x, belowCurrent = true).toOption else None))
+    }
+    events.foreach((head, block) => postImportBus.publish(head, block))
+    result
 
   /** Ancestor of stored block `hash` (inclusive) at `height`, following
     * parent links from the stored headers; None when the walk leaves the
@@ -366,6 +408,7 @@ final class ChainManager(
         val hash = headerHashOf(block)
         val parent = block.header.parent
         if blockRoot(hash).isDefined then Left("block already imported")
+        else if flag(s"invalid:${hash.toHex}") then Left("block failed validation before")
         else if parent == bestHead.hash then importOnBest(block, blockBytes, events)
         else
           (blockHeight(parent), blockStore.hasBlock(parent)) match
@@ -382,7 +425,7 @@ final class ChainManager(
               val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
               val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
               val heavier = weight > bestWeight || (weight == bestWeight && height > bestHeight)
-              if heavier && !branchEquivocates(hash) then reorgTo(hash, events)
+              if heavier && !branchEquivocates(hash) && !branchInvalid(hash) then reorgTo(hash, events)
               else
                 Left(
                   s"stored on side branch (weight $weight height $height vs best $bestWeight/$bestHeight)"
@@ -401,8 +444,10 @@ final class ChainManager(
   ): Either[String, Head] =
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
-    importer.importBlock(block, preState) match
+    val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.value.toLong)
+    importer.importBlock(block, preState, ancestry) match
       case ImportResult.Failure(error, message) =>
+        markInvalid(headerHashOf(block))
         Left(s"$error: $message")
       case ImportResult.Success(postRoot, _) =>
         val hash = headerHashOf(block)
@@ -424,6 +469,39 @@ final class ChainManager(
         events += ((bestHead, block))
         Right(bestHead)
 
+  /** Ancestor set A for a block on `parent` at `slot`: stored headers back to slot - L (GP 0.8.0 §header
+    * eq:ancestors), each with its posterior state root read from its child's prior state root.
+    */
+  private[node] def ancestorsOf(parent: Hash, parentPostRoot: Hash, slot: Long): List[AncestorHeader] =
+    val out = List.newBuilder[AncestorHeader]
+    var cursor = parent
+    var postRoot = parentPostRoot
+    var more = true
+    while more do
+      blockStore.getHeader(cursor).filter(_.length >= 100) match
+        case Some(h) =>
+          val hSlot = io.forge.jam.core.LittleEndian.get(h, 96, 4)
+          if slot - hSlot > config.maxLookupAnchorAge then more = false
+          else
+            out += AncestorHeader(hSlot, cursor, Some(postRoot))
+            postRoot = Hash(h.slice(32, 64))
+            val p = Hash(h.take(32))
+            if p == Hash.zero then more = false else cursor = p
+        case None => more = false
+    out.result()
+
+  // A block that failed validation, and so every block built on it, is never adopted.
+  private def markInvalid(h: Hash): Unit = putMetaLong(s"invalid:${h.toHex}", 1L)
+
+  private def branchInvalid(tip: Hash): Boolean =
+    var cursor = tip
+    while blockRoot(cursor).isEmpty do
+      if flag(s"invalid:${cursor.toHex}") then return true
+      parentOf(cursor) match
+        case Some(p) => cursor = p
+        case None    => return false
+    false
+
   /** Whether the unvalidated branch ending at `tip` (back to its first
     * validated ancestor) holds a block at an equivocated slot.
     */
@@ -442,7 +520,8 @@ final class ChainManager(
     */
   private def reorgTo(
       tip: Hash,
-      events: mutable.ListBuffer[(Head, Block)]
+      events: mutable.ListBuffer[(Head, Block)],
+      ignoreFinality: Boolean = false
   ): Either[String, Head] =
     // Collect the unvalidated branch (tip backwards until a validated block).
     val branch = mutable.ListBuffer.empty[Array[Byte]]
@@ -466,7 +545,7 @@ final class ChainManager(
     // Never rewind at or below finality.
     val finalizedHeight =
       metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
-    if blockHeight(ancestor).getOrElse(0L) < finalizedHeight then
+    if blockHeight(ancestor).getOrElse(0L) < finalizedHeight && !ignoreFinality then
       return Left("reorg would revert finalized blocks")
 
     val previousBest = bestHead

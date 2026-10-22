@@ -178,6 +178,26 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       .values
       .map(_.maxBy(_._2.slot)._2.hash)
 
+  /** Finalized blocks announced by peers with a live UP 0 stream, one per peer key (the newest). */
+  def peerFinalized: List[(JamnpConnection, HashSlot)] =
+    peerFinals.asScala.toList
+      .filter(_._1.isOpen)
+      .groupBy(e => JamBytes(e._1.peerKey))
+      .values
+      .map(_.maxBy(_._2.slot))
+      .toList
+
+  /** Keep to the chain `needed` peers announce as finalized, fetching the agreed block when we lack it. */
+  def followPeerFinality(needed: Int): Unit =
+    val finals = peerFinalized
+    chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed) match
+      case Left(missing) =>
+        if fetching.add(missing) then
+          finals.find(_._2.hash == missing).foreach((conn, _) => requestAndImport(conn, missing, () => fetching.remove(missing)))
+      case Right(_) => ()
+
+  private val fetching = ConcurrentHashMap.newKeySet[Hash]()
+
   private def notePeerBest(conn: JamnpConnection, head: HashSlot): Unit =
     peerBestHeads.merge(conn, head, (old, nu) => if nu.slot >= old.slot then nu else old)
     ()
@@ -347,9 +367,13 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   /** Fetch blocks descending (inclusive) from `from` on a fresh CE 128 stream
     * and import them oldest-first. Runs on the import executor.
     */
-  private def requestAndImport(conn: JamnpConnection, from: Hash): Unit =
+  private def requestAndImport(conn: JamnpConnection, from: Hash, onDone: () => Unit = () => ()): Unit =
     importExecutor.submit(new Runnable {
       override def run(): Unit =
+        try fetch()
+        finally onDone()
+
+      private def fetch(): Unit =
         try
           val stream = conn
             .openStream(StreamKind.BlockRequest)

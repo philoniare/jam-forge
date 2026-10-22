@@ -15,7 +15,7 @@ import io.forge.jam.network.StreamKind
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UInt, UShort}
+import spire.math.UShort
 
 /** The real guarantor path over the network: a builder submits a work
   * package via CE 133; the guarantor node runs the actual in-core pipeline —
@@ -100,8 +100,8 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
-          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-          lookupAnchorStateRoot = Hash.zero,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,
@@ -208,8 +208,8 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
-          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-          lookupAnchorStateRoot = Hash.zero,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,
@@ -314,8 +314,8 @@ class DevnetGuarantorSpec extends AnyFunSuite with Matchers:
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
-          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-          lookupAnchorStateRoot = Hash.zero,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,

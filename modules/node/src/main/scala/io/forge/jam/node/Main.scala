@@ -72,7 +72,7 @@ object Main:
       val fin = node.chain.finalized
       println(
         s"slot $slot best=${best.slot} ${best.hash.toHex} finalized=${fin.slot} " +
-          s"peers=${node.distribution.peers.size}"
+          s"peers=${node.distribution.peerCount}"
       )
     }
 

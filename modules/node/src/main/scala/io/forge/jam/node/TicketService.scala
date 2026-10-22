@@ -77,10 +77,14 @@ final class TicketService(
     * validator keys, so calling this every slot costs nothing on
     * sync/guarantor/auditor-only nodes.
     */
-  def maybeGenerate(): Boolean =
+  def maybeGenerate(wallSlot: Long): Boolean =
     if validatorKeys.isEmpty then return false
     val view = chain.stateView()
     val epoch = view.timeslot / chain.config.epochLength
+    // Only for the epoch we are in, while its lottery is open (slot index < Y, GP 0.8.0 §safrole): a head still
+    // syncing (at genesis, say) would make tickets for an epoch that is long over.
+    val e = chain.config.epochLength
+    if epoch != wallSlot / e || wallSlot % e >= chain.config.ticketCutoff then return false
     val entropy = TicketService.contestEntropy(view)
     def done = epoch == generatedForEpoch && entropy == generatedForEntropy
     if done then return false
@@ -183,17 +187,17 @@ final class TicketService(
               case Right((epoch, env)) =>
                 val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
                 val asProxy = stream.kind == StreamKind.TicketDistributionStep1
-                if epoch == currentEpoch then accept(epoch, env, asProxy)
+                if epoch == currentEpoch then accept(epoch, env, asProxy, peerLabel(connection))
                 else if epoch == currentEpoch + 1 then
                   // The sender's head reached the new epoch before ours: its
                   // proof is against the next epoch's η_2/γ_z, which our state
                   // will hold once we import that epoch's first block.
-                  deferred.add((epoch, env, asProxy))
+                  deferred.add((epoch, env, asProxy, peerLabel(connection)))
                   true
                 else
                   // JAMNP-S CE 131/132: reset when the state needed to verify
                   // the ticket is not known.
-                  logger.debug(s"ticket for epoch $epoch, current $currentEpoch — rejected")
+                  logger.debug(s"ticket from ${peerLabel(connection)} for epoch $epoch, current $currentEpoch — rejected")
                   false
           catch
             case e: Exception =>
@@ -205,7 +209,7 @@ final class TicketService(
   /** Tickets received for the epoch after our head's, checked once our head
     * enters that epoch.
     */
-  private val deferred = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope, Boolean)]()
+  private val deferred = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope, Boolean, String)]()
 
   /** Verify and pool deferred tickets whose epoch our head has reached;
     * drop those that are now stale. Called after every import.
@@ -215,18 +219,22 @@ final class TicketService(
     val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
     val it = deferred.iterator()
     while it.hasNext do
-      val (epoch, env, asProxy) = it.next()
+      val (epoch, env, asProxy, from) = it.next()
       if epoch <= currentEpoch then
         it.remove()
-        if epoch == currentEpoch && !accept(epoch, env, asProxy) then
+        if epoch == currentEpoch && !accept(epoch, env, asProxy, from) then
           logger.debug(s"deferred ticket for epoch $epoch rejected")
+
+  private def peerLabel(conn: JamnpConnection): String =
+    try JamBytes(conn.peerKey).toHex.take(16)
+    catch case _: Exception => "?"
 
   /** Verify a ticket for the current epoch against γ_z and η_2 and pool it.
     * A CE 131 ticket is queued for CE 132 forwarding only when we hold the
     * key of its proxy validator (JAMNP-S CE 131: "verify that they are the
     * correct proxy"). False when a check fails.
     */
-  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean): Boolean =
+  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean, from: String): Boolean =
     val view = chain.stateView()
     val entropy = TicketService.contestEntropy(view)
     BandersnatchVrf.verifyRingProof(
@@ -237,7 +245,9 @@ final class TicketService(
       view.validators.nextEpoch.size
     ) match
       case None =>
-        logger.warn("CE131/132 ticket failed ring verification — dropped")
+        logger.warn(
+          s"CE131/132 ticket from $from for epoch $epoch failed ring verification against η_2 ${entropy.toHex.take(18)}; dropped"
+        )
         false
       case Some(result) =>
         val id = Hash(result.ticketId.toArray)

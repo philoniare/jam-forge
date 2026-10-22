@@ -258,7 +258,7 @@ final class JamNode(
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     if shuttingDown then return None
-    val regenerated = tickets.maybeGenerate()
+    val regenerated = tickets.maybeGenerate(slot)
     updateConnectivity(slot)
     val epoch = slot / chain.config.epochLength
     connectivity.filter(_.epoch == epoch).foreach { v =>
@@ -278,10 +278,19 @@ final class JamNode(
           case None if block.extrinsic.guarantees.nonEmpty ||
               block.extrinsic.assurances.nonEmpty ||
               block.extrinsic.preimages.nonEmpty =>
-            logger.warn("authored block rejected; dropping pools and retrying empty")
-            pools.clear()
-            a.tryAuthor(slot).flatMap { retry =>
-              importAuthored(retry, telemetry.flatMap(_.authoring(slot, retry.header.parent)))
+            // Guarantees are the likeliest culprit; keep assurances for the first retry.
+            def retry(): Option[ChainManager#Head] =
+              a.tryAuthor(slot).flatMap(b => importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))))
+            val withoutGuarantees =
+              if block.extrinsic.guarantees.isEmpty then None
+              else
+                logger.warn("authored block rejected; dropping guarantees and retrying")
+                pools.clearGuarantees()
+                retry()
+            withoutGuarantees.orElse {
+              logger.warn("authored block rejected; dropping pools and retrying empty")
+              pools.clear()
+              retry()
             }
           case None => None
       }
@@ -339,6 +348,7 @@ final class JamNode(
       chain.onImported((_, _) =>
         chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests, spec.finalityQuorum)
       )
+    chain.onImported((_, _) => sync.followPeerFinality(peerFinalityQuorum))
 
     chain.onImported((head, block) => preimages.onImported(head, block))
     chain.onImported((head, block) => pruneTickets(head, block))
@@ -455,6 +465,9 @@ final class JamNode(
   private def gridRestrictsAnnouncements: Boolean =
     !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
 
+  /** Peers whose announced finality we follow: with this node they make the finality quorum (2V/3+1). */
+  private def peerFinalityQuorum: Int = math.max(spec.finalityQuorum - 1, 1)
+
   /** Whether UP 0 should be open to `peer` (JAMNP-S UP 0). */
   private def announcementWanted(peer: Array[Byte]): Boolean =
     !gridRestrictsAnnouncements || connectivity.forall(v =>
@@ -501,6 +514,8 @@ final class JamNode(
       )
   }
 
+  private val connectedAt = new java.util.concurrent.ConcurrentHashMap[JamnpConnection, java.lang.Long]()
+
   /** Dial validators we lack a connection to, as preferred initiator at once
     * and otherwise after the grace period (JAMNP-S "Required connectivity"),
     * and open or close UP 0 streams on our dialed connections to follow the
@@ -509,6 +524,7 @@ final class JamNode(
   private def maintainConnectivity(): Unit =
     if shuttingDown then return
     updateConnectivity(currentSlot)
+    sync.followPeerFinality(peerFinalityQuorum)
     val now = System.currentTimeMillis()
     val self = identity.publicKeyBytes
     validatorDials.values.forEach { d =>
@@ -530,17 +546,21 @@ final class JamNode(
           finally d.inFlight = false
         }
     }
-    if gridRestrictsAnnouncements then
-      distribution.peers.filter(_.initiator).foreach { c =>
-        val wanted = announcementWanted(c.peerKey)
-        val open = sync.hasAnnouncementStream(c)
-        if wanted && !open then
-          dialer.execute(() =>
-            try sync.openAnnouncementStream(c): Unit
-            catch case e: Exception => logger.debug(s"UP0 open failed: ${e.getMessage}")
-          )
-        else if !wanted && open then sync.closeAnnouncementStream(c)
-      }
+    // UP 0 may be opened by either side. A connection kept after a duplicate was closed, or an accepted one whose
+    // peer never opened UP 0, gets one from us after a grace period.
+    distribution.peers.foreach { c =>
+      val wanted = announcementWanted(c.peerKey)
+      val open = sync.hasAnnouncementStream(c)
+      val since = connectedAt.computeIfAbsent(c, _ => now)
+      if wanted && !open && (c.initiator || now - since >= JamNode.UpZeroGraceMillis) then
+        connectedAt.put(c, now)
+        dialer.execute(() =>
+          try sync.openAnnouncementStream(c): Unit
+          catch case e: Exception => logger.debug(s"UP0 open failed: ${e.getMessage}")
+        )
+      else if gridRestrictsAnnouncements && !wanted && open && c.initiator then sync.closeAnnouncementStream(c)
+    }
+    connectedAt.keySet.removeIf(c => !c.isOpen)
 
   /** When a peer is reached over two connections, one dialed by each side,
     * keep the one opened by the preferred initiator P(a, b) and close the
@@ -682,6 +702,9 @@ object JamNode:
 
   /** Upper bound on the redial backoff. */
   val MaxRedialMillis: Long = 16000L
+
+  /** How long an accepted connection may go without UP 0 before we open it. */
+  val UpZeroGraceMillis: Long = 3000L
 
   val ImplementationVersion: String = "0.1.0"
   val GrayPaperVersion: String = "0.8.0"

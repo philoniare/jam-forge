@@ -15,7 +15,7 @@ import io.forge.jam.network.StreamKind
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import spire.math.{UInt, UShort}
+import spire.math.UShort
 
 /** CE 134 co-signing: two guarantor nodes each hold exactly ONE validator key
   * assigned to the target core, so neither can credential a report alone
@@ -100,8 +100,8 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
           stateRoot = anchor.stateRoot,
           beefyRoot = anchor.beefyRoot,
           lookupAnchor = anchor.headerHash,
-          lookupAnchorSlot = Timeslot(UInt(view.timeslot.toInt)),
-          lookupAnchorStateRoot = Hash.zero,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
           prerequisites = List.empty
         ),
         authorization = JamBytes.empty,

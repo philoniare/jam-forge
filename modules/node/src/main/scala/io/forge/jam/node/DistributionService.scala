@@ -46,6 +46,9 @@ final class DistributionService(
   def peers: List[JamnpConnection] =
     connections.asScala.filter(_.isOpen).toList
 
+  /** Distinct peers: one reached over two connections counts once. */
+  def peerCount: Int = peers.map(c => JamBytes(c.peerKey)).distinct.size
+
   // =========================================================================
   // CE 135 — guaranteed work-report distribution
   // =========================================================================
