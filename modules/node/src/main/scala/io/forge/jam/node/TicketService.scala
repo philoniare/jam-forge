@@ -57,28 +57,49 @@ final class TicketService(
     validatorKeys.map(k => k.bandersnatchPublic.toSeq -> k).toMap
 
   @volatile private var generatedForEpoch: Long = -1L
+  @volatile private var generatedForEntropy: Hash = Hash.zero
 
   /** Register the validator keys this node holds, enabling ticket generation
     * for them.
     */
   def setValidatorKeys(keys: Seq[ValidatorKeySet]): Unit = validatorKeys = keys
 
-  /** Generate this epoch's tickets if not already done. A no-op — including
+  /** Generate this epoch's tickets if not already done for the head's
+    * epoch and η_2; true when tickets were (re)generated. A no-op — including
     * skipping the `chain.stateView()` snapshot — when this node holds no
     * validator keys, so calling this every slot costs nothing on
     * sync/guarantor/auditor-only nodes.
     */
-  def maybeGenerate(): Unit =
-    if validatorKeys.isEmpty then return
+  def maybeGenerate(): Boolean =
+    if validatorKeys.isEmpty then return false
     val view = chain.stateView()
     val epoch = view.timeslot / chain.config.epochLength
-    if epoch == generatedForEpoch then return
+    val entropy = TicketService.contestEntropy(view)
+    def done = epoch == generatedForEpoch && entropy == generatedForEntropy
+    if done then return false
     synchronized {
-      if epoch == generatedForEpoch then return
-      generatedForEpoch = epoch
-      pruneStale(epoch)
-      generate(view)
+      if done then false
+      else
+        if epoch == generatedForEpoch then
+          // A reorg moved us to a fork with different epoch entropy: the
+          // tickets made on the old fork can no longer be verified here.
+          logger.info(s"epoch $epoch entropy changed after a reorg; regenerating tickets")
+          dropEpoch(epoch)
+        generatedForEpoch = epoch
+        generatedForEntropy = entropy
+        pruneStale(epoch)
+        generate(view)
+        true
     }
+
+  private def dropEpoch(epoch: Long): Unit =
+    val it = ticketEpoch.entrySet().iterator()
+    while it.hasNext do
+      val entry = it.next()
+      if entry.getValue == epoch then
+        ownTickets.remove(entry.getKey)
+        ownTicketEnvelopes.remove(entry.getKey)
+        it.remove()
 
   /** Drop tickets generated more than one epoch ago: a ticket from epoch E is
     * consulted for ticketed sealing in epoch E+1, so it is safe to forget by
@@ -96,9 +117,7 @@ final class TicketService(
   private def generate(view: io.forge.jam.protocol.state.TrieBackedJamState): Unit =
     val pending = view.validators.nextEpoch // γ_k: the ring for next epoch's contest
     val commitment = view.gamma.z // γ_z: ring root the STF verifies against
-    val entropy = // η_2: ticket-contest entropy
-      if view.entropy.pool.length > 2 then view.entropy.pool(2)
-      else Hash(new Array[Byte](32))
+    val entropy = TicketService.contestEntropy(view)
     val ringKeys = pending.map(_.bandersnatch)
     val ringSize = ringKeys.size
 
@@ -131,7 +150,7 @@ final class TicketService(
                 case Some(result) =>
                   val id = Hash(result.ticketId.toArray)
                   val envelope = TicketEnvelope(attempt, proof)
-                  pools.addTicket(id, envelope)
+                  pools.addTicket(id, envelope, epoch, entropy)
                   val idSeq = result.ticketId.toArray.toSeq
                   ownTickets.put(idSeq, (keys, attempt))
                   ownTicketEnvelopes.put(idSeq, envelope)
@@ -152,31 +171,55 @@ final class TicketService(
           TicketCodec.decode(msg) match
             case Left(err) => logger.warn(s"${StreamKind.name(stream.kind)}: $err")
             case Right((epoch, env)) =>
-              val view = chain.stateView()
-              val currentEpoch = view.timeslot / chain.config.epochLength
-              if epoch != currentEpoch then
-                logger.warn(s"ticket for epoch $epoch, current $currentEpoch — dropped")
-              else
-                val commitment = view.gamma.z
-                val entropy =
-                  if view.entropy.pool.length > 2 then view.entropy.pool(2)
-                  else Hash(new Array[Byte](32))
-                BandersnatchVrf.verifyRingProof(
-                  env.signature,
-                  commitment,
-                  entropy,
-                  env.attempt,
-                  view.validators.nextEpoch.size
-                ) match
-                  case None => logger.warn("CE131/132 ticket failed ring verification — dropped")
-                  case Some(result) =>
-                    val id = Hash(result.ticketId.toArray)
-                    pools.addTicket(id, env)
-                    if stream.kind == StreamKind.TicketDistributionStep1 then
-                      forwardAsProxy(epoch, env)
+              val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
+              val asProxy = stream.kind == StreamKind.TicketDistributionStep1
+              if epoch == currentEpoch then accept(epoch, env, asProxy)
+              else if epoch == currentEpoch + 1 then
+                // The sender's head reached the new epoch before ours: its
+                // proof is against the next epoch's η_2/γ_z, which our state
+                // will hold once we import that epoch's first block.
+                deferred.add((epoch, env, asProxy))
+              else logger.debug(s"ticket for epoch $epoch, current $currentEpoch — dropped")
         catch case e: Exception => logger.warn(s"ticket handler failed: ${e.getMessage}")
         stream.finish()
       }
+
+  /** Tickets received for the epoch after our head's, checked once our head
+    * enters that epoch.
+    */
+  private val deferred = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope, Boolean)]()
+
+  /** Verify and pool deferred tickets whose epoch our head has reached;
+    * drop those that are now stale. Called after every import.
+    */
+  def processDeferred(): Unit =
+    if deferred.isEmpty then return
+    val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
+    val it = deferred.iterator()
+    while it.hasNext do
+      val (epoch, env, asProxy) = it.next()
+      if epoch <= currentEpoch then
+        it.remove()
+        if epoch == currentEpoch then accept(epoch, env, asProxy)
+
+  /** Verify a ticket for the current epoch against γ_z and η_2, pool it,
+    * and forward it on CE 132 when we received it as proxy.
+    */
+  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean): Unit =
+    val view = chain.stateView()
+    val entropy = TicketService.contestEntropy(view)
+    BandersnatchVrf.verifyRingProof(
+      env.signature,
+      view.gamma.z,
+      entropy,
+      env.attempt,
+      view.validators.nextEpoch.size
+    ) match
+      case None => logger.warn("CE131/132 ticket failed ring verification — dropped")
+      case Some(result) =>
+        val id = Hash(result.ticketId.toArray)
+        pools.addTicket(id, env, epoch, entropy)
+        if asProxy then forwardAsProxy(epoch, env)
 
   /** Forward a ticket we accepted as proxy (CE 131) to every connected
     * validator on CE 132.
@@ -193,10 +236,10 @@ final class TicketService(
 
   /** Send each ticket we generated this epoch on CE 131 to its proxy
     * validator (`proxyIndexFor`, resolved to a connection via
-    * `byValidatorIndex`). When no tracked connection exists for the proxy —
-    * a devnet-scale simplification, since validator-index → connection
-    * mapping isn't tracked yet — fall back to broadcasting directly on
-    * CE 132 to every peer.
+    * `byValidatorIndex`). When we hold the proxy's key ourselves we act as
+    * proxy and send on CE 132 to every peer; when the proxy has no open
+    * connection (a peer not using its validator key as network identity, or
+    * a dropped link) we fall back to the same CE 132 broadcast.
     */
   def distributeTickets(
       peers: Iterable[JamnpConnection],
@@ -213,7 +256,11 @@ final class TicketService(
       val id = Hash(idSeq.toArray)
       val proxyIndex = TicketService.proxyIndexFor(id, validatorCount)
       val payload = TicketCodec.encode(epoch, env)
-      byValidatorIndex(proxyIndex) match
+      val ownProxy = view.validators.nextEpoch.lift(proxyIndex).exists(vk =>
+        validatorKeys.exists(k => java.util.Arrays.equals(k.ed25519Public, vk.ed25519.bytes.toArray))
+      )
+      if ownProxy then forwardAsProxy(epoch, env)
+      else byValidatorIndex(proxyIndex) match
         case Some(proxyConn) =>
           submitSend(
             () => proxyConn.openStream(StreamKind.TicketDistributionStep1),
@@ -221,8 +268,8 @@ final class TicketService(
             payload
           )
         case None =>
-          logger.warn(
-            s"no tracked connection for proxy validator $proxyIndex " +
+          logger.debug(
+            s"no open connection to proxy validator $proxyIndex " +
               s"(ticket ${id.toHex}); broadcasting on CE132 directly"
           )
           peers.foreach { conn =>
@@ -255,6 +302,10 @@ final class TicketService(
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
 
 object TicketService:
+  /** η_2 of `view`: the entropy the current epoch's ticket contest uses. */
+  def contestEntropy(view: io.forge.jam.protocol.state.TrieBackedJamState): Hash =
+    view.entropy.pool.lift(2).getOrElse(Hash.zero)
+
   /** Proxy validator for a ticket: last 4 bytes of the VRF output id,
     * big-endian, modulo validator count (jamnp-s CE 131).
     */

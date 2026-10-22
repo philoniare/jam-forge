@@ -37,7 +37,8 @@ object Bootnode:
   *   "genesis_header_hash": "0x…",     // optional; derived from header if absent
   *   "genesis_state": [{"key": "0x…31-bytes…", "value": "0x…"}, …],
   *   "bootnodes": ["<ed25519-hex>@host:port", …],
-  *   "devnet_finality_depth": 5        // optional, default 5; see field doc below
+  *   "devnet_finality_depth": 5,       // optional, default 5; see field doc below
+  *   "devnet_finality_quorum": 5       // optional, default 2V/3+1; see field doc below
   * }
   * }}}
   */
@@ -48,8 +49,20 @@ final case class ChainSpec(
     explicitGenesisHash: Option[Hash],
     genesisState: List[KeyValue],
     bootnodes: List[Bootnode],
-    devnetFinalityDepth: Int = 5
+    /** Devnet stand-in for GRANDPA: finalize the block this many below the
+      * best head (0 disables)...
+      */
+    devnetFinalityDepth: Int = 5,
+    /** ...once this many nodes (this one plus peers whose announced best
+      * descends from it) hold it. None means 2V/3+1 for the config's V
+      * validators, the GRANDPA supermajority, so no minority partition can
+      * finalize alone.
+      */
+    devnetFinalityQuorum: Option[Int] = None
 ):
+  def finalityQuorum: Int =
+    devnetFinalityQuorum.getOrElse(2 * config.validatorCount / 3 + 1)
+
   val genesisHeaderHash: Hash =
     explicitGenesisHash.orElse(genesisHeaderBytes.map(Hashing.blake2b256)).getOrElse {
       throw new IllegalArgumentException(
@@ -74,6 +87,7 @@ object ChainSpec:
       state <- c.getOrElse[List[KeyValue]]("genesis_state")(Nil)
       bootnodes <- c.getOrElse[List[String]]("bootnodes")(Nil)
       devnetFinalityDepth <- c.getOrElse[Int]("devnet_finality_depth")(5)
+      devnetFinalityQuorum <- c.get[Option[Int]]("devnet_finality_quorum")
     yield ChainSpec(
       id = id,
       config = ChainConfig.fromName(configName).fold(
@@ -84,7 +98,8 @@ object ChainSpec:
       explicitGenesisHash = headerHash.map(h => Hash(parseHex(h))),
       genesisState = state,
       bootnodes = bootnodes.map(Bootnode.parse),
-      devnetFinalityDepth = devnetFinalityDepth
+      devnetFinalityDepth = devnetFinalityDepth,
+      devnetFinalityQuorum = devnetFinalityQuorum
     )
 
   def fromJson(json: String): Either[String, ChainSpec] =

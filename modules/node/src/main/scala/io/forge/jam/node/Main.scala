@@ -1,5 +1,6 @@
 package io.forge.jam.node
 
+import java.net.InetSocketAddress
 import java.nio.file.Paths
 
 import io.forge.jam.core.JamBytes
@@ -9,12 +10,28 @@ import io.forge.jam.core.JamBytes
   * jam-node --spec <chain-spec.json> --data <data-dir> [--port N]
   *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
+  *          [--telemetry <host:port>] [--reuse-port]
   * }}}
+  *
+  * With `--author i` and no `--seed`, the node's network identity is dev
+  * validator i's Ed25519 key, as JAMNP-S expects of validators; peers then
+  * map the connection to validator index i (CE 131 proxying). Native crypto
+  * libraries are looked up under `-Djam.base.dir` (default: the working
+  * directory); a missing one stops the node before it joins the network.
   */
 object Main:
 
   def main(args: Array[String]): Unit =
-    val (peerArgs, rest) = extractRepeated("--peer", args.toList)
+    try run(args)
+    catch
+      case e: Throwable =>
+        System.err.println(s"jam-node failed to start: $e")
+        e.printStackTrace()
+        sys.exit(1)
+
+  private def run(args: Array[String]): Unit =
+    val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
+    val (flags, rest) = afterPeers.partition(_ == "--reuse-port")
     val opts = parseArgs(rest, Map.empty)
 
     val specPath = opts.getOrElse("spec", fail("--spec <chain-spec.json> is required"))
@@ -29,28 +46,43 @@ object Main:
       if extraBootnodes.isEmpty then loadedSpec
       else loadedSpec.copy(bootnodes = loadedSpec.bootnodes ++ extraBootnodes)
 
+    // Derive authoring keys first: this loads the native Bandersnatch and
+    // Ed25519 libraries, so a missing library fails here, not after start.
+    val authorKeys = opts.get("author").map(idx => ValidatorKeySet.dev(idx.toInt))
+
     val config = NodeConfig(
       dataDir = Paths.get(dataDir),
       listenPort = opts.get("port").map(_.toInt).getOrElse(0),
-      ed25519Seed = opts.get("seed").map(s => JamBytes.fromHexUnsafe(s).toArray),
+      ed25519Seed = opts
+        .get("seed")
+        .map(s => JamBytes.fromHexUnsafe(s).toArray)
+        .orElse(authorKeys.map(_.ed25519Secret)),
       eraStartSeconds = opts
         .get("era-start")
         .map(_.toLong)
-        .getOrElse(SlotClock.JamCommonEraSeconds)
+        .getOrElse(SlotClock.JamCommonEraSeconds),
+      reusePort = flags.nonEmpty,
+      telemetry = opts.get("telemetry").map(parseHostPort)
     )
 
     val node = new JamNode(spec, config).start()
-    opts.get("author").foreach { idx =>
-      node.enableAuthoring(Seq(ValidatorKeySet.dev(idx.toInt)))
-    }
+    authorKeys.foreach(k => node.enableAuthoring(Seq(k)))
     node.onSlot { slot =>
-      // Authoring hooks in here; for now surface liveness.
-      if slot % 10 == 0 then
-        println(s"slot $slot best=${node.chain.best.slot} (${node.chain.best.hash.toHex.take(18)})")
+      val best = node.chain.best
+      val fin = node.chain.finalized
+      println(
+        s"slot $slot best=${best.slot} ${best.hash.toHex} finalized=${fin.slot} " +
+          s"peers=${node.distribution.peers.size}"
+      )
     }
 
     Runtime.getRuntime.addShutdownHook(new Thread(() => node.shutdown()))
     Thread.currentThread().join()
+
+  private def parseHostPort(s: String): InetSocketAddress =
+    val colon = s.lastIndexOf(':')
+    if colon <= 0 then fail(s"expected host:port, got: $s")
+    new InetSocketAddress(s.substring(0, colon), s.substring(colon + 1).toInt)
 
   /** Pulls every occurrence of a repeatable `--flag value` pair out of
     * `args`, preserving the relative order of what's left for `parseArgs`.

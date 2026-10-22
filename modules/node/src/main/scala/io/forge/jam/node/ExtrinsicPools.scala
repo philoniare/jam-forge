@@ -28,9 +28,14 @@ final class ExtrinsicPools:
   private val preimages =
     new java.util.concurrent.ConcurrentHashMap[(Long, Hash), Preimage]()
 
-  /** Ticket envelopes keyed by their (verified) ticket id. */
+  /** Ticket envelopes keyed by their (verified) ticket id, with the epoch
+    * whose contest they entered and the η_2 their proof was verified
+    * against: the proof is bound to that entropy,
+    * so it is useless in a later epoch or on a fork whose epoch
+    * entropy differs.
+    */
   private val tickets =
-    new java.util.concurrent.ConcurrentHashMap[Hash, TicketEnvelope]()
+    new java.util.concurrent.ConcurrentHashMap[Hash, (Long, Hash, TicketEnvelope)]()
 
   /** Audit judgments (CE 145) keyed by (report hash, validator index):
     * validity claim and its Ed25519 signature
@@ -51,8 +56,8 @@ final class ExtrinsicPools:
       p
     )
 
-  def addTicket(id: Hash, envelope: TicketEnvelope): Unit =
-    tickets.putIfAbsent(id, envelope)
+  def addTicket(id: Hash, envelope: TicketEnvelope, epoch: Long, entropy: Hash): Unit =
+    tickets.putIfAbsent(id, (epoch, entropy, envelope))
 
   def addJudgment(reportHash: Hash, validatorIndex: Int, valid: Boolean, signature: Array[Byte]): Unit =
     judgments.putIfAbsent((reportHash, validatorIndex), (valid, signature))
@@ -64,18 +69,45 @@ final class ExtrinsicPools:
 
   def judgmentCount: Int = judgments.size
 
-  /** Tickets for inclusion: ascending ticket-id order (extrinsic
-    * requirement), excluding ids already accumulated, at most `max`.
+  /** Tickets for inclusion in a block of `epoch` whose posterior η_2 is
+    * `entropy`: ascending ticket-id order,
+    * excluding ids already in
+    * the accumulator `accumulated`, at most `max`. Only tickets that will be
+    * retained are offered: once the accumulator plus the chosen tickets
+    * would exceed `epochLength` (E), a ticket must rank below the E-th
+    * smallest id or the block is invalid.
     */
-  def takeTickets(exclude: Set[JamBytes], max: Int): List[(Hash, TicketEnvelope)] =
-    tickets.entrySet.asScala.toList
-      .filterNot(e => exclude.contains(JamBytes(e.getKey.bytes.toArray)))
-      .sortBy(e => e.getKey.toHex)
-      .take(max)
-      .map(e => (e.getKey, e.getValue))
+  def takeTickets(
+      epoch: Long,
+      entropy: Hash,
+      accumulated: Set[JamBytes],
+      max: Int,
+      epochLength: Int
+  ): List[(Hash, TicketEnvelope)] =
+    val accumulatedHex = accumulated.toList.map(_.toHex.stripPrefix("0x")).sorted
+    val candidates = tickets.entrySet.asScala.toList
+      .filter(e => e.getValue._1 == epoch && e.getValue._2 == entropy)
+      .filterNot(e => accumulated.contains(JamBytes(e.getKey.bytes.toArray)))
+      .map(e => (e.getKey.toHex.stripPrefix("0x"), e.getKey, e.getValue._3))
+      .sortBy(_._1)
+    val chosen = mutable.ListBuffer.empty[(Hash, TicketEnvelope)]
+    val it = candidates.iterator
+    var full = false
+    while chosen.size < max && !full && it.hasNext do
+      val (idHex, id, env) = it.next()
+      // Rank of this id among accumulator ∪ chosen (all chosen ids are smaller).
+      val rank = accumulatedHex.count(_ < idHex) + chosen.size
+      if rank < epochLength then chosen += ((id, env))
+      else full = true
+    chosen.toList
 
   def removeTickets(ids: Iterable[Hash]): Unit =
     ids.foreach(tickets.remove)
+
+  /** Drop tickets entered for any epoch before `epoch`. */
+  def pruneTicketsBefore(epoch: Long): Unit =
+    tickets.entrySet.removeIf(_.getValue._1 < epoch)
+    ()
 
   def ticketCount: Int = tickets.size
 

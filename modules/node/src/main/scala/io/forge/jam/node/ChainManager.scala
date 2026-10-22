@@ -17,8 +17,9 @@ import scala.jdk.CollectionConverters.*
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
   *
   * Forks: blocks with a known non-best parent are stored unvalidated on a
-  * side branch; when a branch becomes strictly longer than the best chain it
-  * is adopted by rewinding to the common ancestor and replaying.
+  * side branch; when a branch becomes strictly heavier than the best chain
+  * and contains no equivocation, it is adopted by rewinding to the common
+  * ancestor and replaying.
   */
 final class ChainManager(
     val config: ChainConfig,
@@ -98,31 +99,47 @@ final class ChainManager(
     }
 
   /** Devnet finality rule: finalize the ancestor `depth` blocks behind the
-    * best head (a stand-in for GRANDPA supermajority votes; the finalized
-    * pointer feeds the UP 0 handshake). Returns the newly finalized head when
-    * it advanced.
+    * best head once at least `quorum` nodes hold it on their best chain: this
+    * node plus every peer whose announced best (`peerBests`) descends from it.
+    * A stand-in for GRANDPA's supermajority; with a quorum
+    * of 2V/3+1 neither side of a network split can finalize alone, so a healed
+    * split can still reorg. The finalized pointer feeds the UP 0 handshake.
+    * Returns the newly finalized head when it advanced.
     */
-  def finalizeAtDepth(depth: Int): Option[Head] =
+  def finalizeAtDepth(depth: Int, peerBests: Iterable[Hash] = Nil, quorum: Int = 1): Option[Head] =
     val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
     val targetHeight = bestHeight - depth
     if targetHeight <= metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L) then None
     else
-      // Walk back from best to the target height.
-      var cursor = bestHead.hash
-      var h = bestHeight
-      while h > targetHeight do
-        val cursorBytes = blockStore
-          .getBlock(cursor)
-          .getOrElse(
-            throw new IllegalStateException(
-              s"block store invariant: ancestor ${cursor.toHex} of best head is missing while finalizing at depth $depth"
+      ancestorAtHeight(bestHead.hash, targetHeight) match
+        case None => None
+        case Some(target) =>
+          // One entry per peer: peers at the same head each count.
+          val bests = peerBests.toList
+          val supporters = 1 + bests.count(b => ancestorAtHeight(b, targetHeight).contains(target))
+          if supporters < quorum then
+            logger.debug(
+              s"finality at height $targetHeight waits: $supporters of $quorum (peer bests ${bests.size})"
             )
-          )
-        decodeBlock(cursorBytes) match
-          case Right(b) => cursor = b.header.parent
-          case Left(_)  => return None
+            None
+          else finalize(target).toOption
+
+  /** Ancestor of stored block `hash` (inclusive) at `height`, following
+    * parent links from the stored headers; None when the walk leaves the
+    * store or `hash` is below `height`.
+    */
+  def ancestorAtHeight(hash: Hash, height: Long): Option[Hash] =
+    blockHeight(hash).filter(_ >= height).flatMap { start =>
+      var cursor: Option[Hash] = Some(hash)
+      var h = start
+      while h > height && cursor.isDefined do
+        cursor = cursor.flatMap(parentOf)
         h -= 1
-      finalize(cursor).toOption
+      cursor
+    }
+
+  private def parentOf(h: Hash): Option[Hash] =
+    blockStore.getHeader(h).filter(_.length >= 32).map(b => Hash(b.take(32)))
 
   def leaves: List[Head] =
     val best = bestHead
@@ -148,6 +165,68 @@ final class ChainManager(
     metaLong(s"height:${h.toHex}")
   private def putBlockHeight(h: Hash, height: Long): Unit =
     putMetaLong(s"height:${h.toHex}", height)
+
+  // Fork-choice metadata, derived from headers alone so unvalidated side
+  // branches can be weighed:
+  //   ticketed:<h>  block h's epoch is sealed by tickets (γ'_s ∈ tickets)
+  //   marked:<h>    h's chain carries a winning-tickets marker in h's epoch
+  //   weight:<h>    number of ticket-sealed blocks among h and its ancestors
+  // γ'_s takes the ticket sequence exactly when e' = e + 1 and the previous
+  // epoch closed with a saturated accumulator, which is when that epoch's
+  // chain carried H_w (§safrole eqs. slotkeysequence, winningticketsmarker).
+  private def flag(name: String): Boolean = metaLong(name).contains(1L)
+  def weightOf(h: Hash): Long = metaLong(s"weight:${h.toHex}").getOrElse(0L)
+
+  private def recordForkChoiceMeta(hash: Hash, block: Block): Unit =
+    val parent = block.header.parent
+    val slot = block.header.slot.value.toLong
+    val epoch = slot / config.epochLength
+    val parentEpoch = slotOfHeader(parent) / config.epochLength
+    val ticketed =
+      if epoch == parentEpoch then flag(s"ticketed:${parent.toHex}")
+      else epoch == parentEpoch + 1 && flag(s"marked:${parent.toHex}")
+    val marked = block.header.ticketsMark.isDefined || (epoch == parentEpoch && flag(s"marked:${parent.toHex}"))
+    putMetaLong(s"ticketed:${hash.toHex}", if ticketed then 1L else 0L)
+    putMetaLong(s"marked:${hash.toHex}", if marked then 1L else 0L)
+    putMetaLong(s"weight:${hash.toHex}", weightOf(parent) + (if ticketed then 1L else 0L))
+    recordSlotAuthor(hash, slot, block.header.authorIndex.toInt)
+
+  /** Slot from stored header bytes (parent ++ prior root ++ extrinsic hash ++
+    * slot as E_4), 0 for genesis or unknown blocks.
+    */
+  private def slotOfHeader(h: Hash): Long =
+    blockStore.getHeader(h).filter(_.length >= 100)
+      .map(b => io.forge.jam.core.LittleEndian.get(b, 96, 4))
+      .getOrElse(0L)
+
+  /** Equivocation tracking: two distinct blocks at one timeslot by one author
+    * A branch holding an unfinalized equivocated slot
+    * is never adopted.
+    */
+  private def recordSlotAuthor(hash: Hash, slot: Long, author: Int): Unit =
+    val key = s"slotauthor:$slot:$author"
+    blockStore.getMeta(key).map(Hash(_)) match
+      case None                    => blockStore.setMeta(key, hash.bytes.toArray)
+      case Some(seen) if seen != hash =>
+        if !flag(s"equivocated:$slot") then
+          logger.warn(
+            s"equivocation at slot $slot by validator $author: ${seen.toHex.take(18)} vs ${hash.toHex.take(18)}"
+          )
+        putMetaLong(s"equivocated:$slot", 1L)
+      case _ => ()
+
+  private def isEquivocated(h: Hash): Boolean = flag(s"equivocated:${slotOfHeader(h)}")
+
+  /** Mark genesis as ticket-sealed when its state already carries a ticket
+    * sealer sequence (γ_s ∈ tickets).
+    */
+  private def recordGenesisForkChoiceMeta(genesisHash: Hash): Unit =
+    val ticketed = stateView().gamma.st match
+      case io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets(_) => true
+      case _                                                                => false
+    putMetaLong(s"ticketed:${genesisHash.toHex}", if ticketed then 1L else 0L)
+    putMetaLong(s"marked:${genesisHash.toHex}", 0L)
+    putMetaLong(s"weight:${genesisHash.toHex}", 0L)
 
   /** Slot of a stored block, decoded from its full block bytes; 0 when the
     * block bytes are missing/empty (genesis, whose body is never stored) or
@@ -240,6 +319,7 @@ final class ChainManager(
         putBlockRoot(genesisHash, root)
         putBlockHeight(genesisHash, 0L)
         bestHead = Head(genesisHash, 0L, root)
+        recordGenesisForkChoiceMeta(genesisHash)
         leafMap.clear()
         leafMap.put(genesisHash, bestHead)
         logger.info(
@@ -261,7 +341,8 @@ final class ChainManager(
     Hashing.blake2b256(block.header.encode.toArray)
 
   /** Import a block: extends the best head directly, or is stored as a side
-    * branch and adopted via reorg when its branch becomes strictly longer
+    * branch and adopted via reorg when its branch becomes strictly heavier
+    * (ticket-sealed count, then height) and holds no equivocation
     */
   def importBlock(blockBytes: Array[Byte]): Either[String, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
@@ -278,15 +359,18 @@ final class ChainManager(
               blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
               val height = parentHeight + 1
               putBlockHeight(hash, height)
+              recordForkChoiceMeta(hash, block)
               leafMap.remove(parent)
               if blockStore.children(hash).isEmpty then
                 leafMap.put(hash, Head(hash, block.header.slot.value.toLong, Hash.zero))
               else leafMap.remove(hash)
               val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
-              if height > bestHeight then reorgTo(hash, events)
+              val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
+              val heavier = weight > bestWeight || (weight == bestWeight && height > bestHeight)
+              if heavier && !branchEquivocates(hash) then reorgTo(hash, events)
               else
                 Left(
-                  s"stored on side branch (height $height <= best $bestHeight)"
+                  s"stored on side branch (weight $weight height $height vs best $bestWeight/$bestHeight)"
                 )
             case _ =>
               Left(s"unknown parent ${parent.toHex.take(18)}")
@@ -309,6 +393,7 @@ final class ChainManager(
         val hash = headerHashOf(block)
         val slot = block.header.slot.value.toLong
         blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
+        recordForkChoiceMeta(hash, block)
         blockStore.setHead(BlockStore.BestHead, hash)
         blockStore.setMeta("state_root", postRoot.bytes.toArray)
         putMetaLong("best_slot", slot)
@@ -323,6 +408,18 @@ final class ChainManager(
         )
         events += ((bestHead, block))
         Right(bestHead)
+
+  /** Whether the unvalidated branch ending at `tip` (back to its first
+    * validated ancestor) holds a block at an equivocated slot.
+    */
+  private def branchEquivocates(tip: Hash): Boolean =
+    var cursor = tip
+    while blockRoot(cursor).isEmpty do
+      if isEquivocated(cursor) then return true
+      parentOf(cursor) match
+        case Some(p) => cursor = p
+        case None    => return false
+    false
 
   /** Adopt the branch ending at `tip`: rewind to the common ancestor (the
     * nearest tip-ancestor with a validated post-state root) and replay the

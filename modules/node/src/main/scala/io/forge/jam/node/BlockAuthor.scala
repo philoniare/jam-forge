@@ -6,6 +6,7 @@ import io.forge.jam.core.primitives.{Hash, Timeslot, ValidatorIndex}
 import io.forge.jam.core.types.block.{Block, Extrinsic}
 import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.header.Header
+import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.crypto.SigningContext
 import io.forge.jam.protocol.pipeline.ExtrinsicHashing
 import io.forge.jam.protocol.safrole.SafroleTransition
@@ -38,20 +39,31 @@ final class BlockAuthor(
     val preView = chain.stateView()
     if slot <= preView.timeslot then return None
 
-    // Candidate tickets while the submission window is open: ascending id,
-    // not already accumulated, at most Cmaxblocktickets.
+    // Candidate tickets while the submission window is open: entered for
+    // this slot's epoch, ascending id, not already accumulated, only those
+    // the accumulator will retain, at most Cmaxblocktickets. A new epoch
+    // starts with an empty accumulator and rotates η_1 into η_2
     val phase = (slot % chain.config.epochLength).toInt
-    val accumulatedIds = preView.gamma.a.map(_.id).toSet
+    val epoch = slot / chain.config.epochLength
+    val sameEpoch = epoch == preView.timeslot / chain.config.epochLength
+    val accumulatedIds = if sameEpoch then preView.gamma.a.map(_.id).toSet else Set.empty
+    val ticketEntropy = preView.entropy.pool.lift(if sameEpoch then 2 else 1).getOrElse(Hash.zero)
     val candidateTickets =
       if phase < chain.config.ticketCutoff then
-        pools.takeTickets(accumulatedIds, chain.config.maxTicketsPerExtrinsic)
+        pools.takeTickets(
+          epoch,
+          ticketEntropy,
+          accumulatedIds,
+          chain.config.maxTicketsPerExtrinsic,
+          chain.config.epochLength
+        )
       else List.empty
 
     // Run Safrole for the target slot (with the real ticket extrinsic) to
     // obtain the posterior sealer sequence and header markers. The view is a
     // throwaway (never committed). A rejected ticket set falls back to an
     // empty extrinsic rather than stalling authoring.
-    def runSafrole(tickets: List[(Hash, io.forge.jam.core.types.tickets.TicketEnvelope)]) =
+    def runSafrole(tickets: List[(Hash, TicketEnvelope)]) =
       val v = chain.stateView()
       SafroleTransition
         .stfView(
@@ -68,9 +80,17 @@ final class BlockAuthor(
       runSafrole(candidateTickets) match
         case Right(res) => res
         case Left(err1) if candidateTickets.nonEmpty =>
-          logger.warn(s"ticket extrinsic rejected ($err1); authoring without tickets")
-          pools.removeTickets(candidateTickets.map(_._1))
-          runSafrole(List.empty) match
+          // Keep the tickets that pass on their own (ascending, so each kept
+          // set stays ordered) and drop only the failures from the pool.
+          val kept = candidateTickets.foldLeft(List.empty[(Hash, TicketEnvelope)]) {
+            (acc, t) => if runSafrole(acc :+ t).isRight then acc :+ t else acc
+          }
+          val dropped = candidateTickets.filterNot(kept.contains)
+          logger.warn(
+            s"ticket extrinsic rejected ($err1); dropped ${dropped.size} of ${candidateTickets.size} ticket(s)"
+          )
+          pools.removeTickets(dropped.map(_._1))
+          runSafrole(kept) match
             case Right(res) => res
             case Left(err) =>
               logger.debug(s"safrole rejected slot $slot: $err")

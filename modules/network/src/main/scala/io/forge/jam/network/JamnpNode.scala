@@ -39,6 +39,12 @@ final case class JamnpConfig(
     genesisHashPrefix: String,
     builder: Boolean = false,
     maxIdleTimeoutMillis: Long = 30000,
+    /** Set SO_REUSEPORT on the listening socket, so a local relay (e.g. a
+      * network-fault injector) can bind the same port on a more specific
+      * address. Off by default: any process of the same user could then
+      * receive this node's traffic.
+      */
+    reusePort: Boolean = false,
     /** Frame size cap; must exceed the largest protocol message (bundles can
       * approach Cmaxbundlesize ≈ 13.8 MB).
       */
@@ -166,6 +172,11 @@ final class JamnpConnection private[network] (
 
   def isOpen: Boolean = quic.isActive
 
+  /** The peer's UDP address, when the QUIC path is known. */
+  def remoteAddress: Option[java.net.SocketAddress] =
+    try Option(quic.remoteSocketAddress())
+    catch case _: Exception => None
+
 /** Handles streams opened by remote peers, keyed by stream kind. */
 trait StreamHandler:
   /** Called when a peer opens a stream of a kind this handler is registered
@@ -186,6 +197,22 @@ final class JamnpNode(
   private val group = new NioEventLoopGroup()
   private val handlers = new ConcurrentHashMap[Byte, StreamHandler]()
   private val connections = ConcurrentHashMap.newKeySet[JamnpConnection]()
+  private val connectionListeners =
+    new java.util.concurrent.CopyOnWriteArrayList[(JamnpConnection, Boolean) => Unit]()
+
+  /** Register a listener called with `true` when a connection (accepted or
+    * dialed) comes up and `false` when it closes, e.g. on the QUIC idle
+    * timeout after a link goes quiet.
+    */
+  def onConnectionChange(f: (JamnpConnection, Boolean) => Unit): JamnpNode =
+    connectionListeners.add(f)
+    this
+
+  private def fireConnectionChange(conn: JamnpConnection, up: Boolean): Unit =
+    connectionListeners.forEach { l =>
+      try l(conn, up)
+      catch case _: Exception => ()
+    }
   @volatile private var serverChannel: Channel = null
 
   def registerHandler(kind: Byte, handler: StreamHandler): JamnpNode =
@@ -199,10 +226,13 @@ final class JamnpNode(
       val conn = new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false)
       ctx.channel().attr(ConnectionKey).set(conn)
       connections.add(conn)
+      fireConnectionChange(conn, true)
       ctx.fireChannelActive()
     override def channelInactive(ctx: ChannelHandlerContext): Unit =
       val conn = ctx.channel().attr(ConnectionKey).get()
-      if conn != null then connections.remove(conn)
+      if conn != null then
+        connections.remove(conn)
+        fireConnectionChange(conn, false)
       ctx.fireChannelInactive()
 
   def boundPort: Int =
@@ -248,10 +278,16 @@ final class JamnpNode(
       })
       .build()
 
-    serverChannel = new Bootstrap()
+    val bootstrap = new Bootstrap()
       .group(group)
       .channel(classOf[NioDatagramChannel])
       .handler(codec)
+    if config.reusePort then
+      bootstrap.option(
+        io.netty.channel.socket.nio.NioChannelOption.of(java.net.StandardSocketOptions.SO_REUSEPORT),
+        java.lang.Boolean.TRUE
+      )
+    serverChannel = bootstrap
       .bind(bindAddress)
       .sync()
       .channel()
@@ -303,11 +339,14 @@ final class JamnpNode(
               val conn = new JamnpConnection(quic, initiator = true)
               quic.attr(ConnectionKey).set(conn)
               connections.add(conn)
+              fireConnectionChange(conn, true)
               quic
                 .closeFuture()
                 .addListener(
                   new io.netty.channel.ChannelFutureListener {
                     override def operationComplete(cf: io.netty.channel.ChannelFuture): Unit =
+                      connections.remove(conn)
+                      fireConnectionChange(conn, false)
                       channel.close()
                   }
                 )

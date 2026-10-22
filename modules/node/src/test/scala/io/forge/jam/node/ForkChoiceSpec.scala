@@ -10,14 +10,14 @@ import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** Fork choice: side branches are stored unvalidated; a strictly longer
-  * branch triggers a reorg that rewinds to the common ancestor and replays
-  * with full validation.
+/** Fork choice: side branches are stored unvalidated; a strictly heavier
+  * branch (ticket-sealed blocks, then height; GP 0.8.0 §bestchain) triggers
+  * a reorg that rewinds to the common ancestor and replays with full
+  * validation, unless the branch holds an equivocation.
   *
-  * Setup: node A and node B share block 1. A extends with its own block 2
-  * (with tickets); B — authoring without a ticket pool — produces a
-  * different block 2' and a block 3'. Feeding 2' to A parks it on a side
-  * branch (equal height); 3' makes B's branch longer and A reorgs onto it.
+  * Setup: node A and node B share block 1. A extends with its own block 2;
+  * B skips slot 2 and produces 3' and 4'. Feeding 3' to A parks it on a side
+  * branch (equal height); 4' makes B's branch longer and A reorgs onto it.
   */
 class ForkChoiceSpec extends AnyFunSuite with Matchers:
 
@@ -77,48 +77,49 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       nodeA.authorSlot(2).isDefined shouldBe true
       val headA2 = nodeA.chain.best
 
-      // B's competing chain: 2' and 3'.
-      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
+      // B's competing chain: 3' and 4' (no block at slot 2, so the branches
+      // do not equivocate).
+      val block2b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
       val block2bBytes = nodeB.chain.encodeBlock(block2b)
       nodeB.chain.importBlock(block2bBytes).isRight shouldBe true
-      val block3b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
+      val block3b = bareAuthorB.tryAuthor(4).getOrElse(fail("author 4'"))
       val block3bBytes = nodeB.chain.encodeBlock(block3b)
       nodeB.chain.importBlock(block3bBytes).isRight shouldBe true
 
       nodeB.chain.best.hash should not be headA2.hash
 
-      // Sanity: 2' imports linearly on a fresh node C (isolates replay bugs
+      // Sanity: 3' imports linearly on a fresh node C (isolates replay bugs
       // from block validity).
       val dirC = tempDir("jam-fork-c")
       val nodeC = new JamNode(spec, NodeConfig(dataDir = dirC, slotTicking = false))
       nodeC.chain.initializeOrRestore(spec)
       nodeC.chain.importBlock(block1Bytes).isRight shouldBe true
       val cRes = nodeC.chain.importBlock(block2bBytes)
-      withClue(s"fresh-node import of 2': $cRes") { cRes.isRight shouldBe true }
+      withClue(s"fresh-node import of 3': $cRes") { cRes.isRight shouldBe true }
       nodeC.shutdownStorageOnly()
       cleanup(dirC)
 
-      // Feed B's branch to A: 2' parks on a side branch (equal height)...
+      // Feed B's branch to A: 3' parks on a side branch (equal height)...
       val sideResult = nodeA.chain.importBlock(block2bBytes)
       sideResult.isLeft shouldBe true
       sideResult.left.toOption.get should include("side branch")
       nodeA.chain.best.hash shouldBe headA2.hash
 
-      // ...and 3' makes the branch longer → reorg onto B's chain.
+      // ...and 4' makes the branch longer → reorg onto B's chain.
       val reorged = nodeA.chain.importBlock(block3bBytes)
       withClue(s"reorg result: $reorged") {
         reorged.isRight shouldBe true
       }
       nodeA.chain.best.hash shouldBe nodeB.chain.best.hash
       nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
-      nodeA.chain.best.slot shouldBe 3L
+      nodeA.chain.best.slot shouldBe 4L
 
       // The abandoned block is still stored but no longer canonical; the new
       // chain keeps extending.
       nodeA.chain.hasBlock(headA2.hash) shouldBe true
-      val block4 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(4).getOrElse(fail("author 4"))
-      nodeA.chain.importBlock(nodeA.chain.encodeBlock(block4)).isRight shouldBe true
-      nodeA.chain.best.slot shouldBe 4L
+      val block5 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(5).getOrElse(fail("author 5"))
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(block5)).isRight shouldBe true
+      nodeA.chain.best.slot shouldBe 5L
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()
@@ -156,6 +157,89 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       // Finalizing below the finalized head is rejected.
       val genesisHash = spec.genesisHeaderHash
       node.chain.finalize(genesisHash).isLeft shouldBe true
+    finally
+      if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
+  private def devSpec(id: String, genesis: io.forge.jam.protocol.traces.Genesis): ChainSpec =
+    ChainSpec(
+      id = id,
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+
+  test("GP: a branch with an unfinalized equivocation is not adopted (§bestchain)") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = devSpec("equivocation-devnet", genesis)
+    val dirA = tempDir("jam-equiv-a")
+    val dirB = tempDir("jam-equiv-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false))
+      nodeA.chain.initializeOrRestore(spec)
+      nodeB.chain.initializeOrRestore(spec)
+      nodeA.enableAuthoring(devKeys)
+      val bareA = new BlockAuthor(nodeA.chain, devKeys)
+      val bareB = new BlockAuthor(nodeB.chain, devKeys)
+
+      val block1Bytes = nodeA.chain.encodeBlock(bareA.tryAuthor(1).getOrElse(fail("author 1")))
+      nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
+      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
+
+      // Slot 2 twice by the same sealer: A's (with tickets) and B's (bare).
+      nodeA.authorSlot(2).isDefined shouldBe true
+      val headA2 = nodeA.chain.best
+      val b2 = nodeB.chain.encodeBlock(bareB.tryAuthor(2).getOrElse(fail("author 2'")))
+      nodeB.chain.importBlock(b2).isRight shouldBe true
+      val b3 = nodeB.chain.encodeBlock(bareB.tryAuthor(3).getOrElse(fail("author 3'")))
+      nodeB.chain.importBlock(b3).isRight shouldBe true
+      nodeB.chain.best.hash should not be headA2.hash
+
+      nodeA.chain.importBlock(b2).isLeft shouldBe true
+      val longer = nodeA.chain.importBlock(b3)
+      withClue(s"import of 3': $longer") { longer.isLeft shouldBe true }
+      nodeA.chain.best.hash shouldBe headA2.hash
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("depth finality waits for a quorum of peers holding the target") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = devSpec("quorum-devnet", genesis)
+    val dir = tempDir("jam-quorum")
+    var node: JamNode = null
+    try
+      node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
+      node.chain.initializeOrRestore(spec)
+      node.enableAuthoring(devKeys)
+      for slot <- 1L to 4L do node.authorSlot(slot).isDefined shouldBe true
+      val best = node.chain.best
+      val genesisHash = spec.genesisHeaderHash
+
+      // Alone, or with a peer whose best is on another chain, quorum 2 is not met.
+      node.chain.finalizeAtDepth(2, Nil, quorum = 2) shouldBe None
+      node.chain.finalizeAtDepth(2, Seq(genesisHash), quorum = 2) shouldBe None
+      node.chain.finalized.hash shouldBe genesisHash
+
+      // Two peers on our chain at the same head count twice: three of three.
+      val fin = node.chain
+        .finalizeAtDepth(2, Seq(best.hash, best.hash), quorum = 3)
+        .getOrElse(fail("not finalized"))
+      fin.slot shouldBe 2L
+      node.chain.ancestorAtHeight(best.hash, 2L) shouldBe Some(fin.hash)
     finally
       if node != null then node.shutdownStorageOnly()
       cleanup(dir)

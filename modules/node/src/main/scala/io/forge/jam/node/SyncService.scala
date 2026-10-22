@@ -11,6 +11,7 @@ import io.forge.jam.core.trie.TrieNode
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.*
 
 /** Wire encodings for the UP 0 / CE 128 protocol messages (jamnp-s spec).
   * `Final` and `Leaf` are hash(32) ++ slot(4 LE); the handshake leaf list is
@@ -155,6 +156,25 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     */
   def peerFinal(conn: JamnpConnection): Option[HashSlot] = Option(peerFinals.get(conn))
 
+  /** Each connected peer's best head as last seen: the newest leaf of its
+    * UP 0 handshake, then every block it announces.
+    */
+  private val peerBestHeads = new ConcurrentHashMap[JamnpConnection, HashSlot]()
+
+  /** Best heads of the peers with a live UP 0 stream, keyed by peer key so a
+    * peer reached over two connections counts once.
+    */
+  def peerBests: Iterable[Hash] =
+    peerBestHeads.asScala.toList
+      .filter(_._1.isOpen)
+      .groupBy(e => JamBytes(e._1.peerKey))
+      .values
+      .map(_.maxBy(_._2.slot)._2.hash)
+
+  private def notePeerBest(conn: JamnpConnection, head: HashSlot): Unit =
+    peerBestHeads.merge(conn, head, (old, nu) => if nu.slot >= old.slot then nu else old)
+    ()
+
   private val StateRequestMaxSizeCap: Long = 16L * 1024 * 1024
 
   /** Single-threaded import pipeline so block application stays sequential. */
@@ -192,6 +212,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       stream.onClosed { () =>
         announceStreams.remove(stream)
         peerFinals.remove(conn)
+        peerBestHeads.remove(conn)
       }
       stream.onMessage { msg =>
         if !handshaken then
@@ -217,6 +238,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     stream.onClosed { () =>
       announceStreams.remove(stream)
       peerFinals.remove(conn)
+      peerBestHeads.remove(conn)
     }
     stream.onMessage { msg =>
       if !handshaken then
@@ -242,11 +264,14 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     val (headerBytes, peerFinal) = decodeAnnouncement(msg)
     peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
+    if headerBytes.length >= 100 then
+      notePeerBest(conn, HashSlot(headerHash, io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)))
     if !chain.hasBlock(headerHash) then
       logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting")
       requestAndImport(conn, headerHash)
 
   private def onPeerLeaves(conn: JamnpConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
+    leaves.maxByOption(_.slot).foreach(notePeerBest(conn, _))
     leaves.foreach { leaf =>
       if leaf.slot < peerFinal.slot then
         logger.debug(

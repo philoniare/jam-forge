@@ -76,9 +76,10 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       val headA2 = nodeA.chain.best
       nodeA.chain.leaves.map(_.hash) shouldBe List(headA2.hash)
 
-      // B's competing block 2' fed to A: parks on a side branch (equal height) —
-      // now both tips are leaves, best (A's) first.
-      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
+      // B's competing block 2' (slot 3, so no equivocation with A's slot 2) fed
+      // to A: parks on a side branch (equal height) — now both tips are leaves,
+      // best (A's) first.
+      val block2b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 2'"))
       val block2bBytes = nodeB.chain.encodeBlock(block2b)
       val block2bHash = nodeB.chain.headerHashOf(block2b)
       val sideResult = nodeA.chain.importBlock(block2bBytes)
@@ -90,7 +91,7 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       leavesAfterFork.map(_.hash).toSet shouldBe Set(headA2.hash, block2bHash)
 
       nodeB.chain.importBlock(block2bBytes).isRight shouldBe true
-      val block3b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
+      val block3b = bareAuthorB.tryAuthor(4).getOrElse(fail("author 3'"))
       val block3bBytes = nodeB.chain.encodeBlock(block3b)
       val block3bHash = nodeB.chain.headerHashOf(block3b)
       val reorged = nodeA.chain.importBlock(block3bBytes)
