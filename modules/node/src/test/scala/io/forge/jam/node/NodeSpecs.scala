@@ -59,6 +59,31 @@ class ChainSpecSpec extends AnyFunSuite with Matchers:
     bn.port shouldBe 40000
   }
 
+  test("parses a JIP-4 chain spec (polkajam dump-spec): state object, config from protocol_parameters") {
+    // polkajam v0.8.0 `--chain dev dump-spec`, cut to the fields read here: B_I, B_L, B_S, C = 2, D = 32, E = 12.
+    val params = "0a00000000000000" + "0100000000000000" + "6400000000000000" + "0200" + "20000000" + "0c000000"
+    val jip4 =
+      s"""{
+        |  "id": "dev",
+        |  "protocol_parameters": "$params",
+        |  "genesis_header": "${"00" * 100}",
+        |  "genesis_state": {"01000000000000000000000000000000000000000000000000000000000000": "11"},
+        |  "bootnodes": ["eecgwpgwq3noky4ijm4jmvjtmuzv44qvigciusxakq5epnrfj2utb@127.0.0.1:40000"]
+        |}""".stripMargin
+    val spec = ChainSpec.fromJson(jip4).fold(e => fail(e), identity)
+    spec.config shouldBe io.forge.jam.core.ChainConfig.TINY
+    spec.genesisState.map(_.value.toHex) shouldBe List("11")
+    // Dev validator 0's Ed25519 key, from its JAMNP-S name.
+    spec.bootnodes.map(_.ed25519Hex) shouldBe List("4418fb8c85bb3985394a8c2756d3643457ce614546202a2f50b093d762499ace")
+  }
+
+  test("bootnode e-name round-trips through NodeIdentity") {
+    val key = Array.tabulate[Byte](32)(i => (i * 7 + 3).toByte)
+    val name = io.forge.jam.network.NodeIdentity.altName(key)
+    Bootnode.parse(s"$name@10.0.0.1:1").ed25519Key.toSeq shouldBe key.toSeq
+    io.forge.jam.network.NodeIdentity.fromAltName(name.updated(5, '1')) shouldBe None
+  }
+
 class NodeIdentitySeedSpec extends AnyFunSuite with Matchers:
 
   test("identity from a fixed seed is deterministic and TLS-usable") {

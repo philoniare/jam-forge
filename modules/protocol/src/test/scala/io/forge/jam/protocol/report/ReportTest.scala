@@ -514,6 +514,24 @@ class ReportTest extends AnyFunSuite with Matchers:
     postState shouldBe preState
   }
 
+  test("GP: lookup anchor in A must match its posterior state root (h'_r)") {
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    val lookupAnchor = Hash(Array.fill(32)(0xFF.toByte))
+    val input = anchorGuaranteeInput(
+      anchor = Hash(Array.fill(32)(0xEE.toByte)), // absent from β -> AnchorNotRecent once lookup passes
+      lookupAnchor = lookupAnchor,
+      lookupAnchorSlot = 5,
+      blockSlot = 10)
+    // The guarantee's lookupAnchorStateRoot is zero.
+    val wrongRoot = List(AncestorHeader(5L, lookupAnchor, Some(Hash(Array.fill(32)(0x42.toByte)))))
+    ReportTransition.stfInternal(input, preState, TinyConfig, ancestry = wrongRoot)._2.swap.toOption shouldBe
+      Some(ReportErrorCode.LookupAnchorNotRecent)
+    val rightRoot = List(AncestorHeader(5L, lookupAnchor, Some(Hash.zero)))
+    ReportTransition.stfInternal(input, preState, TinyConfig, ancestry = rightRoot)._2.swap.toOption shouldBe
+      Some(ReportErrorCode.AnchorNotRecent)
+  }
+
   test("future lookup-anchor slot passes the age check when ancestry validation is skipped") {
     val preState = createMinimalState(
       TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)

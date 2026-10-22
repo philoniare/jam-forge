@@ -54,6 +54,23 @@ object NodeIdentity:
       i += 1
     sb.toString
 
+  /** Inverse of [[altName]]: the Ed25519 key named by an "e" + 52-digit name, if well formed. */
+  def fromAltName(name: String): Option[Array[Byte]] =
+    if name.length != 53 || name.head != 'e' then None
+    else
+      val digits = name.tail.map(Base32Alphabet.indexOf(_))
+      if digits.exists(_ < 0) then None
+      else
+        val key = new Array[Byte](32)
+        digits.zipWithIndex.foreach { (d, i) =>
+          val bitPos = 5 * i
+          val byteIdx = bitPos / 8
+          val v = d << (bitPos % 8)
+          key(byteIdx) = (key(byteIdx) | v).toByte
+          if byteIdx + 1 < 32 then key(byteIdx + 1) = (key(byteIdx + 1) | (v >> 8)).toByte
+        }
+        Option.when(altName(key) == name)(key)
+
   /** Extract the raw 32-byte Ed25519 key from an X.509 SubjectPublicKeyInfo
     * encoding (the raw key is the trailing 32 bytes).
     */

@@ -48,7 +48,28 @@ ENV JAM_BUILD_TIME=${BUILD_TIME}
 RUN echo "Building for git=${GIT_SHA} at ${BUILD_TIME}" && \
     sbt clean "conformance/assembly"
 
-# Stage 3: Runtime image
+# Devnet node image (jam-node), built only on request: docker build --target node -t jam-node .
+FROM scala-builder AS node-builder
+
+COPY modules/network ./modules/network
+COPY modules/db ./modules/db
+COPY modules/node ./modules/node
+
+RUN sbt "node/assembly"
+
+FROM azul/zulu-openjdk:24.0.2-24.32-jdk-crac AS node
+
+WORKDIR /app
+
+COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /app/lib/
+COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /app/lib/
+COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /app/lib/
+COPY --from=node-builder /build/modules/node/target/scala-3.3.7/jam-node.jar /app/
+
+ENV LD_LIBRARY_PATH=/app/lib
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/jam-node.jar"]
+
+# Stage 3: Runtime image (default target: the conformance fuzz target)
 FROM azul/zulu-openjdk:24.0.2-24.32-jdk-crac
 
 WORKDIR /app

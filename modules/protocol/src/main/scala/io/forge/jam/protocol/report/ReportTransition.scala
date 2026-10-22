@@ -366,8 +366,12 @@ object ReportTransition:
         val lookupAnchorPresent =
           skipLookupAnchor || {
             val lookupAnchorSlot = context.lookupAnchorSlot.value.toLong
+            // GP 0.8.0 §reporting: ∃ h, h' ∈ A with h_t = x_t, H(h) = x_l, h'_p = H(h), h'_r = x_l's post-state
             if ancestry.nonEmpty then
-              ancestry.exists(a => a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot)
+              ancestry.exists(a =>
+                a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot &&
+                  a.postStateRoot.forall(_ == context.lookupAnchorStateRoot)
+              )
             else
               recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
                 lookupAnchorSlot <= currentSlot &&

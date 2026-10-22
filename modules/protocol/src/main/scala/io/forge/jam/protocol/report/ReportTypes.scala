@@ -284,9 +284,10 @@ object ReportTypes:
       }
 
   /**
-   * A single entry of the ancestor set A, containing slot and header hash.
+   * A single entry of the ancestor set A: slot, header hash and, when known, the block's posterior state root (its
+   * child's prior state root, h'_r in GP 0.8.0 §reporting).
    */
-  final case class AncestorHeader(slot: Long, headerHash: Hash)
+  final case class AncestorHeader(slot: Long, headerHash: Hash, postStateRoot: Option[Hash] = None)
 
   /**
    * Report input containing guarantees and slot.
