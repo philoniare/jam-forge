@@ -31,22 +31,139 @@ fn simd_len(words: usize) -> usize {
 /// Writes GP-layout `gp` (word p in bytes 2p, 2p+1; missing trailing bytes read as zero) into `out` in
 /// reed-solomon-simd layout. `out` must be zeroed and `simd_len` long.
 fn to_simd_layout(gp: &[u8], out: &mut [u8]) {
-    for (p, word) in gp.chunks(2).enumerate() {
-        let base = (p / 32) * 64 + p % 32;
-        out[base] = word[0];
+    let whole = gp.len() / 64;
+    for (src, dst) in gp.chunks_exact(64).zip(out.chunks_exact_mut(64)) {
+        let (lo, hi) = dst.split_at_mut(32);
+        for i in 0..32 {
+            lo[i] = src[2 * i];
+            hi[i] = src[2 * i + 1];
+        }
+    }
+    let base = whole * 64;
+    for (p, word) in gp[base..].chunks(2).enumerate() {
+        out[base + p] = word[0];
         if word.len() > 1 {
-            out[base + 32] = word[1];
+            out[base + p + 32] = word[1];
         }
     }
 }
 
 /// Inverse of `to_simd_layout` for the first `out.len() / 2` words.
 fn from_simd_layout(simd: &[u8], out: &mut [u8]) {
-    for (p, word) in out.chunks_exact_mut(2).enumerate() {
-        let base = (p / 32) * 64 + p % 32;
-        word[0] = simd[base];
-        word[1] = simd[base + 32];
+    let whole = out.len() / 64;
+    for (src, dst) in simd.chunks_exact(64).zip(out.chunks_exact_mut(64)) {
+        let (lo, hi) = src.split_at(32);
+        for i in 0..32 {
+            dst[2 * i] = lo[i];
+            dst[2 * i + 1] = hi[i];
+        }
     }
+    let base = whole * 64;
+    for (p, word) in out[base..].chunks_exact_mut(2).enumerate() {
+        word[0] = simd[base + p];
+        word[1] = simd[base + p + 32];
+    }
+}
+
+/// Words each thread codes at least; smaller inputs stay on the calling thread. Small in tests so they split.
+#[cfg(not(test))]
+const MIN_PART_WORDS: usize = 2048;
+#[cfg(test)]
+const MIN_PART_WORDS: usize = 32;
+
+/// Splits `words` words into contiguous ranges, one per thread, cut at 32-word block boundaries. The coding is
+/// word-wise, so each range can be coded on its own.
+fn word_parts(words: usize) -> Vec<(usize, usize)> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    let parts = threads.min(words / MIN_PART_WORDS).max(1);
+    let step = words.div_ceil(parts).div_ceil(32) * 32;
+    (0..words).step_by(step.max(1)).map(|a| (a, (a + step).min(words))).collect()
+}
+
+/// Bytes [2a, 2b) of `row`, clipped to its length.
+fn word_range(row: &[u8], a: usize, b: usize) -> &[u8] {
+    &row[(2 * a).min(row.len())..(2 * b).min(row.len())]
+}
+
+/// Cuts each row into the byte ranges of `parts`, giving each part its slice of every row.
+fn split_rows<'a>(rows: Vec<&'a mut [u8]>, parts: &[(usize, usize)]) -> Vec<Vec<&'a mut [u8]>> {
+    let mut out: Vec<Vec<&'a mut [u8]>> = parts.iter().map(|_| Vec::with_capacity(rows.len())).collect();
+    for row in rows {
+        let mut rest = row;
+        for (part, &(a, b)) in out.iter_mut().zip(parts) {
+            let (head, tail) = rest.split_at_mut(2 * (b - a));
+            part.push(head);
+            rest = tail;
+        }
+    }
+    out
+}
+
+/// Runs `f` on each part, on its own thread when there is more than one.
+fn for_each_part<T: Send>(parts: Vec<T>, f: impl Fn(T) -> Option<()> + Sync) -> Option<()> {
+    if parts.len() == 1 {
+        return parts.into_iter().try_for_each(&f);
+    }
+    std::thread::scope(|s| {
+        let handles: Vec<_> = parts.into_iter().map(|p| s.spawn(|| f(p))).collect();
+        handles.into_iter().map(|h| h.join().ok().flatten()).collect::<Option<Vec<()>>>()
+    })?;
+    Some(())
+}
+
+/// Codes `originals` (GP layout, `2 * words` bytes each) into `recovery` (each `2 * words` bytes), split by word range
+/// across threads.
+fn encode_into(originals: &[&[u8]], recovery: Vec<&mut [u8]>, words: usize) -> Option<()> {
+    let parts = word_parts(words);
+    let jobs: Vec<_> = parts.iter().copied().zip(split_rows(recovery, &parts)).collect();
+    for_each_part(jobs, |((a, b), outs)| {
+        let len = simd_len(b - a);
+        let mut encoder = ReedSolomonEncoder::new(originals.len(), outs.len(), len).ok()?;
+        let mut buf = vec![0u8; len];
+        for row in originals {
+            buf.fill(0);
+            to_simd_layout(word_range(row, a, b), &mut buf);
+            encoder.add_original_shard(&buf).ok()?;
+        }
+        let result = encoder.encode().ok()?;
+        for (shard, out) in result.recovery_iter().zip(outs) {
+            from_simd_layout(shard, out);
+        }
+        Some(())
+    })
+}
+
+/// Restores the originals at `missing` indices (each `2 * words` bytes) from `(index, shard)` pairs, split by word
+/// range across threads. Shards shorter than `2 * words` read as zero-padded.
+fn decode_into(
+    shards: &[(usize, Vec<u8>)],
+    original_count: usize,
+    recovery_count: usize,
+    missing: Vec<(usize, &mut [u8])>,
+    words: usize,
+) -> Option<()> {
+    let parts = word_parts(words);
+    let (indices, rows): (Vec<usize>, Vec<&mut [u8]>) = missing.into_iter().unzip();
+    let jobs: Vec<_> = parts.iter().copied().zip(split_rows(rows, &parts)).collect();
+    for_each_part(jobs, |((a, b), outs)| {
+        let len = simd_len(b - a);
+        let mut decoder = ReedSolomonDecoder::new(original_count, recovery_count, len).ok()?;
+        let mut buf = vec![0u8; len];
+        for (index, shard) in shards {
+            buf.fill(0);
+            to_simd_layout(word_range(shard, a, b), &mut buf);
+            if *index < original_count {
+                decoder.add_original_shard(*index, &buf).ok()?;
+            } else {
+                decoder.add_recovery_shard(index - original_count, &buf).ok()?;
+            }
+        }
+        let result = decoder.decode().ok()?;
+        for (i, out) in indices.iter().zip(outs) {
+            from_simd_layout(result.restored_original(*i)?, out);
+        }
+        Some(())
+    })
 }
 
 /// C_k on whole shards: `data` (at most `original_count * 2k` bytes, zero-padded) is cut into `original_count`
@@ -72,23 +189,11 @@ fn chunk_shards(
         })
         .collect();
 
-    let len = simd_len(k);
-    let mut encoder = ReedSolomonEncoder::new(original_count, recovery_count, len).ok()?;
-    let mut buf = vec![0u8; len];
-    for shard in &originals {
-        buf.fill(0);
-        to_simd_layout(shard, &mut buf);
-        encoder.add_original_shard(&buf).ok()?;
-    }
-    let result = encoder.encode().ok()?;
-
+    let mut recovery = vec![vec![0u8; shard_bytes]; recovery_count];
+    let rows: Vec<&[u8]> = originals.iter().map(|s| s.as_slice()).collect();
+    encode_into(&rows, recovery.iter_mut().map(|s| s.as_mut_slice()).collect(), k)?;
     let mut shards = originals;
-    shards.reserve(recovery_count);
-    for recovery in result.recovery_iter() {
-        let mut shard = vec![0u8; shard_bytes];
-        from_simd_layout(recovery, &mut shard);
-        shards.push(shard);
-    }
+    shards.extend(recovery);
     Some(shards)
 }
 
@@ -121,18 +226,9 @@ fn chunk_segments(
         }
     }
 
-    let len = simd_len(segment_count * k);
-    let mut encoder = ReedSolomonEncoder::new(original_count, recovery_count, len).ok()?;
-    let mut buf = vec![0u8; len];
-    for shard in out[..original_count * row].chunks_exact(row) {
-        buf.fill(0);
-        to_simd_layout(shard, &mut buf);
-        encoder.add_original_shard(&buf).ok()?;
-    }
-    let result = encoder.encode().ok()?;
-    for (recovery, shard) in result.recovery_iter().zip(out[original_count * row..].chunks_exact_mut(row)) {
-        from_simd_layout(recovery, shard);
-    }
+    let (originals, recovery) = out.split_at_mut(original_count * row);
+    let rows: Vec<&[u8]> = originals.chunks_exact(row).map(|s| &*s).collect();
+    encode_into(&rows, recovery.chunks_exact_mut(row).collect(), segment_count * k)?;
     Some(out)
 }
 
@@ -153,29 +249,21 @@ fn reconstruct_shards(
     }
     let k = shard_size.div_ceil(2);
     let shard_bytes = 2 * k;
-    let len = simd_len(k);
 
     let mut out = vec![0u8; original_count * shard_bytes];
     let mut provided = vec![false; original_count];
-    let mut decoder = ReedSolomonDecoder::new(original_count, recovery_count, len).ok()?;
-    let mut buf = vec![0u8; len];
     for (index, shard) in shards {
-        buf.fill(0);
-        to_simd_layout(shard, &mut buf);
         if *index < original_count {
-            decoder.add_original_shard(*index, &buf).ok()?;
             out[index * shard_bytes..index * shard_bytes + shard_size].copy_from_slice(shard);
             provided[*index] = true;
-        } else {
-            decoder.add_recovery_shard(index - original_count, &buf).ok()?;
+        } else if *index >= original_count + recovery_count {
+            return None;
         }
     }
-    let result = decoder.decode().ok()?;
-    for (i, done) in provided.iter().enumerate() {
-        if !done {
-            let restored = result.restored_original(i)?;
-            from_simd_layout(restored, &mut out[i * shard_bytes..(i + 1) * shard_bytes]);
-        }
+    let missing: Vec<(usize, &mut [u8])> =
+        out.chunks_exact_mut(shard_bytes).enumerate().filter(|(i, _)| !provided[*i]).collect();
+    if !missing.is_empty() {
+        decode_into(shards, original_count, recovery_count, missing, k)?;
     }
     Some(out)
 }
@@ -392,10 +480,23 @@ mod tests {
     }
 
     #[test]
+    fn test_word_parts_cover_every_word_in_whole_blocks() {
+        for words in [1, 31, 32, 33, 70, 200, 18_720, 20_163] {
+            let parts = word_parts(words);
+            assert_eq!(parts.first().unwrap().0, 0);
+            assert_eq!(parts.last().unwrap().1, words);
+            for w in parts.windows(2) {
+                assert_eq!(w[0].1, w[1].0);
+            }
+            assert!(parts.iter().all(|&(a, b)| a % 32 == 0 && a < b));
+        }
+    }
+
+    #[test]
     fn test_chunk_matches_per_position_coding() {
         // Word counts on both sides of the 32-word block boundary, plus GP's full and tiny shapes.
         for &(original_count, recovery_count, k) in
-            &[(342, 681, 1), (342, 681, 31), (342, 681, 33), (342, 681, 70), (3, 3, 64), (2, 4, 5)]
+            &[(342, 681, 1), (342, 681, 31), (342, 681, 33), (342, 681, 70), (342, 681, 200), (3, 3, 64), (2, 4, 5)]
         {
             for &len in &[1usize, original_count * 2 * k - 1, original_count * 2 * k] {
                 let data = bytes(len, (len * 31 + k) as u64);
@@ -428,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_reconstruct_from_recovery_and_mixed_shards() {
-        let (original_count, recovery_count, k) = (342, 681, 45);
+        let (original_count, recovery_count, k) = (342, 681, 145);
         let data = bytes(original_count * 2 * k - 7, 11);
         let shards = chunk_shards(&data, original_count, recovery_count, k).unwrap();
         let mut expected = data.clone();

@@ -147,6 +147,9 @@ sbt benchmark
 # This executes TracesBenchmark
 ```
 
+The benchmark suites (trie/DB, signature verification, erasure coding, PVM) and baseline figures are in
+[BENCHMARKS.md](BENCHMARKS.md); `sbt benchComponents` runs the first three.
+
 ### Coverage Goals
 
 - Core module: >90% line coverage

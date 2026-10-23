@@ -184,6 +184,9 @@ sbt benchmark
 # The benchmark runs TracesBenchmark which measures STF performance
 ```
 
+The benchmark suites (trie/DB, signature verification, erasure coding, PVM) and baseline figures are in
+[BENCHMARKS.md](BENCHMARKS.md); `sbt benchComponents` runs the first three.
+
 ## Building for Production
 
 ### Conformance Server

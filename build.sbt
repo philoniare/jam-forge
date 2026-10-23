@@ -79,6 +79,12 @@ val quicNativeClassifier = {
   if (osName.contains("mac")) s"osx-$archName" else s"linux-$archName"
 }
 
+// Benchmark suites (trie/DB, signature verification, erasure coding); see BENCHMARKS.md.
+addCommandAlias("benchTrieDb", "db/Test/runMain io.forge.jam.db.benchmark.TrieDbBench")
+addCommandAlias("benchSignatures", "crypto/Test/runMain io.forge.jam.crypto.benchmark.SignatureVerifyBench")
+addCommandAlias("benchErasureCoding", "crypto/Test/runMain io.forge.jam.crypto.benchmark.ErasureCodingBench")
+addCommandAlias("benchComponents", ";benchTrieDb ;benchSignatures ;benchErasureCoding")
+
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)
   .settings(
