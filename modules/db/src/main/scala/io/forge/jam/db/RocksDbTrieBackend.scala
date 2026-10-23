@@ -171,8 +171,11 @@ object RocksDbTrieBackend:
   private val CfNames =
     Seq("trie-nodes", "trie-values", "trie-node-refs", "trie-value-refs")
 
-  /** Slots in the decoded-node cache: enough for the upper levels of the trie that every block rewrites. */
-  private val NodeCacheSlots = 1 << 16
+  /**
+   * Slots in the decoded-node cache: enough for most upper levels of a 1M-key trie, so a read or a block's update
+   * goes to RocksDB for the last few nodes of a path only. Up to roughly 250 MB of heap when full (estimated).
+   */
+  private val NodeCacheSlots = 1 << 20
 
   private val BlockCacheBytes = 64L * 1024 * 1024
 

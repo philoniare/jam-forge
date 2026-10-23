@@ -94,10 +94,13 @@ final class ServiceStorageView private (
   def savepointDepth: Int = savepoints.length
 
   def commit(target: StateTrie): Unit =
+    val updates = commitUpdates()
+    if updates.nonEmpty then target.update(updates)
+
+  /** The staged writes [[commit]] would apply, for a caller merging them into one [[StateTrie.update]]. */
+  def commitUpdates(): Seq[(JamBytes, Option[JamBytes])] =
     readCache.clear()
-    if pending.isEmpty then return
-    val updates = pending.iterator.toSeq
-    target.update(updates)
+    pending.iterator.toSeq
 
   def pendingStateKeys: collection.Set[JamBytes] = pending.keySet
 

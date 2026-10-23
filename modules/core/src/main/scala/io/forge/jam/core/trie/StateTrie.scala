@@ -2,6 +2,7 @@ package io.forge.jam.core.trie
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.trie.HashTables.{NodeTable, ValueTable}
 import scala.collection.mutable
 
 /**
@@ -11,17 +12,18 @@ import scala.collection.mutable
  * node created and then replaced by a later update before `save()` is dropped at once, with its raw value if no other
  * pending leaf shares it. So the pending set stays the size of the nodes that are new and still reachable.
  *
- * Invariants between calls: a hash is in `pendingNodes` iff its ref delta is positive, and a raw value is in
- * `pendingValues` iff its ref delta is positive (one per pending regular leaf that holds it). Zero deltas are not kept.
+ * Pending changes live in flat hash tables ([[HashTables]]): a slot's count is the hash's ref delta since the last
+ * save, and its payload, when present, is the node or raw value queued for writing.
+ *
+ * Invariants between calls: a node is queued iff its ref delta is positive, and a raw value is queued iff its ref
+ * delta is positive (one per queued regular leaf that holds it). Zero deltas are not kept.
  */
 final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private var currentRoot: Hash = initialRoot
 
-  private val pendingNodes = mutable.HashMap[Hash, TrieNode]()
-  private val pendingValues = mutable.HashMap[Hash, JamBytes]()
-  private val nodeRefDeltas = mutable.HashMap[Hash, Long]()
-  private val valueRefDeltas = mutable.HashMap[Hash, Long]()
+  private val pendingNodes = new NodeTable
+  private val pendingValues = new ValueTable
 
   def rootHash: Hash = currentRoot
 
@@ -32,8 +34,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         case TrieNodeType.EmbeddedLeaf =>
           TrieNode.embeddedValue(node)
         case TrieNodeType.RegularLeaf =>
-          val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-          pendingValues.get(vh).orElse(backend.readRawValue(vh))
+          pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
         case TrieNodeType.Branch =>
           None
     }
@@ -49,19 +50,37 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       val batch = StateTrie.sortedBatch(updates)
       currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
 
+  /** Writes the queued nodes and values with all ref deltas in one backend batch. */
   def save(): Unit =
-    val ops = new mutable.ArrayBuffer[BackendOp](
-      pendingNodes.size + pendingValues.size + nodeRefDeltas.size + valueRefDeltas.size
-    )
-    pendingNodes.valuesIterator.foreach(n => ops += BackendOp.WriteNode(n))
-    pendingValues.foreach((h, v) => ops += BackendOp.WriteRawValue(h, v))
-    nodeRefDeltas.foreach((h, d) => ops += BackendOp.NodeRefDelta(h, d))
-    valueRefDeltas.foreach((h, d) => ops += BackendOp.RawValueRefDelta(h, d))
-    backend.batchUpdate(ops.toSeq)
+    backend match
+      case mem: InMemoryTrieBackend => mem.absorb(pendingNodes, pendingValues)
+      case _ =>
+        val ops = new Array[BackendOp](2 * (pendingNodes.size + pendingValues.size))
+        var n = 0
+        var s = 0
+        while s < pendingNodes.slotCount do
+          if pendingNodes.occupied(s) then
+            val h = pendingNodes.keyHash(s)
+            if pendingNodes.hasPayload(s) then
+              ops(n) = BackendOp.WriteNode(pendingNodes.node(s, h).nn)
+              n += 1
+            ops(n) = BackendOp.NodeRefDelta(h, pendingNodes.ref(s))
+            n += 1
+          s += 1
+        s = 0
+        while s < pendingValues.slotCount do
+          if pendingValues.occupied(s) then
+            val h = pendingValues.keyHash(s)
+            val v = pendingValues.value(s)
+            if v != null then
+              ops(n) = BackendOp.WriteRawValue(h, JamBytes.wrap(v))
+              n += 1
+            ops(n) = BackendOp.RawValueRefDelta(h, pendingValues.ref(s))
+            n += 1
+          s += 1
+        backend.batchUpdate(scala.collection.immutable.ArraySeq.unsafeWrapArray(ops).take(n))
     pendingNodes.clear()
     pendingValues.clear()
-    nodeRefDeltas.clear()
-    valueRefDeltas.clear()
 
   /** Rewrites the subtree at `hash` (at `depth`) with `batch(lo until hi)`, whose keys all lead to it. */
   private def updateSubtree(hash: Hash, depth: Int, batch: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
@@ -92,9 +111,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           val updated = a < hi && java.util.Arrays.equals(batch(a).key, 0, 31, leafArr, 1, 32)
           if !updated then buildFromBatch(depth, batch, lo, hi, existing = leaf, existingIndex = a, existingHash = hash)
           else
-            val kept = batch(a).value match
-              case Some(v) => TrieNode.leaf(batch(a).keyBytes, v).hash == hash
-              case None => false
+            val kept = batch(a).value.isDefined && batch(a).leaf.hash == hash
             if kept then buildFromBatch(depth, batch, lo, hi, existing = leaf, existingIndex = a, existingHash = hash)
             else
               unrefNode(hash)
@@ -132,9 +149,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     else if hi - lo == 1 then
       val item = items(lo)
       if item.existing != null then item.existing
-      else
-        val v = item.value.get
-        emitLeaf(TrieNode.leaf(item.keyBytes, v), v)
+      else emitLeaf(item.leaf, item.value.get)
     else
       val mid = StateTrie.firstWithBit(items, lo, hi, depth)
       writeBranch(buildItems(depth + 1, items, lo, mid), buildItems(depth + 1, items, mid, hi))
@@ -155,61 +170,74 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       writeBranch(leftHash, rightHash)
 
   private def writeBranch(leftHash: Hash, rightHash: Hash): Hash =
-    val branch = TrieNode.branch(leftHash, rightHash)
-    refNode(branch)
-    branch.hash
+    val l = leftHash.toArrayUnsafe
+    val r = rightHash.toArrayUnsafe
+    val h = TrieNode.branchHash(l, r)
+    val slot = refSlot(h)
+    if slot >= 0 then pendingNodes.setBranch(slot, l, r)
+    Hash.wrapUnchecked(h)
 
   /** `leaf` must be `TrieNode.leaf(key, value)`; `value` is kept for a regular leaf, whose node holds only its hash. */
   private def emitLeaf(leaf: TrieNode, value: JamBytes): Hash =
-    if refNode(leaf) && leaf.nodeType == TrieNodeType.RegularLeaf then
-      refValue(Hash.wrap(leaf.right.toArrayUnsafe), value)
-    leaf.hash
+    val h = leaf.hash
+    val slot = refSlot(h.toArrayUnsafe)
+    if slot >= 0 then
+      pendingNodes.setNode(slot, leaf)
+      if leaf.nodeType == TrieNodeType.RegularLeaf then refValue(leaf.right.toArrayUnsafe, value)
+    h
 
   /**
-   * Counts a reference to `node` and queues it for writing. Returns false, writing nothing, when `node` was replaced
-   * earlier in this batch and is now back: the backend still holds it at the refcount it had, with its raw value.
+   * Counts a reference to node `h` and returns its pending slot, for the caller to queue the node in. Returns -1,
+   * queueing nothing, when the node was replaced earlier in this batch and is now back: the backend still holds it at
+   * the refcount it had, with its raw value.
    */
-  private def refNode(node: TrieNode): Boolean =
-    val h = node.hash
-    val d = nodeRefDeltas.getOrElse(h, 0L) + 1
+  private def refSlot(h: Array[Byte]): Int =
+    val slot = pendingNodes.findOrInsert(h)
+    val d = pendingNodes.ref(slot) + 1
     if d == 0 then
-      nodeRefDeltas.remove(h)
-      false
+      pendingNodes.remove(slot)
+      -1
     else
-      nodeRefDeltas.update(h, d)
-      pendingNodes.update(h, node)
-      true
+      pendingNodes.setRef(slot, d)
+      slot
 
   /**
    * Drops a reference to `h`. A node created since the last save that loses its only reference is discarded with its
    * raw value's reference, so the backend never sees either.
    */
   private def unrefNode(h: Hash): Unit =
-    val d = nodeRefDeltas.getOrElse(h, 0L) - 1
+    val slot = pendingNodes.findOrInsert(h.toArrayUnsafe)
+    val d = pendingNodes.ref(slot) - 1
     if d == 0 then
-      nodeRefDeltas.remove(h)
-      pendingNodes.remove(h).foreach { node =>
-        if node.nodeType == TrieNodeType.RegularLeaf then unrefValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
-      }
-    else nodeRefDeltas.update(h, d)
+      if pendingNodes.isRegularLeaf(slot) then
+        val vh = new Array[Byte](32)
+        pendingNodes.copyRight(slot, vh)
+        pendingNodes.remove(slot)
+        unrefValue(vh)
+      else pendingNodes.remove(slot)
+    else pendingNodes.setRef(slot, d)
 
-  private def refValue(h: Hash, value: JamBytes): Unit =
-    valueRefDeltas.update(h, valueRefDeltas.getOrElse(h, 0L) + 1)
-    pendingValues.update(h, value)
+  private def refValue(h: Array[Byte], value: JamBytes): Unit =
+    val slot = pendingValues.findOrInsert(h)
+    pendingValues.addRef(slot, 1)
+    pendingValues.setValue(slot, value.toArrayUnsafe)
 
-  private def unrefValue(h: Hash): Unit =
-    val d = valueRefDeltas.getOrElse(h, 0L) - 1
-    if d == 0 then
-      valueRefDeltas.remove(h)
-      pendingValues.remove(h)
-      ()
-    else valueRefDeltas.update(h, d)
+  private def unrefValue(h: Array[Byte]): Unit =
+    val slot = pendingValues.findOrInsert(h)
+    if pendingValues.ref(slot) == 1 then pendingValues.remove(slot)
+    else pendingValues.addRef(slot, -1)
+    ()
+
+  private def pendingOrStoredValue(h: Hash): Option[JamBytes] =
+    val slot = pendingValues.find(h.toArrayUnsafe)
+    val v = if slot >= 0 then pendingValues.value(slot) else null
+    if v != null then Some(JamBytes.wrap(v)) else backend.readRawValue(h)
 
   /** Nodes queued for the next [[save]]; for tests. */
-  private[trie] def pendingNodeCount: Int = pendingNodes.size
+  private[trie] def pendingNodeCount: Int = pendingNodes.payloadCount
 
   /** Raw values queued for the next [[save]]; for tests. */
-  private[trie] def pendingValueCount: Int = pendingValues.size
+  private[trie] def pendingValueCount: Int = pendingValues.payloadCount
 
   def getKeyValues(prefix: JamBytes, bitsCount: Int): List[(JamBytes, JamBytes)] =
     require(bitsCount >= 0 && bitsCount <= 248, "bitsCount must be in [0, 248]")
@@ -256,7 +284,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         }
       case TrieNodeType.RegularLeaf =>
         val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        val v = pendingValues.get(vh).orElse(backend.readRawValue(vh)).getOrElse(
+        val v = pendingOrStoredValue(vh).getOrElse(
           throw new IllegalStateException(s"State trie value ${vh.toHex} is missing")
         )
         buf += ((TrieNode.leafKey(node), v))
@@ -290,8 +318,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       node.nodeType match
         case TrieNodeType.EmbeddedLeaf => TrieNode.embeddedValue(node)
         case TrieNodeType.RegularLeaf =>
-          val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-          pendingValues.get(vh).orElse(backend.readRawValue(vh))
+          pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
         case TrieNodeType.Branch => None
 
     def descentPath(key: JamBytes): List[TrieNode] =
@@ -360,7 +387,10 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private[trie] def getNode(hash: Hash): Option[TrieNode] =
     if hash == Hash.zero then None
-    else pendingNodes.get(hash).orElse(backend.readNode(hash))
+    else
+      val slot = pendingNodes.find(hash.toArrayUnsafe)
+      val pending = if slot >= 0 then pendingNodes.node(slot, hash) else null
+      if pending != null then Some(pending) else backend.readNode(hash)
 
   private[trie] def findLeaf(hash: Hash, key: JamBytes, depth: Int): Option[TrieNode] =
     getNode(hash).flatMap { node =>
@@ -389,10 +419,27 @@ object StateTrie:
       val keyBytes: JamBytes,
       val value: Option[JamBytes],
       val existing: Hash,
-  )
+  ):
+    /** The key's first 8 bytes, big-endian: comparing these unsigned orders most pairs without touching `key`. */
+    val prefix: Long =
+      var p = 0L
+      var i = 0
+      while i < 8 do
+        p = (p << 8) | (key(i) & 0xffL)
+        i += 1
+      p
+
+    private var built: TrieNode | Null = null
+
+    /** The leaf this update writes, built (and later hashed) once however often it is asked for. */
+    def leaf: TrieNode =
+      if built == null then built = TrieNode.leaf(keyBytes, value.get)
+      built.nn
 
   private val updateOrder: java.util.Comparator[Update] =
-    (a, b) => java.util.Arrays.compareUnsigned(a.key, b.key)
+    (a, b) =>
+      val c = java.lang.Long.compareUnsigned(a.prefix, b.prefix)
+      if c != 0 then c else java.util.Arrays.compareUnsigned(a.key, b.key)
 
   /** The updates sorted by key, keeping only the last update to each key. */
   private def sortedBatch(updates: Seq[(JamBytes, Option[JamBytes])]): Array[Update] =
@@ -403,7 +450,7 @@ object StateTrie:
       arr(n) = Update(k.toArrayUnsafe, k, v, null)
       n += 1
     }
-    java.util.Arrays.sort(arr, updateOrder) // stable, so equal keys stay in update order
+    java.util.Arrays.parallelSort(arr, updateOrder) // stable, so equal keys stay in update order
     var kept = 0
     var i = 0
     while i < arr.length do

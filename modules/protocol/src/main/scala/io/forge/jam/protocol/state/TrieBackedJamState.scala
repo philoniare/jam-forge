@@ -463,6 +463,15 @@ final class TrieBackedJamState(
     ).count(identity)
 
   def commit(target: StateTrie): Unit =
+    val updates = commitUpdates()
+    if updates.nonEmpty then target.update(updates.toIndexedSeq)
+
+  /**
+   * The trie writes [[commit]] would apply, re-encoding only dirty components, so a caller can merge them with other
+   * writes into one [[StateTrie.update]] and rebuild each touched node once per block. Updates the store's service
+   * caches as [[commit]] does.
+   */
+  def commitUpdates(): mutable.ArrayBuffer[(JamBytes, Option[JamBytes])] =
     val updates =
       mutable.ArrayBuffer.empty[(JamBytes, Option[JamBytes])]
 
@@ -542,7 +551,7 @@ final class TrieBackedJamState(
           }
       }
 
-    if updates.nonEmpty then target.update(updates.toSeq)
+    updates
 
 
   def toFullJamState(): FullJamState =

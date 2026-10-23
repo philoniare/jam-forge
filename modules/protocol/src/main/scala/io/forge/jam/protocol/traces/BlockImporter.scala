@@ -183,8 +183,11 @@ class BlockImporter(
           view.cores.statistics = finalCoreStats
           view.serviceStatistics = finalServiceStats
 
-          view.commit(trie)
-          storageView.commit(trie)
+          // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
+          // A key in both takes the storage view's value, as when they were applied one after the other.
+          val updates = view.commitUpdates()
+          updates ++= storageView.commitUpdates()
+          trie.update(updates.toIndexedSeq)
           backendLock.synchronized {
             trie.save()
             trieStore.commitChild(block.header.parentStateRoot, trie.rootHash)

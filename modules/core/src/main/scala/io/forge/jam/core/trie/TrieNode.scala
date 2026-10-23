@@ -1,6 +1,6 @@
 package io.forge.jam.core.trie
 
-import io.forge.jam.core.{JamBytes, Hashing}
+import io.forge.jam.core.{Blake2b256, JamBytes, Hashing}
 import io.forge.jam.core.primitives.Hash
 
 enum TrieNodeType(val tag: Byte):
@@ -19,7 +19,16 @@ final case class TrieNode(nodeType: TrieNodeType, left: JamBytes, right: JamByte
   require(left.length == 32, s"left must be 32 bytes, got ${left.length}")
   require(right.length == 32, s"right must be 32 bytes, got ${right.length}")
 
-  lazy val hash: Hash = TrieNode.computeHash(nodeType, left, right)
+  // Racy single check: a recomputation gives the same value, and Hash's array field is final.
+  private var hashCache: Hash | Null = null
+
+  def hash: Hash =
+    val h = hashCache
+    if h != null then h
+    else
+      val c = TrieNode.computeHash(nodeType, left, right)
+      hashCache = c
+      c
 
   def encode: JamBytes = JamBytes.wrap(encodeArray)
 
@@ -54,6 +63,12 @@ object TrieNode:
     val l = java.util.Arrays.copyOfRange(data, 1, 33)
     val r = java.util.Arrays.copyOfRange(data, 33, 65)
     TrieNode(t, JamBytes.wrap(l), JamBytes.wrap(r))
+
+  /** A node whose hash the caller already knows, e.g. the key it was stored under; it is not recomputed. */
+  def withHash(nodeType: TrieNodeType, left: JamBytes, right: JamBytes, hash: Hash): TrieNode =
+    val n = TrieNode(nodeType, left, right)
+    n.hashCache = hash
+    n
 
   def branch(left: Hash, right: Hash): TrieNode =
     TrieNode(TrieNodeType.Branch, left.toJamBytes, right.toJamBytes)
@@ -93,6 +108,14 @@ object TrieNode:
         if len > 32 then None
         else Some(node.right.slice(0, len.toLong))
       case _ => None
+
+  /** The branch hash over child hashes `left` and `right`, without building the node. */
+  def branchHash(left: Array[Byte], right: Array[Byte]): Array[Byte] =
+    val preimage = new Array[Byte](64)
+    System.arraycopy(left, 0, preimage, 0, 32)
+    System.arraycopy(right, 0, preimage, 32, 32)
+    preimage(0) = (preimage(0) & 0x7f).toByte
+    Blake2b256.hash(preimage, 0, 64)
 
   private def computeHash(t: TrieNodeType, left: JamBytes, right: JamBytes): Hash =
     Hashing.blake2b256(gpEncoding(t, left, right), 0, 64)

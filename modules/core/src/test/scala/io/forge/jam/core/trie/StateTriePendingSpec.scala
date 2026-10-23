@@ -72,6 +72,50 @@ class StateTriePendingSpec extends AnyFlatSpec with Matchers:
     trie.pendingValueCount shouldBe 0
   }
 
+  it should "leave a backend fed BackendOps in the same state as an in-memory one fed its pending tables" in {
+    // Hides the in-memory type, so save() goes through batchUpdate rather than absorb.
+    final class Opaque(val inner: InMemoryTrieBackend) extends StateTrieBackend:
+      def readNode(hash: Hash): Option[TrieNode] = inner.readNode(hash)
+      def readRawValue(hash: Hash): Option[JamBytes] = inner.readRawValue(hash)
+      def batchUpdate(ops: Seq[BackendOp]): Unit = inner.batchUpdate(ops)
+      def gc(): Unit = inner.gc()
+      def clear(): Unit = inner.clear()
+
+    val rng = new Random(5)
+    val direct = new InMemoryTrieBackend
+    val viaOps = new Opaque(new InMemoryTrieBackend)
+    var keys = Vector.empty[JamBytes]
+    var rootA = Hash.zero
+    var rootB = Hash.zero
+    for _ <- 1 to 30 do
+      val updates = Vector.fill(150) {
+        if keys.nonEmpty && rng.nextInt(3) == 0 then
+          (keys(rng.nextInt(keys.size)), if rng.nextInt(4) == 0 then None else Some(value(rng)))
+        else
+          val k = key(rng)
+          keys :+= k
+          (k, Some(value(rng)))
+      }
+      val a = StateTrie.at(direct, rootA)
+      a.update(updates)
+      a.save()
+      val b = StateTrie.at(viaOps, rootB)
+      b.update(updates)
+      b.save()
+      rootA = a.rootHash
+      rootB = b.rootHash
+      rootA shouldBe rootB
+      reachable(StateTrie.at(direct, rootA)).foreach { n =>
+        direct.nodeRefcount(n.hash) shouldBe viaOps.inner.nodeRefcount(n.hash)
+      }
+      direct.nodeCount shouldBe viaOps.inner.nodeCount
+      direct.valueCount shouldBe viaOps.inner.valueCount
+      direct.pendingDeadCandidates shouldBe viaOps.inner.pendingDeadCandidates
+      direct.gc()
+      viaOps.gc()
+      direct.nodeCount shouldBe viaOps.inner.nodeCount
+  }
+
   it should "leave the backend holding exactly the reachable nodes and values, each counted once" in {
     val rng = new Random(4)
     val backend = new InMemoryTrieBackend
