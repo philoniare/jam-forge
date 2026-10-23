@@ -5,14 +5,14 @@ import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.crypto.Bls
-import io.forge.jam.network.{JamnpNode, StreamHandler}
+import io.forge.jam.network.{JamnpConnection, JamnpNode, StreamHandler}
 import io.forge.jam.node.BeefyMessages.*
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 
 import scala.collection.mutable
 
 /** BEEFY prototype: signs every block that becomes finalized, sends the signed commitment to every
-  * connected peer, and, once a super-majority of κ' signed one block, stores the aggregated [[BeefyProof]] under
+  * connected peer that takes it, and, once a super-majority of κ' signed one block, stores the aggregated [[BeefyProof]] under
   * `beefy:proof:<hash>` (and `beefy:latest`). Works with any finality source (GRANDPA or the devnet rule). All state
   * lives on one thread.
   */
@@ -44,6 +44,14 @@ final class BeefyService(
   private val consistentKeys = mutable.Set.empty[Seq[Byte]]
   private var warnedUnregistered = false
 
+  /** Whether a peer (by Ed25519 key) takes our BEEFY stream. JAMNP-S has none, and a peer that does not know it may
+    * drop the whole connection, so the first commitment to an unknown peer is a probe: a peer that
+    * keeps the connection for [[ProbeMillis]] takes it, one that drops it is never sent BEEFY again.
+    */
+  private val speaks = mutable.Map.empty[Seq[Byte], Boolean]
+  private val probes = mutable.Map.empty[Seq[Byte], (JamnpConnection, Long)]
+  private val ProbeMillis = 3000L
+
   @volatile private var latest: Option[BeefyProof] = None
 
   /** The newest block with an aggregated proof. */
@@ -62,11 +70,17 @@ final class BeefyService(
     network.registerHandler(StreamKind, handler)
     ()
 
-  def handler: StreamHandler = (_, stream) =>
+  def handler: StreamHandler = (conn, stream) =>
     stream.onMessage { msg =>
       stream.finish()
       decode(msg) match
-        case Right(c)  => exec.execute(() => guarded(onCommitment(c)))
+        case Right(c) =>
+          exec.execute(() =>
+            guarded {
+              speaks(conn.peerKey.toSeq) = true
+              onCommitment(c)
+            }
+          )
         case Left(err) => logger.warn(s"bad BEEFY payload: $err")
     }
 
@@ -75,6 +89,7 @@ final class BeefyService(
     catch case e: Exception => logger.error("BEEFY step failed", e)
 
   private[node] def step(): Unit =
+    resolveProbes(System.currentTimeMillis())
     val fin = chain.finalized
     if fin.hash != lastSigned && fin.slot > 0 then
       newlyFinalized(fin.hash).foreach(signBlock)
@@ -108,9 +123,32 @@ final class BeefyService(
 
   private def broadcast(c: SignedCommitment): Unit =
     val bytes = encode(c)
+    val now = System.currentTimeMillis()
+    resolveProbes(now)
     distribution.peers
       .distinctBy(_.peerKey.toSeq)
-      .foreach(conn => distribution.submitSend(() => conn.openStream(StreamKind), StreamKind, bytes))
+      .foreach { conn =>
+        val key = conn.peerKey.toSeq
+        val send = speaks.get(key) match
+          case Some(known) => known
+          case None =>
+            val probe = !probes.contains(key)
+            if probe then probes(key) = (conn, now)
+            probe
+        if send then distribution.submitSend(() => conn.openStream(StreamKind), StreamKind, bytes)
+      }
+
+  private def resolveProbes(now: Long): Unit =
+    probes.toList.foreach { case (key, (conn, at)) =>
+      if !conn.isOpen then
+        probes.remove(key)
+        if !speaks.contains(key) then
+          speaks(key) = false
+          logger.info(s"BEEFY: peer ${JamNode.hex(key.toArray).take(16)} dropped the connection; not sending it BEEFY")
+      else if now - at >= ProbeMillis then
+        probes.remove(key)
+        speaks.getOrElseUpdate(key, true)
+    }
 
   private def context(block: Hash): Option[Ctx] =
     ctxCache.getOrElseUpdate(block, readContext(block)) match

@@ -108,7 +108,15 @@ final class GrandpaService(
       case None =>
         val root = chain.postStateRoot(genesis).getOrElse(chain.finalized.stateRoot)
         VoterSet(0, Vote(genesis, root, adapter.slotOf(genesis).getOrElse(0L)), genesisKeys)
-    voter = new GrandpaVoter(adapter, outbound, set, keys, gossipMillis = gossipMillis, onFinalized = persist)
+    voter = new GrandpaVoter(
+      adapter,
+      outbound,
+      set,
+      keys,
+      gossipMillis = gossipMillis,
+      onFinalized = persist,
+      onSetAdopted = s => chain.putMeta("grandpa:set", LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray)
+    )
     logger.info(s"GRANDPA voter started: set ${set.setId}, ${set.size} voters, voting=${keys.exists(k =>
         set.members.contains(k.ed25519Public.toSeq))}")
     chain.onImported((head, _) =>
@@ -169,11 +177,30 @@ final class GrandpaService(
   private def onSingleMessage(f: (JamnpConnection, JamnpStream, Array[Byte]) => Unit): StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) => stream.onMessage(msg => f(conn, stream, msg))
 
+  /** Set ids and (set, round) pairs we already asked a peer to bring us up to. */
+  private val requestedWarps = ConcurrentHashMap.newKeySet[Long]()
+  private val requestedCatchUps = ConcurrentHashMap.newKeySet[(Long, Long)]()
+
+  /** A peer in a later set or round than ours: ask it for warp sync (CE 153) or a catch-up (CE 152) once, since some
+    * peers never send CE 151 state.
+    */
+  private def catchUpWith(conn: JamnpConnection, round: Long, setId: Long): Unit =
+    if setId > voter.voterSet.setId then
+      if requestedWarps.add(setId) then requestWarpSync(conn, voter.voterSet.setId)
+    else if voter.wantsCatchUp(round, setId) && requestedCatchUps.add((setId, round)) then
+      requestCatchUp(conn, round - 1, setId)
+
   /** CE 149. */
-  def voteHandler: StreamHandler = onSingleMessage { (_, stream, msg) =>
+  def voteHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeVoteMessage(msg) match
-      case Right(m)  => exec.execute(() => guarded(voter.onVote(m)))
+      case Right(m) =>
+        exec.execute(() =>
+          guarded {
+            catchUpWith(conn, m.round, m.setId)
+            voter.onVote(m)
+          }
+        )
       case Left(err) => logger.warn(s"bad CE149 payload: $err")
   }
 
@@ -181,7 +208,13 @@ final class GrandpaService(
   def commitHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeCommitMessage(msg) match
-      case Right((round, setId, c)) => exec.execute(() => guarded(applyCommit(round, setId, c, Nil, Some(conn))))
+      case Right((round, setId, c)) =>
+        exec.execute(() =>
+          guarded {
+            catchUpWith(conn, round + 1, setId)
+            applyCommit(round, setId, c, Nil, Some(conn))
+          }
+        )
       case Left(err)                => logger.warn(s"bad CE150 payload: $err")
   }
 
@@ -191,10 +224,7 @@ final class GrandpaService(
     decodeState(msg) match
       case Right((round, setId, _)) =>
         exec.execute(() =>
-          guarded {
-            if setId > voter.voterSet.setId then requestWarpSync(conn, voter.voterSet.setId)
-            else if voter.wantsCatchUp(round, setId) then requestCatchUp(conn, round - 1, setId)
-          }
+          guarded(catchUpWith(conn, round, setId))
         )
       case Left(err) => logger.warn(s"bad CE151 payload: $err")
   }

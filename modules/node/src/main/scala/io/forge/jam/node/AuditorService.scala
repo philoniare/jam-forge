@@ -250,18 +250,32 @@ final class AuditorService(
         case Some(valid) => judge(t, reportHash, valid.booleanValue)
         case None if inFlight.add(reportHash) =>
           workers.execute(() =>
-            val valid =
-              try auditReport(w)
+            val outcome =
+              try auditOutcome(w)
               catch
                 case e: Exception =>
-                  logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); false
-            verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
-            exec.execute(() =>
-              guarded {
-                inFlight -= reportHash
-                tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(judge(_, reportHash, valid))
-              }
-            )
+                  logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); Some(false)
+            outcome match
+              case Some(valid) =>
+                verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
+                exec.execute(() =>
+                  guarded {
+                    inFlight -= reportHash
+                    tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(judge(_, reportHash, valid))
+                  }
+                )
+              case None =>
+                // Not enough shards reachable yet (e.g. we are cut off): no judgment, try again while still tracked.
+                exec.schedule(
+                  (() =>
+                    guarded {
+                      inFlight -= reportHash
+                      tracked.values.find(_.reportHashes.contains(Some(reportHash))).foreach(startAudit(_, reportHash))
+                    }
+                  ): Runnable,
+                  AuditSelection.TrancheSeconds.toLong,
+                  TimeUnit.SECONDS
+                )
           )
         case None => ()
     }
@@ -292,20 +306,37 @@ final class AuditorService(
   /** Re-execute a report's in-core pipeline; true when the recomputed report
     * hash matches.
     */
-  def auditReport(report: WorkReport): Boolean =
+  def auditReport(report: WorkReport): Boolean = auditOutcome(report).getOrElse(false)
+
+  /** The audit evaluation e_n: None when too few shards are reachable to rebuild the bundle,
+    * which says nothing about the report (reconstruction is assumed to work); a bundle that fails to decode or verify
+    * makes the report invalid.
+    */
+  def auditOutcome(report: WorkReport): Option[Boolean] =
+    val spec = report.packageSpec
+    val fetched = fetchBundleDirect(spec.erasureRoot, distribution.peers) match
+      case Some(bytes) =>
+        logger.debug(s"CE147: fetched bundle directly for ${spec.erasureRoot.toHex.take(18)}")
+        Right(bytes)
+      case None =>
+        shards.reconstructBundle(
+          spec.erasureRoot,
+          spec.length.toLong.toInt,
+          distribution.peers
+        )
+    fetched match
+      case Left(err) if err.startsWith(ShardService.TooFewShards) =>
+        logger.warn(s"audit of ${spec.hash.toHex.take(18)} postponed: $err")
+        None
+      case Left(err) =>
+        logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
+        Some(false)
+      case Right(bundleBytes) => Some(evaluate(report, bundleBytes))
+
+  private def evaluate(report: WorkReport, bundleBytes: Array[Byte]): Boolean =
     val spec = report.packageSpec
     val result =
       for
-        bundleBytes <- fetchBundleDirect(spec.erasureRoot, distribution.peers) match
-          case Some(bytes) =>
-            logger.debug(s"CE147: fetched bundle directly for ${spec.erasureRoot.toHex.take(18)}")
-            Right(bytes)
-          case None =>
-            shards.reconstructBundle(
-              spec.erasureRoot,
-              spec.length.toLong.toInt,
-              distribution.peers
-            )
         bundle <- WorkPackageBundle.decode(bundleBytes)
         recomputed <- computeReport
           .compute(
@@ -328,7 +359,7 @@ final class AuditorService(
           logger.warn(s"AUDIT MISMATCH for package ${spec.hash.toHex.take(18)}")
         matches
       case Left(err) =>
-        // Irretrievable or undecodable bundle is an audit failure.
+        // A bundle that fails to decode or re-execute makes the report invalid.
         logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
         false
 

@@ -80,10 +80,13 @@ final class GrandpaVoter(
     clock: () => Long = () => System.currentTimeMillis(),
     gossipMillis: Long = 1000L,
     /** Called with each block GRANDPA finalized, its justification and whether it ended a voter set. */
-    onFinalized: (Vote, Justification, Boolean) => Unit = (_, _, _) => ()
+    onFinalized: (Vote, Justification, Boolean) => Unit = (_, _, _) => (),
+    /** Called with each voter set adopted from the finalized chain rather than from our own justification. */
+    onSetAdopted: VoterSet => Unit = _ => ()
 ) extends LazyLogging:
 
   private var set: VoterSet = initialSet
+  private var lastSyncedFinal: Hash = Hash.zero
   private var current: RoundState = new RoundState(1, clock())
   private val rounds = mutable.TreeMap(1L -> current)
 
@@ -233,8 +236,43 @@ final class GrandpaVoter(
       }
     }
 
+  /** Adopt the set changes of a chain finalized without us, e.g. by following peers after a partition: every finalized
+    * epoch-marker block above our base ended a set, since votes never pass the first unfinalized marker. Peers that
+    * only send their latest commit would otherwise leave us in an old set for good. True when the
+    * set changed.
+    */
+  def adoptFinalizedSetChanges(): Boolean =
+    val f = chain.finalized
+    if f.slot <= set.base.slot || f.hash == lastSyncedFinal then false
+    else
+      lastSyncedFinal = f.hash
+      val markers = pathToBase(f.hash, set.base).reverse.flatMap((h, slot) => chain.epochMarkerKeys(h).map((h, slot, _)))
+      markers.foreach { (h, slot, markerKeys) =>
+        set = VoterSet(set.setId + 1, Vote(h, chain.stateRootOf(h).getOrElse(Hash.zero), slot), markerKeys.toIndexedSeq)
+        logger.info(s"GRANDPA adopted set ${set.setId} at ${set.base.short} from the finalized chain")
+        onSetAdopted(set)
+      }
+      if markers.nonEmpty then
+        rounds.clear()
+        current = new RoundState(1, clock())
+        rounds.put(1, current)
+        out.broadcastState(1, set.setId, f.slot)
+      markers.nonEmpty
+
+  /** Votes from at least f + 1 voters in a later round mean the others moved on without us (we restarted, or missed
+    * the votes that completed our round); join that round, keeping its votes.
+    */
+  private def joinLaterRound(n: Long): Unit =
+    rounds.get(n).foreach { r =>
+      val signers = (r.prevotes.keySet ++ r.precommits.keySet).size
+      if n > current.round + 1 && signers >= set.honestThreshold then
+        logger.info(s"GRANDPA joining round $n of set ${set.setId} from round ${current.round}: $signers voters are there")
+        startRound(n)
+    }
+
   /** Advance the current round as far as the votes and timers allow. */
   def step(): Unit =
+    adoptFinalizedSetChanges()
     val r = current
     val now = clock()
     val prevEstimate = previousEstimate(r.round)
@@ -329,7 +367,7 @@ final class GrandpaVoter(
     else if !set.members.contains(sv.signerKey) then
       logger.debug(s"GRANDPA vote from a non-voter ${hexKey(sv.signer)}")
       false
-    else if m.round + 2 < current.round || m.round > current.round + 1 then false
+    else if m.round + 2 < current.round || m.round > current.round + GrandpaVoter.MaxRoundsAhead then false
     else if !verify(m.message.kind, sv, m.round, m.setId) then
       logger.warn(s"GRANDPA vote with a bad signature from ${hexKey(sv.signer)}")
       false
@@ -339,6 +377,7 @@ final class GrandpaVoter(
         case PrimaryPropose =>
           if sv.signerKey == set.primary(m.round) && r.primaryProposal.isEmpty then r.primaryProposal = Some(sv.vote)
         case kind => record(r, kind, sv)
+      joinLaterRound(m.round)
       step()
       true
 
@@ -414,6 +453,9 @@ final class GrandpaVoter(
     peerSetId == set.setId && peerRound > current.round + 1
 
 object GrandpaVoter:
+
+  /** Votes this many rounds ahead of ours are kept, so that a restarted voter can join the others' round. */
+  val MaxRoundsAhead: Long = 256
 
   /** Hash, parent and slot of an encoded header. */
   final case class HeaderLink(hash: Hash, parent: Hash, slot: Long)

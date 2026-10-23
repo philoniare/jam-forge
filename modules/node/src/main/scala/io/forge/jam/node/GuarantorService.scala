@@ -471,9 +471,9 @@ final class GuarantorService(
     * validator index.
     */
   private def ownAssignedKeys(slot: Long, coreIndex: Int): List[(Int, ValidatorKeySet)] =
-    val view = chain.stateView()
-    val assignments = GuarantorService.coreAssignments(view.entropy.pool(2), slot, chain.config)
-    view.validators.current.zipWithIndex.flatMap { case (vk, idx) =>
+    val (entropy, active) = GuarantorService.assignmentContext(chain.stateView(), slot, chain.config)
+    val assignments = GuarantorService.coreAssignments(entropy, slot, chain.config)
+    active.zipWithIndex.flatMap { case (vk, idx) =>
       if assignments(idx) == coreIndex then
         ed25519ByPublic.get(vk.ed25519.bytes.toArray.toSeq).map(idx -> _)
       else None
@@ -606,9 +606,8 @@ final class GuarantorService(
   ): List[GuaranteeSignature] =
     val report = computed.report
     recordBundle(report.packageSpec.erasureRoot, computed.bundleBytes)
-    val view = chain.stateView()
-    val assignments = GuarantorService.coreAssignments(view.entropy.pool(2), slot, chain.config)
-    val activeSet = view.validators.current
+    val (entropy, activeSet) = GuarantorService.assignmentContext(chain.stateView(), slot, chain.config)
+    val assignments = GuarantorService.coreAssignments(entropy, slot, chain.config)
     val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
     val assigned =
       activeSet.indices.filter(i => assignments.lift(i).contains(report.coreIndex.toInt) && !alreadyHave(i))
@@ -752,6 +751,29 @@ object GuarantorService:
           }.toMap
           Right((core, shards, mappings))
     catch case e: Exception => Left(s"bad header: ${e.getMessage}")
+
+  /** η′₂ and κ′ in force at `slot`, from the state of the best block. When `slot` opens a new epoch, the block at
+    * `slot` rotates them (η′₂ = η₁ and κ′ = γ_P on an epoch change), so a guarantee made at the first
+    * slot of an epoch must use those, not the head state's η₂ and κ.
+    */
+  def assignmentContext(
+      view: io.forge.jam.protocol.state.TrieBackedJamState,
+      slot: Long,
+      config: io.forge.jam.core.ChainConfig
+  ): (Hash, List[io.forge.jam.core.types.epoch.ValidatorKey]) =
+    rotatedForSlot(view.timeslot, view.entropy.pool, view.validators.current, view.validators.nextEpoch, slot, config)
+
+  /** [[assignmentContext]] over plain values: the state's slot, η, κ and γ_P. */
+  def rotatedForSlot[K](
+      stateSlot: Long,
+      entropy: List[Hash],
+      current: List[K],
+      pending: List[K],
+      slot: Long,
+      config: io.forge.jam.core.ChainConfig
+  ): (Hash, List[K]) =
+    if slot / config.epochLength > stateSlot / config.epochLength then (entropy(1), pending)
+    else (entropy(2), current)
 
   /** Validator→core assignment (gp guarantor rotation). */
   def coreAssignments(

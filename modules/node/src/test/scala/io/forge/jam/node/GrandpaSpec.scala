@@ -51,14 +51,15 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     val chains = keySets.map(_ => new FakeChain(blocks))
     val commits = mutable.ListBuffer.empty[(Long, Long, Commit)]
     val set = VoterSet(0, blocks.vote(blocks.genesis), keySets.map(_.ed25519Public))
-    val voters: IndexedSeq[GrandpaVoter] = keySets.indices.map { i =>
+    /** Voter `i` as it starts: set 0, round 1. */
+    def newVoter(i: Int): GrandpaVoter =
       val out = new GrandpaOutbound:
         def broadcastVote(m: VoteMessage): Unit = queue.enqueue(i -> m)
         def broadcastCommit(round: Long, setId: Long, c: Commit): Unit =
           commits += ((round, setId, c)); queue.enqueue(i -> (round, setId, c))
         def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
       new GrandpaVoter(chains(i), out, set, Some(keySets(i)), clock = () => now)
-    }
+    val voters: mutable.ArrayBuffer[GrandpaVoter] = mutable.ArrayBuffer.from(keySets.indices.map(newVoter))
 
     def run(millis: Long, deliver: (Int, Int) => Boolean = (_, _) => true): Unit =
       val end = now + millis
@@ -187,4 +188,41 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     follower.finalizedHash shouldBe blocks.genesis
     observer.onCommit(round, setId, commit) shouldBe Right(None)
     follower.finalizedHash shouldBe commit.target.hash
+  }
+
+  test("a voter cut off across set changes adopts them from the finalized chain and votes again") {
+    val markerKeys = Some(keys.map(_.ed25519Public).toList)
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    blocks.add("b2", 2, marker = markerKeys)
+    blocks.add("b3", 3)
+    blocks.add("b4", 4, marker = markerKeys)
+    val net = new Net(blocks, keys)
+    val cutOff = 3
+    net.run(30_000, (from, to) => from != cutOff && to != cutOff)
+    net.voters.take(3).map(_.voterSet.setId).distinct shouldBe Seq(2L)
+    net.voters(cutOff).voterSet.setId shouldBe 0L
+    // Back online, it follows its peers' finality (as SyncService does), but their commits name set 2.
+    net.chains(cutOff).finalizedHash = net.chains(0).finalizedHash
+    net.voters(cutOff).step()
+    net.voters(cutOff).voterSet.setId shouldBe 2L
+    // Voter 0 goes away: the other two need the returning voter for 3 of 4.
+    blocks.add("b5", 5)
+    net.run(20_000, (from, to) => from != 0 && to != 0)
+    net.chains(1).finalizedHash shouldBe h("b5")
+    net.chains(cutOff).finalizedHash shouldBe h("b5")
+  }
+
+  test("a restarted voter joins the round that f + 1 voters are in") {
+    val blocks = new Blocks
+    (1 to 3).foreach(i => blocks.add(s"b$i", i.toLong))
+    val net = new Net(blocks, keys)
+    net.run(20_000)
+    net.voters(1).round should be > 3L
+    net.voters(3) = net.newVoter(3) // restarted: round 1 of the same set
+    blocks.add("b4", 4)
+    // Voter 0 goes away: voters 1 and 2 need the restarted one.
+    net.run(20_000, (from, to) => from != 0 && to != 0)
+    net.voters(3).round shouldBe net.voters(1).round
+    net.chains(1).finalizedHash shouldBe h("b4")
   }

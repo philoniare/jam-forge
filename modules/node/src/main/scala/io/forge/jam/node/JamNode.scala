@@ -720,8 +720,9 @@ final class JamNode(
     */
   def enableGrandpa(keys: Option[ValidatorKeySet]): GrandpaService =
     val g = new GrandpaService(chain, sync, distribution, keys, audited = h => auditor.forall(_.isAudited(h)))
-    g.register(network)
+    // Start the voter before taking CE 149-153 streams, so no message finds it unset.
     g.start(spec.genesisHeaderHash, chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq)
+    g.register(network)
     grandpaService = Some(g)
     g
 

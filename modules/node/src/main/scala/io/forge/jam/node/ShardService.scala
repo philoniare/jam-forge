@@ -221,7 +221,7 @@ final class ShardService(
       pi += 1
 
     if collected.size < needed then
-      Left(s"only ${collected.size}/$needed bundle shards recoverable")
+      Left(s"${ShardService.TooFewShards}: only ${collected.size}/$needed recoverable")
     else DaShards.reconstructBundle(bundleLength, collected.toSeq, config)
 
   // =========================================================================
@@ -257,6 +257,9 @@ final class ShardService(
         None
 
 object ShardService:
+
+  /** Prefix of the error when too few peers answered to rebuild a bundle, as opposed to a bundle that fails to decode. */
+  val TooFewShards = "too few bundle shards"
 
   /** Most segment shards one CE 139/140 stream may request: 2·W_M with
     * W_M = 3072 (JAMNP-S CE 139/140, GP 0.8.0 W_M).
