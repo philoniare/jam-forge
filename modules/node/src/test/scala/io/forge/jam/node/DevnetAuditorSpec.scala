@@ -17,10 +17,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import spire.math.UShort
 
-/** The auditor path over the network: after a report lands on-chain, both
-  * nodes reconstruct the audit bundle from DA custody, re-execute is-authorized + refine in the
-  * PVM, and exchange CE 144 tranche-0 announcements. A tampered report fails
-  * the re-execution comparison.
+/** The auditor path over the network: once a report becomes available, both nodes draw it in
+  * tranche 0 (two cores, so every report), reconstruct the audit bundle from DA custody, re-execute is-authorized +
+  * refine in the PVM, and exchange CE 144 announcements and CE 145 positive judgments, after which the block reads as
+  * audited. A tampered report fails the re-execution comparison.
   */
 class DevnetAuditorSpec extends AnyFunSuite with Matchers:
 
@@ -41,7 +41,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
-  test("included report is audited by both nodes; tampering is detected") {
+  test("available report is audited by both nodes and its block becomes audited; tampering is detected") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
     )
@@ -65,8 +65,11 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
-      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+      // CE 144 names the announcer by its connection key, so each node uses its auditing validator's Ed25519 key.
+      nodeA = new JamNode(spec, NodeConfig(dirA, slotTicking = false, ed25519Seed = Some(devKeys(0).ed25519Secret)))
+        .start()
+      nodeB = new JamNode(spec, NodeConfig(dirB, slotTicking = false, ed25519Seed = Some(devKeys(1).ed25519Secret)))
+        .start()
       // A: author + assurer + auditor (audits via CE 138 pulls from B's
       // custody); B: guarantor + auditor (audits from local custody).
       nodeA.enableAuthoring(devKeys)
@@ -125,29 +128,67 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
         Thread.sleep(50)
       nodeA.pools.guaranteeCount shouldBe 1
 
-      // Slot 3 includes the guarantee; both nodes audit on import.
+      // Slot 3 includes the guarantee; A assures it, and slot 4 makes it available, which starts the audit.
       nodeA.authorSlot(3).isDefined shouldBe true
       val block =
         nodeA.chain.decodeBlock(nodeA.chain.blockStore.getBlock(nodeA.chain.best.hash).get).toOption.get
       val report = block.extrinsic.guarantees.head.report
       val reportHash = Hashing.blake2b256(report.encode.toArray)
+      auditorA.verdictFor(reportHash) shouldBe None // included, not yet available
+
+      val assuranceDeadline = System.currentTimeMillis() + 30000
+      while nodeA.pools.assuranceCount < 5 && System.currentTimeMillis() < assuranceDeadline do Thread.sleep(50)
+      val available = nodeA.authorSlot(4).getOrElse(fail("slot 4 not authored"))
+      awaitSync(nodeA, nodeB)
 
       val verdictDeadlineA = System.currentTimeMillis() + 30000
       while auditorA.verdictFor(reportHash).isEmpty && System.currentTimeMillis() < verdictDeadlineA do
         Thread.sleep(50)
       auditorA.verdictFor(reportHash) shouldBe Some(true)
 
-      // B audits when the announced block syncs; then its CE 144 reaches A.
       val deadline = System.currentTimeMillis() + 30000
       while auditorB.verdictFor(reportHash).isEmpty && System.currentTimeMillis() < deadline do
         Thread.sleep(100)
       auditorB.verdictFor(reportHash) shouldBe Some(true)
 
-      while auditorA.announcementsFor(reportHash) == 0 &&
+      while (auditorA.announcementsFor(reportHash) < 2 || auditorB.announcementsFor(reportHash) < 2) &&
         System.currentTimeMillis() < deadline
       do Thread.sleep(100)
-      auditorA.announcementsFor(reportHash) should be >= 1 // B's announcement
-      auditorB.announcementsFor(reportHash) should be >= 1 // A's announcement
+      auditorA.announcementsFor(reportHash) shouldBe 2 // its own and B's
+      auditorB.announcementsFor(reportHash) shouldBe 2
+
+      // Both announced auditors judged positively: the block is audited on both nodes.
+      while !(auditorA.isAudited(available.hash) && auditorB.isAudited(available.hash)) &&
+        System.currentTimeMillis() < deadline
+      do Thread.sleep(100)
+      auditorA.isAudited(available.hash) shouldBe true
+      auditorB.isAudited(available.hash) shouldBe true
+
+      // Validator 2 announces the report in tranche 0 but never judges it: a no-show, so A no longer counts the
+      // block as audited (A_0 = {0, 1, 2} is not within J⊤ = {0, 1}).
+      val dirC = tempDir("jam-audit-c")
+      val nodeC =
+        new JamNode(spec, NodeConfig(dirC, slotTicking = false, ed25519Seed = Some(devKeys(2).ed25519Secret))).start()
+      try
+        val connCtoA = nodeC.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeA.listenPort))
+        val header = nodeA.chain.header(available.hash).getOrElse(fail("no header"))
+        val y = io.forge.jam.crypto.BandersnatchVrf.getVrfOutput(header.entropySource.toArray).get
+        val items = Seq(report.coreIndex.toInt -> reportHash)
+        val s0 = io.forge.jam.vrfs.BandersnatchWrapper
+          .ietfVrfSign(devKeys(2).bandersnatchSecret, AuditSelection.initialInput(y), Array.emptyByteArray)
+        val sig = io.forge.jam.crypto.Ed25519ZebraWrapper
+          .sign(devKeys(2).ed25519Secret, AuditSelection.announcementMessage(0, items, available.hash))
+        val stream = connCtoA.openStream(StreamKind.AuditAnnouncement).get(10, TimeUnit.SECONDS)
+        stream.send(AuditSelection.encodeHead(available.hash, 0, AuditSelection.Announcement(items, sig)))
+        stream.send(AuditSelection.encodeFirstEvidence(s0))
+        stream.finish()
+        while auditorA.announcementsFor(reportHash) < 3 && System.currentTimeMillis() < deadline + 15000 do
+          Thread.sleep(100)
+        auditorA.announcementsFor(reportHash) shouldBe 3
+        auditorA.isAudited(available.hash) shouldBe false
+      finally
+        nodeC.shutdown()
+        cleanup(dirC)
 
       // No adverse judgments for a valid report.
       nodeA.pools.judgmentCount shouldBe 0

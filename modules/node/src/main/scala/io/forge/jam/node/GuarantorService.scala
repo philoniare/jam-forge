@@ -23,15 +23,19 @@ import spire.math.UInt
 
 import scala.collection.mutable
 
-/** Historical preimage lookup over the node's current chain state: service
-  * existence via the account-info key, preimage blobs via the 0xFFFFFFFE
-  * service-data discriminator.
-  *
-  * TODO(historical): consult the preimage-request timeslots for availability
-  * at the lookup anchor; the current view serves preimages present in the
-  * best state, which is correct for preimages available since genesis.
+/** Historical preimage lookup Λ over the state at the work-package's lookup anchor:
+  * the posterior state of the lookup-anchor block, found by its state root (the context's `lookupAnchorStateRoot`),
+  * so every validator reads the same accounts whatever its best head. When that state is not stored (a node that
+  * synced past it) the best state is read instead. Either way a blob is returned only when its request history
+  * `a_l[(h, |p|)]` shows it available at the anchor timeslot t (`I(l, t)`).
   */
-final class StateHistoricalLookup(chain: ChainManager) extends HistoricalLookupService:
+final class StateHistoricalLookup(chain: ChainManager, anchorStateRoot: Option[Hash] = None)
+    extends HistoricalLookupService:
+
+  private lazy val anchorState = anchorStateRoot.flatMap(chain.stateAtRoot)
+
+  /** The lookup for a work-package whose lookup anchor has posterior state root `root`. */
+  def forAnchor(root: Hash): StateHistoricalLookup = new StateHistoricalLookup(chain, Some(root))
 
   def serviceExists(serviceId: Long): Boolean =
     readRaw(StateKey.computeServiceAccountKey(serviceId)).isDefined
@@ -41,15 +45,28 @@ final class StateHistoricalLookup(chain: ChainManager) extends HistoricalLookupS
       lookupAnchorTimeslot: Long,
       hash: Hash
   ): Option[Array[Byte]] =
-    val blobKey = StateKey.computeServiceDataStateKey(
-      serviceId,
-      0xfffffffeL,
-      JamBytes(hash.bytes.toArray)
-    )
-    readRaw(blobKey).map(_.toArray)
+    val h = JamBytes(hash.bytes.toArray)
+    readRaw(StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, h)).flatMap { blob =>
+      val history = readRaw(StateKey.computePreimageInfoStateKey(serviceId, blob.length.toLong, h))
+        .flatMap(v => scala.util.Try(StateKey.decodePreimageInfoValue(v)).toOption)
+      if history.exists(StateHistoricalLookup.availableAt(_, lookupAnchorTimeslot)) then Some(blob.toArray)
+      else None
+    }
 
   private def readRaw(stateKey: JamBytes): Option[JamBytes] =
-    chain.readRawState(stateKey)
+    anchorState match
+      case Some(trie) => trie.read(stateKey)
+      case None       => chain.readRawState(stateKey)
+
+object StateHistoricalLookup:
+
+  /** `I(l, t)`: whether request history `l` shows the preimage available at timeslot `t`. */
+  def availableAt(l: List[Long], t: Long): Boolean =
+    l match
+      case List(x)       => x <= t
+      case List(x, y)    => x <= t && t < y
+      case List(x, y, z) => (x <= t && t < y) || z <= t
+      case _             => false
 
 /** Guarantor role: accepts work-package submissions (CE 133), computes the
   * work report via the in-core pipeline (is-authorized + refine), signs it
@@ -418,7 +435,7 @@ final class GuarantorService(
       importSegments = importSegments,
       extrinsicData = extrinsicData,
       justifications = justifications,
-      accounts = accounts
+      accounts = accounts.forAnchor(wp.context.lookupAnchorStateRoot)
     ) match
       case Left(err) =>
         logger.warn(s"work package refused: $err")
@@ -553,7 +570,7 @@ final class GuarantorService(
                 importSegments = bundle.importSegments,
                 extrinsicData = bundle.extrinsicData,
                 justifications = bundle.justifications,
-                accounts = accounts
+                accounts = accounts.forAnchor(bundle.workPackage.context.lookupAnchorStateRoot)
               )
               .left
               .map(e => s"re-execution refused: $e")

@@ -5,23 +5,23 @@ import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorServi
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, constants}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}
+import io.forge.jam.crypto.{BandersnatchVrf, Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 import io.forge.jam.protocol.refine.{ComputeReport, WorkPackageBundle}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
-import scala.jdk.CollectionConverters.*
+import scala.collection.mutable
 
-/** Auditor role: re-executes every work report
-  * that lands on-chain and publishes the outcome.
-  *
-  * Per imported block, for each included guarantee: reconstruct the audit
-  * bundle, re-run the full in-core pipeline; mismatches additionally
-  * publish a negative judgment via CE 145 and pool it.
+/** Auditor role. For every imported block the reports that just became available (W) are
+  * tracked; each validator key we hold in the block's prior set κ draws its tranche-0 cores with the VRF s_0
+  * (eq:initialaudit) and, every `C_tranche-seconds` after the block's slot, may join later tranches for reports
+  * with no-shows or a negative judgment (eq:latertranches). Announcements go out on CE 144 and judgments on CE 145,
+  * positive as well as negative. A block is audited once every report in its W is (U(w)); the GRANDPA voter asks
+  * [[isAudited]] before voting for a block, and a block whose report a third of the validators judge invalid is
+  * disregarded by fork choice.
   */
 final class AuditorService(
     chain: ChainManager,
@@ -29,33 +29,265 @@ final class AuditorService(
     shards: ShardService,
     pools: ExtrinsicPools,
     validatorKeys: Seq[ValidatorKeySet],
-    egress: ExecutorService
+    egress: ExecutorService,
+    /** Wall-clock millis at which tranche 0 of a block starts, from its slot and import time. */
+    trancheOrigin: (Long, Long) => Long = (_, importedAt) => importedAt,
+    clock: () => Long = () => System.currentTimeMillis(),
+    tickMillis: Long = 500L
 ) extends LazyLogging:
+
+  import AuditSelection.*
 
   private val computeReport = new ComputeReport(chain.config)
   private val accounts = new StateHistoricalLookup(chain)
   private val verdicts = new ConcurrentHashMap[Hash, java.lang.Boolean]()
-  private val seenAnnouncements = new ConcurrentHashMap[Hash, java.util.Set[Integer]]()
+
+  /** A block being audited: its prior validator set κ, Y(H_v) and the reports q (eq:auditselection). */
+  private final class Tracked(
+      val hash: Hash,
+      val slot: Long,
+      val origin: Long,
+      val vrfOutput: Array[Byte],
+      val validators: IndexedSeq[Array[Byte]],
+      val bandersnatch: IndexedSeq[Array[Byte]],
+      val q: IndexedSeq[Option[WorkReport]],
+      val reportHashes: IndexedSeq[Option[Hash]]
+  ):
+    /** A_n(w): validators announcing each report, per tranche. */
+    val announced = mutable.Map.empty[(Hash, Int), mutable.Set[Int]]
+
+    /** The announcement each validator sent in each tranche (for no-show evidence). */
+    val announcements = mutable.Map.empty[(Int, Int), Announcement]
+
+    /** Reports each of our validator indices has announced, with the tranche. */
+    val ours = mutable.Map.empty[Int, mutable.Map[Hash, Int]]
+    var tranche0Done: Set[Int] = Set.empty
+    var lastTranche: Int = -1
+    def available: Seq[(Int, WorkReport, Hash)] =
+      q.indices.flatMap(c => q(c).zip(reportHashes(c)).map((w, h) => (c, w, h)))
+
+  /** Every access to the tracking state below runs on this thread. */
+  private val exec = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
+    val t = new Thread(r, "jam-audit"); t.setDaemon(true); t
+  }
+  private val workers = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = new Thread(r, "jam-audit-exec"); t.setDaemon(true); t
+  }
+  private val tracked = mutable.LinkedHashMap.empty[Hash, Tracked]
+  private val positive = mutable.Map.empty[Hash, mutable.Set[Int]]
+  private val negative = mutable.Map.empty[Hash, mutable.Set[Int]]
+  private val inFlight = mutable.Set.empty[Hash]
+  private val pendingAnnouncements = mutable.Map.empty[Hash, mutable.ListBuffer[(Array[Byte], Array[Byte], Array[Byte])]]
+
+  /** Readable from any thread: whether each tracked block is audited. Blocks we never tracked count as audited. */
+  private val auditedBlocks = new ConcurrentHashMap[Hash, java.lang.Boolean]()
+  private val announcementCounts = new ConcurrentHashMap[Hash, java.util.Set[Integer]]()
+  @volatile private var disregard: Hash => Unit = _ => ()
+
+  exec.scheduleWithFixedDelay(() => guarded(tick()), tickMillis, tickMillis, TimeUnit.MILLISECONDS)
 
   def verdictFor(reportHash: Hash): Option[Boolean] =
     Option(verdicts.get(reportHash)).map(_.booleanValue)
   def announcementsFor(reportHash: Hash): Int =
-    Option(seenAnnouncements.get(reportHash)).map(_.size).getOrElse(0)
+    Option(announcementCounts.get(reportHash)).map(_.size).getOrElse(0)
+
+  /** isAudited for block `hash`. */
+  def isAudited(hash: Hash): Boolean = auditedBlocks.getOrDefault(hash, java.lang.Boolean.TRUE).booleanValue
+
+  /** Called with a block whose report a third or more of the validators judged invalid. */
+  def onDisregard(f: Hash => Unit): Unit = disregard = f
+
+  def shutdown(): Unit =
+    exec.shutdownNow()
+    workers.shutdownNow()
+
+  private def guarded(f: => Unit): Unit =
+    try f
+    catch case e: Exception => logger.warn(s"auditor step failed: $e")
 
   private def ed25519ByPublic: Map[Seq[Byte], ValidatorKeySet] =
     validatorKeys.map(k => k.ed25519Public.toSeq -> k).toMap
 
-  /** Import listener: audit every report included in this block. */
+  /** Import listener: track the reports that just became available in `block`. Runs on the import bus, so the
+    * block's audited flag is set before any later listener (the GRANDPA voter) can ask for it.
+    */
   def onImported(head: ChainManager#Head, block: Block): Unit =
-    if block.extrinsic.guarantees.isEmpty then return
-    val audited = block.extrinsic.guarantees.map { g =>
-      val reportHash = Hashing.blake2b256(g.report.encode.toArray)
-      val valid = auditReport(g.report)
-      verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
-      if !valid then publishJudgment(reportHash, valid = false)
-      (g.report.coreIndex.toInt, reportHash, valid)
+    if head.slot <= chain.finalized.slot then return
+    val parent = block.header.parent
+    chain.stateViewAt(parent) match
+      case None => ()
+      case Some(prior) =>
+        val kappa = prior.validators.current.toIndexedSeq
+        val q = justBecameAvailable(block, prior.cores.reports.toIndexedSeq, kappa.size)
+        val vrfOut = BandersnatchVrf.getVrfOutput(block.header.entropySource.toArray).getOrElse(Array.emptyByteArray)
+        val t = new Tracked(
+          head.hash,
+          head.slot,
+          trancheOrigin(head.slot, clock()),
+          vrfOut,
+          kappa.map(_.ed25519.bytes.toArray),
+          kappa.map(_.bandersnatch.bytes.toArray),
+          q,
+          q.map(_.map(w => Hashing.blake2b256(w.encode.toArray)))
+        )
+        auditedBlocks.put(head.hash, java.lang.Boolean.valueOf(t.available.isEmpty))
+        if t.available.nonEmpty then
+          exec.execute(() =>
+            guarded {
+              tracked.put(t.hash, t)
+              pendingAnnouncements.remove(t.hash).foreach(_.foreach((p, h, e) => applyAnnouncement(p, h, e)))
+              tick()
+            }
+          )
+
+  /** q of eq:auditselection: per core, the report in ρ that this block's assurances made available. */
+  private def justBecameAvailable(
+      block: Block,
+      rho: IndexedSeq[Option[io.forge.jam.core.types.workpackage.AvailabilityAssignment]],
+      validatorCount: Int
+  ): IndexedSeq[Option[WorkReport]] =
+    val counts = new Array[Int](rho.size)
+    block.extrinsic.assurances.foreach { a =>
+      val bits = a.bitfield.toArray
+      rho.indices.foreach { c =>
+        if c / 8 < bits.length && (bits(c / 8) & (1 << (c % 8))) != 0 then counts(c) += 1
+      }
     }
-    announce(head.hash, audited)
+    rho.indices.map(c => rho(c).filter(_ => 3 * counts(c) > 2 * validatorCount).map(_.report))
+
+  // ---------------------------------------------------------------------------
+  // tranches
+  // ---------------------------------------------------------------------------
+
+  private def tick(): Unit =
+    val finalizedSlot = chain.finalized.slot
+    val now = clock()
+    tracked.filterInPlace((_, t) => t.slot > finalizedSlot || !isAudited(t.hash))
+    tracked.values.foreach { t =>
+      val n = trancheAt(now, t.origin)
+      ownIndices(t).foreach { (v, keys) =>
+        if !t.tranche0Done.contains(v) then
+          t.tranche0Done += v
+          initialTranche(t, v, keys)
+        if n > 0 then laterTranche(t, v, keys, n)
+      }
+      t.lastTranche = n
+      updateAudited(t, n)
+    }
+
+  /** Our keys in the block's prior validator set, by index. */
+  private def ownIndices(t: Tracked): Seq[(Int, ValidatorKeySet)] =
+    val byPublic = ed25519ByPublic
+    t.validators.zipWithIndex.flatMap((k, i) => byPublic.get(k.toSeq).map(i -> _))
+
+  private def initialTranche(t: Tracked, v: Int, keys: ValidatorKeySet): Unit =
+    val s0 = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
+    BandersnatchVrf.getVrfOutput(s0).foreach { y =>
+      val cores = initialCores(t.q, y)
+      val items = cores.sorted.flatMap(c => t.reportHashes(c).map(c -> _))
+      if items.nonEmpty then
+        announce(t, v, keys, 0, items, encodeFirstEvidence(s0))
+        logger.info(s"audit tranche 0 for ${t.hash.toHex.take(18)}: validator $v audits core(s) ${cores.mkString(",")}")
+        items.foreach((_, h) => startAudit(t, h))
+    }
+
+  private def laterTranche(t: Tracked, v: Int, keys: ValidatorKeySet, n: Int): Unit =
+    val mine = t.ours.getOrElseUpdate(v, mutable.Map.empty)
+    val picks = t.available.filterNot((_, _, h) => mine.contains(h)).flatMap { (c, _, h) =>
+      val prior = t.announced.getOrElse((h, n - 1), mutable.Set.empty[Int])
+      val noShows = (prior -- positive.getOrElse(h, mutable.Set.empty)).toSeq.sorted
+      val forced = negative.get(h).exists(_.nonEmpty)
+      if !forced && noShows.isEmpty then None
+      else
+        val sig = BandersnatchWrapper.ietfVrfSign(
+          keys.bandersnatchSecret,
+          laterInput(t.vrfOutput, h, n),
+          Array.emptyByteArray
+        )
+        val out = BandersnatchVrf.getVrfOutput(sig)
+        if forced || out.exists(y => escalates(y, t.validators.size, noShows.size)) then
+          val evidence = noShows.flatMap(i => t.announcements.get((n - 1, i)).map(NoShow(i, _)))
+          Some((c, h, sig, evidence))
+        else None
+    }
+    if picks.nonEmpty then
+      val items = picks.map((c, h, _, _) => c -> h)
+      announce(t, v, keys, n, items, encodeLaterEvidence(picks.map((_, _, s, e) => s -> e)))
+      logger.info(
+        s"audit tranche $n for ${t.hash.toHex.take(18)}: validator $v joins for core(s) ${items.map(_._1).mkString(",")}"
+      )
+      items.foreach((_, h) => startAudit(t, h))
+
+  /** Sign, record and broadcast our announcement for tranche `n` (CE 144). */
+  private def announce(
+      t: Tracked,
+      v: Int,
+      keys: ValidatorKeySet,
+      n: Int,
+      items: Seq[(Int, Hash)],
+      evidence: Array[Byte]
+  ): Unit =
+    val sig = Ed25519ZebraWrapper.sign(keys.ed25519Secret, announcementMessage(n, items, t.hash))
+    val a = Announcement(items, sig)
+    val mine = t.ours.getOrElseUpdate(v, mutable.Map.empty)
+    items.foreach((_, h) => mine.put(h, n))
+    recordAnnouncement(t, v, n, a)
+    val head = encodeHead(t.hash, n, a)
+    distribution.peers.foreach(c => sendTwo(c, StreamKind.AuditAnnouncement, head, evidence))
+
+  private def recordAnnouncement(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
+    t.announcements.put((n, v), a)
+    a.items.foreach { (_, h) =>
+      t.announced.getOrElseUpdate((h, n), mutable.Set.empty) += v
+      announcementCounts.computeIfAbsent(h, _ => ConcurrentHashMap.newKeySet[Integer]()).add(v)
+    }
+
+  /** Re-execute `reportHash` once, off the audit thread, then judge it. */
+  private def startAudit(t: Tracked, reportHash: Hash): Unit =
+    val report = t.available.collectFirst { case (_, w, h) if h == reportHash => w }
+    report.foreach { w =>
+      Option(verdicts.get(reportHash)) match
+        case Some(valid) => judge(t, reportHash, valid.booleanValue)
+        case None if inFlight.add(reportHash) =>
+          workers.execute(() =>
+            val valid =
+              try auditReport(w)
+              catch
+                case e: Exception =>
+                  logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); false
+            verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
+            exec.execute(() =>
+              guarded {
+                inFlight -= reportHash
+                tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(judge(_, reportHash, valid))
+              }
+            )
+          )
+        case None => ()
+    }
+
+  /** Publish our judgment on `reportHash` for every key of ours that announced it in `t`. */
+  private def judge(t: Tracked, reportHash: Hash, valid: Boolean): Unit =
+    ownIndices(t).foreach { (v, keys) =>
+      val announcedIt = t.ours.get(v).exists(_.contains(reportHash))
+      val judged = (if valid then positive else negative).get(reportHash).exists(_.contains(v))
+      if announcedIt && !judged then publishJudgment(reportHash, v, keys, valid)
+    }
+    updateAudited(t, t.lastTranche)
+
+  private def updateAudited(t: Tracked, n: Int): Unit =
+    val v = t.validators.size
+    val reports = t.available.map(_._3)
+    val ok = reports.forall { h =>
+      val byTranche = t.announced.collect { case ((rh, tr), set) if rh == h => tr -> set.toSet }.toMap
+      audited(byTranche, positive.getOrElse(h, Set.empty).toSet, negative.getOrElse(h, Set.empty).toSet, v, n)
+    }
+    val was = isAudited(t.hash)
+    auditedBlocks.put(t.hash, java.lang.Boolean.valueOf(ok))
+    if ok && !was then logger.info(s"block ${t.hash.toHex.take(18)} slot=${t.slot} audited")
+    if reports.exists(h => disregards(negative.getOrElse(h, Set.empty).toSet, v)) then
+      logger.warn(s"block ${t.hash.toHex.take(18)} has a report judged invalid by a third of validators; disregarding")
+      disregard(t.hash)
 
   /** Re-execute a report's in-core pipeline; true when the recomputed report
     * hash matches.
@@ -84,7 +316,7 @@ final class AuditorService(
             importSegments = bundle.importSegments,
             extrinsicData = bundle.extrinsicData,
             justifications = bundle.justifications,
-            accounts = accounts
+            accounts = accounts.forAnchor(bundle.workPackage.context.lookupAnchorStateRoot)
           )
           .left
           .map(e => s"re-execution refused: $e")
@@ -154,71 +386,92 @@ final class AuditorService(
   // CE 144 — audit announcements
   // =========================================================================
 
-  private def announce(headHash: Hash, audited: Seq[(Int, Hash, Boolean)]): Unit =
-    withOwnIndex { (idx, keys) =>
-      val body = new java.io.ByteArrayOutputStream()
-      body.write(headHash.bytes.toArray)
-      body.write(0) // tranche 0
-      body.write(idx & 0xff)
-      body.write((idx >> 8) & 0xff)
-      body.write(JamCodecs.encodeCompactInteger(audited.length.toLong))
-      audited.foreach { case (core, reportHash, _) =>
-        body.write(core & 0xff)
-        body.write((core >> 8) & 0xff)
-        body.write(reportHash.bytes.toArray)
-      }
-      val bodyBytes = body.toByteArray
-      val evidence = BandersnatchWrapper.ietfVrfSign(
-        keys.bandersnatchSecret,
-        "jam_audit".getBytes("UTF-8") ++ headHash.bytes.toArray,
-        bodyBytes
-      )
-      val msg = bodyBytes ++ evidence
-      distribution.peers.foreach(sendOneShot(_, StreamKind.AuditAnnouncement, msg))
-    }
-
+  /** CE 144: `Header Hash ++ Tranche ++ Announcement`, then the evidence, then FIN. The announcer is the peer: its
+    * connection key is its Ed25519 key in the block's prior set.
+    */
   def auditAnnouncementHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
+      val parts = mutable.ListBuffer.empty[Array[Byte]]
       stream.onMessage { msg =>
-        try
-          var off = 32 + 1 // header hash ++ tranche
-          val idx = (msg(off) & 0xff) | ((msg(off + 1) & 0xff) << 8)
-          off += 2
-          val (n, c) = JamCodecs.decodeCompactInteger(msg, off)
-          off += c
-          (0 until n.toInt).foreach { _ =>
-            off += 2 // core index
-            val reportHash = Hash(java.util.Arrays.copyOfRange(msg, off, off + 32))
-            off += 32
-            seenAnnouncements
-              .computeIfAbsent(reportHash, _ => ConcurrentHashMap.newKeySet[Integer]())
-              .add(idx)
-          }
-          logger.debug(s"audit announcement from validator $idx (${n} report(s))")
-        catch case e: Exception => logger.warn(s"bad CE144 payload: ${e.getMessage}")
-        stream.finish()
+        parts += msg
+        if parts.size == 2 then
+          val peer = conn.peerKey
+          val (head, evidence) = (parts(0), parts(1))
+          exec.execute(() =>
+            guarded {
+              decodeHead(head) match
+                case Left(err) => logger.debug(s"CE144 from ${JamNode.hex(peer).take(16)}: $err")
+                case Right((headerHash, _, _)) =>
+                  if tracked.contains(headerHash) then applyAnnouncement(peer, head, evidence)
+                  else if pendingAnnouncements.size < 256 then
+                    pendingAnnouncements.getOrElseUpdate(headerHash, mutable.ListBuffer.empty) +=
+                      ((peer, head, evidence))
+            }
+          )
+          stream.finish()
       }
+
+  /** Verify an announcement against the block it names (Ed25519 signature, VRF evidence, and that the VRF selects
+    * the announced reports) and record it in A_n.
+    */
+  private def applyAnnouncement(peer: Array[Byte], head: Array[Byte], evidence: Array[Byte]): Unit =
+    for
+      (headerHash, n, a) <- decodeHead(head).toOption
+      t <- tracked.get(headerHash)
+      v = t.validators.indexWhere(java.util.Arrays.equals(_, peer))
+      if v >= 0
+    do
+      val signed = Ed25519.verify(t.validators(v), announcementMessage(n, a.items, headerHash), a.signature)
+      val known = a.items.forall((c, h) => t.reportHashes.lift(c).flatten.contains(h))
+      val selected =
+        if n == 0 then
+          BandersnatchVrf
+            .ietfVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence)
+            .exists(y => a.items.map(_._1).toSet.subsetOf(initialCores(t.q, y).toSet))
+        else
+          decodeLaterEvidence(evidence, a.items.size).toOption.exists { perReport =>
+            a.items.zip(perReport).forall { case ((_, h), (sig, noShows)) =>
+              BandersnatchVrf
+                .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
+                .exists(y =>
+                  negative.get(h).exists(_.nonEmpty) ||
+                    escalates(y, t.validators.size, noShows.map(_.validator).distinct.size)
+                )
+            }
+          }
+      if signed && known && selected then
+        recordAnnouncement(t, v, n, a)
+        logger.debug(s"audit announcement from validator $v, tranche $n, ${a.items.size} report(s)")
+        updateAudited(t, t.lastTranche)
+      else
+        logger.warn(s"rejected CE144 from validator $v (signature $signed, reports $known, selection $selected)")
+        logger.debug(s"CE144 rejected: key=${JamNode.hex(peer)} head=${JamNode.hex(head)} evidence=${JamNode.hex(evidence)}")
 
   // =========================================================================
   // CE 145 — judgment publication
   // =========================================================================
 
-  private def publishJudgment(reportHash: Hash, valid: Boolean): Unit =
-    withOwnIndex { (idx, keys) =>
-      val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
-      val signature = Ed25519ZebraWrapper.sign(keys.ed25519Secret, context ++ reportHash.bytes)
-      pools.addJudgment(reportHash, idx, valid, signature)
-      val epoch = (chain.best.slot / chain.config.epochLength).toInt
-      val msg = new java.io.ByteArrayOutputStream(103)
-      msg.write(epoch & 0xff); msg.write((epoch >> 8) & 0xff)
-      msg.write((epoch >> 16) & 0xff); msg.write((epoch >> 24) & 0xff)
-      msg.write(idx & 0xff); msg.write((idx >> 8) & 0xff)
-      msg.write(if valid then 1 else 0)
-      msg.write(reportHash.bytes.toArray)
-      msg.write(signature)
-      distribution.peers.foreach(sendOneShot(_, StreamKind.JudgmentPublication, msg.toByteArray))
-      logger.warn(s"published ${if valid then "positive" else "NEGATIVE"} judgment for ${reportHash.toHex.take(18)}")
-    }
+  /** Sign, record and send our judgment (eq:judgments) with validator index `v`. */
+  private def publishJudgment(reportHash: Hash, v: Int, keys: ValidatorKeySet, valid: Boolean): Unit =
+    val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
+    val signature = Ed25519ZebraWrapper.sign(keys.ed25519Secret, context ++ reportHash.bytes)
+    recordJudgment(reportHash, v, valid, signature)
+    val epoch = (chain.best.slot / chain.config.epochLength).toInt
+    val msg = new java.io.ByteArrayOutputStream(103)
+    msg.write(epoch & 0xff); msg.write((epoch >> 8) & 0xff)
+    msg.write((epoch >> 16) & 0xff); msg.write((epoch >> 24) & 0xff)
+    msg.write(v & 0xff); msg.write((v >> 8) & 0xff)
+    msg.write(if valid then 1 else 0)
+    msg.write(reportHash.bytes.toArray)
+    msg.write(signature)
+    distribution.peers.foreach(sendOneShot(_, StreamKind.JudgmentPublication, msg.toByteArray))
+    if valid then logger.info(s"published positive judgment for ${reportHash.toHex.take(18)} as validator $v")
+    else logger.warn(s"published NEGATIVE judgment for ${reportHash.toHex.take(18)} as validator $v")
+
+  /** J⊤ / J⊥; negative judgments also go to the pool for a disputes verdict. */
+  private def recordJudgment(reportHash: Hash, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
+    (if valid then positive else negative).getOrElseUpdate(reportHash, mutable.Set.empty) += v
+    if !valid then pools.addJudgment(reportHash, v, valid, signature)
 
   def judgmentHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
@@ -238,8 +491,15 @@ final class AuditorService(
             )
           )
           if genuine then
-            pools.addJudgment(reportHash, idx, valid, signature)
-            logger.warn(s"pooled ${if valid then "positive" else "negative"} judgment from validator $idx")
+            exec.execute(() =>
+              guarded {
+                recordJudgment(reportHash, idx, valid, signature)
+                tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(t =>
+                  updateAudited(t, t.lastTranche)
+                )
+              }
+            )
+            logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
           else logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
         else logger.warn(s"bad CE145 length ${msg.length}")
         stream.finish()
@@ -249,19 +509,21 @@ final class AuditorService(
   // helpers
   // =========================================================================
 
-  /** Run `f` with this node's announcing identity: the lowest active-set
-    * index whose Ed25519 key we hold.
-    */
-  private def withOwnIndex(f: (Int, ValidatorKeySet) => Unit): Unit =
-    val byPublic = ed25519ByPublic
-    chain
-      .stateView()
-      .validators
-      .current
-      .zipWithIndex
-      .flatMap((vk, idx) => byPublic.get(vk.ed25519.bytes.toArray.toSeq).map(idx -> _))
-      .headOption
-      .foreach(f.tupled)
+  /** Two messages then FIN on a fresh stream (CE 144). */
+  private def sendTwo(conn: JamnpConnection, kind: Byte, first: Array[Byte], second: Array[Byte]): Unit =
+    try
+      egress.submit(new Runnable {
+        def run(): Unit =
+          try
+            val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
+            stream.send(first)
+            stream.send(second)
+            stream.finish()
+          catch
+            case e: Exception =>
+              logger.debug(s"send on ${StreamKind.name(kind)} failed: ${e.getMessage}")
+      })
+    catch case _: java.util.concurrent.RejectedExecutionException => ()
 
   private def sendOneShot(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
     submitSend(() => conn.openStream(kind), kind, payload)

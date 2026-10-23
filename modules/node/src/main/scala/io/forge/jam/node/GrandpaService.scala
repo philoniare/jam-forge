@@ -18,7 +18,9 @@ final class GrandpaService(
     sync: SyncService,
     distribution: DistributionService,
     keys: Option[ValidatorKeySet],
-    gossipMillis: Long = 1000L
+    gossipMillis: Long = 1000L,
+    /** We vote only for blocks we judge audited. */
+    audited: Hash => Boolean = _ => true
 ) extends LazyLogging:
 
   private val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
@@ -36,6 +38,7 @@ final class GrandpaService(
       if h == genesisHash then None
       else chain.header(h).flatMap(_.epochMark).map(_.validators.map(_.ed25519.bytes))
     def finalizeBlock(h: Hash): Either[String, Unit] = chain.finalizeAdopting(h).map(_ => ())
+    override def isAudited(h: Hash): Boolean = audited(h)
 
   private def toVote(h: chain.Head): Vote = Vote(h.hash, h.stateRoot, h.slot)
 

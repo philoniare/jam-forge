@@ -646,8 +646,64 @@ final class ChainManager(
   def readRawState(stateKey: JamBytes): Option[JamBytes] =
     trieStore.at(bestHead.stateRoot).read(stateKey)
 
+  /** The stored state with root `root`, if its trie nodes are still held (the empty state always is). */
+  def stateAtRoot(root: Hash): Option[StateTrie] =
+    if root == Hash.zero || trieStore.backend.readNode(root).isDefined then Some(StateTrie.at(trieStore.backend, root))
+    else None
+
   def stateAt(headerHash: Hash): Option[StateTrie] =
     blockRoot(headerHash).map(root => StateTrie.at(trieStore.backend, root))
+
+  /** A read view over the posterior state of stored block `headerHash`. */
+  def stateViewAt(headerHash: Hash): Option[TrieBackedJamState] =
+    stateAt(headerHash).map(trie => new TrieBackedJamState(trie, config, new ServiceStorageView(trie), None))
+
+  /** Disregard block `hash` and every descendant (a report judged invalid by a third of the
+    * validators). When it is on the best chain above finality, the best head rewinds to its parent and the heaviest
+    * remaining branch is adopted.
+    */
+  def disregard(hash: Hash): Either[String, Head] =
+    val events = mutable.ListBuffer.empty[(Head, Block)]
+    val result = synchronized {
+      markInvalid(hash)
+      val finalizedHeight = metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
+      (blockRoot(hash), parentOf(hash)) match
+        case (None, _) => Left("not on the best chain")
+        case (_, None) => Left("no parent")
+        case (Some(_), Some(parent)) if blockHeight(hash).getOrElse(0L) <= finalizedHeight =>
+          Left(s"already finalized; parent ${parent.toHex.take(18)}")
+        case (Some(_), Some(parent)) =>
+          rewindTo(parent)
+          val (pw, ph) = (weightOf(parent), blockHeight(parent).getOrElse(0L))
+          val candidates = leafMap.keySet.asScala.toList.filter(l =>
+            l != parent && !branchInvalid(l) && !branchEquivocates(l) && blockRoot(l).isEmpty &&
+              (weightOf(l) > pw || (weightOf(l) == pw && blockHeight(l).getOrElse(0L) > ph))
+          )
+          candidates.sortBy(l => (-weightOf(l), -blockHeight(l).getOrElse(0L))).iterator
+            .map(l => reorgTo(l, events))
+            .collectFirst { case Right(h) => h }
+            .map(Right(_))
+            .getOrElse(Right(bestHead))
+    }
+    events.foreach((head, block) => postImportBus.publish(head, block))
+    result
+
+  /** Move the best head back to its ancestor `ancestor`; the blocks above it lose main-chain status. */
+  private def rewindTo(ancestor: Hash): Unit =
+    var back = bestHead.hash
+    while back != ancestor && back != Hash.zero do
+      val parent = parentOf(back).getOrElse(Hash.zero)
+      dropBlockRoot(back)
+      Option(leafMap.get(back)).foreach(h => leafMap.put(back, h.copy(stateRoot = Hash.zero)))
+      back = parent
+    val root = blockRoot(ancestor).getOrElse(Hash.zero)
+    trieStore.markCommitted(root)
+    bestHead = Head(ancestor, blockSlot(ancestor), root)
+    blockStore.setHead(BlockStore.BestHead, ancestor)
+    blockStore.setMeta("state_root", root.bytes.toArray)
+    putMetaLong("best_slot", bestHead.slot)
+    if blockStore.children(ancestor).isEmpty then leafMap.put(ancestor, bestHead)
+    logger.warn(s"best head rewound to ${ancestor.toHex.take(18)} slot=${bestHead.slot}")
 
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).

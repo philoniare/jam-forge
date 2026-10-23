@@ -124,6 +124,61 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
+  test("submission endpoint: a requested preimage is pooled and announced; an unrequested one is refused") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val serviceId = 0L
+    val blob = Array.tabulate[Byte](48)(i => (i * 3).toByte)
+    val hash = Hashing.blake2b256(blob)
+    val infoKey = StateKey.computePreimageInfoStateKey(serviceId, blob.length, JamBytes(hash.bytes))
+    val spec = ChainSpec(
+      id = "preimage-submit-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals :+ KeyValue(infoKey, StateKey.encodePreimageInfoValue(Nil)),
+      bootnodes = Nil
+    )
+    val dirA = tempDir("jam-pi-submit-a")
+    val dirB = tempDir("jam-pi-submit-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false, submitPort = Some(0))).start()
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+      nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
+      val port = nodeA.submitPort.getOrElse(fail("no submission endpoint"))
+
+      val client = java.net.http.HttpClient.newHttpClient()
+      def post(path: String, body: Array[Byte]) =
+        val req = java.net.http.HttpRequest
+          .newBuilder(java.net.URI.create(s"http://127.0.0.1:$port$path"))
+          .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(body))
+          .build()
+        client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+
+      val refused = post("/preimage/0", Array[Byte](1, 2, 3))
+      refused.statusCode shouldBe 400
+      refused.body should include("has not requested")
+      post("/preimage/x", blob).statusCode shouldBe 400
+
+      val ok = post("/preimage/0", blob)
+      ok.statusCode shouldBe 200
+      ok.body.trim shouldBe hash.toHex
+      nodeA.pools.findPreimage(hash) should not be empty
+
+      // B learns of it on CE 142 and fetches it on CE 143.
+      val deadline = System.currentTimeMillis() + 15000
+      while nodeB.pools.findPreimage(hash).isEmpty && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      nodeB.pools.findPreimage(hash) should not be empty
+    finally
+      if nodeA != null then nodeA.shutdown()
+      if nodeB != null then nodeB.shutdown()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   test("CE143: node A serves a preimage it only knows about from an imported block") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")

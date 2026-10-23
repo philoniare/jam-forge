@@ -10,7 +10,7 @@ import io.forge.jam.core.JamBytes
   * jam-node --spec <chain-spec.json> --data <data-dir> [--port N]
   *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
-  *          [--telemetry <host:port>] [--reuse-port] [--grandpa]
+  *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--submit-port N]
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -18,6 +18,7 @@ import io.forge.jam.core.JamBytes
   * map the connection to validator index i (CE 131 proxying). Native crypto
   * libraries are looked up under `-Djam.base.dir` (default: the working
   * directory); a missing one stops the node before it joins the network.
+  * `--submit-port N` opens the loopback preimage endpoint (`POST /preimage/<service-id>`).
   */
 object Main:
 
@@ -63,7 +64,8 @@ object Main:
         .getOrElse(SlotClock.JamCommonEraSeconds),
       reusePort = flags.contains("--reuse-port"),
       grandpa = flags.contains("--grandpa"),
-      telemetry = opts.get("telemetry").map(parseHostPort)
+      telemetry = opts.get("telemetry").map(parseHostPort),
+      submitPort = opts.get("submit-port").map(_.toInt)
     )
 
     val node = new JamNode(spec, config).start()
@@ -71,6 +73,7 @@ object Main:
       node.enableAuthoring(Seq(k))
       node.enableGuaranteeing(Seq(k))
       node.enableAssuring(Seq(k))
+      node.enableAuditing(Seq(k))
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
     node.onSlot { slot =>

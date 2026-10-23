@@ -25,6 +25,8 @@ final case class NodeConfig(
     telemetry: Option[InetSocketAddress] = None,
     /** GRANDPA finality instead of the devnet quorum rule and following peers' finality. */
     grandpa: Boolean = false,
+    /** Loopback port of the local submission endpoint ([[SubmitServer]]), from `--submit-port N`. */
+    submitPort: Option[Int] = None,
     /** First retry delay for a lost bootnode connection; doubles per failed
       * attempt up to [[JamNode.MaxRedialMillis]].
       */
@@ -149,7 +151,7 @@ final class JamNode(
     val t = new Thread(r, "jam-dial"); t.setDaemon(true); t
   }
   @volatile private var assuranceTimer: java.util.concurrent.ScheduledExecutorService = null
-  @volatile private var ticketsSentEpoch: Long = -1L
+  @volatile private var ticketsSentGeneration: Int = 0
   @volatile private var redialer: java.util.concurrent.ScheduledExecutorService = null
 
   val telemetry: Option[Telemetry] = nodeConfig.telemetry.map { address =>
@@ -240,12 +242,20 @@ final class JamNode(
     val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances)
     chain.onImported((head, block) => a.onImported(head, block))
 
-  /** Enable the auditor role: every included report is re-executed from its
-    * reconstructed bundle; outcomes are announced (CE 144) and mismatches
-    * judged (CE 145). Returns the service for verdict inspection.
+  /** Enable the auditor role: reports that become available are audited per the tranche
+    * rules, announced on CE 144 and judged on CE 145. Tranche 0 starts at the block's slot, or at import without
+    * slot ticking. Returns the service for verdict inspection.
     */
   def enableAuditing(keys: Seq[ValidatorKeySet]): AuditorService =
-    val a = new AuditorService(chain, distribution, shards, pools, keys, egress)
+    val origin: (Long, Long) => Long =
+      if nodeConfig.slotTicking then (slot, _) => slotClock.slotStartMillis(slot)
+      else (_, importedAt) => importedAt
+    val a = new AuditorService(chain, distribution, shards, pools, keys, egress, trancheOrigin = origin)
+    a.onDisregard(h =>
+      chain.disregard(h) match
+        case Right(head) => logger.warn(s"disregarded ${h.toHex.take(18)}; best is now ${head.hash.toHex.take(18)}")
+        case Left(why)   => logger.debug(s"disregard ${h.toHex.take(18)}: $why")
+    )
     auditor = Some(a)
     network.registerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
     network.registerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
@@ -260,18 +270,10 @@ final class JamNode(
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     if shuttingDown then return None
-    val regenerated = tickets.maybeGenerate(slot)
+    tickets.maybeGenerate(slot): Unit
     updateConnectivity(slot)
-    val epoch = slot / chain.config.epochLength
-    connectivity.filter(_.epoch == epoch).foreach { v =>
-      // JAMNP-S CE 131: step 1 max(⌊E/60⌋, 1) slots after the connectivity
-      // changes were applied; again at once when a reorg forced new tickets.
-      val step1Slot = v.appliedSlot + math.max(chain.config.epochLength / 60, 1)
-      if slot >= step1Slot && (ticketsSentEpoch != epoch || regenerated) then
-        ticketsSentEpoch = epoch
-        tickets.distributeTickets(distribution.peers, connectionForNextEpochValidator)
-      tickets.releaseForwards(slot, v.appliedSlot)
-    }
+    maybeSendTickets(slot)
+    connectivity.filter(_.epoch == slot / chain.config.epochLength).foreach(v => tickets.releaseForwards(slot, v.appliedSlot))
     author.flatMap { a =>
       a.tryAuthor(slot).flatMap { block =>
         val authoring = telemetry.flatMap(_.authoring(slot, block.header.parent))
@@ -297,6 +299,29 @@ final class JamNode(
           case None => None
       }
     }
+
+  /** Send this epoch's tickets on CE 131 once (again at once when a reorg forced new tickets): as soon as the epoch's
+    * entropy η_2 is final, i.e. a block of the epoch on our best chain is finalized, or else max(⌊E/60⌋, 1) slots
+    * after the epoch's connectivity changes were applied (JAMNP-S CE 131). Runs at each slot and on the redial
+    * thread, so a finalization mid-slot sends without waiting for the next slot.
+    */
+  private def maybeSendTickets(slot: Long): Unit = synchronized {
+    val e = chain.config.epochLength
+    val epoch = slot / e
+    val fin = chain.finalized.slot
+    val entropyFinal = finalityRunning && fin >= epoch * e && fin / e == epoch && chain.best.slot / e == epoch
+    val step1Due = connectivity.exists(v => v.epoch == epoch && slot >= v.appliedSlot + math.max(e / 60, 1))
+    // A ticket reaching the author at slot index Y − 1 or later misses the lottery (polkajam rejects it).
+    val inLottery = slot % e < chain.config.ticketCutoff - 1
+    val generation = tickets.generation
+    if (entropyFinal || step1Due) && inLottery && ticketsSentGeneration != generation && tickets.hasTicketsFor(epoch)
+    then
+      ticketsSentGeneration = generation
+      logger.info(s"sending epoch $epoch tickets at slot index ${slot % e} (entropy final: $entropyFinal)")
+      tickets.distributeTickets(distribution.peers, connectionForNextEpochValidator)
+  }
+
+  private def finalityRunning: Boolean = nodeConfig.grandpa || spec.devnetFinalityDepth > 0
 
   /** CE 131 proxy lookup: the open connection whose peer key is the Ed25519
     * key of validator `index` in the next epoch's set (γ_k), whose ring the
@@ -413,6 +438,7 @@ final class JamNode(
         s"port=$listenPort identity=${identity.altName}"
     )
     telemetry.foreach(_.start())
+    submitServer = nodeConfig.submitPort.map(p => new SubmitServer(p, preimages).start())
 
     spec.bootnodes.foreach(bn => dialTargets.add(new DialTarget(bn.address, Some(bn.ed25519Key))))
     dialTargets.forEach(t => dial(t, initial = true))
@@ -472,10 +498,10 @@ final class JamNode(
 
   /** Devnet quorum finality counts the best heads peers announce on UP 0,
     * so UP 0 stays open to every peer while it runs; the grid restriction
-    * applies otherwise.
+    * applies otherwise, and always under GRANDPA, which needs no peer bests.
     */
   private def gridRestrictsAnnouncements: Boolean =
-    !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
+    nodeConfig.grandpa || !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
 
   /** Peers whose announced finality we follow: with this node they make the finality quorum (2V/3+1). */
   private def peerFinalityQuorum: Int = math.max(spec.finalityQuorum - 1, 1)
@@ -536,6 +562,7 @@ final class JamNode(
   private def maintainConnectivity(): Unit =
     if shuttingDown then return
     updateConnectivity(currentSlot)
+    if author.isDefined then maybeSendTickets(currentSlot)
     sync.followPeerFinality(peerFinalityQuorum)
     val now = System.currentTimeMillis()
     val self = identity.publicKeyBytes
@@ -692,17 +719,23 @@ final class JamNode(
     * at start, which is genesis on a fresh node.
     */
   def enableGrandpa(keys: Option[ValidatorKeySet]): GrandpaService =
-    val g = new GrandpaService(chain, sync, distribution, keys)
+    val g = new GrandpaService(chain, sync, distribution, keys, audited = h => auditor.forall(_.isAudited(h)))
     g.register(network)
     g.start(spec.genesisHeaderHash, chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq)
     grandpaService = Some(g)
     g
 
   @volatile private var grandpaService: Option[GrandpaService] = None
+  @volatile private var submitServer: Option[SubmitServer] = None
+
+  /** Port of the local submission endpoint, when it runs. */
+  def submitPort: Option[Int] = submitServer.map(_.boundPort)
 
   def shutdown(): Unit =
     shuttingDown = true
+    submitServer.foreach(_.stop())
     grandpaService.foreach(_.shutdown())
+    auditor.foreach(_.shutdown())
     if redialer != null then redialer.shutdownNow()
     dialer.shutdownNow()
     if assuranceTimer != null then assuranceTimer.shutdownNow()

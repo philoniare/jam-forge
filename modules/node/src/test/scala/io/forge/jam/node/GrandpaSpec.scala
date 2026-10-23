@@ -29,6 +29,8 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
 
   private final class FakeChain(blocks: Blocks) extends GrandpaChain:
     var finalizedHash: Hash = blocks.genesis
+    var unaudited: Set[Hash] = Set.empty
+    override def isAudited(x: Hash): Boolean = !unaudited.contains(x)
     def finalized: Vote = blocks.vote(finalizedHash)
     def best: Vote = blocks.vote(blocks.tip)
     def slotOf(x: Hash): Option[Long] = blocks.byHash.get(x).map(_.slot)
@@ -128,6 +130,19 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     }
     net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b6"))
     net.voters.map(_.round).min should be > 3L
+  }
+
+  test("voters vote only for audited blocks, so finality waits below an unaudited one") {
+    val blocks = new Blocks
+    (1 to 5).foreach(i => blocks.add(s"b$i", i.toLong))
+    val net = new Net(blocks, keys)
+    net.chains.foreach(_.unaudited = Set(h("b3")))
+    net.run(10_000)
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b2"))
+    // Once b3 is audited the votes move on to the best block.
+    net.chains.foreach(_.unaudited = Set.empty)
+    net.run(10_000)
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b5"))
   }
 
   test("two of four voters cannot finalize") {

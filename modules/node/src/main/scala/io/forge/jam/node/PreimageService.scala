@@ -116,6 +116,23 @@ final class PreimageService(
       }
     }
 
+  /** Local entrypoint for a preimage: it must answer an open request of `serviceId` in the best state (a
+    * request history `[]` for its hash and length). It is pooled for our own blocks and
+    * announced on CE 142 to the gossip targets, who fetch it with CE 143. Returns the preimage hash.
+    */
+  def submit(serviceId: Long, blob: Array[Byte]): Either[String, Hash] =
+    val hash = Hashing.blake2b256(blob)
+    val infoKey = StateKey.computePreimageInfoStateKey(serviceId, blob.length.toLong, JamBytes(hash.bytes))
+    chain.stateView().storage.readTrie(infoKey) match
+      case None => Left(s"service $serviceId has not requested ${hash.toHex} with length ${blob.length}")
+      case Some(info) if !StateKey.isUnprovidedRequest(info) =>
+        Left(s"preimage ${hash.toHex} of service $serviceId is already provided")
+      case Some(_) =>
+        pools.addPreimage(Preimage(requester = ServiceId(serviceId.toInt), blob = JamBytes(blob)))
+        announce(serviceId, blob, gossipTargets())
+        logger.info(s"preimage ${hash.toHex.take(18)} (${blob.length} bytes) for service $serviceId submitted")
+        Right(hash)
+
   def announce(serviceId: Long, blob: Array[Byte], peers: Iterable[JamnpConnection]): Unit =
     val hash = Hashing.blake2b256(blob)
     val length = blob.length.toLong

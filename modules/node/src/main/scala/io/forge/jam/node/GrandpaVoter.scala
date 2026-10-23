@@ -19,6 +19,9 @@ trait GrandpaChain:
   def epochMarkerKeys(h: Hash): Option[List[Array[Byte]]]
   def finalizeBlock(h: Hash): Either[String, Unit]
 
+  /** isAudited: a block may be voted for only once audited. */
+  def isAudited(h: Hash): Boolean = true
+
   /** `a` is `b` or one of its ancestors. */
   def isAncestor(a: Hash, b: Hash): Boolean =
     if a == b then true
@@ -177,17 +180,23 @@ final class GrandpaVoter(
   // voting
   // ---------------------------------------------------------------------------
 
-  /** Our best block to vote for: the best head, not past the first unfinalized epoch-marker block (the set change),
-    * and never off the chain of `floor`.
+  /** Our best block to vote for: the best head, not past the first unfinalized epoch-marker block (the set change)
+    * nor past the last block before an unaudited one, and never off the chain of `floor`.
     */
   private def voteTarget(floor: Vote): Vote =
     val best = chain.best
     if !chain.isAncestor(floor.hash, best.hash) then floor
     else
-      val path = pathToBase(best.hash, floor)
-      path.reverse.find((h, _) => chain.epochMarkerKeys(h).isDefined) match
-        case Some((h, slot)) => voteFor(h, slot).getOrElse(floor)
-        case None            => best
+      val ascending = pathToBase(best.hash, floor).reverse
+      val audited = ascending.takeWhile((h, _) => chain.isAudited(h))
+      if audited.size < ascending.size then
+        logger.debug(s"GRANDPA vote held at ${audited.size} of ${ascending.size} blocks above the floor: not audited")
+      val marker = audited.indexWhere((h, _) => chain.epochMarkerKeys(h).isDefined)
+      val upTo = if marker >= 0 then audited.take(marker + 1) else audited
+      upTo.lastOption match
+        case Some((h, slot)) if upTo.size < ascending.size => voteFor(h, slot).getOrElse(floor)
+        case Some(_)                                       => best
+        case None                                          => floor
 
   private def cast(kind: Int, vote: Vote): Unit =
     keys.filter(k => set.members.contains(k.ed25519Public.toSeq)).foreach { k =>

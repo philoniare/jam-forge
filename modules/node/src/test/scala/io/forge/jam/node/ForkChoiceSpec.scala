@@ -127,6 +127,62 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
+  test("a disregarded best block is rewound and the best remaining branch adopted") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec(
+      id = "disregard-devnet",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dirA = tempDir("jam-disregard-a")
+    val dirB = tempDir("jam-disregard-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false))
+      nodeA.chain.initializeOrRestore(spec)
+      nodeB.chain.initializeOrRestore(spec)
+      val block1 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(1).getOrElse(fail("author block 1"))
+      val block1Bytes = nodeA.chain.encodeBlock(block1)
+      nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
+      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
+      val headA1 = nodeA.chain.best
+
+      // A: 2 then 3 on its own chain; B: 4' on block 1, parked on A as a side branch.
+      val authorA = new BlockAuthor(nodeA.chain, devKeys)
+      val a2 = authorA.tryAuthor(2).getOrElse(fail("author 2"))
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)).isRight shouldBe true
+      val headA2 = nodeA.chain.best
+      val a3 = authorA.tryAuthor(3).getOrElse(fail("author 3"))
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a3)).isRight shouldBe true
+      val b4 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(4).getOrElse(fail("author 4'"))
+      val b4Bytes = nodeB.chain.encodeBlock(b4)
+      nodeB.chain.importBlock(b4Bytes).isRight shouldBe true
+      nodeA.chain.importBlock(b4Bytes).isLeft shouldBe true // shorter: stays a side branch
+
+      // Disregarding block 2 drops 2 and 3 and adopts 4'.
+      nodeA.chain.disregard(headA2.hash) match
+        case Right(head) => head.hash shouldBe nodeB.chain.best.hash
+        case Left(err)   => fail(err)
+      nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
+      nodeA.chain.parentHash(nodeA.chain.best.hash) shouldBe Some(headA1.hash)
+      // The new chain extends; the disregarded block is refused from now on.
+      val b5 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(5).getOrElse(fail("author 5"))
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(b5)).isRight shouldBe true
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)) shouldBe Left("block failed validation before")
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   test("depth finality advances the finalized head and blocks reorgs below it") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")

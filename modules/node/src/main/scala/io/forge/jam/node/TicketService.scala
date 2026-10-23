@@ -64,6 +64,12 @@ final class TicketService(
     validatorKeys.map(k => k.bandersnatchPublic.toSeq -> k).toMap
 
   @volatile private var generatedForEpoch: Long = -1L
+
+  /** Bumped at each (re)generation, so a sender can tell new tickets from ones it already sent. */
+  @volatile var generation: Int = 0
+
+  /** Epoch whose tickets are completely generated: senders on other threads must not see a partial set. */
+  @volatile private var readyEpoch: Long = -1L
   @volatile private var generatedForEntropy: Hash = Hash.zero
 
   /** Register the validator keys this node holds, enabling ticket generation
@@ -99,7 +105,10 @@ final class TicketService(
         generatedForEpoch = epoch
         generatedForEntropy = entropy
         pruneStale(epoch)
+        readyEpoch = -1L
         generate(view)
+        readyEpoch = epoch
+        generation += 1
         true
     }
 
@@ -317,6 +326,9 @@ final class TicketService(
     * connection (a peer not using its validator key as network identity, or
     * a dropped link) we fall back to the same CE 132 broadcast.
     */
+  /** Whether this epoch's tickets are fully generated. */
+  def hasTicketsFor(epoch: Long): Boolean = readyEpoch == epoch
+
   def distributeTickets(
       peers: Iterable[JamnpConnection],
       byValidatorIndex: Int => Option[JamnpConnection]
