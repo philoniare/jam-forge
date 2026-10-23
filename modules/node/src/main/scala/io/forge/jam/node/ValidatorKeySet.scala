@@ -1,17 +1,19 @@
 package io.forge.jam.node
 
 import io.forge.jam.core.Hashing
-import io.forge.jam.crypto.Ed25519ZebraWrapper
+import io.forge.jam.crypto.{Bls, Ed25519ZebraWrapper}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
-/** A validator's signing keys: Bandersnatch (sealing/VRF) and Ed25519
-  * (guarantees, assurances, judgments, network identity).
+/** A validator's signing keys: Bandersnatch (sealing/VRF), Ed25519
+  * (guarantees, assurances, judgments, network identity) and BLS (BEEFY).
   */
 final case class ValidatorKeySet(
     bandersnatchSecret: Array[Byte],
     bandersnatchPublic: Array[Byte],
     ed25519Secret: Array[Byte],
-    ed25519Public: Array[Byte]
+    ed25519Public: Array[Byte],
+    blsSecret: Array[Byte] = Array.emptyByteArray,
+    blsPublic: Array[Byte] = Array.emptyByteArray
 )
 
 object ValidatorKeySet:
@@ -29,7 +31,8 @@ object ValidatorKeySet:
     Array.fill(8)(le).flatten
 
   /** JIP-5 key derivation from a 32-byte seed: per-algorithm seeds are
-    * blake2b("jam_val_key_<algo>" ++ seed).
+    * blake2b("jam_val_key_<algo>" ++ seed). JIP-5 names no BLS seed; we
+    * assume "jam_val_key_bls" by the same pattern (BEEFY prototype).
     */
   def fromSeed(seed: Array[Byte]): ValidatorKeySet =
     require(seed.length == 32, "validator seed must be 32 bytes")
@@ -45,7 +48,10 @@ object ValidatorKeySet:
     val bsPublic = BandersnatchWrapper.publicFromSecret(bsSecret)
     val edPublic = Ed25519ZebraWrapper.publicFromSecret(ed25519Seed)
 
-    ValidatorKeySet(bsSecret, bsPublic, ed25519Seed, edPublic)
+    val blsSeed =
+      Hashing.blake2b256("jam_val_key_bls".getBytes("UTF-8") ++ seed).bytes
+
+    ValidatorKeySet(bsSecret, bsPublic, ed25519Seed, edPublic, blsSeed, Bls.publicFromSeed(blsSeed))
 
   /** Dev validator `index` (JIP-5 trivial seed). */
   def dev(index: Int): ValidatorKeySet = fromSeed(trivialSeed(index))

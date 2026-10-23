@@ -10,7 +10,7 @@ import io.forge.jam.core.JamBytes
   * jam-node --spec <chain-spec.json> --data <data-dir> [--port N]
   *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
-  *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--submit-port N]
+  *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -32,7 +32,7 @@ object Main:
 
   private def run(args: Array[String]): Unit =
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (flags, rest) = afterPeers.partition(a => a == "--reuse-port" || a == "--grandpa")
+    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--beefy").contains(a))
     val opts = parseArgs(rest, Map.empty)
 
     val specPath = opts.getOrElse("spec", fail("--spec <chain-spec.json> is required"))
@@ -76,6 +76,7 @@ object Main:
       node.enableAuditing(Seq(k))
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
+    if flags.contains("--beefy") then node.enableBeefy(authorKeys)
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized

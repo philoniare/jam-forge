@@ -1,3 +1,5 @@
+pub mod bls;
+
 use ed25519_zebra::{batch, Signature, SigningKey, VerificationKey, VerificationKeyBytes};
 use jni::objects::{JByteArray, JClass, JIntArray};
 use jni::sys::{jboolean, jbyteArray, JNI_FALSE, JNI_TRUE};

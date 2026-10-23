@@ -731,10 +731,21 @@ final class JamNode(
   /** Port of the local submission endpoint, when it runs. */
   def submitPort: Option[Int] = submitServer.map(_.boundPort)
 
+  /** BEEFY prototype: sign finalized blocks with `keys` (when given) and aggregate peers' signatures into proofs. */
+  def enableBeefy(keys: Option[ValidatorKeySet]): BeefyService =
+    val b = new BeefyService(chain, distribution, keys)
+    b.register(network)
+    b.start()
+    beefyService = Some(b)
+    b
+
+  @volatile private var beefyService: Option[BeefyService] = None
+
   def shutdown(): Unit =
     shuttingDown = true
     submitServer.foreach(_.stop())
     grandpaService.foreach(_.shutdown())
+    beefyService.foreach(_.shutdown())
     auditor.foreach(_.shutdown())
     if redialer != null then redialer.shutdownNow()
     dialer.shutdownNow()
