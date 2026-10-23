@@ -51,24 +51,38 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     val chains = keySets.map(_ => new FakeChain(blocks))
     val commits = mutable.ListBuffer.empty[(Long, Long, Commit)]
     val set = VoterSet(0, blocks.vote(blocks.genesis), keySets.map(_.ed25519Public))
-    /** Voter `i` as it starts: set 0, round 1. */
-    def newVoter(i: Int): GrandpaVoter =
+    /** Each voter's last persisted (set, round, our votes). */
+    val progress = mutable.Map.empty[Int, (Long, Long, List[VoteMessage])]
+    /** Voter `i` as it starts: set 0, round 1, or the persisted round when `resume`. */
+    def newVoter(i: Int, resume: Boolean = false): GrandpaVoter =
       val out = new GrandpaOutbound:
         def broadcastVote(m: VoteMessage): Unit = queue.enqueue(i -> m)
         def broadcastCommit(round: Long, setId: Long, c: Commit): Unit =
           commits += ((round, setId, c)); queue.enqueue(i -> (round, setId, c))
         def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
-      new GrandpaVoter(chains(i), out, set, Some(keySets(i)), clock = () => now)
-    val voters: mutable.ArrayBuffer[GrandpaVoter] = mutable.ArrayBuffer.from(keySets.indices.map(newVoter))
+      new GrandpaVoter(
+        chains(i),
+        out,
+        set,
+        Some(keySets(i)),
+        clock = () => now,
+        onProgress = (s, r, votes) => progress(i) = (s, r, votes),
+        resume = Option.when(resume)(progress.get(i).map((_, r, v) => (r, v))).flatten
+      )
+    val voters: mutable.ArrayBuffer[GrandpaVoter] = mutable.ArrayBuffer.from(keySets.indices.map(i => newVoter(i)))
 
-    def run(millis: Long, deliver: (Int, Int) => Boolean = (_, _) => true): Unit =
+    def run(
+        millis: Long,
+        deliver: (Int, Int) => Boolean = (_, _) => true,
+        silent: (Int, Any) => Boolean = (_, _) => false
+    ): Unit =
       val end = now + millis
       while now < end do
         now += 250
         voters.foreach(_.step())
         while queue.nonEmpty do
           val (from, msg) = queue.dequeue()
-          voters.indices.filter(j => j != from && deliver(from, j)).foreach { j =>
+          voters.indices.filter(j => j != from && deliver(from, j) && !silent(from, msg)).foreach { j =>
             msg match
               case m: VoteMessage                          => voters(j).onVote(m)
               case (round: Long, setId: Long, c: Commit) => voters(j).onCommit(round, setId, c)
@@ -225,4 +239,82 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     net.run(20_000, (from, to) => from != 0 && to != 0)
     net.voters(3).round shouldBe net.voters(1).round
     net.chains(1).finalizedHash shouldBe h("b4")
+  }
+
+  test("a commit for a set we have not reached is replayed once the finalized chain moves us there") {
+    val blocks = new Blocks
+    blocks.add("b1", 1, marker = Some(keys.map(_.ed25519Public).toList))
+    blocks.add("b2", 2)
+    val net = new Net(blocks, keys)
+    val cutOff = 3
+    net.run(20_000, (from, to) => from != cutOff && to != cutOff)
+    val (round, setId, commit) = net.commits.filter(_._2 == 1L).last
+    net.chains(0).finalizedHash shouldBe h("b2")
+    // The set 1 commit arrives just before we follow the peers' finality to b2 (soak3, node 5).
+    net.voters(cutOff).onCommit(round, setId, commit).isLeft shouldBe true
+    net.chains(cutOff).finalizedHash = h("b2")
+    net.voters(cutOff).step()
+    net.voters(cutOff).voterSet.setId shouldBe 1L
+    net.voters(cutOff).round shouldBe round + 1
+  }
+
+  test("a voter left a round behind joins the next one from relayed votes and finishes it") {
+    val blocks = new Blocks
+    (1 to 3).foreach(i => blocks.add(s"b$i", i.toLong))
+    val net = new Net(blocks, keys)
+    net.run(10_000)
+    blocks.add("b4", 4)
+    // Voter 3 is cut off; once b4 is final, voter 0 stops voting, as a silent peer would.
+    var lastRound0 = Long.MaxValue
+    val silent0: (Int, Any) => Boolean = (from, msg) =>
+      from == 0 && (msg match { case m: VoteMessage => m.round > lastRound0; case _ => lastRound0 < Long.MaxValue })
+    var waited = 0
+    while net.chains(1).finalizedHash != h("b4") && waited < 20_000 do
+      net.run(250, (from, to) => from != 3 && to != 3, silent0); waited += 250
+    lastRound0 = net.voters(1).round - 1
+    blocks.add("b5", 5)
+    net.run(10_000, (from, to) => from != 3 && to != 3, silent0)
+    net.voters(3).round should be < net.voters(1).round
+    // Back online, nobody resends the votes of the others' round: still stuck.
+    net.run(10_000, silent = silent0)
+    net.chains(1).finalizedHash shouldBe h("b4")
+    // Voter 1 relays the round's votes it holds (GrandpaService does this while a round is stalled).
+    net.voters(1).roundVotes.foreach(net.voters(3).onVote)
+    net.voters(3).round shouldBe net.voters(1).round
+    net.run(10_000, silent = silent0)
+    net.chains(1).finalizedHash shouldBe h("b5")
+    net.chains(3).finalizedHash shouldBe h("b5")
+  }
+
+  test("a voter one round behind joins the next round when f + 1 voters are in it") {
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    val net = new Net(blocks, keys)
+    var waited = 0
+    while (net.voters(1).round < 2 || net.voters(1).roundVotes.map(_.message.signed.signerKey).distinct.size < 2) &&
+      waited < 20_000
+    do
+      net.run(250); waited += 250
+    net.voters(1).round shouldBe 2L
+    val behind = net.newVoter(3) // round 1, missed the votes that completed it
+    net.voters(1).roundVotes.foreach(behind.onVote)
+    behind.round shouldBe 2L
+  }
+
+  test("a restarted voter resumes its persisted round with the votes it cast, so it never votes twice in a round") {
+    val blocks = new Blocks
+    (1 to 3).foreach(i => blocks.add(s"b$i", i.toLong))
+    val net = new Net(blocks, keys)
+    var waited = 0
+    while net.voters(3).ourVotes.size < 2 && waited < 20_000 do
+      net.run(250); waited += 250
+    val before = net.voters(3)
+    val restarted = net.newVoter(3, resume = true)
+    restarted.round shouldBe before.round
+    restarted.ourVotes.map(m => (m.message.kind, m.message.signed.vote)) shouldBe
+      before.ourVotes.map(m => (m.message.kind, m.message.signed.vote))
+    net.voters(3) = restarted
+    blocks.add("b4", 4)
+    net.run(10_000)
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b4"))
   }

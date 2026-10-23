@@ -88,8 +88,11 @@ object GrandpaMessages:
     w.compact(j.ancestries.size.toLong)
     j.ancestries.foreach(w.bytes(_))
 
+  /** Round ++ set id ++ kind ++ target ++ signature ++ signer. */
+  val VoteMessageSize: Int = 177
+
   def encodeVoteMessage(m: VoteMessage): Array[Byte] =
-    val w = new ByteWriter(177)
+    val w = new ByteWriter(VoteMessageSize)
     w.u64(m.round)
     w.u32(m.setId)
     w.u8(m.message.kind)

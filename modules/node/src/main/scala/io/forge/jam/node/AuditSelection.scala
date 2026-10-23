@@ -13,6 +13,9 @@ object AuditSelection:
   /** Expected auditors drawn per no-show in the tranche before (`C_audit-bias-factor`). */
   val BiasFactor: Int = 2
 
+  /** Tranches after which a finalized block we never saw audited stops being audited (our own rule). */
+  val GiveUpTranches: Int = 10
+
   /** Cores drawn by the tranche-0 VRF. */
   val InitialCores: Int = 10
 

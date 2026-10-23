@@ -130,8 +130,8 @@ final class AuditorService(
           q,
           q.map(_.map(w => Hashing.blake2b256(w.encode.toArray)))
         )
-        auditedBlocks.put(head.hash, java.lang.Boolean.valueOf(t.available.isEmpty))
         if t.available.nonEmpty then
+          auditedBlocks.put(head.hash, java.lang.Boolean.FALSE)
           exec.execute(() =>
             guarded {
               tracked.put(t.hash, t)
@@ -162,7 +162,7 @@ final class AuditorService(
   private def tick(): Unit =
     val finalizedSlot = chain.finalized.slot
     val now = clock()
-    tracked.filterInPlace((_, t) => t.slot > finalizedSlot || !isAudited(t.hash))
+    forgetFinalized(finalizedSlot, now)
     tracked.values.foreach { t =>
       val n = trancheAt(now, t.origin)
       ownIndices(t).foreach { (v, keys) =>
@@ -279,6 +279,24 @@ final class AuditorService(
           )
         case None => ()
     }
+
+  /** Stop auditing finalized blocks once audited, or after `GiveUpTranches` without: a node that was cut off missed
+    * the others' announcements and judgments, which are never resent, so it would retry forever and keep their state.
+    */
+  private def forgetFinalized(finalizedSlot: Long, now: Long): Unit =
+    val done = tracked.values
+      .filter(t => t.slot <= finalizedSlot && (isAudited(t.hash) || trancheAt(now, t.origin) >= GiveUpTranches))
+      .toList
+    if done.nonEmpty then
+      done.foreach(t => tracked.remove(t.hash))
+      val live = tracked.values.flatMap(_.available.map(_._3)).toSet
+      done.foreach { t =>
+        if !isAudited(t.hash) then logger.debug(s"block ${t.hash.toHex.take(18)} finalized before we saw it audited")
+        auditedBlocks.remove(t.hash)
+        t.available.map(_._3).filterNot(live.contains).foreach { h =>
+          positive.remove(h); negative.remove(h); verdicts.remove(h); announcementCounts.remove(h)
+        }
+      }
 
   /** Publish our judgment on `reportHash` for every key of ours that announced it in `t`. */
   private def judge(t: Tracked, reportHash: Hash, valid: Boolean): Unit =

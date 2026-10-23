@@ -82,13 +82,35 @@ final class GrandpaVoter(
     /** Called with each block GRANDPA finalized, its justification and whether it ended a voter set. */
     onFinalized: (Vote, Justification, Boolean) => Unit = (_, _, _) => (),
     /** Called with each voter set adopted from the finalized chain rather than from our own justification. */
-    onSetAdopted: VoterSet => Unit = _ => ()
+    onSetAdopted: VoterSet => Unit = _ => (),
+    /** Called with our set, round and votes in it whenever they change, to persist them. */
+    onProgress: (Long, Long, List[VoteMessage]) => Unit = (_, _, _) => (),
+    /** Round and our votes in it from before a restart, in `initialSet`. */
+    resume: Option[(Long, List[VoteMessage])] = None
 ) extends LazyLogging:
 
   private var set: VoterSet = initialSet
   private var lastSyncedFinal: Hash = Hash.zero
-  private var current: RoundState = new RoundState(1, clock())
-  private val rounds = mutable.TreeMap(1L -> current)
+  private var current: RoundState = new RoundState(resume.fold(1L)(_._1), clock())
+  private val rounds = mutable.TreeMap(current.round -> current)
+
+  // A restarted voter goes back to its round with the votes it cast there: peers that never resend their votes
+  // are waiting in that round, and voting again differently would be an equivocation.
+  resume.foreach { (_, votes) =>
+    votes.filter(m => m.setId == set.setId && m.round == current.round).foreach { m =>
+      val sv = m.message.signed
+      m.message.kind match
+        case PrimaryPropose => current.proposed = true; current.primaryProposal = Some(sv.vote)
+        case Prevote        => current.prevoted = true; record(current, Prevote, sv)
+        case _              => current.precommitted = true; record(current, Precommit, sv)
+    }
+  }
+
+  /** Votes and the latest commit for sets we have not reached yet, replayed once we change to that set: a peer's
+    * commit can arrive just before the finalized chain that moves us to its set.
+    */
+  private val futureVotes = mutable.ListBuffer.empty[VoteMessage]
+  private val futureCommits = mutable.TreeMap.empty[Long, (Long, Commit, List[Array[Byte]])]
 
   def voterSet: VoterSet = set
   def round: Long = current.round
@@ -204,7 +226,8 @@ final class GrandpaVoter(
   private def cast(kind: Int, vote: Vote): Unit =
     keys.filter(k => set.members.contains(k.ed25519Public.toSeq)).foreach { k =>
       val signed = sign(kind, vote, current.round, set.setId, k)
-      record(current, kind, signed)
+      if kind == PrimaryPropose then current.primaryProposal = Some(signed.vote) else record(current, kind, signed)
+      onProgress(set.setId, current.round, ourVotes)
       out.broadcastVote(VoteMessage(current.round, set.setId, SignedMessage(kind, signed)))
       logger.debug(s"GRANDPA round ${current.round} set ${set.setId}: ${kindName(kind)} ${vote.short}")
     }
@@ -226,6 +249,15 @@ final class GrandpaVoter(
         true
 
   private def hexKey(k: Array[Byte]): String = k.take(6).map(b => f"${b & 0xff}%02x").mkString
+
+  /** Every vote we hold for the current round, ours and relayed, to resend while the round is stalled: a voter that
+    * was cut off gets the votes it needs to finish the round, since some peers never resend.
+    */
+  def roundVotes: List[VoteMessage] =
+    val r = current
+    (r.prevotes.values.map(Prevote -> _) ++ r.precommits.values.map(Precommit -> _)).toList.map { (kind, v) =>
+      VoteMessage(r.round, set.setId, SignedMessage(kind, v))
+    }
 
   /** Our own votes in the current round, to resend to voters that connected after we cast them. */
   def ourVotes: List[VoteMessage] =
@@ -257,17 +289,34 @@ final class GrandpaVoter(
         current = new RoundState(1, clock())
         rounds.put(1, current)
         out.broadcastState(1, set.setId, f.slot)
+        onProgress(set.setId, 1, Nil)
+        replayFuture()
       markers.nonEmpty
 
-  /** Votes from at least f + 1 voters in a later round mean the others moved on without us (we restarted, or missed
-    * the votes that completed our round); join that round, keeping its votes.
+  /** Feed the buffered votes and commit of the set we just reached. */
+  private def replayFuture(): Unit =
+    val (now, later) = futureVotes.toList.filter(_.setId >= set.setId).partition(_.setId == set.setId)
+    futureVotes.clear()
+    futureVotes ++= later
+    now.foreach(acceptVote)
+    futureCommits.keys.filter(_ < set.setId).toList.foreach(futureCommits.remove)
+    futureCommits.remove(set.setId).foreach { (round, c, anc) =>
+      logger.info(s"GRANDPA replaying the commit for round $round of set ${set.setId}")
+      onCommit(round, set.setId, c, anc): Unit
+    }
+    rounds.keys.toList.reverse.takeWhile(_ > current.round).find(joinLaterRound): Unit
+
+  /** Votes from at least f + 1 voters in a later round mean an honest voter saw our round completable (we restarted,
+    * or missed the votes that completed it); join that round, keeping its votes.
     */
-  private def joinLaterRound(n: Long): Unit =
-    rounds.get(n).foreach { r =>
+  private def joinLaterRound(n: Long): Boolean =
+    rounds.get(n).exists { r =>
       val signers = (r.prevotes.keySet ++ r.precommits.keySet).size
-      if n > current.round + 1 && signers >= set.honestThreshold then
+      val join = n > current.round && signers >= set.honestThreshold
+      if join then
         logger.info(s"GRANDPA joining round $n of set ${set.setId} from round ${current.round}: $signers voters are there")
         startRound(n)
+      join
     }
 
   /** Advance the current round as far as the votes and timers allow. */
@@ -299,6 +348,7 @@ final class GrandpaVoter(
     current = rounds.getOrElseUpdate(n, new RoundState(n, clock()))
     rounds.keys.filter(_ < n - 2).toList.foreach(rounds.remove)
     out.broadcastState(n, set.setId, chain.finalized.slot)
+    onProgress(set.setId, n, ourVotes)
 
   /** Finalize the highest precommit GHOST above our finalized block, in any round we track; true when the voter set
     * changed.
@@ -349,6 +399,8 @@ final class GrandpaVoter(
             rounds.put(1, current)
             logger.info(s"GRANDPA set change to set ${set.setId} at ${target.short} (${set.size} voters)")
             out.broadcastState(1, set.setId, target.slot)
+            onProgress(set.setId, 1, Nil)
+            replayFuture()
             Some(true)
           case None => Some(false)
 
@@ -363,6 +415,19 @@ final class GrandpaVoter(
       s"GRANDPA ${kindName(m.message.kind)} from ${hexKey(sv.signer)}: round ${m.round} set ${m.setId} ${sv.vote.short}" +
         s" (we are at round ${current.round} set ${set.setId})"
     )
+    if m.setId > set.setId then
+      if futureVotes.size < GrandpaVoter.MaxFutureVotes then futureVotes += m
+      false
+    else
+      val ok = acceptVote(m)
+      if ok then
+        joinLaterRound(m.round): Unit
+        step()
+      ok
+
+  /** Check and record a vote of our set without advancing. */
+  private def acceptVote(m: VoteMessage): Boolean =
+    val sv = m.message.signed
     if m.setId != set.setId then false
     else if !set.members.contains(sv.signerKey) then
       logger.debug(s"GRANDPA vote from a non-voter ${hexKey(sv.signer)}")
@@ -377,8 +442,6 @@ final class GrandpaVoter(
         case PrimaryPropose =>
           if sv.signerKey == set.primary(m.round) && r.primaryProposal.isEmpty then r.primaryProposal = Some(sv.vote)
         case kind => record(r, kind, sv)
-      joinLaterRound(m.round)
-      step()
       true
 
   /** Checks a commit against the current set: valid distinct precommits, a supermajority, all at or above the
@@ -402,7 +465,14 @@ final class GrandpaVoter(
 
   /** CE 150 or a fetched justification. Returns the block to fetch when the target is not stored yet. */
   def onCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]] = Nil): Either[String, Option[Hash]] =
-    if c.target.slot <= chain.finalized.slot then Right(None)
+    if setId > set.setId then
+      if futureCommits.get(setId).forall(_._1 < round) then futureCommits.put(setId, (round, c, ancestries))
+      Left(s"set $setId, expected ${set.setId}; kept for later")
+    else if c.target.slot <= chain.finalized.slot then
+      // Already finalized (e.g. by following peers), but the commit still says the round is over.
+      if setId == set.setId && round >= current.round && chain.slotOf(c.target.hash).isDefined then
+        verifyCommit(round, setId, c, ancestries).map(_ => { startRound(round + 1); None })
+      else Right(None)
     else if chain.slotOf(c.target.hash).isEmpty then
       verifyCommitSignatures(round, setId, c).map(_ => Some(c.target.hash))
     else
@@ -456,6 +526,9 @@ object GrandpaVoter:
 
   /** Votes this many rounds ahead of ours are kept, so that a restarted voter can join the others' round. */
   val MaxRoundsAhead: Long = 256
+
+  /** Votes kept for sets we have not reached yet. */
+  val MaxFutureVotes: Int = 1024
 
   /** Hash, parent and slot of an encoded header. */
   final case class HeaderLink(hash: Hash, parent: Hash, slot: Long)

@@ -114,8 +114,9 @@ final class ExtrinsicPools:
   /** Guarantees for inclusion: sorted by core index (extrinsic ordering
     * requirement), at most one per core.
     */
-  def takeGuarantees(): List[GuaranteeExtrinsic] =
+  def takeGuarantees(usable: GuaranteeExtrinsic => Boolean = _ => true): List[GuaranteeExtrinsic] =
     guarantees.values.asScala.toList
+      .filter(usable)
       .groupBy(_.report.coreIndex.toInt)
       .values
       .map(_.head)
@@ -128,8 +129,9 @@ final class ExtrinsicPools:
       .filter(_.anchor == parent)
       .sortBy(_.validatorIndex.value.toInt)
 
-  def takePreimages(): List[Preimage] =
+  def takePreimages(usable: Preimage => Boolean = _ => true): List[Preimage] =
     preimages.values.asScala.toList
+      .filter(usable)
       .sortBy(p => (p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray).toHex))
 
   def findPreimage(hash: Hash): Option[Preimage] =
@@ -155,6 +157,16 @@ final class ExtrinsicPools:
     assurances.keySet.asScala.filterNot(_._2 == newBestHash).toList.foreach(assurances.remove)
 
   def clearGuarantees(): Unit = guarantees.clear()
+
+  def pendingGuarantees: List[GuaranteeExtrinsic] = guarantees.values.asScala.toList
+
+  def pendingPreimages: List[Preimage] = preimages.values.asScala.toList
+
+  def removePreimages(ps: Iterable[Preimage]): Unit =
+    ps.foreach(p => preimages.remove((p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray))))
+
+  def removeGuarantees(gs: Iterable[GuaranteeExtrinsic]): Unit =
+    gs.foreach(g => guarantees.remove(Hashing.blake2b256(g.report.encode.toArray)))
 
   def clear(): Unit =
     guarantees.clear()

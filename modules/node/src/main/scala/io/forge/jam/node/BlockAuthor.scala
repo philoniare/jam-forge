@@ -127,10 +127,25 @@ final class BlockAuthor(
       logger.warn("sealing key not in the active validator set")
       return None
 
+    // Guarantees that can no longer go in a block on `best` leave the pool, so they don't fail the import.
+    val ancestors = chain.ancestorsOf(best.hash, best.stateRoot, slot)
+    val recent = view.beta.history.map(_.headerHash).toSet + best.hash
+    val stale = pools.pendingGuarantees.filterNot(BlockAuthor.guaranteeUsable(_, slot, recent, ancestors, chain.config))
+    if stale.nonEmpty then
+      logger.info(s"dropping ${stale.size} guarantee(s) no longer valid at slot $slot")
+      pools.removeGuarantees(stale)
+
+    // A preimage another block already provided would fail the import (PreimageUnneeded); one not requested yet waits.
+    val preimageState = pools.pendingPreimages.map(p => p -> BlockAuthor.preimageRequest(p, preView)).toMap
+    val provided = preimageState.collect { case (p, Some(false)) => p }
+    if provided.nonEmpty then
+      logger.info(s"dropping ${provided.size} preimage(s) already provided")
+      pools.removePreimages(provided)
+
     // Fill from the pools.
     val extrinsic = Extrinsic(
       tickets = includedTickets.map(_._2),
-      preimages = pools.takePreimages(),
+      preimages = pools.takePreimages(p => preimageState.get(p).forall(_.contains(true))),
       guarantees = pools.takeGuarantees(),
       assurances = pools.takeAssurances(best.hash),
       disputes = Dispute(List.empty, List.empty, List.empty)
@@ -176,3 +191,37 @@ final class BlockAuthor(
         s"${extrinsic.assurances.size} assurances)"
     )
     Some(block)
+
+object BlockAuthor:
+
+  /** The reporting checks that a guarantee fails just by ageing: its rotation is the current or the
+    * previous one, its anchor is in recent history, and its lookup anchor is an ancestor at most L slots old.
+    */
+  def guaranteeUsable(
+      g: io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic,
+      slot: Long,
+      recent: Set[Hash],
+      ancestors: List[io.forge.jam.protocol.report.ReportTypes.AncestorHeader],
+      config: io.forge.jam.core.ChainConfig
+  ): Boolean =
+    val ctx = g.report.context
+    val rotation = g.slot.value.toLong / config.rotationPeriod
+    val current = slot / config.rotationPeriod
+    val lookupSlot = ctx.lookupAnchorSlot.value.toLong
+    rotation >= current - 1 && g.slot.value.toLong <= slot &&
+    recent.contains(ctx.anchor) &&
+    slot - lookupSlot <= config.maxLookupAnchorAge &&
+    ancestors.exists(a => a.headerHash == ctx.lookupAnchor && a.slot == lookupSlot)
+
+  /** Some(true) when `p` is requested and not provided yet, Some(false) when already provided, None when not
+    * requested (Y(a_l)).
+    */
+  def preimageRequest(
+      p: io.forge.jam.core.types.extrinsic.Preimage,
+      state: io.forge.jam.protocol.state.TrieBackedJamState
+  ): Option[Boolean] =
+    import io.forge.jam.protocol.accumulation.StateKey
+    val blob = p.blob.toArray
+    val hash = JamBytes(Hashing.blake2b256(blob).bytes)
+    val key = StateKey.computePreimageInfoStateKey(p.requester.value.toLong, blob.length, hash)
+    state.storage.readTrie(key).map(StateKey.isUnprovidedRequest)

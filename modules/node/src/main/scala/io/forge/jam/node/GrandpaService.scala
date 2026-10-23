@@ -70,13 +70,15 @@ final class GrandpaService(
   private val votesSentTo = ConcurrentHashMap.newKeySet[Seq[Byte]]()
   @volatile private var votesRound = (0L, 0L)
   @volatile private var roundSince = 0L
+  @volatile private var lastCatchUpAsk = 0L
 
-  /** Resend our current round's votes to voters that connected since, and to every voter while the round is stalled
-    * (votes lost in a partition are not resent by their senders).
+  /** Resend our current round's votes to voters that connected since, and every vote we hold for it to every voter
+    * while the round is stalled (votes lost in a partition are not resent by their senders).
     */
   private def resendVotes(): Unit =
     val now = System.currentTimeMillis()
     val round = (voter.voterSet.setId, voter.round)
+    var stalled = false
     if round != votesRound then
       votesRound = round
       roundSince = now
@@ -84,7 +86,13 @@ final class GrandpaService(
     else if now - roundSince > 8 * gossipMillis then
       roundSince = now - 4 * gossipMillis
       votesSentTo.clear()
-    val votes = voter.ourVotes
+      stalled = true
+    if stalled && now - lastCatchUpAsk > 30 * gossipMillis then
+      // A voter back from a restart hears nothing from peers that never resend: ask them.
+      lastCatchUpAsk = now
+      logger.debug(s"GRANDPA round ${voter.round} of set ${voter.voterSet.setId} stalled: asking voters for a catch-up")
+      voterPeers.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
+    val votes = if stalled then voter.roundVotes else voter.ourVotes
     if votes.nonEmpty then
       voterPeers.filterNot(c => votesSentTo.contains(c.peerKey.toSeq)).foreach { c =>
         votesSentTo.add(c.peerKey.toSeq)
@@ -115,10 +123,16 @@ final class GrandpaService(
       keys,
       gossipMillis = gossipMillis,
       onFinalized = persist,
-      onSetAdopted = s => chain.putMeta("grandpa:set", LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray)
+      onSetAdopted = s => chain.putMeta("grandpa:set", LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray),
+      onProgress = (setId, round, votes) =>
+        chain.putMeta(
+          "grandpa:round",
+          LittleEndian.encode(setId, 8) ++ LittleEndian.encode(round, 8) ++ votes.flatMap(encodeVoteMessage)
+        ),
+      resume = storedRound(set.setId)
     )
-    logger.info(s"GRANDPA voter started: set ${set.setId}, ${set.size} voters, voting=${keys.exists(k =>
-        set.members.contains(k.ed25519Public.toSeq))}")
+    logger.info(s"GRANDPA voter started: set ${set.setId} round ${voter.round}, ${set.size} voters, voting=${keys
+        .exists(k => set.members.contains(k.ed25519Public.toSeq))}")
     chain.onImported((head, _) =>
       exec.execute(() => { retryPending(head.hash); voter.step() })
     )
@@ -135,6 +149,13 @@ final class GrandpaService(
   private def guarded(f: => Unit): Unit =
     try f
     catch case e: Exception => logger.error("GRANDPA step failed", e)
+
+  /** The round and our votes in it persisted for `setId` before a restart. */
+  private def storedRound(setId: Long): Option[(Long, List[VoteMessage])] =
+    chain.meta("grandpa:round").filter(b => b.length >= 16 && LittleEndian.get(b, 0, 8) == setId).map { b =>
+      val votes = b.drop(16).grouped(VoteMessageSize).flatMap(v => decodeVoteMessage(v).toOption).toList
+      (LittleEndian.get(b, 8, 8), votes)
+    }
 
   private def persist(target: Vote, j: Justification, setChanged: Boolean): Unit =
     val encoded = encodeJustification(j)
