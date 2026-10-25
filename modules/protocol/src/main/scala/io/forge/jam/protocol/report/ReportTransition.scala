@@ -429,13 +429,10 @@ object ReportTransition:
       _ <- ensure(workReport.results.length <= config.maxWorkItems, ReportErrorCode.WorkReportTooBig)
       _ <- ensure(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
-      _ <- {
-        // ULong sum: signed-Long sum can wrap and falsely satisfy the bound.
-        val totalAccGas = workReport.results.foldLeft(ULong(0L)) { (acc, r) =>
-          acc + ULong(r.accumulateGas.toLong)
-        }
-        ensure(totalAccGas <= ULong(config.reportAccGas), ReportErrorCode.WorkReportGasTooHigh)
-      }
+      _ <- ensure(
+        sumWithin(workReport.results.map(_.accumulateGas.value), config.reportAccGas),
+        ReportErrorCode.WorkReportGasTooHigh
+      )
       _ <- ensure(
         workReport.coreIndex.toInt < config.coresCount &&
           workReport.coreIndex.toInt < activeValidatorCount / 3,
@@ -445,12 +442,37 @@ object ReportTransition:
         workReport.packageSpec.erasureShards.toInt == activeValidatorCount,
         ReportErrorCode.BadErasureShards
       )
+      _ <- validateWorkPackageLimits(workReport, config)
       _ <- validateAuthorizer(workReport, authPools)
       _ <- validateWorkResults(workReport, accountsById)
       _ <- ensure(
         workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
         ReportErrorCode.TooManyDependencies
       )
+    yield ()
+
+  /** Sum of u64 values at most `limit`, summed in BigInt so it can't wrap. */
+  private def sumWithin(xs: List[ULong], limit: Long): Boolean =
+    xs.foldLeft(BigInt(0))(_ + _.toBigInt) <= limit
+
+  /**
+   * Work-report values within the work-package limits.
+   */
+  private def validateWorkPackageLimits(workReport: WorkReport, config: ChainConfig): ValidationResult =
+    val loads = workReport.results.map(_.refineLoad)
+    val exports = loads.map(_.exports.toLong).sum
+    val refineLoadOk =
+      sumWithin(loads.map(_.gasUsed.value), config.maxRefineGas) &&
+        loads.map(_.imports.toLong).sum <= constants.Cmaxpackageimports &&
+        exports <= constants.Cmaxpackageexports &&
+        loads.map(_.extrinsicCount.toLong).sum <= constants.Cmaxpackagexts &&
+        loads.map(l => l.extrinsicSize.toLong + l.imports.toLong * constants.Csegmentfootprint).sum <=
+        constants.Cmaxinputsize
+    for
+      _ <- ensure(workReport.packageSpec.exportsCount.toLong == exports, ReportErrorCode.BadExportsCount)
+      _ <- ensure(refineLoadOk, ReportErrorCode.RefineLoadTooHigh)
+      _ <- ensure(workReport.packageSpec.length.toLong <= constants.Cmaxbundlesize, ReportErrorCode.BundleTooBig)
+      _ <- ensure(workReport.authGasUsed.value <= ULong(constants.Cpackageauthgas), ReportErrorCode.AuthGasTooHigh)
     yield ()
 
   private def validateOutputSize(workReport: WorkReport): ValidationResult =

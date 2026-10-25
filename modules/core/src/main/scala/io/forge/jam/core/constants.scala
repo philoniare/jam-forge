@@ -71,6 +71,18 @@ object constants:
   /** Cpackageauthgas: gas allotted to a work package's is-authorized call. */
   val Cpackageauthgas: Long = 50_000_000L
 
+  /** Cmaxpackagexts = T: maximum extrinsics per work package. */
+  val Cmaxpackagexts: Int = 128
+
+  /** Csegmentfootprint = W_F: Audits DA footprint of one imported segment. */
+  val Csegmentfootprint: Long = 4488L
+
+  /** Cmaxinputsize = W_I: maximum work-package input data size. */
+  val Cmaxinputsize: Long = 13_791_360L
+
+  /** Cmaxbundlesize = W_B: maximum encoded work-package bundle length. */
+  val Cmaxbundlesize: Long = 13_904_950L
+
   /**
    * Cmaxreportvarsize: bound on the variable-size portion of a work report —
    * the authorizer trace and the cumulative work-item output sizes.

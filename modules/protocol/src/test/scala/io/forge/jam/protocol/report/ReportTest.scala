@@ -847,8 +847,15 @@ class ReportTest extends AnyFunSuite with Matchers:
     ReportErrorCode.values.foreach { e =>
       codec.decodeExact(codec.encode(e)) shouldBe Right(e)
     }
-    // values.length (27) is out of range: decode must return a Left
+    // values.length is out of range: decode must return a Left
     // (no thrown exception).
     val invalid = Array[Byte](ReportErrorCode.values.length.toByte)
     codec.decode(invalid).isLeft shouldBe true
+  }
+
+  test("work-package limit error codes use reports.asn ordinals 28-31") {
+    ReportErrorCode.RefineLoadTooHigh.ordinal shouldBe 28
+    ReportErrorCode.BadExportsCount.ordinal shouldBe 29
+    ReportErrorCode.BundleTooBig.ordinal shouldBe 30
+    ReportErrorCode.AuthGasTooHigh.ordinal shouldBe 31
   }

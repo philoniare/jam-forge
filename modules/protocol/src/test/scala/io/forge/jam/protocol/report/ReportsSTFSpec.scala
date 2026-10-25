@@ -122,7 +122,8 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
         erasureRoot = hashOf(0x02),
         erasureShards = UShort(testConfig.validatorCount),
         exportsRoot = hashOf(0x03),
-        exportsCount = UShort(1)
+        // Segment count is the sum of the digest exports
+        exportsCount = UShort(results.map(_.refineLoad.exports.toInt).sum)
       ),
       context = Context(
         anchor = hashOf(0x04),

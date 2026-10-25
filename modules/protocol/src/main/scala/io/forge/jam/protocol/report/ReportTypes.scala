@@ -323,6 +323,7 @@ object ReportTypes:
   /**
    * Error codes for the Reports STF.
    */
+  /** Ordinals 0-31 follow jam-test-vectors reports.asn; DuplicateGuarantors is ours. */
   enum ReportErrorCode:
     case BadCoreIndex
     case FutureReportSlot
@@ -352,6 +353,10 @@ object ReportTypes:
     case MissingWorkResults
     case BadAnchorSlot
     case BadErasureShards
+    case RefineLoadTooHigh
+    case BadExportsCount
+    case BundleTooBig
+    case AuthGasTooHigh
     case DuplicateGuarantors
 
   object ReportErrorCode:
@@ -394,6 +399,10 @@ object ReportTypes:
           case "missing_work_results" => ReportErrorCode.MissingWorkResults
           case "bad_anchor_slot" => ReportErrorCode.BadAnchorSlot
           case "bad_erasure_shards" => ReportErrorCode.BadErasureShards
+          case "refine_load_too_high" => ReportErrorCode.RefineLoadTooHigh
+          case "bad_exports_count" => ReportErrorCode.BadExportsCount
+          case "bundle_too_big" => ReportErrorCode.BundleTooBig
+          case "auth_gas_too_high" => ReportErrorCode.AuthGasTooHigh
           case "duplicate_guarantors" => ReportErrorCode.DuplicateGuarantors
           case other => throw new IllegalArgumentException(s"Unknown error code: $other")
         }
