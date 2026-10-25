@@ -20,10 +20,10 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     */
   protected def handleBless(instance: PvmInstance): Unit =
     val newManager = getReg(instance, 7).toLong
-    val assignersPtr = getReg(instance, 8).toInt
+    val assignersPtr = argAddr(instance, 8)
     val newDelegator = getReg(instance, 9).toLong
     val newRegistrar = getReg(instance, 10).toLong
-    val alwaysAccPtr = getReg(instance, 11).toInt
+    val alwaysAccPtr = argAddr(instance, 11)
     val alwaysAccCount: Long = argU32(instance, 12)
       .getOrElse(
         panic(
@@ -97,7 +97,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     */
   protected def handleAssign(instance: PvmInstance): Unit =
     val targetCoreIndexU = getReg(instance, 7)
-    val startAddr = getReg(instance, 8).toInt
+    val startAddr = argAddr(instance, 8)
     val newAssigner = getReg(instance, 9).toLong
 
     // Read authorization queue from memory (32 bytes * AUTH_QUEUE_SIZE)
@@ -152,7 +152,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
   /** designate (16): Set validator queue (privileged).
     */
   protected def handleDesignate(instance: PvmInstance): Unit =
-    val startAddr = getReg(instance, 7).toInt
+    val startAddr = argAddr(instance, 7)
     val validatorKeySize = 336L
     val zFull = getReg(instance, 8)
 
@@ -201,7 +201,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
   /** upgrade (19): Upgrade service code hash.
     */
   protected def handleUpgrade(instance: PvmInstance): Unit =
-    val codeHashAddr = getReg(instance, 7).toInt
+    val codeHashAddr = argAddr(instance, 7)
     val newMinAccumulateGas = getReg(instance, 8).toLong
     val newMinMemoGas = getReg(instance, 9).toLong
 
@@ -235,7 +235,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     * caller is registrar)
     */
   protected def handleNew(instance: PvmInstance): Unit =
-    val codeHashAddr = getReg(instance, 7).toInt
+    val codeHashAddr = argAddr(instance, 7)
     val codeHashLength = argU32(instance, 8)
       .getOrElse(
         panic(
@@ -358,7 +358,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     */
   protected def handleEject(instance: PvmInstance): Unit =
     val ejectServiceId = getReg(instance, 7).toLong
-    val preimageHashAddr = getReg(instance, 8).toInt
+    val preimageHashAddr = argAddr(instance, 8)
 
     val hashBuffer = new Array[Byte](Hash.Size)
     if !readMemory(instance, preimageHashAddr, hashBuffer) then
@@ -472,7 +472,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     val destination = argServiceId(instance, 7).toLong
     val amount = getReg(instance, 8).toLong
     val gasLimitU = getReg(instance, 9)
-    val memoAddr = getReg(instance, 10).toInt
+    val memoAddr = argAddr(instance, 10)
 
     val account = context.x.accounts.get(context.serviceIndex)
     val accounts = context.x.accounts

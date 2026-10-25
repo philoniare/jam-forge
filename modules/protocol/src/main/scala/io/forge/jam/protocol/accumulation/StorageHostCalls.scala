@@ -24,8 +24,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     * accumulation, supports fetching operands and constants.
     */
   protected def handleFetch(instance: PvmInstance): Unit =
-    val selector = getReg(instance, 10).toInt
-    val outputAddr = getReg(instance, 7).toInt
+    val selector = argU32(instance, 10).fold(-1)(_.toInt)
+    val outputAddr = argAddr(instance, 7)
     val index = argU32(instance, 11)
 
     val data: Option[Array[Byte]] = selector match
@@ -62,8 +62,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleLookup(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
-    val hashAddr = getReg(instance, 8).toInt
-    val outputAddr = getReg(instance, 9).toInt
+    val hashAddr = argAddr(instance, 8)
+    val outputAddr = argAddr(instance, 9)
 
     // Read hash from memory - panic on OOB
     val hashBuffer = new Array[Byte](Hash.Size)
@@ -128,9 +128,9 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleRead(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
-    val keyAddr = getReg(instance, 8).toInt
+    val keyAddr = argAddr(instance, 8)
     val keyLen = getReg(instance, 9) & ULong(0xffffffffL)
-    val outputAddr = getReg(instance, 10).toInt
+    val outputAddr = argAddr(instance, 10)
 
     // Read key from memory - PANIC on memory failure
     val keyBuffer = readGuestBytes(instance, keyAddr, keyLen, "Read")
@@ -174,8 +174,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     * NONE if key didn't exist, FULL if threshold exceeded.
     */
   protected def handleWrite(instance: PvmInstance): Unit =
-    val keyAddr = getReg(instance, 7).toInt
-    val valueAddr = getReg(instance, 9).toInt
+    val keyAddr = argAddr(instance, 7)
+    val valueAddr = argAddr(instance, 9)
     val keyLen: Long = (getReg(instance, 8) & ULong(0xffffffffL)).toLong
     val valueLen: Long = (getReg(instance, 10) & ULong(0xffffffffL)).toLong
 
@@ -279,7 +279,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleInfo(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
-    val outputAddr = getReg(instance, 8).toInt
+    val outputAddr = argAddr(instance, 8)
     val targetServiceId =
       if serviceId == -1L then context.serviceIndex else serviceId
     val info = context.x.accounts.get(targetServiceId) match
@@ -320,7 +320,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   /** query (22): Return preimage request status packed in r7/r8.
     */
   protected def handleQuery(instance: PvmInstance): Unit =
-    val hashAddr = getReg(instance, 7).toInt
+    val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
@@ -379,7 +379,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     *   - Otherwise: Return HUH
     */
   protected def handleSolicit(instance: PvmInstance): Unit =
-    val hashAddr = getReg(instance, 7).toInt
+    val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
@@ -483,7 +483,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     *   - Otherwise: Return HUH
     */
   protected def handleForget(instance: PvmInstance): Unit =
-    val hashAddr = getReg(instance, 7).toInt
+    val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
     if zFull > ULong(0xffffffffL) then
       setReg(instance, 7, HostCallResult.HUH)
@@ -608,7 +608,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val targetServiceId =
       if r7 == ULong(0xffffffffffffffffL) then context.serviceIndex
       else r7.toLong
-    val blobAddr = getReg(instance, 8).toInt
+    val blobAddr = argAddr(instance, 8)
     val blobBuffer = readGuestBytes(instance, blobAddr, zFull, "Provide")
 
     // Safe: readGuestBytes panicked unless zFull <= Int.MaxValue.
@@ -665,7 +665,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   /** yield (25): Set accumulation output hash.
     */
   protected def handleYield(instance: PvmInstance): Unit =
-    val hashAddr = getReg(instance, 7).toInt
+    val hashAddr = argAddr(instance, 7)
 
     // Read hash from memory
     val hashBuffer = new Array[Byte](Hash.Size)

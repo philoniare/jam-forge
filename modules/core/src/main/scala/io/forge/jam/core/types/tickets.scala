@@ -28,22 +28,22 @@ object tickets:
       s"Signature must be $RingVrfSignatureSize bytes, got ${signature.length}")
 
   object TicketEnvelope:
-    /** Minimum on-wire size: 1-byte compact attempt (value < 128) + signature. */
-    val MinSize: Int = 1 + RingVrfSignatureSize // 785 bytes
-    /** Maximum on-wire size: 2-byte compact attempt (value >= 128) + signature. */
-    val MaxSize: Int = 2 + RingVrfSignatureSize // 786 bytes
+    /** On-wire size: 1-byte attempt + signature. */
+    val Size: Int = 1 + RingVrfSignatureSize // 785 bytes
 
-    private val attemptCodec: Codec[UByte] =
-      JamCodecs.compactInt.emap[UByte](
-        i => if i < 0 || i > 255 then Left(s"attempt $i out of UByte range") else Right(UByte(i)),
-        _.toInt
-      )
-
-    given Codec[TicketEnvelope] =
-      (attemptCodec :: bytes(RingVrfSignatureSize)).xmap(
-        { case (attempt, sig) => TicketEnvelope(attempt, sig) },
-        te => (te.attempt, te.signature)
-      )
+    /** The attempt is a fixed one-octet E_1, not a general natural, so an attempt of
+      * 128..255 is still one byte on the wire.
+      */
+    given Codec[TicketEnvelope] = Codec.of(
+      (w, te) =>
+        w.u8(te.attempt.toInt)
+        w.bytes(te.signature),
+      r =>
+        val attempt = UByte(r.u8())
+        TicketEnvelope(attempt, JamBytes.wrap(r.bytes(RingVrfSignatureSize)))
+      ,
+      Size
+    )
 
     given Decoder[TicketEnvelope] = Decoder.instance { cursor =>
       for

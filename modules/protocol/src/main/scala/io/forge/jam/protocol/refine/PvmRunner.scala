@@ -26,6 +26,14 @@ object PvmRunner:
   enum PvmExit:
     case Halt, Panic, OutOfGas, PageFault
 
+  private def fitsU32(reg: Long): Boolean = (reg >>> 32) == 0
+
+  /** A 64-bit register used as a guest address. PVM memory is 32-bit, so a value >= 2^32 maps to 0, inside the
+    * always-inaccessible first Z_Z octets: the access then fails as the spec requires, instead of hitting the
+    * truncated low 32 bits.
+    */
+  def memAddr(reg: Long): Int = if fitsU32(reg) then reg.toInt else 0
+
   private val RA_INIT = 0xffff0000L
   private val SP_INIT = 0xfefe0000L
   private val INPUT_ADDR = 0xfeff0000L
@@ -120,9 +128,13 @@ object PvmRunner:
 
     val output =
       if exit == PvmExit.Halt then
-        val addr = instance.reg(7).toInt
-        val len = instance.reg(8).toInt
-        if len >= 0 && pvmWrapper.isMemoryReadable(addr, len) then
+        // o = mem[w7 ..+ w8] when readable, else empty. Both are 64-bit
+        // registers: a value >= 2^32 can't name a readable range, so it must not be truncated to 32 bits.
+        val r7 = instance.reg(7)
+        val r8 = instance.reg(8)
+        val addr = r7.toInt
+        val len = r8.toInt
+        if fitsU32(r7) && fitsU32(r8) && len >= 0 && pvmWrapper.isMemoryReadable(addr, len) then
           pvmWrapper.readBytes(addr, len).getOrElse(Array.empty[Byte])
         else Array.empty[Byte]
       else Array.empty[Byte]

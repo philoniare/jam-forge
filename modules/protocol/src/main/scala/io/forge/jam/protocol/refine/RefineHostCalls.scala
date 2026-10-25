@@ -83,7 +83,7 @@ class RefineHostCalls(
       case _ => HostCallGas.Cgasunknown
 
   private def invokeInnerGasLimit(instance: PvmInstance): ULong =
-    val o = getReg(instance, 8).toInt
+    val o = PvmRunner.memAddr(instance.reg(8))
     if !instance.isMemoryWritable(o, 112) then ULong(0L)
     else
       val buf = new Array[Byte](8)
@@ -119,7 +119,7 @@ class RefineHostCalls(
 
   private def handleFetch(instance: PvmInstance): Unit =
     val selector = getReg(instance, 10)
-    val outputAddr = getReg(instance, 7).toInt
+    val outputAddr = PvmRunner.memAddr(instance.reg(7))
     val r11 = getReg(instance, 11)
     val r12 = getReg(instance, 12)
 
@@ -156,8 +156,8 @@ class RefineHostCalls(
           Some(id)
         else None
 
-    val hashAddr = getReg(instance, 8).toInt
-    val outputAddr = getReg(instance, 9).toInt
+    val hashAddr = PvmRunner.memAddr(instance.reg(8))
+    val outputAddr = PvmRunner.memAddr(instance.reg(9))
 
     // v = error when the 32-byte hash is unreadable — checked before the
     // account-missing NONE case per Omega_H.
@@ -198,7 +198,7 @@ class RefineHostCalls(
   // ===========================================================================
 
   private def handleExport(instance: PvmInstance): Unit =
-    val addr = getReg(instance, 7).toInt
+    val addr = PvmRunner.memAddr(instance.reg(7))
     val z = argClampedLen(instance, 8, Csegmentsize)
 
     if !instance.isMemoryReadable(addr, z) then
@@ -292,7 +292,7 @@ class RefineHostCalls(
 
     // Outer destination must be writable, else panic (checked first).
     if z > ULong(Int.MaxValue) ||
-      !instance.isMemoryWritable(o.toInt, z.toInt)
+      !instance.isMemoryWritable(PvmRunner.memAddr(o.signed), z.toInt)
     then panic(s"Peek PANIC: outer memory not writable at 0x${o.toLong.toHexString} len $z")
 
     context.innerPvms.get(n.toLong) match
@@ -318,7 +318,7 @@ class RefineHostCalls(
     val z = getReg(instance, 10)
 
     if z > ULong(Int.MaxValue) ||
-      !instance.isMemoryReadable(s.toInt, z.toInt)
+      !instance.isMemoryReadable(PvmRunner.memAddr(s.signed), z.toInt)
     then panic(s"Poke PANIC: outer memory not readable at 0x${s.toLong.toHexString} len $z")
 
     context.innerPvms.get(n.toLong) match
@@ -368,7 +368,7 @@ class RefineHostCalls(
 
   private def handleInvoke(instance: PvmInstance): Unit =
     val n = getReg(instance, 7)
-    val o = getReg(instance, 8).toInt
+    val o = PvmRunner.memAddr(instance.reg(8))
 
     // The 112-byte block (encode8(gas) ++ 13 × encode8(reg)) must be WRITABLE
     // (it is read now and written back after the run), else panic.

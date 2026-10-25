@@ -24,18 +24,18 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
       case Left(err)            => throw new RuntimeException(s"Decode failed: $err")
 
   // ============================================================================
-  // Test 1: TicketEnvelope encode/decode (compact attempt + 784-byte signature)
+  // Test 1: TicketEnvelope encode/decode (1-byte attempt + 784-byte signature)
   // ============================================================================
 
-  "TicketEnvelope" should "encode to MinSize when attempt < 128" in {
+  "TicketEnvelope" should "encode to Size" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x42.toByte)
     val envelope = TicketEnvelope(UByte(3), signature)
     val encoded = encode(envelope)
-    encoded.length shouldBe TicketEnvelope.MinSize
+    encoded.length shouldBe TicketEnvelope.Size
     encoded.length shouldBe 785
   }
 
-  it should "encode attempt as first byte (compact, value < 128)" in {
+  it should "encode attempt as first byte" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x00.toByte)
     val envelope = TicketEnvelope(UByte(42), signature)
     val encoded = encode(envelope)
@@ -47,20 +47,20 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     val envelope = TicketEnvelope(UByte(7), signature)
     val encoded = encode(envelope)
     val (decoded, consumed) = decode[TicketEnvelope](encoded)
-    consumed shouldBe TicketEnvelope.MinSize
+    consumed shouldBe TicketEnvelope.Size
     decoded.attempt shouldBe envelope.attempt
     decoded.signature shouldBe envelope.signature
   }
 
-  it should "use 2-byte JAM-compact encoding for attempt >= 128" in {
+  it should "attempt is a fixed one-octet E_1, also for attempt >= 128" in {
     val signature = JamBytes.fill(RingVrfSignatureSize)(0x00.toByte)
-    val envelope = TicketEnvelope(UByte(200), signature)
+    val envelope = TicketEnvelope(UByte(255), signature)
     val encoded = encode(envelope)
-    encoded.length shouldBe TicketEnvelope.MaxSize
-    encoded.length shouldBe 786
+    encoded.length shouldBe TicketEnvelope.Size
+    encoded(0) shouldBe 0xff.toByte
     val (decoded, consumed) = decode[TicketEnvelope](encoded)
-    consumed shouldBe TicketEnvelope.MaxSize
-    decoded.attempt shouldBe UByte(200)
+    consumed shouldBe TicketEnvelope.Size
+    decoded.attempt shouldBe UByte(255)
   }
 
   // ============================================================================
