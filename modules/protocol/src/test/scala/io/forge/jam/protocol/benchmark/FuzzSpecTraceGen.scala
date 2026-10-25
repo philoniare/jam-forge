@@ -13,13 +13,13 @@ import java.nio.file.{Files, Paths}
  * Writes a binary trace (`genesis.bin` plus one `NNNNNNNN.bin` per block, the jamtestvectors/traces layout) for a
  * chain spec other than tiny, so a fuzz target can be replayed under e.g. `JAM_FUZZ_SPEC=fuzz`.
  *
- * Genesis is the tiny `fuzzy` genesis re-sized by [[FuzzSpecGenesis]] for V = 3C dev validators. Blocks come from
+ * Genesis is a tiny trace's genesis (`--genesis`, default `fuzzy`) re-sized by [[FuzzSpecGenesis]] for V = 3C dev validators. Blocks come from
  * [[BlockGenerator]] (fallback sealing, guarantees, assurances, accumulation) and each post-state root is the one
  * our own importer computes, so the trace is only as right as this client: replay it against other targets to
  * compare.
  *
  * Usage: sbt "protocol/Test/runMain io.forge.jam.protocol.benchmark.FuzzSpecTraceGen --out=<dir> [--spec=fuzz]
- * [--blocks=200] [--staging=N]"
+ * [--blocks=200] [--staging=N] [--genesis=fuzzy] [--seed=42]"
  *
  * `--staging=N` puts only the first N validators in the genesis staging set (iota), as if a `designate` had
  * resized the set: N keys enter gamma_P at the first epoch change and kappa at the second.
@@ -37,7 +37,7 @@ object FuzzSpecTraceGen:
 
     given Decoder[Genesis] = Genesis.decoder
     val tiny = TestFileLoader
-      .loadJsonFromTestVectors[Genesis]("traces/fuzzy", "genesis")
+      .loadJsonFromTestVectors[Genesis](s"traces/${opts.getOrElse("genesis", "fuzzy")}", "genesis")
       .fold(e => throw new IllegalStateException(s"tiny genesis: $e"), identity)
 
     val validatorCount = 3 * config.coresCount
@@ -54,7 +54,8 @@ object FuzzSpecTraceGen:
     val importer = new BlockImporter(config)
     val store = importer.store
     store.bootstrap(genesisState.keyvals.map(kv => (kv.key, kv.value)))
-    val generator = new BlockGenerator(config, keys, store, genesisHeaderHash = Some(genesisHash))
+    val generator = new BlockGenerator(config, keys, store, seed = opts.get("seed").map(_.toLong).getOrElse(42L),
+      genesisHeaderHash = Some(genesisHash))
     val stepCodec = TraceStep.codec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
 
     var root = genesisState.stateRoot

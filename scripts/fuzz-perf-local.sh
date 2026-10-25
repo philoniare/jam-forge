@@ -28,10 +28,11 @@ JOPTS=(-XX:+UseZGC -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDed
   --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
   -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/src/main/resources"
   -Dlogback.configurationFile="$PWD/modules/conformance/src/main/resources/logback-prod.xml")
-# Warmup corpus, laid out as the image's /app/warmup-traces.
+# Warmup corpus, laid out as the image's /app/warmup-traces: the preimages traces plus the generated ones in
+# warmup-traces/. FUZZ_WARMUP_DIRS (space-separated trace directories) replaces the whole list.
 WARMUP_DIR="$(mktemp -d /tmp/jam_warmup.XXXXXX)"
-ln -s "$PWD/jamtestvectors/traces/preimages" "$WARMUP_DIR/preimages"
-ln -s "$PWD/jamtestvectors/traces/preimages_light" "$WARMUP_DIR/preimages_light"
+WARMUP_DIRS="${FUZZ_WARMUP_DIRS:-$PWD/jamtestvectors/traces/preimages $PWD/jamtestvectors/traces/preimages_light $(ls -d "$PWD"/warmup-traces/*/ 2>/dev/null | tr '\n' ' ')}"
+for d in $WARMUP_DIRS; do ln -s "${d%/}" "$WARMUP_DIR/$(basename "$d")"; done
 
 DATA="$(mktemp -d /tmp/jam_fuzz_perf.XXXXXX)"
 TARGET_PID=""

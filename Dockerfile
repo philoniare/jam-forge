@@ -86,6 +86,7 @@ COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conf
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
 COPY jamtestvectors/traces/preimages/*.bin /app/warmup-traces/preimages/
 COPY jamtestvectors/traces/preimages_light/*.bin /app/warmup-traces/preimages_light/
+COPY warmup-traces/ /app/warmup-traces/
 ENV JAM_TRACES_DIR=/app/warmup-traces
 
 ENV LD_LIBRARY_PATH=/app/lib

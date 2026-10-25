@@ -71,6 +71,26 @@ type BanderOutput = Output<BandersnatchSha512Ell2>;
 type BanderPublic = Public<BandersnatchSha512Ell2>;
 type BanderSecret = Secret<BandersnatchSha512Ell2>;
 
+/// Public keys already decoded with the subgroup check, by their encoding. Block seals and entropy
+/// sources are signed by the current validators, so the same few keys come back every block.
+static PUBLIC_KEYS: OnceLock<Mutex<HashMap<[u8; 32], BanderPublic>>> = OnceLock::new();
+const PUBLIC_KEYS_MAX: usize = 4096;
+
+fn checked_public(bytes: &[u8]) -> Option<BanderPublic> {
+    let key: [u8; 32] = bytes.try_into().ok()?;
+    let cache = PUBLIC_KEYS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(p) = lock(cache).get(&key) {
+        return Some(p.clone());
+    }
+    let public = BanderPublic::deserialize_compressed(bytes).ok()?;
+    let mut map = lock(cache);
+    if map.len() >= PUBLIC_KEYS_MAX {
+        map.clear();
+    }
+    map.insert(key, public.clone());
+    Some(public)
+}
+
 #[derive(Debug)]
 enum VrfError {
     DeserializationError(&'static str),
@@ -642,9 +662,9 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         Err(_) => return return_error_local(&mut env, "Failed to convert signature data"),
     };
 
-    let public = match BanderPublic::deserialize_compressed(&public_data[..]) {
-        Ok(p) => p,
-        Err(_) => return return_error_local(&mut env, "Failed to deserialize public key"),
+    let public = match checked_public(&public_data[..]) {
+        Some(p) => p,
+        None => return return_error_local(&mut env, "Failed to deserialize public key"),
     };
 
     let sig = match IetfVrfSignature::deserialize_compressed(&sig_data[..]) {
@@ -828,5 +848,22 @@ mod tests {
             expected,
             "Padding point should match spec"
         );
+    }
+
+    #[test]
+    fn checked_public_caches_valid_keys_and_rejects_bad_ones() {
+        let secret = BanderSecret::from_seed(&[7u8; 32]);
+        let mut bytes = Vec::new();
+        secret.public().serialize_compressed(&mut bytes).unwrap();
+        let first = checked_public(&bytes).expect("valid key");
+        let again = checked_public(&bytes).expect("cached key");
+        assert_eq!(first, again);
+        assert_eq!(first, secret.public());
+
+        // Not a point on the curve, and the wrong length: rejected every time, never cached.
+        let bad = [0xffu8; 32];
+        assert!(checked_public(&bad).is_none());
+        assert!(checked_public(&bad).is_none());
+        assert!(checked_public(&bytes[..31]).is_none());
     }
 }
