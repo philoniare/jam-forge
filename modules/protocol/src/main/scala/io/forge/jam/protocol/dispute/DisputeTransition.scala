@@ -356,22 +356,20 @@ object DisputeTransition:
       else state
     }
 
-  /** Record a new offender key, skipping keys already known or already added.
+  /** Record an offender key. The marker H_o lists every culprit then every fault key, so a key that is both
+    * appears twice, while psi_o' is a set union.
     */
   private def recordOffender(
       state: ProcessState,
       key: Ed25519PublicKey,
       preOffendersSet: Set[Ed25519PublicKey]
   ): ProcessState =
-    val keyInOffenders = preOffendersSet.contains(key)
-    val keyAlreadyAdded = state.newOffendersSet.contains(key)
-
-    if !keyInOffenders && !keyAlreadyAdded then
+    if preOffendersSet.contains(key) then state
+    else
       state.copy(
         offendersMarkRev = key :: state.offendersMarkRev,
         newOffendersSet = state.newOffendersSet + key
       )
-    else state
 
   /** Process culprits using foldLeft. */
   private def processCulprits(
