@@ -127,4 +127,6 @@ object PvmRunner:
         else Array.empty[Byte]
       else Array.empty[Byte]
 
+    // The run is over and the output copied out: let the next invocation reuse a large heap buffer.
+    instance.basicMemory.release()
     (exit, gasUsed, output)

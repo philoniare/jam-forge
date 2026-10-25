@@ -12,6 +12,7 @@ verification and erasure coding. Each suite is a plain `main` under `src/test/..
 | Erasure coding | `ErasureCodingBench` (full config: 1023 validators, 342 needed) | `sbt benchErasureCoding` |
 | Block import | `TracesBenchmark`, `Phase0Benchmark`, `PolkajamComparisonBenchmark` | `sbt benchmark` |
 | Hashing | `Blake2bBench` | `sbt "core/Test/runMain io.forge.jam.core.benchmark.Blake2bBench"` |
+| PVM heap growth (`grow_heap`) | `GrowHeapBench` | `sbt benchGrowHeap` |
 
 `sbt benchComponents` runs the trie/DB, signature and erasure-coding suites in turn.
 
@@ -70,3 +71,10 @@ Erasure coding (full config):
 | One segment reconstruct, parity only | 731 µs |
 | 3,120 segments encode (`chunkSegments`) | 134 ms |
 | 3,120 segments reconstruct (`reconstructSegments`) | 188 ms |
+
+PVM Heap Growth:
+| Scenario | Before | After |
+|---|---|---|
+| fuzzy-ramp: 20 grows of 1-3 pages, then doubling to ~128 MiB (30 calls) | 64.2 / 65.7 ms | 16.0 / 15.6 ms |
+| small-steps: 4,096 grows of 2 pages (32 MiB) | 27,556 / 27,452 ms | 2.4 / 2.7 ms |
+| small-on-large: one 32 MiB grow, then 200 grows of 2 pages | 1,772 / 1,748 ms | 1.9 / 2.0 ms |

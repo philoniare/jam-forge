@@ -84,6 +84,7 @@ addCommandAlias("benchTrieDb", "db/Test/runMain io.forge.jam.db.benchmark.TrieDb
 addCommandAlias("benchSignatures", "crypto/Test/runMain io.forge.jam.crypto.benchmark.SignatureVerifyBench")
 addCommandAlias("benchErasureCoding", "crypto/Test/runMain io.forge.jam.crypto.benchmark.ErasureCodingBench")
 addCommandAlias("benchComponents", ";benchTrieDb ;benchSignatures ;benchErasureCoding")
+addCommandAlias("benchGrowHeap", "pvm/Test/runMain io.forge.jam.pvm.benchmark.GrowHeapBench")
 
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)

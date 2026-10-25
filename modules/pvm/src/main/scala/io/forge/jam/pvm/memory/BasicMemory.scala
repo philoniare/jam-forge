@@ -492,6 +492,18 @@ final class BasicMemory private (
   // Heap Operations (sbrk)
   // ============================================================================
 
+  /** Bytes in [dirtyFrom, dirtyTo) of a reused heap buffer may hold a previous owner's data; dirtyFrom is never
+    * below the heap end.
+    */
+  private var dirtyFrom: Int = 0
+  private var dirtyTo: Int = 0
+
+  private def zeroDirty(upTo: Int): Unit =
+    if upTo > dirtyFrom && dirtyTo > dirtyFrom then
+      val end = math.min(upTo, dirtyTo)
+      java.util.Arrays.fill(rwData, dirtyFrom, end, 0.toByte)
+      dirtyFrom = end
+
   override def sbrk(size: UInt): Option[UInt] =
     val prevHeapEnd = heapEnd
 
@@ -515,13 +527,28 @@ final class BasicMemory private (
       cachedRegionId = 0
     invalidateWindows()
 
-    // Ensure rwData buffer is large enough for the new heap size
-    // The heap lives in the rwData buffer starting at heapBase relative to rwDataAddress
+    // The heap lives in the rwData buffer starting at heapBase relative to rwDataAddress. A grow past the buffer takes
+    // the large buffer a finished invocation released, if there is one, else grows the buffer by at least half, so a
+    // run of grow_heap calls copies linearly, not quadratically. Bytes past the heap end are zero and stay
+    // unreachable: every access is bounded by the page map and heapEnd, never by the buffer length.
     val requiredBufferSize = newHeapSize.signed
+    zeroDirty(requiredBufferSize)
     if requiredBufferSize > rwData.length then
-      val newBuffer = new Array[Byte](requiredBufferSize)
-      System.arraycopy(rwData, 0, newBuffer, 0, rwData.length)
+      val pooled = BasicMemory.takeSpare(requiredBufferSize)
+      val oldLength = rwData.length
+      val newBuffer =
+        if pooled != null then pooled.buffer
+        else
+          val cap = math.min(memoryMap.maxHeapSize.toLong, BasicMemory.MaxBufferSize.toLong)
+          val grown = math.min(oldLength.toLong * 3 / 2, cap).toInt
+          new Array[Byte](math.max(requiredBufferSize, grown))
+      System.arraycopy(rwData, 0, newBuffer, 0, oldLength)
       rwData = newBuffer
+      // The previous owner's bytes past the copy are zeroed as the heap reaches them, not all up front.
+      if pooled != null && pooled.dirtyEnd > oldLength then
+        dirtyFrom = oldLength
+        dirtyTo = pooled.dirtyEnd
+        zeroDirty(requiredBufferSize)
 
     // Update page map for new heap pages
     val prevPageBoundary = AlignmentOps.alignUp(prevHeapEnd, memoryMap.pageSize)
@@ -889,6 +916,21 @@ final class BasicMemory private (
    */
   def markDirty(): Unit = isDirty = true
 
+  /** Ends this memory's use: hands a large heap buffer to the next invocation that grows its heap, so it skips the
+    * allocation, zeroing and copying of its own. Any later access misses the (now empty) buffer instead of touching it.
+    */
+  def release(): Unit =
+    val buf = rwData
+    // Writes only land below the RW region end or the heap end, whichever is higher.
+    val written = math.max(math.max(rwRegionSize.toLong, _heapSize.toLong), dirtyTo.toLong)
+    val dirtyEnd = math.min(buf.length.toLong, written).toInt
+    rwData = Array.emptyByteArray
+    dirtyFrom = 0
+    dirtyTo = 0
+    cachedRegionId = 0
+    invalidateWindows()
+    BasicMemory.offerSpare(buf, dirtyEnd)
+
   /**
    * Returns true if memory has been modified.
    */
@@ -911,6 +953,31 @@ object BasicMemory:
   final val FastOutOfBounds: Int = -2
 
   private final val WindowSlots = 4
+
+  /** Largest heap buffer sbrk over-allocates to; a larger heap still gets exactly the size it needs. */
+  private final val MaxBufferSize: Int = Int.MaxValue - 8
+
+  /** A released heap buffer; bytes at `dirtyEnd` and beyond are zero. */
+  private final class Spare(val buffer: Array[Byte], val dirtyEnd: Int)
+
+  /** Released heap buffers between these sizes are kept, one at a time (the largest), for the next large grow. */
+  private final val MinSpareBytes: Int = 1 << 20
+  private final val MaxSpareBytes: Int = 256 << 20
+
+  private val spare = new java.util.concurrent.atomic.AtomicReference[Spare](null)
+
+  /** The kept buffer if it holds `required` bytes, else null (and it stays kept). */
+  private def takeSpare(required: Int): Spare =
+    val s = spare.get()
+    if s == null || s.buffer.length < required || !spare.compareAndSet(s, null) then null else s
+
+  private def offerSpare(buffer: Array[Byte], dirtyEnd: Int): Unit =
+    if buffer.length >= MinSpareBytes && buffer.length <= MaxSpareBytes then
+      var done = false
+      while !done do
+        val cur = spare.get()
+        done = (cur != null && cur.buffer.length >= buffer.length) ||
+          spare.compareAndSet(cur, new Spare(buffer, dirtyEnd))
 
   /** Little-endian 8-byte view of a byte array (unaligned access allowed). */
   private val LongLE: java.lang.invoke.VarHandle =
