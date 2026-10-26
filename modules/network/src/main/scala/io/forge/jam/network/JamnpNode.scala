@@ -89,15 +89,41 @@ final class JamnpStream private[network] (
     private[network] val channel: QuicStreamChannel,
     val kind: Byte
 ):
-  @volatile private var receiver: Array[Byte] => Unit = _ => ()
+  private var receiver: Array[Byte] => Unit = null
+  // Messages that arrive before a receiver is registered (the peer can reply
+  // as soon as `openStream` returns), or while `onMessage` replays them.
+  // Capped, since send-only streams never register a receiver.
+  private val pending = new java.util.ArrayDeque[Array[Byte]]()
+  private var pendingBytes = 0L
+  private var draining = false
   private var closed = false
   private var closeDelivered = false
   private var closeListener: () => Unit = null
 
-  /** Register the message receiver (called on the event loop). */
+  /** Register the message receiver. Messages received before this call are
+    * delivered first, in order, on the caller's thread.
+    */
   def onMessage(f: Array[Byte] => Unit): JamnpStream =
-    receiver = f
+    synchronized {
+      receiver = f
+      draining = true
+    }
+    var batch = nextPending()
+    while batch != null do
+      batch.foreach(f)
+      batch = nextPending()
     this
+
+  private def nextPending(): List[Array[Byte]] = synchronized {
+    if pending.isEmpty then
+      draining = false
+      null
+    else
+      val out = List.newBuilder[Array[Byte]]
+      while !pending.isEmpty do out += pending.poll()
+      pendingBytes = 0
+      out.result()
+  }
 
   /** Register a close/FIN listener. `openStream` returns after the kind byte
     * is sent, so the peer can finish or reject the stream before this runs; a
@@ -115,7 +141,16 @@ final class JamnpStream private[network] (
     if fireNow then f()
     this
 
-  private[network] def dispatch(message: Array[Byte]): Unit = receiver(message)
+  private[network] def dispatch(message: Array[Byte]): Unit =
+    val f = synchronized {
+      if receiver == null || draining then
+        if draining || pendingBytes + message.length <= JamnpStream.MaxPendingBytes then
+          pending.add(message)
+          pendingBytes += message.length
+        null
+      else receiver
+    }
+    if f != null then f(message)
 
   /** Fires the close listener exactly once (remote FIN and channel-inactive
     * both signal closure; handlers must not run twice).
@@ -165,6 +200,9 @@ final class JamnpStream private[network] (
   def id: Long = channel.streamId()
 
 object JamnpStream:
+  /** Cap on bytes buffered before a receiver is registered; later frames are dropped. */
+  val MaxPendingBytes: Long = 4L * 1024 * 1024
+
   /** Application error code sent with a stream reset. */
   val ResetErrorCode: Int = 0
 

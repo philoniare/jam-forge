@@ -110,6 +110,38 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
       serverNode.shutdown()
   }
 
+  test("messages that arrive before onMessage is registered are delivered in order") {
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config)
+
+    // UP 0-style acceptor: sends its handshake as soon as the stream opens.
+    serverNode.registerHandler(
+      StreamKind.BlockAnnouncement,
+      (conn: JamnpConnection, stream: JamnpStream) =>
+        stream.onMessage(_ => ())
+        stream.send("early-1".getBytes("UTF-8"))
+        stream.send("early-2".getBytes("UTF-8"))
+    )
+
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = clientNode
+        .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
+        .get(10, TimeUnit.SECONDS)
+
+      val stream = conn.openStream(StreamKind.BlockAnnouncement).get(10, TimeUnit.SECONDS)
+      // Let the server's frames land before a receiver exists.
+      Thread.sleep(500)
+      val fromServer = new LinkedBlockingQueue[String]()
+      stream.onMessage(msg => fromServer.offer(new String(msg, "UTF-8")))
+
+      await(fromServer) shouldBe "early-1"
+      await(fromServer) shouldBe "early-2"
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+  }
+
   test("streams of unregistered kinds are rejected") {
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
