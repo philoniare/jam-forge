@@ -48,11 +48,11 @@ final class ExtrinsicPools:
     guarantees.putIfAbsent(reportHash, g)
 
   def addAssurance(a: AssuranceExtrinsic): Unit =
-    assurances.putIfAbsent((a.validatorIndex.value.toInt, a.anchor), a)
+    assurances.putIfAbsent((a.validatorIndex.toInt, a.anchor), a)
 
   def addPreimage(p: Preimage): Unit =
     preimages.putIfAbsent(
-      (p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray)),
+      (p.requester.toLong, Hashing.blake2b256(p.blob.toArray)),
       p
     )
 
@@ -127,12 +127,12 @@ final class ExtrinsicPools:
   def takeAssurances(parent: Hash): List[AssuranceExtrinsic] =
     assurances.values.asScala.toList
       .filter(_.anchor == parent)
-      .sortBy(_.validatorIndex.value.toInt)
+      .sortBy(_.validatorIndex.toInt)
 
   def takePreimages(usable: Preimage => Boolean = _ => true): List[Preimage] =
     preimages.values.asScala.toList
       .filter(usable)
-      .sortBy(p => (p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray).toHex))
+      .sortBy(p => (p.requester.toLong, Hashing.blake2b256(p.blob.toArray).toHex))
 
   def findPreimage(hash: Hash): Option[Preimage] =
     preimages.values.asScala.find(p => Hashing.blake2b256(p.blob.toArray) == hash)
@@ -148,10 +148,10 @@ final class ExtrinsicPools:
       guarantees.remove(Hashing.blake2b256(g.report.encode.toArray))
     }
     includedAssurances.foreach { a =>
-      assurances.remove((a.validatorIndex.value.toInt, a.anchor))
+      assurances.remove((a.validatorIndex.toInt, a.anchor))
     }
     includedPreimages.foreach { p =>
-      preimages.remove((p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray)))
+      preimages.remove((p.requester.toLong, Hashing.blake2b256(p.blob.toArray)))
     }
     // Assurances only ever anchor at the parent of the next block: drop stale.
     assurances.keySet.asScala.filterNot(_._2 == newBestHash).toList.foreach(assurances.remove)
@@ -163,7 +163,7 @@ final class ExtrinsicPools:
   def pendingPreimages: List[Preimage] = preimages.values.asScala.toList
 
   def removePreimages(ps: Iterable[Preimage]): Unit =
-    ps.foreach(p => preimages.remove((p.requester.value.toLong, Hashing.blake2b256(p.blob.toArray))))
+    ps.foreach(p => preimages.remove((p.requester.toLong, Hashing.blake2b256(p.blob.toArray))))
 
   def removeGuarantees(gs: Iterable[GuaranteeExtrinsic]): Unit =
     gs.foreach(g => guarantees.remove(Hashing.blake2b256(g.report.encode.toArray)))

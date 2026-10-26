@@ -16,17 +16,17 @@ import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
 
 
 final class ValidatorsRef(private val s: TrieBackedJamState):
-  def current: List[ValidatorKey] = s.kappa
-  def current_=(v: List[ValidatorKey]): Unit = s.kappa = v
+  def current: IndexedSeq[ValidatorKey] = s.kappa
+  def current_=(v: IndexedSeq[ValidatorKey]): Unit = s.kappa = v
 
-  def previous: List[ValidatorKey] = s.lambda
-  def previous_=(v: List[ValidatorKey]): Unit = s.lambda = v
+  def previous: IndexedSeq[ValidatorKey] = s.lambda
+  def previous_=(v: IndexedSeq[ValidatorKey]): Unit = s.lambda = v
 
-  def queue: List[ValidatorKey] = s.iota
-  def queue_=(v: List[ValidatorKey]): Unit = s.iota = v
+  def queue: IndexedSeq[ValidatorKey] = s.iota
+  def queue_=(v: IndexedSeq[ValidatorKey]): Unit = s.iota = v
 
-  def nextEpoch: List[ValidatorKey] = s.gammaK
-  def nextEpoch_=(v: List[ValidatorKey]): Unit = s.gammaK = v
+  def nextEpoch: IndexedSeq[ValidatorKey] = s.gammaK
+  def nextEpoch_=(v: IndexedSeq[ValidatorKey]): Unit = s.gammaK = v
 
 final class EntropyRef(private val s: TrieBackedJamState):
   def pool: List[Hash] = s.entropyPool

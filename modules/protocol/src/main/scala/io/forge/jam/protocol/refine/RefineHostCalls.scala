@@ -144,7 +144,7 @@ class RefineHostCalls(
 
   private def handleHistoricalLookup(instance: PvmInstance): Unit =
     val r7 = getReg(instance, 7)
-    val ownServiceId = context.workItem.service.value.toLong
+    val ownServiceId = context.workItem.service.toLong
 
     val targetService: Option[Long] =
       if r7 == ULong.MaxValue then
@@ -629,7 +629,7 @@ object RefineFetch:
   def workItemSummary(w: WorkItem): Array[Byte] =
     val out = new Array[Byte](4 + 32 + 8 + 8 + 2 + 2 + 2 + 4)
     var off = 0
-    LittleEndian.put(out, off, w.service.value.toLong, 4); off += 4
+    LittleEndian.put(out, off, w.service.toLong, 4); off += 4
     System.arraycopy(w.codeHash.bytes.toArray, 0, out, off, 32); off += 32
     LittleEndian.put(out, off, w.refineGasLimit.toLong, 8); off += 8
     LittleEndian.put(out, off, w.accumulateGasLimit.toLong, 8); off += 8

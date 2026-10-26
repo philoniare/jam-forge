@@ -125,8 +125,7 @@ object AssuranceTransition:
    */
   private def findAvailableCores(
     input: AssuranceInput,
-    state: AssuranceState,
-    config: ChainConfig
+    state: AssuranceState
   ): Set[Int] =
     // For each core, count how many validators have assured it
     val coresCount = state.availAssignments.size
@@ -180,7 +179,7 @@ object AssuranceTransition:
   def stfViewWithValidators(
     input: AssuranceInput,
     view: TrieBackedJamState,
-    validators: List[ValidatorKey]
+    validators: IndexedSeq[ValidatorKey]
   ): AssuranceOutput =
     val preStateBase = AssuranceBridge.extract(view)
     val preState = preStateBase.copy(currValidators = validators)
@@ -214,7 +213,7 @@ object AssuranceTransition:
           (preState, StfResult.error(error))
         case None =>
           // Find available cores and reports
-          val availableCores = findAvailableCores(input, preState, config)
+          val availableCores = findAvailableCores(input, preState)
           val availableReports = processAvailableReports(availableCores, preState)
 
           if availableReports.isEmpty then

@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.assurance
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
@@ -57,32 +59,25 @@ object AssuranceTypes:
    */
   final case class AssuranceState(
     availAssignments: List[Option[AvailabilityAssignment]],
-    currValidators: List[ValidatorKey],
-    postValidators: List[ValidatorKey]
+    currValidators: IndexedSeq[ValidatorKey],
+    postValidators: IndexedSeq[ValidatorKey]
   )
 
   object AssuranceState:
     /**
      * Create a codec that knows the cores and validator counts.
      */
-    def codec(coreCount: Int, validatorCount: Int): Codec[AssuranceState] =
+    def codec(coreCount: Int): Codec[AssuranceState] =
       (fixedSizeList(optionCodec(summon[Codec[AvailabilityAssignment]]), coreCount) ::
-       FullJamStateCodecs.validatorListCodec(validatorCount) ::
-       FullJamStateCodecs.validatorListCodec(validatorCount)).xmap(
+       FullJamStateCodecs.validatorListCodec ::
+       FullJamStateCodecs.validatorListCodec).xmap(
         { case (availAssignments, currValidators, postValidators) =>
           AssuranceState(availAssignments, currValidators, postValidators)
         },
         as => (as.availAssignments, as.currValidators, as.postValidators)
       )
 
-    given Decoder[AssuranceState] =
-      Decoder.instance { cursor =>
-        for
-          availAssignments <- cursor.get[List[Option[AvailabilityAssignment]]]("avail_assignments")
-          currValidators <- cursor.get[List[ValidatorKey]]("curr_validators")
-          postValidators <- cursor.get[List[ValidatorKey]]("post_validators")
-        yield AssuranceState(availAssignments, currValidators, postValidators)
-      }
+    given Decoder[AssuranceState] = ConfiguredDecoder.derived
 
   /**
    * Error codes for the Assurances STF.
@@ -129,12 +124,7 @@ object AssuranceTypes:
         aom => aom.reported
       )
 
-    given Decoder[AssuranceOutputMarks] =
-      Decoder.instance { cursor =>
-        for
-          reported <- cursor.get[List[WorkReport]]("reported")
-        yield AssuranceOutputMarks(reported)
-      }
+    given Decoder[AssuranceOutputMarks] = ConfiguredDecoder.derived
 
   /**
    * Output from the Assurances STF.
@@ -165,23 +155,15 @@ object AssuranceTypes:
     import AssuranceOutput.given Codec[AssuranceOutput]
 
     /** Create a config-aware codec for AssuranceCase */
-    def codec(coreCount: Int, validatorCount: Int): Codec[AssuranceCase] =
+    def codec(coreCount: Int): Codec[AssuranceCase] =
       (AssuranceInput.codec(coreCount) ::
-       AssuranceState.codec(coreCount, validatorCount) ::
+       AssuranceState.codec(coreCount) ::
        summon[Codec[AssuranceOutput]] ::
-       AssuranceState.codec(coreCount, validatorCount)).xmap(
+       AssuranceState.codec(coreCount)).xmap(
         { case (input, preState, output, postState) =>
           AssuranceCase(input, preState, output, postState)
         },
         ac => (ac.input, ac.preState, ac.output, ac.postState)
       )
 
-    given Decoder[AssuranceCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[AssuranceInput]("input")
-          preState <- cursor.get[AssuranceState]("pre_state")
-          output <- cursor.get[AssuranceOutput]("output")
-          postState <- cursor.get[AssuranceState]("post_state")
-        yield AssuranceCase(input, preState, output, postState)
-      }
+    given Decoder[AssuranceCase] = ConfiguredDecoder.derived

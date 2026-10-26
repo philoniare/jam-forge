@@ -211,7 +211,7 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers:
       nodeA.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
       nodeA.pools.addPreimage(Preimage(requester = ServiceId(serviceId.toInt), blob = JamBytes(blob)))
 
-      val genesisSlot = genesis.header.slot.value.toLong
+      val genesisSlot = genesis.header.slot.toLong
       val head = nodeA.authorSlot(genesisSlot + 1)
       head.isDefined shouldBe true
 

@@ -66,10 +66,10 @@ object FuzzClient:
   /** A binary trace directory: `genesis.bin` plus one `NNNNNNNN.bin` per step (the jamtestvectors/traces layout). */
   final case class TraceDir(genesis: Path, steps: Vector[Path]):
     def readGenesis(config: ChainConfig): Genesis =
-      Genesis.codec(config.validatorCount, config.epochLength).decodeUnsafe(Files.readAllBytes(genesis))
+      Genesis.codec(config.epochLength).decodeUnsafe(Files.readAllBytes(genesis))
     def readStep(step: Path, config: ChainConfig): TraceStep =
       TraceStep
-        .codec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
+        .codec(config.epochLength, config.coresCount)
         .decodeUnsafe(Files.readAllBytes(step))
 
   object TraceDir:

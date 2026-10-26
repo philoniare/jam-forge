@@ -61,8 +61,8 @@ class DisputeTest extends AnyFunSuite with Matchers:
       psi = Psi.empty,
       rho = List.fill(coreCount)(None),
       tau = 0,
-      kappa = (0 until validatorCount).map(i => validatorKeyFilled(i)).toList,
-      lambda = (0 until validatorCount).map(i => validatorKeyFilled(i + 100)).toList
+      kappa = (0 until validatorCount).map(i => validatorKeyFilled(i)),
+      lambda = (0 until validatorCount).map(i => validatorKeyFilled(i + 100))
     )
 
   // Helper to create empty disputes
@@ -235,6 +235,16 @@ class DisputeTest extends AnyFunSuite with Matchers:
           )
           assertDisputeOutputEquals(testCase.output, output, testCaseName)
           assertDisputeStateEquals(testCase.postState, postState, testCaseName)
+  }
+
+  test("GP: tiny disputes vectors round-trip through the binary DisputeCase codec") {
+    val folderPath = "stf/disputes/tiny"
+    val codec = DisputeCase.codec(TinyConfig.coresCount)
+    for testCaseName <- TestFileLoader.getTestFilenamesFromTestVectors(folderPath).getOrElse(List.empty) do
+      val (testCase, binary) = TestFileLoader.loadTestDataFromTestVectors[DisputeCase](folderPath, testCaseName)
+        .fold(err => fail(s"Failed to load test case $testCaseName: $err"), identity)
+      codec.encode(testCase) shouldBe binary withClue s"Encoding mismatch for $testCaseName"
+      codec.decodeExact(binary) shouldBe Right(testCase) withClue s"Decoding mismatch for $testCaseName"
   }
 
   test("full config state transition") {

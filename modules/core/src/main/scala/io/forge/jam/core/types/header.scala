@@ -8,7 +8,7 @@ import io.forge.jam.core.types.epoch.EpochMark
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.codec.PrimitiveCodecs
-import io.forge.jam.core.codec.{ByteReader, ByteWriter, Codec}
+import io.forge.jam.core.codec.Codec
 
 /**
  * Block header type.
@@ -58,8 +58,13 @@ object header:
     /**
      * Create a header codec that knows the config-dependent sizes.
      */
-    def headerCodec(validatorCount: Int, epochLength: Int): Codec[Header] =
-      val epochMarkOpt = JamCodecs.optionCodec(EpochMark.epochMarkCodec(validatorCount))
+    private val codecs = new java.util.concurrent.ConcurrentHashMap[Int, Codec[Header]]()
+
+    /** Built once per epoch length. */
+    def headerCodec(epochLength: Int): Codec[Header] = codecs.computeIfAbsent(epochLength, build)
+
+    private def build(epochLength: Int): Codec[Header] =
+      val epochMarkOpt = JamCodecs.optionCodec(EpochMark.epochMarkCodec)
       val ticketsMarkOpt = JamCodecs.optionCodec(JamCodecs.fixedSizeList(summon[Codec[TicketMark]], epochLength))
       val offendersCodec = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
       Codec.of(
@@ -94,26 +99,9 @@ object header:
      * Create a codec with config.
      */
     def headerCodec(config: ChainConfig): Codec[Header] =
-      headerCodec(config.validatorCount, config.epochLength)
+      headerCodec(config.epochLength)
 
-    /**
-     * Default codec for encoding (can infer sizes from data).
-     * For decoding, use headerCodec with config parameters.
-     */
-    given Codec[Header] = new Codec[Header] {
-      def write(out: ByteWriter, header: Header): Unit =
-        // For encoding, we can infer the sizes from the data
-        val validatorCount = header.epochMark.map(_.validators.length).getOrElse(0)
-        val epochLength = header.ticketsMark.map(_.length).getOrElse(0)
-        // Use a reasonable default if we can't infer (encoding doesn't need exact counts)
-        headerCodec(
-          if validatorCount > 0 then validatorCount else 6,
-          if epochLength > 0 then epochLength else 12
-        ).write(out, header)
-
-      def read(in: ByteReader): Header =
-        in.fail("Use headerCodec(validatorCount, epochLength) for decoding")
-    }
+    given (using config: ChainConfig): Codec[Header] = headerCodec(config.epochLength)
 
     /**
      * Convenience method to decode with config.

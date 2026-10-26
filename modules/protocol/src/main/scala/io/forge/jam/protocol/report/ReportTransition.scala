@@ -56,9 +56,9 @@ object ReportTransition:
 
   private def selectValidatorSet(
     ctx: RotationContext,
-    currValidators: List[ValidatorKey],
-    prevValidators: List[ValidatorKey]
-  ): List[ValidatorKey] =
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey]
+  ): IndexedSeq[ValidatorKey] =
     if ctx.isCurrent then currValidators
     else if ctx.isEpochChanging then prevValidators
     else currValidators
@@ -124,7 +124,7 @@ object ReportTransition:
     result match
       case Left(err) =>
         (preState, StfResult.error(err))
-      case Right((reports, packages, guarantors)) =>
+      case Right((_, packages, guarantors)) =>
         val postState = preState.copy(
           availAssignments = updateAvailAssignments(preState.availAssignments, input.guarantees, input.slot),
           coresStatistics = StatsAggregation.coreStatsByCore(input.guarantees, config.coresCount),
@@ -140,7 +140,7 @@ object ReportTransition:
    * Process all guarantees and collect results.
    */
   private final case class RotationCache(
-    validators: List[ValidatorKey],
+    validators: IndexedSeq[ValidatorKey],
     validatorsArr: Array[ValidatorKey],
     coreAssignments: Array[Int]
   )
@@ -225,7 +225,7 @@ object ReportTransition:
       _ <- validateGuarantorSignatureOrder(guarantee)
       _ <- validateWorkReport(
         guarantee.report,
-        guarantee.slot.value.toLong,
+        guarantee.slot.toLong,
         input.slot,
         accountsById,
         preState.authPools,
@@ -242,7 +242,7 @@ object ReportTransition:
         config
       )
     yield
-      val ctx   = computeRotationContext(guarantee.slot.value.toLong, input.slot, config)
+      val ctx   = computeRotationContext(guarantee.slot.toLong, input.slot, config)
       val cache = cacheFor(ctx)
 
       val packageLookup = SegmentRootLookup(
@@ -339,7 +339,7 @@ object ReportTransition:
   ): ValidationResult =
     boundary:
       for guarantee <- guarantees do
-        val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.value.toLong
+        val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.toLong
         if currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
           break(Left(ReportErrorCode.LookupAnchorNotRecent))
       Right(())
@@ -365,7 +365,7 @@ object ReportTransition:
 
         val lookupAnchorPresent =
           skipLookupAnchor || {
-            val lookupAnchorSlot = context.lookupAnchorSlot.value.toLong
+            val lookupAnchorSlot = context.lookupAnchorSlot.toLong
             // GP 0.8.0 §reporting: ∃ h, h' ∈ A with h_t = x_t, H(h) = x_l, h'_p = H(h), h'_r = x_l's post-state
             if ancestry.nonEmpty then
               ancestry.exists(a =>
@@ -390,7 +390,7 @@ object ReportTransition:
           break(Left(ReportErrorCode.BadStateRoot))
         if anchor.beefyRoot != context.beefyRoot then
           break(Left(ReportErrorCode.BadBeefyMmrRoot))
-        if anchor.slot != context.anchorSlot.value.toLong then
+        if anchor.slot != context.anchorSlot.toLong then
           break(Left(ReportErrorCode.BadAnchorSlot))
 
         // Validate prerequisites with segment root consistency
@@ -525,7 +525,7 @@ object ReportTransition:
       if sigCount < 2 || sigCount > 3 then
         break(Left(ReportErrorCode.InsufficientGuarantees))
 
-      val ctx = computeRotationContext(guarantee.slot.value.toLong, currentSlot, config)
+      val ctx = computeRotationContext(guarantee.slot.toLong, currentSlot, config)
       if ctx.reportRotation < ctx.currentRotation - 1 then
         break(Left(ReportErrorCode.ReportEpochBeforeLast))
       if ctx.reportRotation > ctx.currentRotation then

@@ -17,3 +17,7 @@ class HostCallPanicSpec extends AnyFunSuite with Matchers:
       case _: HostCallPanic => fail("generic RuntimeException must not match HostCallPanic")
       case _                => succeed
   }
+
+  test("HostCallPanic carries no stack trace") {
+    new HostCallPanic("x").getStackTrace shouldBe empty
+  }

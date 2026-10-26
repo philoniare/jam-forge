@@ -179,8 +179,8 @@ class ReportsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
     )
     ReportState(
       availAssignments = List.fill(config.coresCount)(None),
-      currValidators = List.fill(config.validatorCount)(emptyValidatorKey),
-      prevValidators = List.fill(config.validatorCount)(emptyValidatorKey),
+      currValidators = IndexedSeq.fill(config.validatorCount)(emptyValidatorKey),
+      prevValidators = IndexedSeq.fill(config.validatorCount)(emptyValidatorKey),
       entropy = List.fill(4)(zeroHash),
       offenders = List.empty,
       recentBlocks =

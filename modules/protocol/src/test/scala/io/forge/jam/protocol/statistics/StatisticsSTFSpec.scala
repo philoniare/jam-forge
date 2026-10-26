@@ -289,7 +289,7 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
     val service = List.empty[ServiceStatisticsEntry]
 
     val codec =
-      ActivityStatisticsCodec.activityStatisticsCodec(testConfig.validatorCount, testConfig.coresCount)
+      ActivityStatisticsCodec.activityStatisticsCodec(testConfig.coresCount)
     val encoded = codec
       .encode(
         ActivityStatisticsCodec.ActivityStatistics(

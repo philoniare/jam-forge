@@ -805,12 +805,6 @@ final class BasicMemory private (
     Some(result)
 
   /**
-   * Reads multiple bytes from memory.
-   */
-  private def readBytes(address: UInt, length: Int): Option[Array[Byte]] =
-    readBytesInt(address.signed, length)
-
-  /**
    * Writes a single byte to the appropriate region.
    * Uses pre-computed boundaries for faster access.
    */
@@ -906,12 +900,6 @@ final class BasicMemory private (
     true
 
   /**
-   * Writes multiple bytes to memory.
-   */
-  private def writeBytes(address: UInt, data: Array[Byte]): Boolean =
-    writeBytesInt(address.signed, data)
-
-  /**
    * Marks memory as dirty (needs reset before reuse).
    */
   def markDirty(): Unit = isDirty = true
@@ -948,21 +936,21 @@ final class BasicMemory private (
 
 object BasicMemory:
   // Status sentinels for the allocation-free fast-path load/store API.
-  final val FastOk: Int = 0
-  final val FastSegfault: Int = -1
-  final val FastOutOfBounds: Int = -2
+  inline val FastOk = 0
+  inline val FastSegfault = -1
+  inline val FastOutOfBounds = -2
 
   private final val WindowSlots = 4
 
   /** Largest heap buffer sbrk over-allocates to; a larger heap still gets exactly the size it needs. */
-  private final val MaxBufferSize: Int = Int.MaxValue - 8
+  private inline val MaxBufferSize = Int.MaxValue - 8
 
   /** A released heap buffer; bytes at `dirtyEnd` and beyond are zero. */
   private final class Spare(val buffer: Array[Byte], val dirtyEnd: Int)
 
   /** Released heap buffers between these sizes are kept, one at a time (the largest), for the next large grow. */
-  private final val MinSpareBytes: Int = 1 << 20
-  private final val MaxSpareBytes: Int = 256 << 20
+  private inline val MinSpareBytes = 1 << 20
+  private inline val MaxSpareBytes = 256 << 20
 
   private val spare = new java.util.concurrent.atomic.AtomicReference[Spare](null)
 
@@ -1066,7 +1054,7 @@ object BasicMemory:
   private def initializePageMap(
     memoryMap: MemoryMap,
     roDataActualSize: Option[Int],
-    argumentDataSize: Option[Int] = None
+    argumentDataSize: Option[Int]
   ): PageMap =
     val mappings = scala.collection.mutable.ListBuffer[(UInt, UInt, PageAccess)]()
 

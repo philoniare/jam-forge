@@ -89,9 +89,9 @@ object TraceStep:
   /**
    * Create a codec for TraceStep with config parameters.
    */
-  def codec(validatorCount: Int, epochLength: Int, coresCount: Int, votesPerVerdict: Int): Codec[TraceStep] =
+  def codec(epochLength: Int, coresCount: Int): Codec[TraceStep] =
     (summon[Codec[RawState]] ::
-     Block.blockCodec(validatorCount, epochLength, coresCount, votesPerVerdict) ::
+     Block.blockCodec(epochLength, coresCount) ::
      summon[Codec[RawState]]).xmap(
       { case (preState, block, postState) =>
         TraceStep(preState = preState, block = block, postState = postState)
@@ -123,8 +123,8 @@ object Genesis:
   /**
    * Create a codec for Genesis with config parameters.
    */
-  def codec(validatorCount: Int, epochLength: Int): Codec[Genesis] =
-    (Header.headerCodec(validatorCount, epochLength) ::
+  def codec(epochLength: Int): Codec[Genesis] =
+    (Header.headerCodec(epochLength) ::
      summon[Codec[RawState]]).xmap(
       { case (header, state) =>
         Genesis(header = header, state = state)

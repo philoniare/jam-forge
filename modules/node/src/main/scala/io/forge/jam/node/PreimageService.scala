@@ -82,7 +82,7 @@ final class PreimageService(
   def onImported(@annotation.unused head: ChainManager#Head, block: Block): Unit =
     block.extrinsic.preimages.foreach { p =>
       val hash = Hashing.blake2b256(p.blob.toArray)
-      announcedMeta.put(hash, (p.requester.value.toLong, p.blob.length.toLong))
+      announcedMeta.put(hash, (p.requester.toLong, p.blob.length.toLong))
     }
 
   def requestHandler: StreamHandler = new StreamHandler:

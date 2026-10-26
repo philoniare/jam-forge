@@ -9,10 +9,10 @@ package io.forge.jam.pvm.program
 object Varint:
 
   /** Maximum varint length in bytes */
-  val MaxVarintLength: Int = 5
+  inline val MaxVarintLength = 5
 
   /** Maximum varint length for 64-bit values */
-  val MaxVarint64Length: Int = 8
+  inline val MaxVarint64Length = 8
 
   /** Lookup table for shift amounts based on length */
   private val LengthToShift: Array[Int] = Array(32, 24, 16, 8, 0, 0, 0, 0, 0)

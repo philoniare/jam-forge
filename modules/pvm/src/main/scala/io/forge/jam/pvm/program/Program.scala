@@ -14,10 +14,10 @@ import io.forge.jam.pvm.Opcode
 object Program:
 
   /** Maximum skip value in bitmask (24 bytes) */
-  val BitmaskMax: Int = 24
+  inline val BitmaskMax = 24
 
   /** Invalid instruction index marker */
-  val InvalidInstructionIndex: Int = 256
+  inline val InvalidInstructionIndex = 256
 
   // ============================================================================
   // Bitmask Operations

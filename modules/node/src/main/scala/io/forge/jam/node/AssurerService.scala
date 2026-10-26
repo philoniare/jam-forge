@@ -2,8 +2,7 @@ package io.forge.jam.node
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, constants}
-import io.forge.jam.core.primitives.{Ed25519Signature, Hash, ValidatorIndex}
-import io.forge.jam.core.types.block.Block
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature, Hash, ValidatorIndex}
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.crypto.Ed25519ZebraWrapper
 import io.forge.jam.protocol.refine.DaShards
@@ -31,18 +30,18 @@ final class AssurerService(
     */
   private val pending = new java.util.concurrent.atomic.AtomicReference[List[AssuranceExtrinsic]](Nil)
 
-  private val ed25519ByPublic: Map[Seq[Byte], ValidatorKeySet] =
-    validatorKeys.map(k => k.ed25519Public.toSeq -> k).toMap
+  private val ed25519ByPublic: Map[Ed25519PublicKey, ValidatorKeySet] =
+    validatorKeys.map(k => k.ed25519Key -> k).toMap
 
   /** Import listener: acquire custody, then assure held cores. */
-  def onImported(head: ChainManager#Head, block: Block): Unit =
+  def onImported(head: ChainManager#Head): Unit =
     val view = chain.stateView()
     val reports = view.cores.reports
     if !reports.exists(_.isDefined) then return
 
     val activeSet = view.validators.current
     val heldIndexes = activeSet.zipWithIndex.flatMap { case (vk, idx) =>
-      ed25519ByPublic.get(vk.ed25519.bytes.toArray.toSeq).map(keys => idx -> keys)
+      ed25519ByPublic.get(vk.ed25519).map(keys => idx -> keys)
     }
     if heldIndexes.isEmpty then return
 

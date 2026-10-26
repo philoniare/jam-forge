@@ -368,7 +368,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     }.toList
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
     // Use the codec factory for 6 validators
-    val codec = EpochMark.epochMarkCodec(6)
+    val codec = EpochMark.epochMarkCodec
     val encoded = codec.encode(epochMark)
     encoded.length shouldBe EpochMark.size(6)
     encoded.length shouldBe (32 + 32 + 1 + 6 * 64) // 449 bytes
@@ -385,7 +385,7 @@ class SimpleTypesSpec extends AnyFlatSpec with Matchers:
     }.toList
     val epochMark = EpochMark(entropy, ticketsEntropy, validators)
     // Use the codec factory for 3 validators
-    val codec = EpochMark.epochMarkCodec(3)
+    val codec = EpochMark.epochMarkCodec
     val encoded = codec.encode(epochMark)
     val decoded = codec.decodeUnsafe(encoded)
     decoded.entropy.toHex shouldBe epochMark.entropy.toHex

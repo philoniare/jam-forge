@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.dispute
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.extrinsic.Dispute
@@ -64,22 +66,20 @@ object DisputeTypes:
     psi: Psi,
     rho: List[Option[AvailabilityAssignment]],
     tau: Long,
-    kappa: List[ValidatorKey],
-    lambda: List[ValidatorKey]
+    kappa: IndexedSeq[ValidatorKey],
+    lambda: IndexedSeq[ValidatorKey]
   )
 
   object DisputeState:
     /** Create a config-aware codec for DisputeState */
-    def codec(coreCount: Int, validatorCount: Int): Codec[DisputeState] =
-      given availabilityAssignmentCodec: Codec[AvailabilityAssignment] = summon[Codec[AvailabilityAssignment]]
-
+    def codec(coreCount: Int): Codec[DisputeState] =
       val psiCodec = summon[Codec[Psi]]
-      val rhoCodec = JamCodecs.fixedSizeList(JamCodecs.optionCodec(availabilityAssignmentCodec), coreCount)
+      val rhoCodec = JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coreCount)
       val tauCodec = uint32L.xmap(
         l => l & 0xFFFFFFFFL,
         tau => tau & 0xFFFFFFFFL
       )
-      val validatorListCodec = FullJamStateCodecs.validatorListCodec(validatorCount)
+      val validatorListCodec = FullJamStateCodecs.validatorListCodec
 
       (psiCodec :: rhoCodec :: tauCodec :: validatorListCodec :: validatorListCodec).xmap(
         { case (psi, rho, tau, kappa, lambda) =>
@@ -88,16 +88,7 @@ object DisputeTypes:
         state => (state.psi, state.rho, state.tau, state.kappa, state.lambda)
       )
 
-    given Decoder[DisputeState] =
-      Decoder.instance { cursor =>
-        for
-          psi <- cursor.get[Psi]("psi")
-          rho <- cursor.get[List[Option[AvailabilityAssignment]]]("rho")
-          tau <- cursor.get[Long]("tau")
-          kappa <- cursor.get[List[ValidatorKey]]("kappa")
-          lambda <- cursor.get[List[ValidatorKey]]("lambda")
-        yield DisputeState(psi, rho, tau, kappa, lambda)
-      }
+    given Decoder[DisputeState] = ConfiguredDecoder.derived
 
   /**
    * Input to the Disputes STF.
@@ -108,18 +99,13 @@ object DisputeTypes:
 
   object DisputeInput:
     /** Create a config-aware codec for DisputeInput */
-    def codec(votesPerVerdict: Int): Codec[DisputeInput] =
-      Dispute.codec(votesPerVerdict).xmap(
+    given codec: Codec[DisputeInput] =
+      Dispute.codec.xmap(
         disputes => DisputeInput(disputes),
         input => input.disputes
       )
 
-    given Decoder[DisputeInput] =
-      Decoder.instance { cursor =>
-        for
-          disputes <- cursor.get[Dispute]("disputes")
-        yield DisputeInput(disputes)
-      }
+    given Decoder[DisputeInput] = ConfiguredDecoder.derived
 
   /**
    * Error codes for the Disputes STF.
@@ -224,9 +210,9 @@ object DisputeTypes:
     import DisputeOutput.given
 
     /** Create a config-aware codec for DisputeCase */
-    def codec(coreCount: Int, validatorCount: Int, votesPerVerdict: Int): Codec[DisputeCase] =
-      val inputCodec = DisputeInput.codec(votesPerVerdict)
-      val stateCodec = DisputeState.codec(coreCount, validatorCount)
+    def codec(coreCount: Int): Codec[DisputeCase] =
+      val inputCodec = DisputeInput.codec
+      val stateCodec = DisputeState.codec(coreCount)
       val outputCodec = summon[Codec[DisputeOutput]]
 
       (inputCodec :: stateCodec :: outputCodec :: stateCodec).xmap(
@@ -236,12 +222,4 @@ object DisputeTypes:
         testCase => (testCase.input, testCase.preState, testCase.output, testCase.postState)
       )
 
-    given Decoder[DisputeCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[DisputeInput]("input")
-          preState <- cursor.get[DisputeState]("pre_state")
-          output <- cursor.get[DisputeOutput]("output")
-          postState <- cursor.get[DisputeState]("post_state")
-        yield DisputeCase(input, preState, output, postState)
-      }
+    given Decoder[DisputeCase] = ConfiguredDecoder.derived

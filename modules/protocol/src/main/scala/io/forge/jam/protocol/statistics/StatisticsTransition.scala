@@ -1,6 +1,5 @@
 package io.forge.jam.protocol.statistics
 
-import cats.syntax.all.*
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.StatisticsBridge
@@ -79,7 +78,7 @@ object StatisticsTransition:
 
     // For each guarantee, determine which validator set to use based on epoch
     val reporters: Set[io.forge.jam.core.primitives.Ed25519PublicKey] = input.extrinsic.guarantees.flatMap { guarantee =>
-      val guaranteeEpoch = guarantee.slot.value.toLong / config.epochLength
+      val guaranteeEpoch = guarantee.slot.toLong / config.epochLength
       // Use previous validators if guarantee is from a previous epoch, otherwise current
       val validatorSet = if guaranteeEpoch < postEpoch && preState.prevValidators.nonEmpty then
         preState.prevValidators

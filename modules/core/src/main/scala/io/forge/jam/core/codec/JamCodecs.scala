@@ -51,6 +51,8 @@ object JamCodecs:
 
   def compactPrefixedList[A](codec: Codec[A]): Codec[List[A]] = codecs.compactPrefixedList(codec)
 
+  def compactPrefixedVector[A](codec: Codec[A]): Codec[IndexedSeq[A]] = codecs.compactPrefixedVector(codec)
+
   def fixedSizeList[A](codec: Codec[A], size: Int): Codec[List[A]] = codecs.fixedSizeList(codec, size)
 
   def stfResultCodec[A, E](using okCodec: Codec[A], errCodec: Codec[E]): Codec[Either[E, A]] =

@@ -122,7 +122,7 @@ class JsonTraceRunner(
           return JsonTraceResult.Error(effectiveTraceId, fileName, s"JSON parse error: ${error.getMessage}")
         case Right(step) => step
 
-      val slot = traceStep.block.header.slot.value.toLong
+      val slot = traceStep.block.header.slot.toLong
 
       // Step 2: Verify pre-state root (sanity check)
       val computedPreRoot = StateMerklization.stateMerklize(traceStep.preState.keyvals)
@@ -145,7 +145,7 @@ class JsonTraceRunner(
           else
             val keyvalDiffs =
               if compareKeyvals then
-                val actualKeyvals = importer.materializePostState(config).keyvals
+                val actualKeyvals = importer.materializePostState().keyvals
                 Some(computeKeyvalDiffs(traceStep.postState.keyvals, actualKeyvals))
               else None
 

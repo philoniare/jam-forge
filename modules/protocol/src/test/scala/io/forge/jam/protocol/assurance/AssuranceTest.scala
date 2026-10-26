@@ -88,7 +88,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
     val assignments = (0 until coreCount).map { coreIndex =>
       Some(simpleAssignment(coreIndex, timeout))
     }.toList
-    val validators = (0 until validatorCount).map(i => validatorKeyFilled(i)).toList
+    val validators = (0 until validatorCount).map(i => validatorKeyFilled(i))
     AssuranceState(
       availAssignments = assignments,
       currValidators = validators,
@@ -130,7 +130,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
 
   test("core timeout handling") {
     // Test that stale reports are cleared based on timeout
-    val validators4 = (0 until 4).map(i => validatorKeyFilled(i)).toList
+    val validators4 = (0 until 4).map(i => validatorKeyFilled(i))
     val state = AssuranceState(
       availAssignments = List(
         Some(simpleAssignment(0, 5)),  // registered at slot 5
@@ -195,7 +195,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          given Codec[AssuranceCase] = AssuranceCase.codec(TinyConfig.coresCount, TinyConfig.validatorCount)
+          given Codec[AssuranceCase] = AssuranceCase.codec(TinyConfig.coresCount)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
@@ -224,7 +224,7 @@ class AssuranceTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding
-          given Codec[AssuranceCase] = AssuranceCase.codec(FullConfig.coresCount, FullConfig.validatorCount)
+          given Codec[AssuranceCase] = AssuranceCase.codec(FullConfig.coresCount)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 

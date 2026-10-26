@@ -100,9 +100,9 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       accounts: HistoricalLookupService,
       executionMode: ExecutionMode = ExecutionMode.default
   ): IsAuthorizedResult =
-    val hostService = workPackage.authCodeHost.value.toLong
+    val hostService = workPackage.authCodeHost.toLong
     val lookupAnchorTimeslot =
-      workPackage.context.lookupAnchorSlot.value.toLong
+      workPackage.context.lookupAnchorSlot.toLong
 
     // p_authcode: encode(var(metadata), code) = histlookup(δ[authCodeHost], t, authCodeHash)
     val preimageOpt =

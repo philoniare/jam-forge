@@ -82,7 +82,7 @@ object workresult:
             refineLoad
           )
         },
-        wr => (wr.serviceId.value.toLong & 0xFFFFFFFFL, wr.codeHash, wr.payloadHash, wr.accumulateGas.toLong, wr.result, wr.refineLoad)
+        wr => (wr.serviceId.toLong & 0xFFFFFFFFL, wr.codeHash, wr.payloadHash, wr.accumulateGas.toLong, wr.result, wr.refineLoad)
       )
 
     given Decoder[WorkResult] = Decoder.instance { cursor =>

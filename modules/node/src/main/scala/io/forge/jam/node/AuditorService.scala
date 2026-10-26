@@ -4,7 +4,7 @@ import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorServi
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, constants}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -105,8 +105,8 @@ final class AuditorService(
     try f
     catch case e: Exception => logger.warn(s"auditor step failed: $e")
 
-  private def ed25519ByPublic: Map[Seq[Byte], ValidatorKeySet] =
-    validatorKeys.map(k => k.ed25519Public.toSeq -> k).toMap
+  private def ed25519ByPublic: Map[Ed25519PublicKey, ValidatorKeySet] =
+    validatorKeys.map(k => k.ed25519Key -> k).toMap
 
   /** Import listener: track the reports that just became available in `block`. Runs on the import bus, so the
     * block's audited flag is set before any later listener (the GRANDPA voter) can ask for it.
@@ -178,7 +178,7 @@ final class AuditorService(
   /** Our keys in the block's prior validator set, by index. */
   private def ownIndices(t: Tracked): Seq[(Int, ValidatorKeySet)] =
     val byPublic = ed25519ByPublic
-    t.validators.zipWithIndex.flatMap((k, i) => byPublic.get(k.toSeq).map(i -> _))
+    t.validators.zipWithIndex.flatMap((k, i) => byPublic.get(Ed25519PublicKey(k)).map(i -> _))
 
   private def initialTranche(t: Tracked, v: Int, keys: ValidatorKeySet): Unit =
     val s0 = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
@@ -195,7 +195,8 @@ final class AuditorService(
     val mine = t.ours.getOrElseUpdate(v, mutable.Map.empty)
     val picks = t.available.filterNot((_, _, h) => mine.contains(h)).flatMap { (c, _, h) =>
       val prior = t.announced.getOrElse((h, n - 1), mutable.Set.empty[Int])
-      val noShows = (prior -- positive.getOrElse(h, mutable.Set.empty)).toSeq.sorted
+      val seen = positive.getOrElse(h, mutable.Set.empty)
+      val noShows = prior.iterator.filterNot(seen.contains).toSeq.sorted
       val forced = negative.get(h).exists(_.nonEmpty)
       if !forced && noShows.isEmpty then None
       else
@@ -523,7 +524,7 @@ final class AuditorService(
     if !valid then pools.addJudgment(reportHash, v, valid, signature)
 
   def judgmentHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         if msg.length == 4 + 2 + 1 + 32 + 64 then
           val idx = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)

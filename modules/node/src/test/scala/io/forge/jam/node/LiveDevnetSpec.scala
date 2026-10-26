@@ -47,7 +47,7 @@ class LiveDevnetSpec extends AnyFunSuite with Matchers:
 
     // Align the era so the wall clock sits a little past the genesis slot:
     // the next tick authors genesisSlot + 1.
-    val genesisSlot = genesis.header.slot.value.toLong
+    val genesisSlot = genesis.header.slot.toLong
     val eraStart =
       System.currentTimeMillis() / 1000 - genesisSlot * spec.config.slotDuration - 1
 

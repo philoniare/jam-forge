@@ -28,7 +28,7 @@ class IdleAccumulationSpec extends AnyFunSuite with Matchers:
           TestFileLoader.loadJsonFromTestVectors[TraceStep](s"traces/$trace", name).fold(e => fail(e.toString), identity)
         val store = new StateTrieStore(new InMemoryTrieBackend)
         val root = store.bootstrap(step.preState.keyvals.map(kv => (kv.key, kv.value)))
-        val input = AccumulationInput(slot = step.block.header.slot.value.toLong, reports = Nil)
+        val input = AccumulationInput(slot = step.block.header.slot.toLong, reports = Nil)
 
         def posterior(run: TrieBackedJamState => AccumulationOutput) =
           val trie = store.at(root)

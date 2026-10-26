@@ -37,10 +37,9 @@ object DisputeTransition:
     */
   private def validateJudgementAge(
       verdict: Verdict,
-      currentEpoch: Long,
-      epochLength: Int
+      currentEpoch: Long
   ): Boolean =
-    val age = verdict.age.value.toLong
+    val age = verdict.age.toLong
     val validAges = Set(currentEpoch, currentEpoch - 1)
     validAges.contains(age)
 
@@ -70,9 +69,9 @@ object DisputeTransition:
       verdict: Verdict,
       state: DisputeState,
       epochLength: Int
-  ): List[ValidatorKey] =
+  ): IndexedSeq[ValidatorKey] =
     val currentEpoch = state.tau / epochLength
-    val age = verdict.age.value.toLong
+    val age = verdict.age.toLong
     if age == currentEpoch then state.kappa else state.lambda
 
   /** Compute which targets will be judged bad from the verdicts.
@@ -129,7 +128,7 @@ object DisputeTransition:
       // 2. Validate each verdict (must happen before culprit target validation)
       for verdict <- disputes.verdicts do
         // Validate judgment age
-        if !validateJudgementAge(verdict, currentEpoch, config.epochLength) then
+        if !validateJudgementAge(verdict, currentEpoch) then
           break(Left(DisputeErrorCode.BadJudgementAge))
 
         val validatorSet = getValidatorSet(verdict, state, config.epochLength)
@@ -475,8 +474,8 @@ object DisputeTransition:
       input: DisputeInput,
       view: TrieBackedJamState,
       priorTau: Long,
-      priorKappa: List[ValidatorKey],
-      priorLambda: List[ValidatorKey]
+      priorKappa: IndexedSeq[ValidatorKey],
+      priorLambda: IndexedSeq[ValidatorKey]
   ): DisputeOutput =
     val preStateBase = DisputeBridge.extract(view)
     val preState = preStateBase.copy(

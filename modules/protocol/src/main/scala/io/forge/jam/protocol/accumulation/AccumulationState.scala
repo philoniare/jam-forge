@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
@@ -38,12 +40,7 @@ object AlwaysAccItem:
       a => (a.id & 0xffffffffL, a.gas)
     )
 
-  given Decoder[AlwaysAccItem] = Decoder.instance { cursor =>
-    for
-      id <- cursor.get[Long]("id")
-      gas <- cursor.get[Long]("gas")
-    yield AlwaysAccItem(id, gas)
-  }
+  given Decoder[AlwaysAccItem] = ConfiguredDecoder.derived
 
 /** Privileged service configuration.
   *
@@ -558,12 +555,7 @@ object AccumulationInput:
       i => (i.slot & 0xffffffffL, i.reports)
     )
 
-  given Decoder[AccumulationInput] = Decoder.instance { cursor =>
-    for
-      slot <- cursor.get[Long]("slot")
-      reports <- cursor.get[List[WorkReport]]("reports")
-    yield AccumulationInput(slot, reports)
-  }
+  given Decoder[AccumulationInput] = ConfiguredDecoder.derived
 
 /** Output data from the accumulation STF.
   *
@@ -656,11 +648,4 @@ object AccumulationCase:
       c => (c.input, c.preState, c.output, c.postState)
     )
 
-  given Decoder[AccumulationCase] = Decoder.instance { cursor =>
-    for
-      input <- cursor.get[AccumulationInput]("input")
-      preState <- cursor.get[AccumulationState]("pre_state")
-      output <- cursor.get[AccumulationOutput]("output")
-      postState <- cursor.get[AccumulationState]("post_state")
-    yield AccumulationCase(input, preState, output, postState)
-  }
+  given Decoder[AccumulationCase] = ConfiguredDecoder.derived

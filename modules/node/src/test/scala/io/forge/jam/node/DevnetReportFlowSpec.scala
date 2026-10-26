@@ -120,7 +120,7 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
     val signatures = assigned.map { vi =>
       val sig = Ed25519ZebraWrapper.sign(devKeys(vi).ed25519Secret, message)
       GuaranteeSignature(ValidatorIndex(vi), Ed25519Signature(sig))
-    }.sortBy(_.validatorIndex.value.toInt)
+    }.sortBy(_.validatorIndex.toInt)
 
     GuaranteeExtrinsic(report, Timeslot(UInt(slot.toInt)), signatures)
 

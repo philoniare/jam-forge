@@ -63,7 +63,7 @@ final class RefineContext(
   def workItem = workPackage.items(workItemIndex)
 
   def lookupAnchorTimeslot: Long =
-    workPackage.context.lookupAnchorSlot.value.toLong
+    workPackage.context.lookupAnchorSlot.toLong
 
   /** Lowest natural number not already used as a machine index (Omega_M's n). */
   def nextMachineIndex: Long =

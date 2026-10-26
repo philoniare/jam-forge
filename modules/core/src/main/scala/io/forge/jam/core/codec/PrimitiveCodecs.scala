@@ -2,7 +2,6 @@ package io.forge.jam.core.codec
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Ed25519Signature, Timeslot, ValidatorIndex}
-import spire.math.{UInt, UShort}
 
 object PrimitiveCodecs:
 
@@ -12,9 +11,9 @@ object PrimitiveCodecs:
     Ed25519Signature.Size
   )
 
-  val timeslot: Codec[Timeslot] = Codec.of((w, ts) => w.i32(ts.value.signed), r => Timeslot(UInt(r.i32())), 4)
+  val timeslot: Codec[Timeslot] = Codec.of((w, ts) => w.i32(ts.toInt), r => Timeslot(r.i32()), 4)
 
   val validatorIndex: Codec[ValidatorIndex] =
-    Codec.of((w, vi) => w.u16(vi.value.toInt), r => ValidatorIndex(UShort(r.u16())), 2)
+    Codec.of((w, vi) => w.u16(vi.toInt), r => ValidatorIndex(r.u16()), 2)
 
   val compactBytes: Codec[JamBytes] = codecs.compactBytes

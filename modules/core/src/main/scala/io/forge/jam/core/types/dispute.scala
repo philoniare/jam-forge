@@ -1,5 +1,7 @@
 package io.forge.jam.core.types
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.primitives.{Hash, ValidatorIndex, Ed25519PublicKey, Ed25519Signature}
@@ -28,13 +30,7 @@ object dispute:
     given Codec[Culprit] =
       (hashCodec :: ed25519PublicKeyCodec :: PrimitiveCodecs.ed25519Signature).as[Culprit]
 
-    given Decoder[Culprit] = Decoder.instance { cursor =>
-      for
-        target <- cursor.get[Hash]("target")
-        key <- cursor.get[Ed25519PublicKey]("key")
-        signature <- cursor.get[Ed25519Signature]("signature")
-      yield Culprit(target, key, signature)
-    }
+    given Decoder[Culprit] = ConfiguredDecoder.derived
 
   /**
    * A fault in a dispute - a validator who voted incorrectly.
@@ -58,14 +54,7 @@ object dispute:
         f => (f.target, (if f.vote then 1 else 0).toByte, f.key, f.signature)
       )
 
-    given Decoder[Fault] = Decoder.instance { cursor =>
-      for
-        target <- cursor.get[Hash]("target")
-        vote <- cursor.get[Boolean]("vote")
-        key <- cursor.get[Ed25519PublicKey]("key")
-        signature <- cursor.get[Ed25519Signature]("signature")
-      yield Fault(target, vote, key, signature)
-    }
+    given Decoder[Fault] = ConfiguredDecoder.derived
 
   /**
    * A guarantee signature from a validator.
@@ -82,7 +71,7 @@ object dispute:
     given Codec[GuaranteeSignature] =
       (uint16L :: PrimitiveCodecs.ed25519Signature).xmap(
         { case (idx, sig) => GuaranteeSignature(ValidatorIndex(idx), sig) },
-        gs => (gs.validatorIndex.value.toInt, gs.signature)
+        gs => (gs.validatorIndex.toInt, gs.signature)
       )
 
     given Decoder[GuaranteeSignature] = Decoder.instance { cursor =>

@@ -34,6 +34,7 @@ import io.forge.jam.protocol.traces.{FullJamState, StateKeys}
 
 import io.forge.jam.core.codec.Codec
 import scala.collection.mutable
+import scala.compiletime.uninitialized
 
 final class TrieBackedJamState(
     private val trie: StateTrie,
@@ -42,73 +43,67 @@ final class TrieBackedJamState(
     private val store: Option[StateTrieStore] = None
 ):
 
-  private var _tau: Long = 0L
-  private var _tauLoaded: Boolean = false
-  private var _tauDirty: Boolean = false
+  private val tauCell = StateCell(StateKeys.TIMESLOT, TrieBackedJamState.readTimeslot(trie), TrieBackedJamState.encodeTimeslot)
+  private val entropyPoolCell = StateCell(StateKeys.ENTROPY_POOL, TrieBackedJamState.readEntropyPool(trie), TrieBackedJamState.encodeEntropyPool)
+  private val kappaCell = StateCell(
+    StateKeys.CURRENT_VALIDATORS,
+    TrieBackedJamState.readValidators(trie, StateKeys.CURRENT_VALIDATORS, config.validatorCount),
+    TrieBackedJamState.encodeValidatorList
+  )
+  private val lambdaCell = StateCell(
+    StateKeys.PREVIOUS_VALIDATORS,
+    TrieBackedJamState.readValidators(trie, StateKeys.PREVIOUS_VALIDATORS, config.validatorCount),
+    TrieBackedJamState.encodeValidatorList
+  )
+  private val iotaCell = StateCell(
+    StateKeys.VALIDATOR_QUEUE,
+    TrieBackedJamState.readValidators(trie, StateKeys.VALIDATOR_QUEUE, config.validatorCount),
+    TrieBackedJamState.encodeValidatorList
+  )
+  private val authPoolsCell =
+    StateCell(StateKeys.CORE_AUTHORIZATION_POOL, TrieBackedJamState.readAuthPools(trie, config), TrieBackedJamState.encodeAuthPools)
+  private val authQueuesCell = StateCell(
+    StateKeys.AUTHORIZATION_QUEUE,
+    TrieBackedJamState.readAuthQueues(trie, config),
+    TrieBackedJamState.encodeAuthQueues(_, config)
+  )
+  private val betaCell = StateCell(StateKeys.RECENT_HISTORY, TrieBackedJamState.readRecentHistory(trie), TrieBackedJamState.encodeRecentHistory)
+  private val reportsCell = StateCell(
+    StateKeys.REPORTS,
+    TrieBackedJamState.readReports(trie, config.coresCount),
+    TrieBackedJamState.encodeReports(_, config.coresCount)
+  )
+  private val readyQueueCell = StateCell(
+    StateKeys.ACCUMULATION_QUEUE,
+    TrieBackedJamState.readAccumulationQueue(trie, config.epochLength),
+    TrieBackedJamState.encodeAccumulationQueue
+  )
+  private val accumulatedCell = StateCell(
+    StateKeys.ACCUMULATION_HISTORY,
+    TrieBackedJamState.readAccumulationHistory(trie, config.epochLength),
+    TrieBackedJamState.encodeAccumulationHistory
+  )
+  private val lastAccumulationOutputsCell = StateCell(
+    StateKeys.LAST_ACCUMULATION_OUTPUTS,
+    TrieBackedJamState.readLastAccumulationOutputs(trie),
+    TrieBackedJamState.encodeLastAccumulationOutputs
+  )
+  private val privilegesCell = StateCell(
+    StateKeys.PRIVILEGED_SERVICES,
+    TrieBackedJamState.readPrivileges(trie, config.coresCount),
+    TrieBackedJamState.encodePrivileges(_, config.coresCount)
+  )
+  private val psiCell = StateCell(StateKeys.JUDGEMENTS, TrieBackedJamState.readPsi(trie), TrieBackedJamState.encodePsi)
 
-  private var _entropyPool: List[Hash] = List.fill(4)(Hash.zero)
-  private var _entropyPoolLoaded: Boolean = false
-  private var _entropyPoolDirty: Boolean = false
-
-  private var _kappa: List[ValidatorKey] =
-    List.fill(config.validatorCount)(TrieBackedJamState.emptyValidator)
-  private var _kappaLoaded: Boolean = false
-  private var _kappaDirty: Boolean = false
-
-  private var _lambda: List[ValidatorKey] =
-    List.fill(config.validatorCount)(TrieBackedJamState.emptyValidator)
-  private var _lambdaLoaded: Boolean = false
-  private var _lambdaDirty: Boolean = false
-
-  private var _iota: List[ValidatorKey] =
-    List.fill(config.validatorCount)(TrieBackedJamState.emptyValidator)
-  private var _iotaLoaded: Boolean = false
-  private var _iotaDirty: Boolean = false
-
-  private var _authPools: List[List[Hash]] = List.fill(config.coresCount)(List.empty)
-  private var _authPoolsLoaded: Boolean = false
-  private var _authPoolsDirty: Boolean = false
-
-  private var _authQueues: List[List[Hash]] =
-    List.fill(config.coresCount)(List.fill(config.authQueueSize)(Hash.zero))
-  private var _authQueuesLoaded: Boolean = false
-  private var _authQueuesDirty: Boolean = false
-
-  private var _beta: HistoricalBetaContainer = HistoricalBetaContainer()
-  private var _betaLoaded: Boolean = false
-  private var _betaDirty: Boolean = false
-
-  private var _reports: List[Option[AvailabilityAssignment]] =
-    List.fill(config.coresCount)(None)
-  private var _reportsLoaded: Boolean = false
-  private var _reportsDirty: Boolean = false
-
-  private var _readyQueue: List[List[AccumulationReadyRecord]] =
-    List.fill(config.epochLength)(List.empty)
-  private var _readyQueueLoaded: Boolean = false
-  private var _readyQueueDirty: Boolean = false
-
-  private var _accumulated: List[List[JamBytes]] =
-    List.fill(config.epochLength)(List.empty)
-  private var _accumulatedLoaded: Boolean = false
-  private var _accumulatedDirty: Boolean = false
-
-  private var _lastAccumulationOutputs: List[(Long, JamBytes)] = List.empty
-  private var _lastAccumulationOutputsLoaded: Boolean = false
-  private var _lastAccumulationOutputsDirty: Boolean = false
-
-  private var _privileges: Privileges =
-    Privileges(0, List.fill(config.coresCount)(0L), 0, 0, List.empty)
-  private var _privilegesLoaded: Boolean = false
-  private var _privilegesDirty: Boolean = false
-
-  private var _psi: Psi = Psi.empty
-  private var _psiLoaded: Boolean = false
-  private var _psiDirty: Boolean = false
+  // In commit order.
+  private val cells: Array[StateCell[?]] = Array(
+    tauCell, entropyPoolCell, kappaCell, lambdaCell, iotaCell, authPoolsCell, authQueuesCell, betaCell, reportsCell,
+    readyQueueCell, accumulatedCell, lastAccumulationOutputsCell, privilegesCell, psiCell
+  )
 
 
-  private var _gammaK: List[ValidatorKey] =
-    List.fill(config.validatorCount)(TrieBackedJamState.emptyValidator)
+  private var _gammaK: IndexedSeq[ValidatorKey] =
+    IndexedSeq.fill(config.validatorCount)(TrieBackedJamState.emptyValidator)
   private var _gammaZ: JamBytes =
     JamBytes.zeros(FullJamStateCodecs.BandersnatchRingCommitmentSize)
   private var _gammaS: TicketsOrKeys =
@@ -139,65 +134,30 @@ final class TrieBackedJamState(
   private var _postOffenders: List[Ed25519PublicKey] = List.empty
 
 
-  def timeslot: Long =
-    if !_tauLoaded then
-      _tau = TrieBackedJamState.readTimeslot(trie)
-      _tauLoaded = true
-    _tau
+  def timeslot: Long = tauCell.get
 
   def timeslot_=(v: Long): Unit =
-    if !_tauLoaded || _tau != v then
-      _tau = v
-      _tauLoaded = true
-      _tauDirty = true
+    tauCell.set(v)
 
-  def authPools: List[List[Hash]] =
-    if !_authPoolsLoaded then
-      _authPools = TrieBackedJamState.readAuthPools(trie, config)
-      _authPoolsLoaded = true
-    _authPools
+  def authPools: List[List[Hash]] = authPoolsCell.get
 
   def authPools_=(v: List[List[Hash]]): Unit =
-    if !_authPoolsLoaded || _authPools != v then
-      _authPools = v
-      _authPoolsLoaded = true
-      _authPoolsDirty = true
+    authPoolsCell.set(v)
 
-  def authQueues: List[List[Hash]] =
-    if !_authQueuesLoaded then
-      _authQueues = TrieBackedJamState.readAuthQueues(trie, config)
-      _authQueuesLoaded = true
-    _authQueues
+  def authQueues: List[List[Hash]] = authQueuesCell.get
 
   def authQueues_=(v: List[List[Hash]]): Unit =
-    if !_authQueuesLoaded || _authQueues != v then
-      _authQueues = v
-      _authQueuesLoaded = true
-      _authQueuesDirty = true
+    authQueuesCell.set(v)
 
-  def psi: Psi =
-    if !_psiLoaded then
-      _psi = TrieBackedJamState.readPsi(trie)
-      _psiLoaded = true
-    _psi
+  def psi: Psi = psiCell.get
 
   def psi_=(v: Psi): Unit =
-    if !_psiLoaded || _psi != v then
-      _psi = v
-      _psiLoaded = true
-      _psiDirty = true
+    psiCell.set(v)
 
-  def beta: HistoricalBetaContainer =
-    if !_betaLoaded then
-      _beta = TrieBackedJamState.readRecentHistory(trie)
-      _betaLoaded = true
-    _beta
+  def beta: HistoricalBetaContainer = betaCell.get
 
   def beta_=(v: HistoricalBetaContainer): Unit =
-    if !_betaLoaded || _beta != v then
-      _beta = v
-      _betaLoaded = true
-      _betaDirty = true
+    betaCell.set(v)
 
   def serviceStatistics: List[ServiceStatisticsEntry] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -213,18 +173,10 @@ final class TrieBackedJamState(
 
   def postOffenders_=(v: List[Ed25519PublicKey]): Unit = _postOffenders = v
 
-  def lastAccumulationOutputs: List[(Long, JamBytes)] =
-    if !_lastAccumulationOutputsLoaded then
-      _lastAccumulationOutputs =
-        TrieBackedJamState.readLastAccumulationOutputs(trie)
-      _lastAccumulationOutputsLoaded = true
-    _lastAccumulationOutputs
+  def lastAccumulationOutputs: List[(Long, JamBytes)] = lastAccumulationOutputsCell.get
 
   def lastAccumulationOutputs_=(v: List[(Long, JamBytes)]): Unit =
-    if !_lastAccumulationOutputsLoaded || _lastAccumulationOutputs != v then
-      _lastAccumulationOutputs = v
-      _lastAccumulationOutputsLoaded = true
-      _lastAccumulationOutputsDirty = true
+    lastAccumulationOutputsCell.set(v)
 
 
   val validators: ValidatorsRef = new ValidatorsRef(this)
@@ -235,59 +187,26 @@ final class TrieBackedJamState(
   val statistics: StatisticsRef = new StatisticsRef(this)
 
 
-  private[state] def kappa: List[ValidatorKey] =
-    if !_kappaLoaded then
-      _kappa = TrieBackedJamState.readValidators(
-        trie,
-        StateKeys.CURRENT_VALIDATORS,
-        config.validatorCount
-      )
-      _kappaLoaded = true
-    _kappa
+  private[state] def kappa: IndexedSeq[ValidatorKey] = kappaCell.get
 
-  private[state] def kappa_=(v: List[ValidatorKey]): Unit =
-    if !_kappaLoaded || _kappa != v then
-      _kappa = v
-      _kappaLoaded = true
-      _kappaDirty = true
+  private[state] def kappa_=(v: IndexedSeq[ValidatorKey]): Unit =
+    kappaCell.set(v)
 
-  private[state] def lambda: List[ValidatorKey] =
-    if !_lambdaLoaded then
-      _lambda = TrieBackedJamState.readValidators(
-        trie,
-        StateKeys.PREVIOUS_VALIDATORS,
-        config.validatorCount
-      )
-      _lambdaLoaded = true
-    _lambda
+  private[state] def lambda: IndexedSeq[ValidatorKey] = lambdaCell.get
 
-  private[state] def lambda_=(v: List[ValidatorKey]): Unit =
-    if !_lambdaLoaded || _lambda != v then
-      _lambda = v
-      _lambdaLoaded = true
-      _lambdaDirty = true
+  private[state] def lambda_=(v: IndexedSeq[ValidatorKey]): Unit =
+    lambdaCell.set(v)
 
-  private[state] def iota: List[ValidatorKey] =
-    if !_iotaLoaded then
-      _iota = TrieBackedJamState.readValidators(
-        trie,
-        StateKeys.VALIDATOR_QUEUE,
-        config.validatorCount
-      )
-      _iotaLoaded = true
-    _iota
+  private[state] def iota: IndexedSeq[ValidatorKey] = iotaCell.get
 
-  private[state] def iota_=(v: List[ValidatorKey]): Unit =
-    if !_iotaLoaded || _iota != v then
-      _iota = v
-      _iotaLoaded = true
-      _iotaDirty = true
+  private[state] def iota_=(v: IndexedSeq[ValidatorKey]): Unit =
+    iotaCell.set(v)
 
-  private[state] def gammaK: List[ValidatorKey] =
+  private[state] def gammaK: IndexedSeq[ValidatorKey] =
     if !_safroleLoaded then loadSafrole()
     _gammaK
 
-  private[state] def gammaK_=(v: List[ValidatorKey]): Unit =
+  private[state] def gammaK_=(v: IndexedSeq[ValidatorKey]): Unit =
     if !_safroleLoaded then loadSafrole()
     if _gammaK != v then
       _gammaK = v
@@ -323,30 +242,16 @@ final class TrieBackedJamState(
       _gammaA = v
       _safroleDirty = true
 
-  private[state] def entropyPool: List[Hash] =
-    if !_entropyPoolLoaded then
-      _entropyPool = TrieBackedJamState.readEntropyPool(trie)
-      _entropyPoolLoaded = true
-    _entropyPool
+  private[state] def entropyPool: List[Hash] = entropyPoolCell.get
 
   private[state] def entropyPool_=(v: List[Hash]): Unit =
     require(v.size == 4, s"entropy pool must be 4 hashes, got ${v.size}")
-    if !_entropyPoolLoaded || _entropyPool != v then
-      _entropyPool = v
-      _entropyPoolLoaded = true
-      _entropyPoolDirty = true
+    entropyPoolCell.set(v)
 
-  private[state] def coreReports: List[Option[AvailabilityAssignment]] =
-    if !_reportsLoaded then
-      _reports = TrieBackedJamState.readReports(trie, config.coresCount)
-      _reportsLoaded = true
-    _reports
+  private[state] def coreReports: List[Option[AvailabilityAssignment]] = reportsCell.get
 
   private[state] def coreReports_=(v: List[Option[AvailabilityAssignment]]): Unit =
-    if !_reportsLoaded || _reports != v then
-      _reports = v
-      _reportsLoaded = true
-      _reportsDirty = true
+    reportsCell.set(v)
 
   private[state] def coreStatistics: List[CoreStatisticsRecord] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -358,43 +263,20 @@ final class TrieBackedJamState(
       _coreStatistics = v
       _activityStatsDirty = true
 
-  private[state] def readyQueue: List[List[AccumulationReadyRecord]] =
-    if !_readyQueueLoaded then
-      _readyQueue =
-        TrieBackedJamState.readAccumulationQueue(trie, config.epochLength)
-      _readyQueueLoaded = true
-    _readyQueue
+  private[state] def readyQueue: List[List[AccumulationReadyRecord]] = readyQueueCell.get
 
   private[state] def readyQueue_=(v: List[List[AccumulationReadyRecord]]): Unit =
-    if !_readyQueueLoaded || _readyQueue != v then
-      _readyQueue = v
-      _readyQueueLoaded = true
-      _readyQueueDirty = true
+    readyQueueCell.set(v)
 
-  private[state] def accumulated: List[List[JamBytes]] =
-    if !_accumulatedLoaded then
-      _accumulated =
-        TrieBackedJamState.readAccumulationHistory(trie, config.epochLength)
-      _accumulatedLoaded = true
-    _accumulated
+  private[state] def accumulated: List[List[JamBytes]] = accumulatedCell.get
 
   private[state] def accumulated_=(v: List[List[JamBytes]]): Unit =
-    if !_accumulatedLoaded || _accumulated != v then
-      _accumulated = v
-      _accumulatedLoaded = true
-      _accumulatedDirty = true
+    accumulatedCell.set(v)
 
-  private[state] def privileges: Privileges =
-    if !_privilegesLoaded then
-      _privileges = TrieBackedJamState.readPrivileges(trie, config.coresCount)
-      _privilegesLoaded = true
-    _privileges
+  private[state] def privileges: Privileges = privilegesCell.get
 
   private[state] def privileges_=(v: Privileges): Unit =
-    if !_privilegesLoaded || _privileges != v then
-      _privileges = v
-      _privilegesLoaded = true
-      _privilegesDirty = true
+    privilegesCell.set(v)
 
   private[state] def serviceAccounts: List[AccumulationServiceItem] =
     if !_serviceAccountsLoaded then loadServiceAccounts()
@@ -456,11 +338,7 @@ final class TrieBackedJamState(
   
   /** How many components [[commit]] would re-encode (all service accounts count as one). */
   private[protocol] def dirtyComponents: Int =
-    Seq(
-      _tauDirty, _entropyPoolDirty, _kappaDirty, _lambdaDirty, _iotaDirty, _authPoolsDirty, _authQueuesDirty,
-      _betaDirty, _reportsDirty, _readyQueueDirty, _accumulatedDirty, _lastAccumulationOutputsDirty,
-      _privilegesDirty, _psiDirty, _safroleDirty, _activityStatsDirty, _serviceAccountsDirty
-    ).count(identity)
+    cells.count(_.dirty) + Seq(_safroleDirty, _activityStatsDirty, _serviceAccountsDirty).count(identity)
 
   def commit(target: StateTrie): Unit =
     val updates = commitUpdates()
@@ -475,48 +353,9 @@ final class TrieBackedJamState(
     val updates =
       mutable.ArrayBuffer.empty[(JamBytes, Option[JamBytes])]
 
-    if _tauDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.TIMESLOT),
-        Some(TrieBackedJamState.encodeTimeslot(_tau))))
-    if _entropyPoolDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.ENTROPY_POOL),
-        Some(TrieBackedJamState.encodeEntropyPool(_entropyPool))))
-    if _kappaDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.CURRENT_VALIDATORS),
-        Some(TrieBackedJamState.encodeValidatorList(_kappa))))
-    if _lambdaDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.PREVIOUS_VALIDATORS),
-        Some(TrieBackedJamState.encodeValidatorList(_lambda))))
-    if _iotaDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.VALIDATOR_QUEUE),
-        Some(TrieBackedJamState.encodeValidatorList(_iota))))
-    if _authPoolsDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.CORE_AUTHORIZATION_POOL),
-        Some(TrieBackedJamState.encodeAuthPools(_authPools))))
-    if _authQueuesDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.AUTHORIZATION_QUEUE),
-        Some(TrieBackedJamState.encodeAuthQueues(_authQueues, config))))
-    if _betaDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.RECENT_HISTORY),
-        Some(TrieBackedJamState.encodeRecentHistory(_beta))))
-    if _reportsDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.REPORTS),
-        Some(TrieBackedJamState.encodeReports(_reports, config.coresCount))))
-    if _readyQueueDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.ACCUMULATION_QUEUE),
-        Some(TrieBackedJamState.encodeAccumulationQueue(_readyQueue))))
-    if _accumulatedDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.ACCUMULATION_HISTORY),
-        Some(TrieBackedJamState.encodeAccumulationHistory(_accumulated))))
-    if _lastAccumulationOutputsDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.LAST_ACCUMULATION_OUTPUTS),
-        Some(TrieBackedJamState.encodeLastAccumulationOutputs(_lastAccumulationOutputs))))
-    if _privilegesDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.PRIVILEGED_SERVICES),
-        Some(TrieBackedJamState.encodePrivileges(_privileges, config.coresCount))))
-    if _psiDirty then
-      updates += ((StateKeys.simpleKey(StateKeys.JUDGEMENTS),
-        Some(TrieBackedJamState.encodePsi(_psi))))
+    cells.foreach { c =>
+      if c.dirty then updates += ((StateKeys.simpleKey(c.prefix), Some(c.encoded)))
+    }
     if _safroleDirty then
       updates += ((StateKeys.simpleKey(StateKeys.SAFROLE_STATE),
         Some(TrieBackedJamState.encodeSafroleBlock(_gammaK, _gammaZ, _gammaS, _gammaA))))
@@ -619,12 +458,12 @@ object TrieBackedJamState:
       trie: StateTrie,
       prefix: Byte,
       validatorCount: Int
-  ): List[ValidatorKey] =
+  ): IndexedSeq[ValidatorKey] =
     trie.read(StateKeys.simpleKey(prefix)) match
-      case None => List.fill(validatorCount)(emptyValidator)
+      case None => IndexedSeq.fill(validatorCount)(emptyValidator)
       case Some(v) =>
         FullJamStateCodecs
-          .validatorListCodec(validatorCount)
+          .validatorListCodec
           .decodeUnsafe(v.toArrayUnsafe)
 
   private def readAuthPools(
@@ -721,11 +560,11 @@ object TrieBackedJamState:
   private def readSafroleBlock(
       trie: StateTrie,
       config: ChainConfig
-  ): (List[ValidatorKey], JamBytes, TicketsOrKeys, List[TicketMark]) =
+  ): (IndexedSeq[ValidatorKey], JamBytes, TicketsOrKeys, List[TicketMark]) =
     trie.read(StateKeys.simpleKey(StateKeys.SAFROLE_STATE)) match
       case None =>
         (
-          List.fill(config.validatorCount)(emptyValidator),
+          IndexedSeq.fill(config.validatorCount)(emptyValidator),
           JamBytes.zeros(FullJamStateCodecs.BandersnatchRingCommitmentSize),
           TicketsOrKeys.Keys(
             List.fill(config.epochLength)(BandersnatchPublicKey.zero)
@@ -735,7 +574,7 @@ object TrieBackedJamState:
       case Some(v) =>
         val (k, z, sData, a) =
           FullJamStateCodecs
-            .safroleGammaStateCodec(config.validatorCount, config.epochLength)
+            .safroleGammaStateCodec(config.epochLength)
             .decodeUnsafe(v.toArrayUnsafe)
         val s = sData match
           case TicketsOrKeysData.Tickets(t) => TicketsOrKeys.Tickets(t)
@@ -757,7 +596,6 @@ object TrieBackedJamState:
       case Some(v) =>
         ActivityStatisticsCodec.decodeActivityStatistics(
           v.toArray,
-          config.validatorCount,
           config.coresCount
         )
 
@@ -830,8 +668,8 @@ object TrieBackedJamState:
   private def encodeEntropyPool(pool: List[Hash]): JamBytes =
     encodeJB(FullJamStateCodecs.entropyPoolCodec, pool)
 
-  private def encodeValidatorList(vs: List[ValidatorKey]): JamBytes =
-    encodeJB(FullJamStateCodecs.validatorListCodec(vs.length), vs)
+  private def encodeValidatorList(vs: IndexedSeq[ValidatorKey]): JamBytes =
+    encodeJB(FullJamStateCodecs.validatorListCodec, vs)
 
   private def encodeAuthPools(pools: List[List[Hash]]): JamBytes =
     encodeJB(FullJamStateCodecs.authPoolsCodec(pools.length), pools)
@@ -883,7 +721,7 @@ object TrieBackedJamState:
     encodeJB(Privileges.codec(coresCount), p)
 
   private def encodeSafroleBlock(
-      gammaK: List[ValidatorKey],
+      gammaK: IndexedSeq[ValidatorKey],
       gammaZ: JamBytes,
       gammaS: TicketsOrKeys,
       gammaA: List[TicketMark]
@@ -894,7 +732,7 @@ object TrieBackedJamState:
       case TicketsOrKeys.Keys(k) =>
         (TicketsOrKeysData.Keys(k), k.length)
     encodeJB(
-      FullJamStateCodecs.safroleGammaStateCodec(gammaK.length, sLen),
+      FullJamStateCodecs.safroleGammaStateCodec(sLen),
       (gammaK, gammaZ, sData, gammaA)
     )
 
@@ -910,7 +748,7 @@ object TrieBackedJamState:
     val corePadded = core.padTo(config.coresCount, CoreStatisticsRecord.zero)
     encodeJB(
       ActivityStatisticsCodec
-        .activityStatisticsCodec(config.validatorCount, config.coresCount),
+        .activityStatisticsCodec(config.coresCount),
       ActivityStatisticsCodec.ActivityStatistics(
         accumulator = cur,
         previous = prev,
@@ -921,3 +759,25 @@ object TrieBackedJamState:
 
   private def encodeServiceInfo(info: ServiceInfo): JamBytes =
     encodeJB(FullJamStateCodecs.serviceInfoCodec, info)
+
+/** A state component read from the trie on first use and re-encoded at commit only if set to a different value. */
+private[state] final class StateCell[A](val prefix: Byte, read: => A, write: A => JamBytes):
+  private var value: A = uninitialized
+  private var loaded = false
+  private var changed = false
+
+  def get: A =
+    if !loaded then
+      value = read
+      loaded = true
+    value
+
+  def set(v: A): Unit =
+    if !loaded || value != v then
+      value = v
+      loaded = true
+      changed = true
+
+  def dirty: Boolean = changed
+
+  def encoded: JamBytes = write(value)

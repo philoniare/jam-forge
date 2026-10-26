@@ -3,7 +3,8 @@ package io.forge.jam.node
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.JamBytes
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.crypto.Bls
 import io.forge.jam.network.{JamnpConnection, JamnpNode, StreamHandler}
 import io.forge.jam.node.BeefyMessages.*
@@ -34,22 +35,22 @@ final class BeefyService(
   private val MaxTracked = 64
 
   /** What a block's posterior state says about BEEFY: κ' BLS keys and the last super-peak of β_H. */
-  private final case class Ctx(keys: IndexedSeq[Array[Byte]], ed25519: IndexedSeq[Seq[Byte]], superPeak: Hash)
+  private final case class Ctx(keys: IndexedSeq[Array[Byte]], ed25519: IndexedSeq[Ed25519PublicKey], superPeak: Hash)
 
   private var lastSigned: Hash = chain.finalized.hash
   private val ctxCache = mutable.LinkedHashMap.empty[Hash, Option[Ctx]]
   private val received = mutable.LinkedHashMap.empty[Hash, mutable.Map[Int, SignedCommitment]]
   private val proven = mutable.LinkedHashSet.empty[Hash]
   private val pending = mutable.ArrayBuffer.empty[SignedCommitment]
-  private val consistentKeys = mutable.Set.empty[Seq[Byte]]
+  private val consistentKeys = mutable.Set.empty[JamBytes]
   private var warnedUnregistered = false
 
   /** Whether a peer (by Ed25519 key) takes our BEEFY stream. JAMNP-S has none, and a peer that does not know it may
     * drop the whole connection, so the first commitment to an unknown peer is a probe: a peer that
     * keeps the connection for [[ProbeMillis]] takes it, one that drops it is never sent BEEFY again.
     */
-  private val speaks = mutable.Map.empty[Seq[Byte], Boolean]
-  private val probes = mutable.Map.empty[Seq[Byte], (JamnpConnection, Long)]
+  private val speaks = mutable.Map.empty[Ed25519PublicKey, Boolean]
+  private val probes = mutable.Map.empty[Ed25519PublicKey, (JamnpConnection, Long)]
   private val ProbeMillis = 3000L
 
   @volatile private var latest: Option[BeefyProof] = None
@@ -77,7 +78,7 @@ final class BeefyService(
         case Right(c) =>
           exec.execute(() =>
             guarded {
-              speaks(conn.peerKey.toSeq) = true
+              speaks(conn.peerPublicKey) = true
               onCommitment(c)
             }
           )
@@ -114,7 +115,7 @@ final class BeefyService(
       k <- keys
       ctx <- context(block)
       slot <- chain.slotOf(block)
-      index = ctx.ed25519.indexOf(k.ed25519Public.toSeq)
+      index = ctx.ed25519.indexOf(k.ed25519Key)
       if index >= 0
     do
       val c = BeefyMessages.sign(block, slot, index, ctx.superPeak, k)
@@ -126,9 +127,9 @@ final class BeefyService(
     val now = System.currentTimeMillis()
     resolveProbes(now)
     distribution.peers
-      .distinctBy(_.peerKey.toSeq)
+      .distinctBy(_.peerPublicKey)
       .foreach { conn =>
-        val key = conn.peerKey.toSeq
+        val key = conn.peerPublicKey
         val send = speaks.get(key) match
           case Some(known) => known
           case None =>
@@ -144,7 +145,7 @@ final class BeefyService(
         probes.remove(key)
         if !speaks.contains(key) then
           speaks(key) = false
-          logger.info(s"BEEFY: peer ${JamNode.hex(key.toArray).take(16)} dropped the connection; not sending it BEEFY")
+          logger.info(s"BEEFY: peer ${JamNode.hex(key.toArrayUnsafe).take(16)} dropped the connection; not sending it BEEFY")
       else if now - at >= ProbeMillis then
         probes.remove(key)
         speaks.getOrElseUpdate(key, true)
@@ -162,7 +163,7 @@ final class BeefyService(
       val state = new TrieBackedJamState(trie, chain.config, new ServiceStorageView(trie))
       val vs = state.validators.current.toIndexedSeq
       state.beta.history.lastOption.map(h =>
-        Ctx(vs.map(_.bls.bytes), vs.map(_.ed25519.bytes.toSeq), h.beefyRoot)
+        Ctx(vs.map(_.bls.bytes), vs.map(_.ed25519), h.beefyRoot)
       )
     }
 
@@ -192,7 +193,8 @@ final class BeefyService(
       Right(())
 
   private def keyConsistent(k: Array[Byte]): Boolean =
-    consistentKeys.contains(k.toSeq) || Bls.keyConsistent(k) && { consistentKeys += k.toSeq; true }
+    val key = JamBytes(k)
+    consistentKeys.contains(key) || Bls.keyConsistent(k) && { consistentKeys += key; true }
 
   private def accept(c: SignedCommitment, ctx: Ctx): Unit =
     val sigs = received.getOrElseUpdate(c.block, mutable.Map.empty)

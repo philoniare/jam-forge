@@ -120,6 +120,21 @@ object codecs:
   /** Compact length prefix, then that many elements (eq. C.8). */
   def compactPrefixedList[A](c: Codec[A]): Codec[List[A]] = listOfN(compactInt, c)
 
+  /** As [[compactPrefixedList]], for sequences read by index. */
+  def compactPrefixedVector[A](c: Codec[A]): Codec[IndexedSeq[A]] = new Codec[IndexedSeq[A]]:
+    def write(out: ByteWriter, value: IndexedSeq[A]): Unit =
+      compactInt.write(out, value.length)
+      value.foreach(c.write(out, _))
+    def read(in: ByteReader): IndexedSeq[A] =
+      val n = compactInt.read(in)
+      if n < 0 then in.fail(s"negative element count $n")
+      val b = Vector.newBuilder[A]
+      var i = 0
+      while i < n do
+        b += c.read(in)
+        i += 1
+      b.result()
+
   /** Elements until the input is exhausted, no length prefix. */
   def listToEnd[A](c: Codec[A]): Codec[List[A]] = new Codec[List[A]]:
     def write(out: ByteWriter, value: List[A]): Unit = value.foreach(c.write(out, _))

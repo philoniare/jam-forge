@@ -113,7 +113,7 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     val commit = Commit(vote, pcs)
     val (round, setId, c) = decodeCommitMessage(encodeCommitMessage(2L, 0L, commit)).toOption.get
     (round, setId, c.target, c.precommits.map(_.vote)) shouldBe ((2L, 0L, vote, pcs.map(_.vote)))
-    val headers = io.forge.jam.core.types.header.Header.headerCodec(ChainConfig.TINY.validatorCount, ChainConfig.TINY.epochLength)
+    val headers = io.forge.jam.core.types.header.Header.headerCodec(ChainConfig.TINY.epochLength)
     val j = decodeJustification(encodeJustification(Justification(2L, 0L, commit, Nil)), headers).toOption.get
     j.commit.precommits.size shouldBe 3
     decodeState(encodeState(5L, 1L, 42L)) shouldBe Right((5L, 1L, 42L))

@@ -1,7 +1,7 @@
 package io.forge.jam.pvm.program
 
 import io.forge.jam.pvm.{Instruction, Opcode, PvmConstants}
-import PvmConstants.{NumGeneralRegisters, MaxInstructionSize}
+import PvmConstants.MaxInstructionSize
 
 /**
  * Decodes PVM instructions from bytecode.
@@ -126,7 +126,7 @@ object InstructionDecoder:
     Opcode.StoreImmIndirectU64 -> ((r, o, v) => Instruction.StoreImmIndirectU64(r, o, v))
   )
 
-  private final val KindNone = 0
+  // Kind 0: no decoder for the opcode.
   private final val KindArgless = 1
   private final val KindRegs2 = 2
   private final val KindRegs3 = 3

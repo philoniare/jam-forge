@@ -3,7 +3,6 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
@@ -12,6 +11,7 @@ import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
 
 import scala.collection.mutable
+import scala.util.boundary, boundary.break
 import scala.jdk.CollectionConverters.*
 
 /** Owns the canonical chain: the persistent state trie, block storage and the
@@ -71,21 +71,21 @@ final class ChainManager(
   /** Mark a main-chain block as finalized: the finalized head advances and
     * side branches forking at or below it are no longer adoptable
     */
-  def finalize(hash: Hash, belowCurrent: Boolean = false): Either[String, Head] =
+  def finalize(hash: Hash, belowCurrent: Boolean = false): Either[ChainError, Head] =
     synchronized {
       blockRoot(hash) match
-        case None => Left("cannot finalize a non-main-chain block")
+        case None => Left(ChainError.NotOnMainChain)
         case Some(root) =>
           val slot = blockStore
             .getBlock(hash)
             .filter(_.nonEmpty)
             .flatMap(b => decodeBlock(b).toOption)
-            .map(_.header.slot.value.toLong)
+            .map(_.header.slot.toLong)
             .getOrElse(0L)
           val current = finalized
           if !belowCurrent && metaLong(s"height:${hash.toHex}").getOrElse(0L) <
               metaLong(s"height:${current.hash.toHex}").getOrElse(0L)
-          then Left("cannot finalize below the finalized head")
+          then Left(ChainError.BelowFinalized)
           else
             blockStore.setHead(BlockStore.FinalizedHead, hash)
             putMetaLong("finalized_slot", slot)
@@ -159,7 +159,7 @@ final class ChainManager(
   /** Finalize stored block `x` (GRANDPA), first reorging to the heaviest leaf containing it when it is off our best
     * chain.
     */
-  def finalizeAdopting(x: Hash): Either[String, Head] =
+  def finalizeAdopting(x: Hash): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
     val result = synchronized(adoptAndFinalize(x, events, belowCurrent = false))
     events.foreach((head, block) => postImportBus.publish(head, block))
@@ -169,9 +169,9 @@ final class ChainManager(
       x: Hash,
       events: mutable.ListBuffer[(Head, Block)],
       belowCurrent: Boolean
-  ): Either[String, Head] =
+  ): Either[ChainError, Head] =
     blockHeight(x) match
-      case None => Left("unknown block")
+      case None => Left(ChainError.UnknownBlock)
       case Some(xHeight) =>
         val onBest = blockRoot(x).isDefined && ancestorAtHeight(bestHead.hash, xHeight).contains(x)
         val adopted =
@@ -184,7 +184,7 @@ final class ChainManager(
               logger.warn(s"adopting ${tip.toHex.take(18)}, which contains finalized ${x.toHex.take(18)}")
               reorgTo(tip, events, ignoreFinality = true)
         adopted.flatMap(_ =>
-          if blockRoot(x).isDefined then finalize(x, belowCurrent) else Left("block not on a validated chain")
+          if blockRoot(x).isDefined then finalize(x, belowCurrent) else Left(ChainError.NotValidated)
         )
 
   /** Parent of a stored block. */
@@ -204,7 +204,7 @@ final class ChainManager(
   def header(h: Hash): Option[io.forge.jam.core.types.header.Header] =
     blockStore.getHeader(h).flatMap(b => headerCodec.decodeExact(b).toOption)
 
-  val headerCodec = io.forge.jam.core.types.header.Header.headerCodec(config.validatorCount, config.epochLength)
+  val headerCodec = io.forge.jam.core.types.header.Header.headerCodec(config.epochLength)
 
   def meta(name: String): Option[Array[Byte]] = blockStore.getMeta(name)
   def putMeta(name: String, value: Array[Byte]): Unit = blockStore.setMeta(name, value)
@@ -264,7 +264,7 @@ final class ChainManager(
 
   private def recordForkChoiceMeta(hash: Hash, block: Block): Unit =
     val parent = block.header.parent
-    val slot = block.header.slot.value.toLong
+    val slot = block.header.slot.toLong
     val epoch = slot / config.epochLength
     val parentEpoch = slotOfHeader(parent) / config.epochLength
     val ticketed =
@@ -322,7 +322,7 @@ final class ChainManager(
       .getBlock(h)
       .filter(_.nonEmpty)
       .flatMap(b => decodeBlock(b).toOption)
-      .map(_.header.slot.value.toLong)
+      .map(_.header.slot.toLong)
       .getOrElse(0L)
 
   /** The `Head` for an already-imported block, for leaf bookkeeping:
@@ -438,43 +438,41 @@ final class ChainManager(
     Right(out.toList)
 
   def headerHashOf(block: Block): Hash =
-    Hashing.blake2b256(block.header.encode.toArray)
+    Hashing.blake2b256(headerCodec.encode(block.header))
 
   /** Import a block: extends the best head directly, or is stored as a side
     * branch and adopted via reorg when its branch becomes strictly heavier
     * (ticket-sealed count, then height) and holds no equivocation
     */
-  def importBlock(blockBytes: Array[Byte]): Either[String, Head] =
+  def importBlock(blockBytes: Array[Byte]): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
     val result = synchronized {
-      decodeBlock(blockBytes).flatMap { block =>
+      decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
         val parent = block.header.parent
-        if blockRoot(hash).isDefined then Left("block already imported")
-        else if flag(s"invalid:${hash.toHex}") then Left("block failed validation before")
+        if blockRoot(hash).isDefined then Left(ChainError.AlreadyImported)
+        else if flag(s"invalid:${hash.toHex}") then Left(ChainError.PreviouslyInvalid)
         else if parent == bestHead.hash then importOnBest(block, blockBytes, events)
         else
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
               // Known parent on some branch: store and evaluate.
-              blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
+              blockStore.putBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
               val height = parentHeight + 1
               putBlockHeight(hash, height)
               recordForkChoiceMeta(hash, block)
               leafMap.remove(parent)
               if blockStore.children(hash).isEmpty then
-                leafMap.put(hash, Head(hash, block.header.slot.value.toLong, Hash.zero))
+                leafMap.put(hash, Head(hash, block.header.slot.toLong, Hash.zero))
               else leafMap.remove(hash)
               val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
               val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
               val heavier = weight > bestWeight || (weight == bestWeight && height > bestHeight)
               if heavier && !branchEquivocates(hash) && !branchInvalid(hash) then reorgTo(hash, events)
               else
-                Left(
-                  s"stored on side branch (weight $weight height $height vs best $bestWeight/$bestHeight)"
-                )
+                Left(ChainError.StoredOnSideBranch(weight, height, bestWeight, bestHeight))
             case _ =>
-              Left(s"unknown parent ${parent.toHex.take(18)}")
+              Left(ChainError.UnknownParent(parent))
       }
     }
     events.foreach((head, block) => postImportBus.publish(head, block))
@@ -484,18 +482,18 @@ final class ChainManager(
       block: Block,
       blockBytes: Array[Byte],
       events: mutable.ListBuffer[(Head, Block)]
-  ): Either[String, Head] =
+  ): Either[ChainError, Head] =
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
-    val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.value.toLong)
+    val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.toLong)
     importer.importBlock(block, preState, ancestry) match
       case ImportResult.Failure(error, message) =>
         markInvalid(headerHashOf(block))
-        Left(s"$error: $message")
+        Left(ChainError.ImportFailed(error, message))
       case ImportResult.Success(postRoot, _) =>
         val hash = headerHashOf(block)
-        val slot = block.header.slot.value.toLong
-        blockStore.putBlock(hash, parent, block.header.encode.toArray, blockBytes)
+        val slot = block.header.slot.toLong
+        blockStore.putBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
         recordForkChoiceMeta(hash, block)
         blockStore.setHead(BlockStore.BestHead, hash)
         blockStore.setMeta("state_root", postRoot.bytes.toArray)
@@ -565,7 +563,7 @@ final class ChainManager(
       tip: Hash,
       events: mutable.ListBuffer[(Head, Block)],
       ignoreFinality: Boolean = false
-  ): Either[String, Head] =
+  ): Either[ChainError, Head] =
     // Collect the unvalidated branch (tip backwards until a validated block).
     val branch = mutable.ListBuffer.empty[Array[Byte]]
     var cursor = tip
@@ -575,8 +573,8 @@ final class ChainManager(
           branch.prepend(bytes)
           decodeBlock(bytes) match
             case Right(b) => cursor = b.header.parent
-            case Left(e)  => return Left(s"reorg: undecodable branch block: $e")
-        case _ => return Left("reorg: branch block missing")
+            case Left(e)  => return Left(ChainError.Undecodable(s"reorg: undecodable branch block: $e"))
+        case _ => return Left(ChainError.BranchBlockMissing)
     val ancestor = cursor
     // The loop above exits precisely when `blockRoot(cursor)` is defined.
     val ancestorRoot = blockRoot(ancestor).getOrElse(
@@ -589,7 +587,7 @@ final class ChainManager(
     val finalizedHeight =
       metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
     if blockHeight(ancestor).getOrElse(0L) < finalizedHeight && !ignoreFinality then
-      return Left("reorg would revert finalized blocks")
+      return Left(ChainError.RevertsFinalized)
 
     val previousBest = bestHead
     // Abandoned main-chain blocks (best back to ancestor) lose main status.
@@ -606,7 +604,7 @@ final class ChainManager(
         )
       decodeBlock(backBytes) match
         case Right(b) => back = b.header.parent
-        case Left(e)  => return Left(s"reorg: undecodable main block: $e")
+        case Left(e)  => return Left(ChainError.Undecodable(s"reorg: undecodable main block: $e"))
 
     logger.info(
       s"reorg: rewinding ${abandoned.size} block(s) to ${ancestor.toHex.take(18)}, " +
@@ -616,29 +614,30 @@ final class ChainManager(
     val ancestorBlock = blockStore.getBlock(ancestor)
     val ancestorSlot =
       ancestorBlock.filter(_.nonEmpty).flatMap(b => decodeBlock(b).toOption)
-        .map(_.header.slot.value.toLong)
+        .map(_.header.slot.toLong)
         .getOrElse(0L)
     bestHead = Head(ancestor, ancestorSlot, ancestorRoot)
 
     val replayed = mutable.ListBuffer.empty[Hash]
-    branch.foreach { bytes =>
-      decodeBlock(bytes).flatMap(b => importOnBest(b, bytes, events)) match
-        case Right(head) =>
-          replayed += head.hash
-        case Left(err) =>
-          replayed.foreach(dropBlockRoot)
-          trieStore.markCommitted(previousBest.stateRoot)
-          bestHead = previousBest
-          blockStore.setHead(BlockStore.BestHead, previousBest.hash)
-          blockStore.setMeta("state_root", previousBest.stateRoot.bytes.toArray)
-          putMetaLong("best_slot", previousBest.slot)
-          return Left(s"reorg replay failed: $err")
-    }
-    abandoned.foreach { h =>
-      dropBlockRoot(h)
-      Option(leafMap.get(h)).foreach(head => leafMap.put(h, head.copy(stateRoot = Hash.zero)))
-    }
-    Right(bestHead)
+    boundary:
+      branch.foreach { bytes =>
+        decodeBlock(bytes).left.map(ChainError.Undecodable(_)).flatMap(b => importOnBest(b, bytes, events)) match
+          case Right(head) =>
+            replayed += head.hash
+          case Left(err) =>
+            replayed.foreach(dropBlockRoot)
+            trieStore.markCommitted(previousBest.stateRoot)
+            bestHead = previousBest
+            blockStore.setHead(BlockStore.BestHead, previousBest.hash)
+            blockStore.setMeta("state_root", previousBest.stateRoot.bytes.toArray)
+            putMetaLong("best_slot", previousBest.slot)
+            break(Left(ChainError.ReplayFailed(err)))
+      }
+      abandoned.foreach { h =>
+        dropBlockRoot(h)
+        Option(leafMap.get(h)).foreach(head => leafMap.put(h, head.copy(stateRoot = Hash.zero)))
+      }
+      Right(bestHead)
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)
 
@@ -662,16 +661,16 @@ final class ChainManager(
     * validators). When it is on the best chain above finality, the best head rewinds to its parent and the heaviest
     * remaining branch is adopted.
     */
-  def disregard(hash: Hash): Either[String, Head] =
+  def disregard(hash: Hash): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
     val result = synchronized {
       markInvalid(hash)
       val finalizedHeight = metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
       (blockRoot(hash), parentOf(hash)) match
-        case (None, _) => Left("not on the best chain")
-        case (_, None) => Left("no parent")
+        case (None, _) => Left(ChainError.NotOnBestChain)
+        case (_, None) => Left(ChainError.NoParent)
         case (Some(_), Some(parent)) if blockHeight(hash).getOrElse(0L) <= finalizedHeight =>
-          Left(s"already finalized; parent ${parent.toHex.take(18)}")
+          Left(ChainError.AlreadyFinalized(parent))
         case (Some(_), Some(parent)) =>
           rewindTo(parent)
           val (pw, ph) = (weightOf(parent), blockHeight(parent).getOrElse(0L))

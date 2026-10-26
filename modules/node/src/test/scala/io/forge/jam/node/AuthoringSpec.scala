@@ -60,7 +60,7 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
 
       nodeB.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeA.listenPort))
 
-      val genesisSlot = genesis.header.slot.value.toLong
+      val genesisSlot = genesis.header.slot.toLong
 
       // Author five consecutive slots deterministically.
       for i <- 1 to 5 do
@@ -98,7 +98,7 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
       node.chain.initializeOrRestore(node.spec)
       node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
 
-      val genesisSlot = genesis.header.slot.value.toLong
+      val genesisSlot = genesis.header.slot.toLong
       val epochLen = node.spec.config.epochLength // 12 (TINY)
 
       // Author through epoch 0. Tickets (18 candidates, ≤3 per block) fill
@@ -144,7 +144,7 @@ class AuthoringSpec extends AnyFunSuite with Matchers:
       node.chain.initializeOrRestore(node.spec)
       // Keys from an index outside the tiny validator set.
       node.enableAuthoring(Seq(ValidatorKeySet.dev(17)))
-      node.authorSlot(genesis.header.slot.value.toLong + 1) shouldBe None
+      node.authorSlot(genesis.header.slot.toLong + 1) shouldBe None
     finally
       if node != null then node.shutdownStorageOnly()
       cleanup(dir)

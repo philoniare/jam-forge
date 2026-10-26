@@ -141,7 +141,7 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
       block.extrinsic.guarantees.size shouldBe 1
       val guarantee = block.extrinsic.guarantees.head
       guarantee.signatures.size shouldBe 2
-      guarantee.signatures.map(_.validatorIndex.value.toInt).toSet shouldBe
+      guarantee.signatures.map(_.validatorIndex.toInt).toSet shouldBe
         Set(core0Validators(0), core0Validators(1))
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
     finally

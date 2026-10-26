@@ -23,7 +23,7 @@ object ExtrinsicHashing:
       compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets)
     // Each preimage contributes E_4(service) ++ hash(data)
     val preimageItems = ex.preimages.map { p =>
-      io.forge.jam.core.codec.codecs.uint32L.encode(p.requester.value.toLong & 0xffffffffL) ++
+      io.forge.jam.core.codec.codecs.uint32L.encode(p.requester.toLong & 0xffffffffL) ++
         Hashing.blake2b256(p.blob.toArray).bytes
     }
     val preimagesEncoded =
@@ -32,13 +32,13 @@ object ExtrinsicHashing:
       compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount))
         .encode(ex.assurances)
     val disputesEncoded =
-      Dispute.codec(config.votesPerVerdict).encode(ex.disputes)
+      Dispute.codec.encode(ex.disputes)
 
     val guaranteeItems = ex.guarantees.map { g =>
       val reportEncoded = summon[Codec[WorkReport]].encode(g.report)
       val reportHash = Hashing.blake2b256(reportEncoded)
       val timeslotEncoded =
-        io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL)
+        io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.toLong & 0xffffffffL)
       val credentialEncoded =
         compactPrefixedList(summon[Codec[GuaranteeSignature]])
           .encode(g.signatures)

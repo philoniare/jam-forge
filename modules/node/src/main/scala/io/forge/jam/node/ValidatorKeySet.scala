@@ -1,6 +1,7 @@
 package io.forge.jam.node
 
 import io.forge.jam.core.Hashing
+import io.forge.jam.core.primitives.{BandersnatchPublicKey, Ed25519PublicKey}
 import io.forge.jam.crypto.{Bls, Ed25519ZebraWrapper}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
@@ -14,7 +15,10 @@ final case class ValidatorKeySet(
     ed25519Public: Array[Byte],
     blsSecret: Array[Byte] = Array.emptyByteArray,
     blsPublic: Array[Byte] = Array.emptyByteArray
-)
+):
+  /** The public keys as content-compared values, for map keys and set membership. */
+  lazy val ed25519Key: Ed25519PublicKey = Ed25519PublicKey(ed25519Public)
+  lazy val bandersnatchKey: BandersnatchPublicKey = BandersnatchPublicKey(bandersnatchPublic)
 
 object ValidatorKeySet:
 

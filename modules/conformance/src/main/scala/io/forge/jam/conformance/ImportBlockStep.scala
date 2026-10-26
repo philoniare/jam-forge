@@ -1,6 +1,6 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.{ChainConfig, Parallel}
+import io.forge.jam.core.Parallel
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
@@ -18,7 +18,6 @@ object ImportBlockStep:
   def apply(
       stateStore: StateStore,
       blockImporter: BlockImporter,
-      config: ChainConfig,
       block: Block
   ): Either[String, Hash] =
     val parentHash = block.header.parent
@@ -31,11 +30,11 @@ object ImportBlockStep:
         // from its parent, so fork mutations do not pollute a shared
         // global ancestry list (header.tex eq:ancestors).
         val ancestry = stateStore.ancestryFor(parentHash).map(a =>
-          AncestorHeader(a.slot.value.toLong & 0xffffffffL, a.headerHash)
+          AncestorHeader(a.slot.toLong & 0xffffffffL, a.headerHash)
         )
         blockImporter.importBlock(block, parentState, ancestry) match
           case ImportResult.Success(postStateRoot, headerHash) =>
-            val postState = Parallel.async(blockImporter.materializePostState(config))
+            val postState = Parallel.async(blockImporter.materializePostState())
             val isOriginal = stateStore.isOriginalBlock(parentHash)
             // Record parentage for every imported block so any future
             // block can derive its own per-chain ancestry.

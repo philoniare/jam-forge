@@ -44,9 +44,9 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
   }
 
   test("ticketsForEpoch keeps only tickets recorded for the current epoch") {
-    val currentId = Seq.fill[Byte](32)(0x01)
-    val staleId = Seq.fill[Byte](32)(0x02)
-    val unknownId = Seq.fill[Byte](32)(0x03) // present in envelopes but missing from epochOf
+    val currentId = Hash(Array.fill[Byte](32)(0x01))
+    val staleId = Hash(Array.fill[Byte](32)(0x02))
+    val unknownId = Hash(Array.fill[Byte](32)(0x03)) // present in envelopes but missing from epochOf
 
     val envelopes = Map(
       currentId -> envelope(0x0a),
@@ -62,8 +62,8 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
   }
 
   test("ticketsForEpoch is a no-op when every ticket already matches the current epoch") {
-    val idA = Seq.fill[Byte](32)(0x0d)
-    val idB = Seq.fill[Byte](32)(0x0e)
+    val idA = Hash(Array.fill[Byte](32)(0x0d))
+    val idB = Hash(Array.fill[Byte](32)(0x0e))
     val envelopes = Map(idA -> envelope(1), idB -> envelope(2))
     val epochOf = Map(idA -> 9L, idB -> 9L)
 
@@ -71,7 +71,7 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
   }
 
   test("ticketsForEpoch drops everything when all tickets are stale") {
-    val idA = Seq.fill[Byte](32)(0x0f)
+    val idA = Hash(Array.fill[Byte](32)(0x0f))
     val envelopes = Map(idA -> envelope(3))
     val epochOf = Map(idA -> 1L)
 

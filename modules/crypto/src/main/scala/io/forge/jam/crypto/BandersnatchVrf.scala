@@ -4,6 +4,7 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash}
 import io.forge.jam.vrfs.BandersnatchWrapper as JniBandersnatchWrapper
 import spire.math.UByte
+import scala.compiletime.uninitialized
 
 import java.nio.file.{Files, Paths}
 
@@ -22,14 +23,14 @@ object BandersnatchVrf:
   val RingVrfSignatureSize: Int = 784
 
   /** Cached SRS data */
-  private var srsData: Array[Byte] = _
+  private var srsData: Array[Byte] = uninitialized
 
   /** Flag to track if context has been initialized for a given ring size */
   private var initializedRingSizes: Set[Int] = Set.empty
 
   /** Memoization for the last ring root generated, to avoid redundant native calls */
-  private var lastRingRootKey: (List[BandersnatchPublicKey], Int) = _
-  private var lastRingRootResult: Option[JamBytes] = _
+  private var lastRingRootKey: (List[BandersnatchPublicKey], Int) = uninitialized
+  private var lastRingRootResult: Option[JamBytes] = uninitialized
 
   /**
    * Result of a successful ring VRF proof verification.

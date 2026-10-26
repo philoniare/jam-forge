@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.node.GrandpaMessages.*
 
 import scala.collection.mutable
@@ -43,7 +43,7 @@ trait GrandpaOutbound:
 
 /** A GRANDPA voter set: its id, the block it starts from and its Ed25519 keys. */
 final case class VoterSet(setId: Long, base: Vote, keys: IndexedSeq[Array[Byte]]):
-  val members: Set[Seq[Byte]] = keys.map(_.toSeq).toSet
+  val members: Set[Ed25519PublicKey] = keys.map(Ed25519PublicKey(_)).toSet
   def size: Int = keys.size
 
   /** Votes needed for a supermajority: n − ⌊(n−1)/3⌋. */
@@ -54,12 +54,12 @@ final case class VoterSet(setId: Long, base: Vote, keys: IndexedSeq[Array[Byte]]
 
   /** JAMNP-S: `primary = V[round mod validators]`, V sorted by key. */
   private val sortedKeys = keys.sortWith((a, b) => java.util.Arrays.compareUnsigned(a, b) < 0)
-  def primary(round: Long): Seq[Byte] = sortedKeys((round % size).toInt).toSeq
+  def primary(round: Long): Ed25519PublicKey = Ed25519PublicKey(sortedKeys((round % size).toInt))
 
 /** One GRANDPA round's votes and our progress in it. */
 final class RoundState(val round: Long, val startedAt: Long):
-  val prevotes = mutable.LinkedHashMap.empty[Seq[Byte], SignedVote]
-  val precommits = mutable.LinkedHashMap.empty[Seq[Byte], SignedVote]
+  val prevotes = mutable.LinkedHashMap.empty[Ed25519PublicKey, SignedVote]
+  val precommits = mutable.LinkedHashMap.empty[Ed25519PublicKey, SignedVote]
   var primaryProposal: Option[Vote] = None
   var proposed = false
   var prevoted = false
@@ -116,7 +116,7 @@ final class GrandpaVoter(
   def round: Long = current.round
   def roundState(r: Long): Option[RoundState] = rounds.get(r)
 
-  private def ourKey: Option[Seq[Byte]] = keys.map(_.ed25519Public.toSeq).filter(set.members.contains)
+  private def ourKey: Option[Ed25519PublicKey] = keys.map(_.ed25519Key).filter(set.members.contains)
 
   // ---------------------------------------------------------------------------
   // vote graph
@@ -224,7 +224,7 @@ final class GrandpaVoter(
         case None                                          => floor
 
   private def cast(kind: Int, vote: Vote): Unit =
-    keys.filter(k => set.members.contains(k.ed25519Public.toSeq)).foreach { k =>
+    keys.filter(k => set.members.contains(k.ed25519Key)).foreach { k =>
       val signed = sign(kind, vote, current.round, set.setId, k)
       if kind == PrimaryPropose then current.primaryProposal = Some(signed.vote) else record(current, kind, signed)
       onProgress(set.setId, current.round, ourVotes)

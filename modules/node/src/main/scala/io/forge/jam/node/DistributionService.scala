@@ -7,12 +7,11 @@ import io.forge.jam.core.{Hashing, JamBytes, constants}
 import io.forge.jam.core.primitives.{Ed25519Signature, Hash, ValidatorIndex}
 import io.forge.jam.crypto.Ed25519
 import io.forge.jam.core.codec.JamCodecs.encode
-import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
+import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
 import io.forge.jam.core.codec.Codec
 
-import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 /** Distribution protocols feeding the extrinsic pools:
@@ -54,7 +53,7 @@ final class DistributionService(
   // =========================================================================
 
   def workReportHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         decodeItem[GuaranteeExtrinsic](msg) match
           case Right(g) =>

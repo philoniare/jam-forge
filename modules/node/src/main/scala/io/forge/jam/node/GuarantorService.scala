@@ -2,7 +2,7 @@ package io.forge.jam.node
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, LittleEndian, constants}
-import io.forge.jam.core.primitives.{Ed25519Signature, Hash, Timeslot, ValidatorIndex}
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature, Hash, Timeslot, ValidatorIndex}
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.dispute.GuaranteeSignature
@@ -22,6 +22,7 @@ import io.forge.jam.core.codec.Codec
 import spire.math.UInt
 
 import scala.collection.mutable
+import scala.util.boundary, boundary.break
 
 /** Historical preimage lookup Λ over the state at the work-package's lookup anchor:
   * the posterior state of the lookup-anchor block, found by its state root (the context's `lookupAnchorStateRoot`),
@@ -204,14 +205,14 @@ final class GuarantorService(
     executor.shutdown()
     executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
 
-  private val ed25519ByPublic: Map[Seq[Byte], ValidatorKeySet] =
-    validatorKeys.map(k => k.ed25519Public.toSeq -> k).toMap
+  private val ed25519ByPublic: Map[Ed25519PublicKey, ValidatorKeySet] =
+    validatorKeys.map(k => k.ed25519Key -> k).toMap
 
   /** CE 133 handler: message 1 = core index (2 bytes LE) ++ work package,
     * message 2 = concatenated extrinsic blobs, then FIN.
     */
   def workPackageSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       var rejected = false
       stream.onMessage { msg =>
@@ -276,7 +277,7 @@ final class GuarantorService(
     * scope here — ledgered as a node-level follow-up.
     */
   def bundleSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       var dispatched = false
       var totalBytes = 0L
@@ -386,19 +387,19 @@ final class GuarantorService(
       blob: Array[Byte]
   ): Either[String, IndexedSeq[IndexedSeq[Array[Byte]]]] =
     var offset = 0
-    val out = wp.items.map { item =>
-      item.extrinsic.map { ref =>
-        val len = ref.len.toInt
-        if offset + len > blob.length then return Left("extrinsic data truncated")
-        val data = java.util.Arrays.copyOfRange(blob, offset, offset + len)
-        offset += len
-        if Hashing.blake2b256(data) != ref.hash then
-          return Left("extrinsic hash mismatch")
-        data
+    boundary:
+      val out = wp.items.map { item =>
+        item.extrinsic.map { ref =>
+          val len = ref.len.toInt
+          if offset + len > blob.length then break(Left("extrinsic data truncated"))
+          val data = java.util.Arrays.copyOfRange(blob, offset, offset + len)
+          offset += len
+          if Hashing.blake2b256(data) != ref.hash then break(Left("extrinsic hash mismatch"))
+          data
+        }.toIndexedSeq
       }.toIndexedSeq
-    }.toIndexedSeq
-    if offset != blob.length then Left("trailing extrinsic bytes")
-    else Right(out)
+      if offset != blob.length then Left("trailing extrinsic bytes")
+      else Right(out)
 
   /** Guarantee a submitted work package: refine, sign, pool and distribute.
     * CE 133 has no cross-package imports on hand, so it always calls this
@@ -475,9 +476,9 @@ final class GuarantorService(
     val assignments = GuarantorService.coreAssignments(entropy, slot, chain.config)
     active.zipWithIndex.flatMap { case (vk, idx) =>
       if assignments(idx) == coreIndex then
-        ed25519ByPublic.get(vk.ed25519.bytes.toArray.toSeq).map(idx -> _)
+        ed25519ByPublic.get(vk.ed25519).map(idx -> _)
       else None
-    }
+    }.toList
 
   private def signAndDistribute(
       computed: ComputedReport,
@@ -498,9 +499,9 @@ final class GuarantorService(
     // hold all three credentials.
     val signatures =
       (if ownSignatures.size >= 3 then ownSignatures
-       else ownSignatures ++ requestCoSignatures(computed, slot, reportHash, ownSignatures.map(_.validatorIndex.value.toInt).toSet))
-        .distinctBy(_.validatorIndex.value.toInt)
-        .sortBy(_.validatorIndex.value.toInt)
+       else ownSignatures ++ requestCoSignatures(computed, slot, reportHash, ownSignatures.map(_.validatorIndex.toInt).toSet))
+        .distinctBy(_.validatorIndex.toInt)
+        .sortBy(_.validatorIndex.toInt)
 
     if signatures.size < 2 then
       logger.warn(
@@ -528,7 +529,7 @@ final class GuarantorService(
     * cannot be co-signed are rejected by resetting the stream.
     */
   def workPackageSharingHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       stream.onMessage { msg =>
         messages += msg
@@ -760,18 +761,18 @@ object GuarantorService:
       view: io.forge.jam.protocol.state.TrieBackedJamState,
       slot: Long,
       config: io.forge.jam.core.ChainConfig
-  ): (Hash, List[io.forge.jam.core.types.epoch.ValidatorKey]) =
+  ): (Hash, IndexedSeq[io.forge.jam.core.types.epoch.ValidatorKey]) =
     rotatedForSlot(view.timeslot, view.entropy.pool, view.validators.current, view.validators.nextEpoch, slot, config)
 
   /** [[assignmentContext]] over plain values: the state's slot, η, κ and γ_P. */
   def rotatedForSlot[K](
       stateSlot: Long,
       entropy: List[Hash],
-      current: List[K],
-      pending: List[K],
+      current: IndexedSeq[K],
+      pending: IndexedSeq[K],
       slot: Long,
       config: io.forge.jam.core.ChainConfig
-  ): (Hash, List[K]) =
+  ): (Hash, IndexedSeq[K]) =
     if slot / config.epochLength > stateSlot / config.epochLength then (entropy(1), pending)
     else (entropy(2), current)
 

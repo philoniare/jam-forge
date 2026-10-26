@@ -1,5 +1,7 @@
 package io.forge.jam.core.types
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.primitives.Hash
@@ -29,13 +31,7 @@ object history:
         rwp => (rwp.hash, rwp.exportsRoot)
       )
 
-    given Decoder[ReportedWorkPackage] =
-      Decoder.instance { cursor =>
-        for
-          hash <- cursor.get[Hash]("hash")
-          exportsRoot <- cursor.get[Hash]("exports_root")
-        yield ReportedWorkPackage(hash, exportsRoot)
-      }
+    given Decoder[ReportedWorkPackage] = ConfiguredDecoder.derived
 
   /**
    * Historical block entry containing header hash, beefy root, state root,
@@ -58,16 +54,7 @@ object history:
         hb => (hb.headerHash, hb.beefyRoot, hb.stateRoot, hb.slot & 0xFFFFFFFFL, hb.reported.sortBy(_.hash))
       )
 
-    given Decoder[HistoricalBeta] =
-      Decoder.instance { cursor =>
-        for
-          headerHash <- cursor.get[Hash]("header_hash")
-          beefyRoot <- cursor.get[Hash]("beefy_root")
-          stateRoot <- cursor.get[Hash]("state_root")
-          slot <- cursor.get[Long]("slot")
-          reported <- cursor.get[List[ReportedWorkPackage]]("reported")
-        yield HistoricalBeta(headerHash, beefyRoot, stateRoot, slot, reported)
-      }
+    given Decoder[HistoricalBeta] = ConfiguredDecoder.derived
 
   /**
    * Merkle Mountain Range (MMR) with optional peaks.
@@ -106,10 +93,4 @@ object history:
         hbc => (hbc.history, hbc.mmr)
       )
 
-    given Decoder[HistoricalBetaContainer] =
-      Decoder.instance { cursor =>
-        for
-          history <- cursor.get[List[HistoricalBeta]]("history")
-          mmr <- cursor.get[HistoricalMmr]("mmr")
-        yield HistoricalBetaContainer(history, mmr)
-      }
+    given Decoder[HistoricalBetaContainer] = ConfiguredDecoder.derived

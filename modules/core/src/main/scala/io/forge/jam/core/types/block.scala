@@ -1,5 +1,7 @@
 package io.forge.jam.core.types
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.circe.Decoder
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.ChainConfig
@@ -38,12 +40,17 @@ object block:
      * @param coresCount The number of cores (affects assurance bitfield size)
      * @param votesPerVerdict The number of votes per verdict (affects dispute encoding)
      */
-    def extrinsicCodec(coresCount: Int, votesPerVerdict: Int): Codec[Extrinsic] =
+    private val codecs = new java.util.concurrent.ConcurrentHashMap[Int, Codec[Extrinsic]]()
+
+    /** Built once per core count. */
+    def extrinsicCodec(coresCount: Int): Codec[Extrinsic] = codecs.computeIfAbsent(coresCount, build)
+
+    private def build(coresCount: Int): Codec[Extrinsic] =
       (compactPrefixedList(summon[Codec[TicketEnvelope]]) ::
        compactPrefixedList(summon[Codec[Preimage]]) ::
        compactPrefixedList(summon[Codec[GuaranteeExtrinsic]]) ::
        compactPrefixedList(AssuranceExtrinsic.codec(coresCount)) ::
-       Dispute.codec(votesPerVerdict)).xmap(
+       Dispute.codec).xmap(
         { case (tickets, preimages, guarantees, assurances, disputes) =>
           Extrinsic(tickets, preimages, guarantees, assurances, disputes)
         },
@@ -54,17 +61,9 @@ object block:
      * Create a codec that knows the config-dependent sizes.
      */
     def extrinsicCodec(config: ChainConfig): Codec[Extrinsic] =
-      extrinsicCodec(config.coresCount, config.votesPerVerdict)
+      extrinsicCodec(config.coresCount)
 
-    given Decoder[Extrinsic] = Decoder.instance { cursor =>
-      for
-        tickets <- cursor.get[List[TicketEnvelope]]("tickets")
-        preimages <- cursor.get[List[Preimage]]("preimages")
-        guarantees <- cursor.get[List[GuaranteeExtrinsic]]("guarantees")
-        assurances <- cursor.get[List[AssuranceExtrinsic]]("assurances")
-        disputes <- cursor.get[Dispute]("disputes")
-      yield Extrinsic(tickets, preimages, guarantees, assurances, disputes)
-    }
+    given Decoder[Extrinsic] = ConfiguredDecoder.derived
 
   /**
    * A complete block containing header and extrinsic.
@@ -78,13 +77,17 @@ object block:
     /**
      * Create a codec for Block with config-dependent sizes.
      *
-     * @param validatorCount The number of validators
      * @param epochLength The epoch length in slots
      * @param coresCount The number of cores
-     * @param votesPerVerdict The number of votes per verdict
      */
-    def blockCodec(validatorCount: Int, epochLength: Int, coresCount: Int, votesPerVerdict: Int): Codec[Block] =
-      (Header.headerCodec(validatorCount, epochLength) :: Extrinsic.extrinsicCodec(coresCount, votesPerVerdict)).xmap(
+    private val codecs = new java.util.concurrent.ConcurrentHashMap[(Int, Int), Codec[Block]]()
+
+    /** Built once per (epoch length, core count). */
+    def blockCodec(epochLength: Int, coresCount: Int): Codec[Block] =
+      codecs.computeIfAbsent((epochLength, coresCount), _ => build(epochLength, coresCount))
+
+    private def build(epochLength: Int, coresCount: Int): Codec[Block] =
+      (Header.headerCodec(epochLength) :: Extrinsic.extrinsicCodec(coresCount)).xmap(
         { case (header, extrinsic) => Block(header, extrinsic) },
         b => (b.header, b.extrinsic)
       )
@@ -93,7 +96,7 @@ object block:
      * Create a codec that knows the config-dependent sizes.
      */
     def blockCodec(config: ChainConfig): Codec[Block] =
-      blockCodec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
+      blockCodec(config.epochLength, config.coresCount)
 
     /**
      * Convenience method to decode with config.
@@ -101,9 +104,4 @@ object block:
     def fromBytes(bytes: Array[Byte], config: ChainConfig): Either[String, Block] =
       blockCodec(config).decode(bytes)
 
-    given Decoder[Block] = Decoder.instance { cursor =>
-      for
-        header <- cursor.get[Header]("header")
-        extrinsic <- cursor.get[Extrinsic]("extrinsic")
-      yield Block(header, extrinsic)
-    }
+    given Decoder[Block] = ConfiguredDecoder.derived

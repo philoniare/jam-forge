@@ -32,7 +32,7 @@ final class ShardService(
     * proof segment shards, then the justification, as three messages.
     */
   def shardDistributionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         withCustody(stream, msg) { shards =>
           stream.send(shards.bundleShard)
@@ -46,7 +46,7 @@ final class ShardService(
     * non-validators are not throttled.
     */
   def auditShardHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         withCustody(stream, msg) { shards =>
           stream.send(shards.bundleShard)
@@ -79,7 +79,7 @@ final class ShardService(
     * rejects the whole request.
     */
   def segmentShardHandler(verified: Boolean): io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         val served =
           for

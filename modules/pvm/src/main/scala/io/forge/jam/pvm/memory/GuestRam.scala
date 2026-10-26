@@ -162,11 +162,11 @@ final class GuestRam:
       p += 1
 
 object GuestRam:
-  val PageSize: Int = 4096
-  val PageShift: Int = 12
-  val PageMask: Long = PageSize - 1L
+  inline val PageSize = 4096
+  inline val PageShift = 12
+  inline val PageMask = PageSize - 1L
   /** Total pages in the 32-bit space: 2^32 / 4096. */
-  val TotalPages: Long = 1L << 20
+  inline val TotalPages = 1L << 20
 
   private val AccessNone: Byte = 0
   private val AccessRead: Byte = 1

@@ -49,9 +49,9 @@ class RefineExecutor(val config: ChainConfig):
       accounts: HistoricalLookupService
   ): RefineResult =
     val workItem = workPackage.items(workItemIndex)
-    val serviceId = workItem.service.value.toLong
+    val serviceId = workItem.service.toLong
     val lookupAnchorTimeslot =
-      workPackage.context.lookupAnchorSlot.value.toLong
+      workPackage.context.lookupAnchorSlot.toLong
 
     // BAD: unknown service or unavailable code preimage at the lookup anchor.
     if !accounts.serviceExists(serviceId) then

@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.report
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.StfResult
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.{SegmentRootLookup, AvailabilityAssignment}
@@ -185,8 +187,8 @@ object ReportTypes:
    */
   final case class ReportState(
     availAssignments: List[Option[AvailabilityAssignment]],
-    currValidators: List[ValidatorKey],
-    prevValidators: List[ValidatorKey],
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey],
     entropy: List[Hash],
     offenders: List[Hash],
     recentBlocks: HistoricalBetaContainer,
@@ -199,11 +201,11 @@ object ReportTypes:
   )
 
   object ReportState:
-    def codec(coresCount: Int, validatorsCount: Int): Codec[ReportState] =
+    def codec(coresCount: Int): Codec[ReportState] =
       val availAssignmentsCodec =
         JamCodecs.fixedSizeList(JamCodecs.optionCodec(summon[Codec[AvailabilityAssignment]]), coresCount)
-      val currValidatorsCodec = FullJamStateCodecs.validatorListCodec(validatorsCount)
-      val prevValidatorsCodec = FullJamStateCodecs.validatorListCodec(validatorsCount)
+      val currValidatorsCodec = FullJamStateCodecs.validatorListCodec
+      val prevValidatorsCodec = FullJamStateCodecs.validatorListCodec
       val entropyCodec = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
       val offendersCodec = JamCodecs.compactPrefixedList(JamCodecs.hashCodec)
       val recentBlocksCodec = summon[Codec[HistoricalBetaContainer]]
@@ -260,8 +262,8 @@ object ReportTypes:
       Decoder.instance { cursor =>
         for
           availAssignments <- cursor.get[List[Option[AvailabilityAssignment]]]("avail_assignments")
-          currValidators <- cursor.get[List[ValidatorKey]]("curr_validators")
-          prevValidators <- cursor.get[List[ValidatorKey]]("prev_validators")
+          currValidators <- cursor.get[IndexedSeq[ValidatorKey]]("curr_validators")
+          prevValidators <- cursor.get[IndexedSeq[ValidatorKey]]("prev_validators")
           entropy <- cursor.get[List[String]]("entropy").map(_.map(h => Hash(parseHex(h))))
           offenders <- cursor.get[List[String]]("offenders").map(_.map(h => Hash(parseHex(h))))
           recentBlocks <- cursor.get[HistoricalBetaContainer]("recent_blocks")
@@ -458,8 +460,8 @@ object ReportTypes:
   object ReportCase:
     import ReportOutput.{circeDecoder, given}
 
-    def codec(coresCount: Int, validatorsCount: Int): Codec[ReportCase] =
-      val stateCodec = ReportState.codec(coresCount, validatorsCount)
+    def codec(coresCount: Int): Codec[ReportCase] =
+      val stateCodec = ReportState.codec(coresCount)
       (summon[Codec[ReportInput]] :: stateCodec ::
         summon[Codec[ReportOutput]] :: stateCodec).xmap(
         {
@@ -469,12 +471,4 @@ object ReportTypes:
         testCase => (testCase.input, testCase.preState, testCase.output, testCase.postState)
       )
 
-    given Decoder[ReportCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[ReportInput]("input")
-          preState <- cursor.get[ReportState]("pre_state")
-          output <- cursor.get[ReportOutput]("output")
-          postState <- cursor.get[ReportState]("post_state")
-        yield ReportCase(input, preState, output, postState)
-      }
+    given Decoder[ReportCase] = ConfiguredDecoder.derived

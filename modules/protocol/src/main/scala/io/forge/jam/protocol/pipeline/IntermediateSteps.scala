@@ -16,8 +16,8 @@ object IntermediateSteps:
   val validateBlockSeal: StfStep = validate { (view, ctx) =>
     val block = ctx.block
     val config = ctx.config
-    val slotIndex = ((block.header.slot.value.toLong & 0xffffffffL) % config.epochLength).toInt
-    val authorIndex = block.header.authorIndex.value.toInt
+    val slotIndex = ((block.header.slot.toLong & 0xffffffffL) % config.epochLength).toInt
+    val authorIndex = block.header.authorIndex.toInt
 
     val kappa = view.validators.current
     val pool = view.entropy.pool
@@ -96,7 +96,7 @@ object IntermediateSteps:
 
   val validateEntropyVrf: StfStep = validate { (view, ctx) =>
     val block = ctx.block
-    val authorIndex = block.header.authorIndex.value.toInt
+    val authorIndex = block.header.authorIndex.toInt
     val kappa = view.validators.current
     if authorIndex < 0 || authorIndex >= kappa.length then
       Left(PipelineError.HeaderVerificationErr(s"InvalidAuthorIndex: $authorIndex >= ${kappa.length}"))

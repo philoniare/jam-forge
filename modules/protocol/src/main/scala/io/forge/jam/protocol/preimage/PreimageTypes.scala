@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.preimage
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.StfResult
@@ -59,13 +61,7 @@ object PreimageTypes:
         hist => (hist.key, hist.value.map(_ & 0xFFFFFFFFL))
       )
 
-    given Decoder[PreimageHistory] =
-      Decoder.instance { cursor =>
-        for
-          key <- cursor.get[PreimageHistoryKey]("key")
-          value <- cursor.get[List[Long]]("value")
-        yield PreimageHistory(key, value)
-      }
+    given Decoder[PreimageHistory] = ConfiguredDecoder.derived
 
   /**
    * Account info containing preimages and lookup metadata.
@@ -105,13 +101,7 @@ object PreimageTypes:
         pa => (pa.id & 0xFFFFFFFFL, pa.data)
       )
 
-    given Decoder[PreimageAccount] =
-      Decoder.instance { cursor =>
-        for
-          id <- cursor.get[Long]("id")
-          data <- cursor.get[AccountInfo]("data")
-        yield PreimageAccount(id, data)
-      }
+    given Decoder[PreimageAccount] = ConfiguredDecoder.derived
 
   /**
    * Service activity record for statistics.
@@ -233,13 +223,7 @@ object PreimageTypes:
         pi => (pi.preimages, pi.slot & 0xFFFFFFFFL)
       )
 
-    given Decoder[PreimageInput] =
-      Decoder.instance { cursor =>
-        for
-          preimages <- cursor.get[List[Preimage]]("preimages")
-          slot <- cursor.get[Long]("slot")
-        yield PreimageInput(preimages, slot)
-      }
+    given Decoder[PreimageInput] = ConfiguredDecoder.derived
 
   /**
    * Error codes for the Preimages STF.
@@ -295,12 +279,4 @@ object PreimageTypes:
         pc => (pc.input, pc.preState, pc.output, pc.postState)
       )
 
-    given Decoder[PreimageCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[PreimageInput]("input")
-          preState <- cursor.get[PreimageState]("pre_state")
-          output <- cursor.get[PreimageOutput]("output")
-          postState <- cursor.get[PreimageState]("post_state")
-        yield PreimageCase(input, preState, output, postState)
-      }
+    given Decoder[PreimageCase] = ConfiguredDecoder.derived

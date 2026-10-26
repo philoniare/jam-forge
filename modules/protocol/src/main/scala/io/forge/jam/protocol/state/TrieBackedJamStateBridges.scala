@@ -4,7 +4,6 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.accumulation.{
-  AccumulationServiceItem,
   AccumulationState,
   StateKey
 }
@@ -162,7 +161,7 @@ object TrieBackedJamStateBridges:
   object AccumulationBridge:
     def extract(view: TrieBackedJamState): AccumulationPreState =
       val initStagingSet: List[JamBytes] =
-        view.validators.queue.map(_.toJamBytes)
+        view.validators.queue.map(_.toJamBytes).toList
       val initAuthQueues: List[List[JamBytes]] =
         view.authQueues.map(_.map(h => JamBytes(h.bytes)))
 
@@ -203,8 +202,8 @@ object TrieBackedJamStateBridges:
       val stagingChanged =
         !(postStagingSet eq initStagingSet) && postStagingSet != initStagingSet
       if stagingChanged then
-        val newQueue: List[ValidatorKey] =
-          postStagingSet.map(ValidatorKey.fromJamBytes)
+        val newQueue: IndexedSeq[ValidatorKey] =
+          postStagingSet.map(ValidatorKey.fromJamBytes).toIndexedSeq
         view.validators.queue = newQueue
 
       val authChanged =

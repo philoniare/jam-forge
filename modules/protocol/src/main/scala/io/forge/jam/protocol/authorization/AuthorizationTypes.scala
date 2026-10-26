@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.authorization
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.{Hash, CoreIndex}
 import io.forge.jam.core.json.JsonHelpers.{parseHash, parseHashListList}
@@ -69,13 +71,7 @@ object AuthorizationTypes:
         input => (input.slot & 0xFFFFFFFFL, input.auths)
       )
 
-    given Decoder[AuthInput] =
-      Decoder.instance { cursor =>
-        for
-          slot <- cursor.get[Long]("slot")
-          auths <- cursor.get[List[Auth]]("auths")
-        yield AuthInput(slot, auths)
-      }
+    given Decoder[AuthInput] = ConfiguredDecoder.derived
 
   /**
    * Authorization state containing pools and queues per core.
@@ -142,11 +138,4 @@ object AuthorizationTypes:
         authCase => (authCase.input, authCase.preState, authCase.postState)
       )
 
-    given Decoder[AuthCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[AuthInput]("input")
-          preState <- cursor.get[AuthState]("pre_state")
-          postState <- cursor.get[AuthState]("post_state")
-        yield AuthCase(input, preState, postState)
-      }
+    given Decoder[AuthCase] = ConfiguredDecoder.derived

@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import io.forge.jam.core.codec.{ByteReader, ByteWriter, Codec, CodecDecodingException}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.crypto.Ed25519
 
 /** GRANDPA wire types of JAMNP-S. Integers are little endian, `len++` is a GP
@@ -24,7 +24,7 @@ object GrandpaMessages:
 
   /** A vote with its signature and the voter's Ed25519 key. */
   final case class SignedVote(vote: Vote, signature: Array[Byte], signer: Array[Byte]):
-    def signerKey: Seq[Byte] = signer.toSeq
+    lazy val signerKey: Ed25519PublicKey = Ed25519PublicKey(signer)
 
   /** `Message Type ++ Vote ++ Signature ++ Ed25519 Public`. */
   final case class SignedMessage(kind: Int, signed: SignedVote)

@@ -167,7 +167,7 @@ object work:
           case (voteByte, idx, sig) =>
             Vote(voteByte != 0, ValidatorIndex(idx), sig)
         },
-        v => ((if v.vote then 1 else 0).toByte, v.validatorIndex.value.toInt, v.signature)
+        v => ((if v.vote then 1 else 0).toByte, v.validatorIndex.toInt, v.signature)
       )
 
     given Decoder[Vote] = Decoder.instance { cursor =>

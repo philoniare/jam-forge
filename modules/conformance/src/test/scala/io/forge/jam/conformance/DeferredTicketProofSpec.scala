@@ -15,12 +15,12 @@ import scala.jdk.CollectionConverters.*
   */
 class DeferredTicketProofSpec extends AnyFunSuite:
   test("GP: a block with a bad ticket proof is rejected with BadTicketProof (eq. 6.30)") {
-    val config = ChainConfig.TINY
+    given config: ChainConfig = ChainConfig.TINY
     val dir = Paths.get("jamtestvectors/traces/safrole")
-    val genesisCodec = Genesis.codec(config.validatorCount, config.epochLength)
+    val genesisCodec = Genesis.codec(config.epochLength)
     val genesis = genesisCodec.decodeUnsafe(Files.readAllBytes(dir.resolve("genesis.bin")))
     val stepCodec =
-      TraceStep.codec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
+      TraceStep.codec(config.epochLength, config.coresCount)
     val files = Files.list(dir).iterator().asScala
       .filter(_.getFileName.toString.matches("\\d+\\.bin"))
       .toVector.sortBy(_.toString)
@@ -47,10 +47,10 @@ class DeferredTicketProofSpec extends AnyFunSuite:
           extrinsic = extrinsic,
           header = block.header.copy(extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, config))
         )
-        val result = ImportBlockStep(store, importer, config, bad)
+        val result = ImportBlockStep(store, importer, bad)
         assert(result.left.exists(_.contains("BadTicketProof")), s"${file.getFileName}: $result")
         tampered += 1
-      val imported = ImportBlockStep(store, importer, config, block)
+      val imported = ImportBlockStep(store, importer, block)
       assert(imported == Right(step.postState.stateRoot), file.getFileName)
     assert(tampered == 3)
   }

@@ -2,7 +2,6 @@ package io.forge.jam.protocol.pipeline
 
 import cats.data.StateT
 import io.forge.jam.core.{ChainConfig, Hashing, Parallel}
-import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
@@ -38,8 +37,8 @@ final class PendingChecks:
     checks.iterator.map(Parallel.await).collectFirst { case Some(err) => err }
 
 /** The block header's encoding and hash, each computed at most once per block. */
-final class EncodedHeader(header: Header):
-  lazy val bytes: Array[Byte] = summon[Codec[Header]].encode(header)
+final class EncodedHeader(header: Header, config: ChainConfig):
+  lazy val bytes: Array[Byte] = Header.headerCodec(config.epochLength).encode(header)
 
   /** E_U(H), the encoding without the 96-byte seal (GP 0.8.0 §5). */
   def unsealed: Array[Byte] = java.util.Arrays.copyOf(bytes, bytes.length - 96)
@@ -55,9 +54,9 @@ final case class PipelineContext(
   block: Block,
   header: EncodedHeader,
   preTransitionTau: Long,
-  preSafroleValidators: List[ValidatorKey] = List.empty,
-  preSafroleKappa: List[ValidatorKey] = List.empty,
-  preSafroleLambda: List[ValidatorKey] = List.empty,
+  preSafroleValidators: IndexedSeq[ValidatorKey] = IndexedSeq.empty,
+  preSafroleKappa: IndexedSeq[ValidatorKey] = IndexedSeq.empty,
+  preSafroleLambda: IndexedSeq[ValidatorKey] = IndexedSeq.empty,
   // Intermediate results passed between STFs
   safroleOutput: Option[SafroleOutputData] = None,
   disputeOffendersMark: List[Ed25519PublicKey] = List.empty,
@@ -74,7 +73,7 @@ object PipelineContext:
     PipelineContext(
       config = config,
       block = block,
-      header = new EncodedHeader(block.header),
+      header = new EncodedHeader(block.header, config),
       preTransitionTau = view.timeslot,
       preSafroleValidators = view.validators.current,
       preSafroleKappa = view.validators.current,

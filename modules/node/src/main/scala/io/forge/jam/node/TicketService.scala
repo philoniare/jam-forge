@@ -4,7 +4,7 @@ import java.util.concurrent.{CompletableFuture, ExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{JamBytes, LittleEndian}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash}
 import io.forge.jam.core.types.tickets.{RingVrfSignatureSize, TicketEnvelope}
 import io.forge.jam.crypto.BandersnatchVrf
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
@@ -42,17 +42,17 @@ final class TicketService(
   /** Our tickets: id bytes → (keys, attempt), consulted when sealing a
     * ticketed slot.
     */
-  val ownTickets = new ConcurrentHashMap[Seq[Byte], (ValidatorKeySet, UByte)]()
+  val ownTickets = new ConcurrentHashMap[Hash, (ValidatorKeySet, UByte)]()
 
   /** Our tickets' full envelopes (attempt + ring proof), consulted by
     * `distributeTickets` for CE 131 submission.
     */
-  private val ownTicketEnvelopes = new ConcurrentHashMap[Seq[Byte], TicketEnvelope]()
+  private val ownTicketEnvelopes = new ConcurrentHashMap[Hash, TicketEnvelope]()
 
   /** Epoch each ticket id was generated in, so stale entries can be pruned
     * once their ticketed-sealing window has passed.
     */
-  private val ticketEpoch = new ConcurrentHashMap[Seq[Byte], Long]()
+  private val ticketEpoch = new ConcurrentHashMap[Hash, Long]()
 
   /** Locally held validator keys, registered via `setValidatorKeys` (called
     * by `JamNode.enableAuthoring`). Empty on a node that only relays/proxies
@@ -60,8 +60,8 @@ final class TicketService(
     */
   @volatile private var validatorKeys: Seq[ValidatorKeySet] = Nil
 
-  private def bsByPublic: Map[Seq[Byte], ValidatorKeySet] =
-    validatorKeys.map(k => k.bandersnatchPublic.toSeq -> k).toMap
+  private def bsByPublic: Map[BandersnatchPublicKey, ValidatorKeySet] =
+    validatorKeys.map(k => k.bandersnatchKey -> k).toMap
 
   @volatile private var generatedForEpoch: Long = -1L
 
@@ -138,13 +138,13 @@ final class TicketService(
     val pending = view.validators.nextEpoch // γ_k: the ring for next epoch's contest
     val commitment = view.gamma.z // γ_z: ring root the STF verifies against
     val entropy = TicketService.contestEntropy(view)
-    val ringKeys = pending.map(_.bandersnatch)
+    val ringKeys = pending.map(_.bandersnatch).toList
     val ringSize = ringKeys.size
 
     val epoch = view.timeslot / chain.config.epochLength
     var produced = 0
     pending.zipWithIndex.foreach { case (vk, index) =>
-      bsByPublic.get(vk.bandersnatch.bytes.toArray.toSeq).foreach { keys =>
+      bsByPublic.get(vk.bandersnatch).foreach { keys =>
         for attemptInt <- 0 until chain.config.ticketsPerValidator do
           val attempt = UByte(attemptInt)
           BandersnatchVrf.createRingProof(
@@ -171,10 +171,9 @@ final class TicketService(
                   val id = Hash(result.ticketId.toArray)
                   val envelope = TicketEnvelope(attempt, proof)
                   pools.addTicket(id, envelope, epoch, entropy)
-                  val idSeq = result.ticketId.toArray.toSeq
-                  ownTickets.put(idSeq, (keys, attempt))
-                  ownTicketEnvelopes.put(idSeq, envelope)
-                  ticketEpoch.put(idSeq, epoch)
+                  ownTickets.put(id, (keys, attempt))
+                  ownTicketEnvelopes.put(id, envelope)
+                  ticketEpoch.put(id, epoch)
                   produced += 1
       }
     }
@@ -272,7 +271,7 @@ final class TicketService(
   private def holdsProxyKey(view: io.forge.jam.protocol.state.TrieBackedJamState, id: Hash): Boolean =
     val next = view.validators.nextEpoch
     next.nonEmpty && next.lift(TicketService.proxyIndexFor(id, next.size)).exists(vk =>
-      validatorKeys.exists(k => java.util.Arrays.equals(k.ed25519Public, vk.ed25519.bytes.toArray))
+      validatorKeys.exists(_.ed25519Key == vk.ed25519)
     )
 
   /** Send queued proxy tickets on CE 132, spread evenly from
@@ -340,12 +339,11 @@ final class TicketService(
     if validatorCount == 0 then return
     val current =
       TicketService.ticketsForEpoch(epoch, ownTicketEnvelopes.asScala.toMap, ticketEpoch.asScala.toMap)
-    current.foreach { case (idSeq, env) =>
-      val id = Hash(idSeq.toArray)
+    current.foreach { case (id, env) =>
       val proxyIndex = TicketService.proxyIndexFor(id, validatorCount)
       val payload = TicketCodec.encode(epoch, env)
       val ownProxy = view.validators.nextEpoch.lift(proxyIndex).exists(vk =>
-        validatorKeys.exists(k => java.util.Arrays.equals(k.ed25519Public, vk.ed25519.bytes.toArray))
+        validatorKeys.exists(_.ed25519Key == vk.ed25519)
       )
       // As our own proxy we send on CE 132 ourselves, on the proxy schedule.
       if ownProxy then pendingForwards.add((epoch, env))
@@ -405,10 +403,10 @@ object TicketService:
 
   private[node] def ticketsForEpoch(
       epoch: Long,
-      envelopes: Map[Seq[Byte], TicketEnvelope],
-      epochOf: Map[Seq[Byte], Long]
-  ): Map[Seq[Byte], TicketEnvelope] =
-    envelopes.filter { case (idSeq, _) => epochOf.getOrElse(idSeq, -1L) == epoch }
+      envelopes: Map[Hash, TicketEnvelope],
+      epochOf: Map[Hash, Long]
+  ): Map[Hash, TicketEnvelope] =
+    envelopes.filter { case (id, _) => epochOf.getOrElse(id, -1L) == epoch }
 
 /** CE 131/132 wire format (jamnp-s): Epoch Index (u32 LE) ++ Attempt (1) ++
   * RingVRF proof (784). Both kinds carry the identical message.

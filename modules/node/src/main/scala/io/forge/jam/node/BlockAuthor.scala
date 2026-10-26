@@ -2,7 +2,7 @@ package io.forge.jam.node
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes}
-import io.forge.jam.core.primitives.{Hash, Timeslot, ValidatorIndex}
+import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash, Timeslot, ValidatorIndex}
 import io.forge.jam.core.types.block.{Block, Extrinsic}
 import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.header.Header
@@ -22,12 +22,12 @@ final class BlockAuthor(
     validators: Seq[ValidatorKeySet],
     pools: ExtrinsicPools = new ExtrinsicPools,
     /** Own tickets (id bytes → keys, attempt), populated by TicketService. */
-    ownTickets: java.util.concurrent.ConcurrentHashMap[Seq[Byte], (ValidatorKeySet, spire.math.UByte)] =
+    ownTickets: java.util.concurrent.ConcurrentHashMap[Hash, (ValidatorKeySet, spire.math.UByte)] =
       new java.util.concurrent.ConcurrentHashMap()
 ) extends LazyLogging:
 
-  private val ourBandersnatchKeys: Map[Seq[Byte], ValidatorKeySet] =
-    validators.map(v => v.bandersnatchPublic.toSeq -> v).toMap
+  private val ourBandersnatchKeys: Map[BandersnatchPublicKey, ValidatorKeySet] =
+    validators.map(v => v.bandersnatchKey -> v).toMap
 
   /** Try to author a block for `slot` on top of the current best head.
     * Returns the block when one of our keys owns the slot.
@@ -107,13 +107,12 @@ final class BlockAuthor(
       else new Array[Byte](32)
     val (keys, sealVrfInput) = view.gamma.st match
       case TicketsOrKeys.Keys(sealerKeys) =>
-        val sealerKey = sealerKeys(slotIndex).bytes
-        ourBandersnatchKeys.get(sealerKey.toSeq) match
+        ourBandersnatchKeys.get(sealerKeys(slotIndex)) match
           case Some(ks) => (ks, SigningContext.fallbackSealInputData(sealEntropy))
           case None     => return None
       case TicketsOrKeys.Tickets(marks) =>
         val mark = marks(slotIndex)
-        ownTickets.get(mark.id.toArray.toSeq) match
+        ownTickets.get(Hash(mark.id.toArray)) match
           case null => return None
           case (ks, attempt) =>
             if attempt != mark.attempt then return None
@@ -163,7 +162,7 @@ final class BlockAuthor(
     )
 
     val headerCodec =
-      Header.headerCodec(chain.config.validatorCount, chain.config.epochLength)
+      Header.headerCodec(chain.config.epochLength)
     val unsealed = Header(
       parent = best.hash,
       parentStateRoot = best.stateRoot,
@@ -205,10 +204,10 @@ object BlockAuthor:
       config: io.forge.jam.core.ChainConfig
   ): Boolean =
     val ctx = g.report.context
-    val rotation = g.slot.value.toLong / config.rotationPeriod
+    val rotation = g.slot.toLong / config.rotationPeriod
     val current = slot / config.rotationPeriod
-    val lookupSlot = ctx.lookupAnchorSlot.value.toLong
-    rotation >= current - 1 && g.slot.value.toLong <= slot &&
+    val lookupSlot = ctx.lookupAnchorSlot.toLong
+    rotation >= current - 1 && g.slot.toLong <= slot &&
     recent.contains(ctx.anchor) &&
     slot - lookupSlot <= config.maxLookupAnchorAge &&
     ancestors.exists(a => a.headerHash == ctx.lookupAnchor && a.slot == lookupSlot)
@@ -223,5 +222,5 @@ object BlockAuthor:
     import io.forge.jam.protocol.accumulation.StateKey
     val blob = p.blob.toArray
     val hash = JamBytes(Hashing.blake2b256(blob).bytes)
-    val key = StateKey.computePreimageInfoStateKey(p.requester.value.toLong, blob.length, hash)
+    val key = StateKey.computePreimageInfoStateKey(p.requester.toLong, blob.length, hash)
     state.storage.readTrie(key).map(StateKey.isUnprovidedRequest)

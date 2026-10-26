@@ -61,8 +61,8 @@ class ReportTest extends AnyFunSuite with Matchers:
 
     ReportState(
       availAssignments = List.fill(cores)(None),
-      currValidators = List.fill(validators)(emptyValidatorKey),
-      prevValidators = List.fill(validators)(emptyValidatorKey),
+      currValidators = IndexedSeq.fill(validators)(emptyValidatorKey),
+      prevValidators = IndexedSeq.fill(validators)(emptyValidatorKey),
       entropy = List.fill(4)(Hash(Array.fill(32)(0.toByte))),
       offenders = List.empty,
       recentBlocks = recentBlocks,

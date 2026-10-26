@@ -201,6 +201,7 @@ object SafroleTransition extends StrictLogging:
     val ringKeys = newGammaK
       .map(_.bandersnatch)
       .padTo(config.validatorCount, BandersnatchPublicKey(new Array[Byte](32)))
+      .toList
     val newGammaZ = BandersnatchWrapper
       .generateRingRoot(ringKeys, config.validatorCount)
       .getOrElse(
@@ -223,7 +224,7 @@ object SafroleTransition extends StrictLogging:
     val epochMark = EpochMark(
       entropy = originalEta0,
       ticketsEntropy = preState.eta(1),
-      validators = newGammaK.map(v => EpochValidatorKey(v.bandersnatch, v.ed25519))
+      validators = newGammaK.map(v => EpochValidatorKey(v.bandersnatch, v.ed25519)).toList
     )
 
     val updatedState = preState.copy(
@@ -370,7 +371,7 @@ object SafroleTransition extends StrictLogging:
    */
   private def generateFallbackSequence(
     entropy: Hash,
-    validators: List[ValidatorKey],
+    validators: IndexedSeq[ValidatorKey],
     epochLength: Int
   ): List[BandersnatchPublicKey] =
     val keys: Array[BandersnatchPublicKey] = validators.iterator.map(_.bandersnatch).toArray

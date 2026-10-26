@@ -1,7 +1,6 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, Hashing}
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
 import org.crac.{Context, Core, Resource}
 
@@ -156,7 +155,7 @@ object WarmupRunner extends Resource:
         client.request(ProtocolMessage.ImportBlockMsg(ImportBlock(traceStep.block))) match
           case ProtocolMessage.StateRootMsg(root) if root.hash == traceStep.postState.stateRoot =>
             ok += 1
-            lastHeader = Some(Hashing.blake2b256(traceStep.block.header.encode))
+            lastHeader = Some(Hashing.blake2b256(io.forge.jam.core.types.header.Header.headerCodec(warmupConfig.epochLength).encode(traceStep.block.header)))
           case _ => bad += 1
       // A trace whose later blocks were rejected may have pruned that state; the server then ends the session.
       try lastHeader.foreach(h => client.request(ProtocolMessage.GetStateMsg(GetState(h))))
@@ -173,8 +172,8 @@ object WarmupRunner extends Resource:
         Paths.get(baseDir, "jam-conformance", "fuzz-reports", "0.8.0", "traces")
       )
 
-  override def beforeCheckpoint(context: Context[_ <: Resource]): Unit =
+  override def beforeCheckpoint(context: Context[? <: Resource]): Unit =
     println("Preparing for CRaC checkpoint...")
 
-  override def afterRestore(context: Context[_ <: Resource]): Unit =
+  override def afterRestore(context: Context[? <: Resource]): Unit =
     println("CRaC restore: JVM resumed with warm JIT.")

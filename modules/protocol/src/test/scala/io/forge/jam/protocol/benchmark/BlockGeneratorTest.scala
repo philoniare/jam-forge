@@ -35,7 +35,7 @@ class BlockGeneratorTest extends AnyFunSpec with Matchers:
 
       val block = generator.generateBlock(genesis.stateRoot, slot = 1)
 
-      block.header.slot.value.toInt shouldBe 1
+      block.header.slot.toInt shouldBe 1
       block.header.parentStateRoot shouldBe genesis.stateRoot
       block.header.seal.length shouldBe 96
       block.header.entropySource.length shouldBe 96

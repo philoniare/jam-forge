@@ -1,13 +1,13 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.protocol.traces.{BlockImporter, RawState, StateMerklization}
 
 import java.io.EOFException
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.channels.{ByteChannel, ClosedChannelException}
 import scala.util.control.NonFatal
+import scala.compiletime.uninitialized
 
 /** Outcome of a single `readMessage` call.
   *
@@ -36,7 +36,7 @@ class ProtocolHandler(
     config: ChainConfig
 ):
   // BlockImporter will be created by Initialize, once the handshake has fixed the negotiated features.
-  private var blockImporter: BlockImporter = _
+  private var blockImporter: BlockImporter = uninitialized
 
   // Session features after negotiation
   private var sessionFeatures: Int = 0
@@ -180,7 +180,7 @@ class ProtocolHandler(
   private def handleInitialize(init: Initialize): ProtocolMessage =
     blockImporter = new BlockImporter(config, skipAncestryValidation)
 
-    val headerHash = Hashing.blake2b256(init.header.encode)
+    val headerHash = Hashing.blake2b256(io.forge.jam.core.types.header.Header.headerCodec(config.epochLength).encode(init.header))
     val stateRoot = StateMerklization.stateMerklize(init.keyvals)
     stateStore.initialize(
       headerHash,
@@ -197,7 +197,7 @@ class ProtocolHandler(
     */
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
     val result =
-      try ImportBlockStep(stateStore, blockImporter, config, importBlock.block)
+      try ImportBlockStep(stateStore, blockImporter, importBlock.block)
       catch
         case NonFatal(error) =>
           throw new IllegalStateException(

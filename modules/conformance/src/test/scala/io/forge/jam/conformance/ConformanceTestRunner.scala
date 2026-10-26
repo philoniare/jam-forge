@@ -30,6 +30,7 @@ class ConformanceTestRunner(
   config: ChainConfig = ChainConfig.TINY,
   faultyMode: Boolean = false // When true, step 29 state root mismatch is expected
 ):
+  private given ChainConfig = config
   private val stateStore = new StateStore()
   private var blockImporter: BlockImporter = _
   private var sessionFeatures: Int = 0
@@ -156,7 +157,7 @@ class ConformanceTestRunner(
     ProtocolMessage.StateRootMsg(StateRoot(stateRoot))
 
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
-    ImportBlockStep(stateStore, blockImporter, config, importBlock.block) match
+    ImportBlockStep(stateStore, blockImporter, importBlock.block) match
       case Right(postStateRoot) =>
         ProtocolMessage.StateRootMsg(StateRoot(postStateRoot))
       case Left(errorMsg) =>

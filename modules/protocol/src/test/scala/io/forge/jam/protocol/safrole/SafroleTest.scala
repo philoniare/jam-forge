@@ -109,7 +109,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Encode the parsed JSON
-          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.validatorCount, TinyConfig.epochLength)
+          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.epochLength)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
       }
@@ -133,7 +133,7 @@ class SafroleTest extends AnyFunSuite with Matchers:
           fail(s"Failed to load test case $testCaseName: $error")
         case Right((testCase, expectedBinaryData)) =>
           // Test encoding matches expected binary
-          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.validatorCount, TinyConfig.epochLength)
+          given Codec[SafroleCase] = SafroleCase.codec(TinyConfig.epochLength)
           val encoded = testCase.encode
           encoded.toArray shouldBe expectedBinaryData withClue s"Encoding mismatch for $testCaseName"
 
@@ -342,8 +342,8 @@ class SafroleTest extends AnyFunSuite with Matchers:
    * Compare validator key lists with detailed error messages.
    */
   private def assertValidatorListEquals(
-    expected: List[io.forge.jam.core.types.epoch.ValidatorKey],
-    actual: List[io.forge.jam.core.types.epoch.ValidatorKey],
+    expected: IndexedSeq[io.forge.jam.core.types.epoch.ValidatorKey],
+    actual: IndexedSeq[io.forge.jam.core.types.epoch.ValidatorKey],
     fieldName: String,
     testCaseName: String
   ): Unit = {

@@ -19,7 +19,7 @@ object RecompilerAbi:
 
   /** Sentinel `targetIndex` result for a byte offset that isn't a decoded
     * instruction's leader (invalid static control-flow target). */
-  private val InvalidTarget: Long = -1L
+  private inline val InvalidTarget = -1L
 
   private enum StaticTargetField:
     case TargetInImm, TargetInImm2, NoStaticTarget
@@ -265,7 +265,7 @@ object RecompilerAbi:
     codeLen: Int
   )
 
-  private val InvalidJumpTableSlot: Int = -1
+  private inline val InvalidJumpTableSlot = -1
 
   /**
    * Decode a whole code blob and translate it into the recompiler's generic

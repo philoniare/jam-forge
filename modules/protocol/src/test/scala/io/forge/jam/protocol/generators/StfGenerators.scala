@@ -154,8 +154,8 @@ object StfGenerators:
    * @param count Number of validators to generate
    * @return Generator producing exactly `count` validator keys
    */
-  def genValidatorKeys(count: Int): Gen[List[ValidatorKey]] =
-    Gen.listOfN(count, genValidatorKey)
+  def genValidatorKeys(count: Int): Gen[IndexedSeq[ValidatorKey]] =
+    Gen.listOfN(count, genValidatorKey).map(_.toIndexedSeq)
 
   /**
    * Generator for short-form epoch validator keys (64 bytes).

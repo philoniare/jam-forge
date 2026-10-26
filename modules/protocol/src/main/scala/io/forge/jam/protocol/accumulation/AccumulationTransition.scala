@@ -8,7 +8,6 @@ import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AccumulationBridge
 
 import scala.collection.mutable
 
-import io.forge.jam.core.types.epoch.ValidatorKey
 
 final case class AccumulationStfResult(
     state: AccumulationState,
@@ -763,7 +762,7 @@ object AccumulationTransition:
           result = result.result
         )
         serviceOperands.getOrElseUpdate(
-          result.serviceId.value.toLong,
+          result.serviceId.toLong,
           mutable.ListBuffer.empty
         ) +=
           AccumulationOperand.WorkItem(operand)
@@ -842,7 +841,6 @@ object AccumulationTransition:
       operands.foreach {
         case AccumulationOperand.WorkItem(op) => workItemGas += op.gasLimit
         case AccumulationOperand.Transfer(t)  => transferGas += t.gasLimit
-        case _                                => ()
       }
       val totalGasLimit = workItemGas + alwaysAccGas + transferGas
 
@@ -1028,7 +1026,7 @@ object AccumulationTransition:
       provisions: Set[(Long, JamBytes)],
       state: PartialState,
       timeslot: Long,
-      view: Option[ServiceStorageView] = None
+      view: Option[ServiceStorageView]
   ): PartialState =
     for (serviceId, preimage) <- provisions do
       state.accounts.get(serviceId).foreach { account =>
@@ -1124,7 +1122,7 @@ object AccumulationTransition:
       reports: List[WorkReport]
   ): Map[Long, Int] =
     reports
-      .flatMap(_.results.map(_.serviceId.value.toLong))
+      .flatMap(_.results.map(_.serviceId.toLong))
       .groupBy(identity)
       .view
       .mapValues(_.size)

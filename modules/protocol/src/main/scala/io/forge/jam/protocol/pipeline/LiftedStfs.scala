@@ -76,7 +76,7 @@ object LiftedStfs:
       extractInput = ctx =>
         ReportInput(
           guarantees = ctx.block.extrinsic.guarantees,
-          slot = ctx.block.header.slot.value.toLong
+          slot = ctx.block.header.slot.toLong
         ),
       wrapError = (e: ReportErrorCode) => PipelineError.ReportErr(e)
     )
@@ -90,7 +90,7 @@ object LiftedStfs:
       extractInput = ctx =>
         InputExtractor.extractAccumulationInput(
           ctx.availableReports,
-          ctx.block.header.slot.value.toLong
+          ctx.block.header.slot.toLong
         ),
       wrapError = (n: Nothing) => n
     )
@@ -110,7 +110,7 @@ object LiftedStfs:
   val preimages: StfStepWith[Unit] = liftStandard(
     stf = (input, view) => PreimageTransition.stfView(input, view),
     extractInput = ctx =>
-      InputExtractor.extractPreimageInput(ctx.block, ctx.block.header.slot.value.toLong),
+      InputExtractor.extractPreimageInput(ctx.block, ctx.block.header.slot.toLong),
     wrapError = (e: PreimageErrorCode) => PipelineError.PreimageErr(e)
   )
 

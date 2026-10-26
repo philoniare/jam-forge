@@ -26,7 +26,7 @@ class EmptyGuaranteesSpec extends AnyFunSuite with Matchers:
           TestFileLoader.loadJsonFromTestVectors[TraceStep](s"traces/$trace", name).fold(e => fail(e.toString), identity)
         val store = new StateTrieStore(new InMemoryTrieBackend)
         val root = store.bootstrap(step.preState.keyvals.map(kv => (kv.key, kv.value)))
-        val input = ReportInput(guarantees = Nil, slot = step.block.header.slot.value.toLong)
+        val input = ReportInput(guarantees = Nil, slot = step.block.header.slot.toLong)
 
         def posterior(run: TrieBackedJamState => ReportOutput) =
           val trie = store.at(root)

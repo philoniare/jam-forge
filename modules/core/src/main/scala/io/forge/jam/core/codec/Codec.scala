@@ -4,10 +4,13 @@ import io.forge.jam.core.JamBytes
 
 import scala.annotation.targetName
 import scala.deriving.Mirror
+import scala.util.control.NoStackTrace
 
-/** Thrown by [[ByteReader]] and codecs when input bytes cannot be decoded. */
+/** Thrown by [[ByteReader]] and codecs when input bytes cannot be decoded. Untrusted input fails often, so it
+  * skips the stack trace.
+  */
 final class CodecDecodingException(message: String, cause: Throwable = null)
-    extends IllegalArgumentException(message, cause)
+    extends IllegalArgumentException(message, cause) with NoStackTrace
 
 /** Growable little-endian byte sink that codecs write into. */
 final class ByteWriter(initialCapacity: Int = 64):

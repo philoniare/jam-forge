@@ -28,7 +28,7 @@ object Abi:
   val VmMaximumImportCount: UInt = UInt(1024)
 
   /** Code address alignment factor */
-  val VmCodeAddressAlignment: Int = 2
+  inline val VmCodeAddressAlignment = 2
 
   /** Address space bottom (after null page) */
   val VmAddressSpaceBottom: UInt = VmMaxPageSize
@@ -41,10 +41,10 @@ object Abi:
  */
 object PvmConstants:
   /** Number of general-purpose registers (RA through R12) */
-  val NumGeneralRegisters: Int = 13
+  inline val NumGeneralRegisters = 13
 
   /** Maximum instruction size in bytes */
-  val MaxInstructionSize: Int = 24
+  inline val MaxInstructionSize = 24
 
   /** ZP = 2^12: Page size (4 KB) */
   val ZP: UInt = UInt(4096)
@@ -58,10 +58,10 @@ object PvmConstants:
   /**
    * Maximum page count
    */
-  val MaxPageCount: Int = 1 << 20 // 1,048,576 pages
+  inline val MaxPageCount = 1 << 20 // 1,048,576 pages
 
   /** ZA = 2: Dynamic address alignment factor */
-  val ZA: Int = 2
+  inline val ZA = 2
 
   /** Minimum valid address - below triggers panic */
   val MinValidAddress: UInt = UInt(0x10000)
@@ -154,9 +154,6 @@ object MemoryMap:
       val alignedRwData = alignToPage(pageSize, rwDataSize)
       val alignedStack = alignToPage(pageSize, stackSize)
       val alignedAux = alignToPage(pageSize, auxDataSize)
-
-      // RO data starts at ZZ (0x10000)
-      val roDataAddr = PvmConstants.ZZ
 
       // RW data starts at 2*ZZ + aligned RO data size (zone-aligned)
       val rwDataAddr = UInt(2L * PvmConstants.ZZ.toLong + alignToPage(PvmConstants.ZZ, roDataSize).toLong)

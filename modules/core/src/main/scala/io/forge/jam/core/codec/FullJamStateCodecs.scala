@@ -29,8 +29,8 @@ object FullJamStateCodecs:
   /**
    * Codec for `ValidatorsData`.
    */
-  def validatorListCodec(count: Int): Codec[List[ValidatorKey]] =
-    JamCodecs.compactPrefixedList(summon[Codec[ValidatorKey]])
+  def validatorListCodec: Codec[IndexedSeq[ValidatorKey]] =
+    JamCodecs.compactPrefixedVector(summon[Codec[ValidatorKey]])
 
   /** Codec for authorization pools: per-core compact length prefix + N hashes. */
   def authPoolsCodec(coresCount: Int): Codec[List[List[Hash]]] =
@@ -76,10 +76,9 @@ object FullJamStateCodecs:
 
   /** Codec for safrole gamma state (gammaK + gammaZ + gammaS + gammaA). */
   def safroleGammaStateCodec(
-    validatorCount: Int,
     epochLength: Int
-  ): Codec[(List[ValidatorKey], JamBytes, TicketsOrKeysData, List[TicketMark])] =
-    val gammaKCodec = validatorListCodec(validatorCount)
+  ): Codec[(IndexedSeq[ValidatorKey], JamBytes, TicketsOrKeysData, List[TicketMark])] =
+    val gammaKCodec = validatorListCodec
     val gammaZCodec: Codec[JamBytes] = bytes(BandersnatchRingCommitmentSize)
     val gammaSCodec = ticketsOrKeysCodec(epochLength)
     val gammaACodec: Codec[List[TicketMark]] = JamCodecs.compactPrefixedList(JamCodecs.ticketMarkCodec)

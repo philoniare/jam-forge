@@ -3,10 +3,8 @@ package io.forge.jam.core.types
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.json.JsonHelpers.{parseHex, parseHexBytesFixed}
-import io.forge.jam.core.codec.JamCodecs
 import io.circe.Decoder
 import io.forge.jam.core.codec.*
-import io.forge.jam.core.codec.codecs.*
 import spire.math.UByte
 
 /**

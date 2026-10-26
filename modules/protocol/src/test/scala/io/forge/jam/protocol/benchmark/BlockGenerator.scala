@@ -114,7 +114,7 @@ class BlockGenerator(
     val entropyVrfInput = SigningContext.entropyInputData(sealVrfOutput)
     val entropyVrf = BandersnatchWrapper.ietfVrfSign(authorBsSecret, entropyVrfInput, Array.empty)
 
-    val headerCodec = Header.headerCodec(config.validatorCount, config.epochLength)
+    val headerCodec = Header.headerCodec(config.epochLength)
     val headerWithEntropy = Header(
       parent = parentHash,
       parentStateRoot = parentRoot,
@@ -287,7 +287,7 @@ class BlockGenerator(
     val signatures = assignedValidators.take(3).map { vi =>
       val sig = Ed25519ZebraWrapper.sign(validators(vi).ed25519Secret, sigMessage)
       GuaranteeSignature(ValidatorIndex(vi), Ed25519Signature(sig))
-    }.sortBy(_.validatorIndex.value.toInt)
+    }.sortBy(_.validatorIndex.toInt)
 
     Some(GuaranteeExtrinsic(report, Timeslot(UInt(slot.toInt)), signatures))
 
@@ -327,12 +327,12 @@ class BlockGenerator(
     val ticketsEncoded = compactPrefixedList(summon[Codec[TicketEnvelope]]).encode(ex.tickets)
     val preimagesEncoded = compactPrefixedList(summon[Codec[Preimage]]).encode(ex.preimages)
     val assurancesEncoded = compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)).encode(ex.assurances)
-    val disputesEncoded = Dispute.codec(config.votesPerVerdict).encode(ex.disputes)
+    val disputesEncoded = Dispute.codec.encode(ex.disputes)
 
     val guaranteeItems = ex.guarantees.map { g =>
       val reportEncoded = summon[Codec[WorkReport]].encode(g.report)
       val reportHash = Hashing.blake2b256(reportEncoded)
-      val timeslotEncoded = io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.value.toLong & 0xffffffffL)
+      val timeslotEncoded = io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.toLong & 0xffffffffL)
       val credentialEncoded = compactPrefixedList(summon[Codec[GuaranteeSignature]]).encode(g.signatures)
       reportHash.bytes ++ timeslotEncoded ++ credentialEncoded
     }

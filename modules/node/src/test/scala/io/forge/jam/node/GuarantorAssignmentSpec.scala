@@ -9,8 +9,8 @@ class GuarantorAssignmentSpec extends AnyFunSuite with Matchers:
 
   private val config = ChainConfig.TINY
   private val eta = (0 until 4).map(i => Hashing.blake2b256(Array(i.toByte))).toList
-  private val kappa = List("k0", "k1")
-  private val gammaP = List("p0", "p1")
+  private val kappa = Vector("k0", "k1")
+  private val gammaP = Vector("p0", "p1")
 
   test("guarantor assignment at the first slot of an epoch uses η′₂ = η₁ and κ′ = γ_P") {
     val last = config.epochLength - 1L

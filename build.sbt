@@ -45,7 +45,9 @@ val commonScalacOptions = Seq(
 val commonScalacOptionsHK = commonScalacOptions :+ "-language:higherKinds"
 
 def commonSettings = Seq(
-  publish / skip := true
+  publish / skip := true,
+  // Main sources must compile without warnings; test sources may still warn.
+  Compile / compile / scalacOptions += "-Werror"
 )
 
 val hasNativeRecompiler = (osName.contains("mac") || osName.contains("linux")) && {
@@ -181,7 +183,6 @@ lazy val pvm = (project in file("modules/pvm"))
       "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
       "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test,
       "io.circe" %% "circe-core" % "0.14.6" % Test,
-      "io.circe" %% "circe-generic" % "0.14.6" % Test,
       "io.circe" %% "circe-parser" % "0.14.6" % Test
     ),
     scalacOptions ++= commonScalacOptionsHK,
@@ -216,10 +217,7 @@ lazy val protocol = (project in file("modules/protocol"))
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
       "ch.qos.logback" % "logback-classic" % "1.4.11",
       "io.circe" %% "circe-core" % "0.14.6",
-      "io.circe" %% "circe-generic" % "0.14.6",
       "io.circe" %% "circe-parser" % "0.14.6",
-      "dev.optics" %% "monocle-core" % "3.2.0",
-      "dev.optics" %% "monocle-macro" % "3.2.0",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test,
       "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
       "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test
@@ -259,7 +257,6 @@ lazy val network = (project in file("modules/network"))
     name := "jam-network",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "cats-effect" % "3.5.4",
       "org.typelevel" %% "spire" % "0.18.0",
       // JAMNP-S transport: QUIC via the Netty incubator codec (BoringSSL),
       // which supports TLS 1.3 mutual auth with Ed25519 certificates.
@@ -326,9 +323,6 @@ lazy val conformance = (project in file("modules/conformance"))
       "org.typelevel" %% "spire" % "0.18.0",
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
       "ch.qos.logback" % "logback-classic" % "1.4.11",
-      // Monocle for lens-based state access (needed by protocol module at runtime)
-      "dev.optics" %% "monocle-core" % "3.2.0",
-      "dev.optics" %% "monocle-macro" % "3.2.0",
       // CRaC for checkpoint/restore (instant JVM warmup)
       "org.crac" % "crac" % "1.4.0",
       "org.scalatest" %% "scalatest" % "3.2.17" % Test

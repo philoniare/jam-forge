@@ -98,7 +98,7 @@ object AncestryItem:
     import io.forge.jam.core.codec.codecs.*
     (uint32L :: JamCodecs.hashCodec).xmap(
       { case (slotVal, headerHash) => AncestryItem(Timeslot(slotVal.toInt), headerHash) },
-      a => (a.slot.value.toLong & 0xffffffffL, a.headerHash)
+      a => (a.slot.toLong & 0xffffffffL, a.headerHash)
     )
 
 /**
@@ -151,7 +151,7 @@ object ImportBlock:
   def codec(config: ChainConfig): Codec[ImportBlock] =
     codecCache.getOrElseUpdate(
       config,
-      Block.blockCodec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict).xmap(
+      Block.blockCodec(config.epochLength, config.coresCount).xmap(
         block => ImportBlock(block),
         ib => ib.block
       )

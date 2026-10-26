@@ -136,7 +136,7 @@ class TracesTest extends AnyFunSuite with Matchers:
           info(s"Safrole STF returned error: ${safroleOutput.left.toOption.get}")
         else
           // Verify timeslot was updated
-          safrolePostState.timeslot should be >= step.block.header.slot.value.toLong withClue
+          safrolePostState.timeslot should be >= step.block.header.slot.toLong withClue
             "Timeslot should be at least the block slot"
   }
 
@@ -205,7 +205,7 @@ class TracesTest extends AnyFunSuite with Matchers:
         val (safrolePostState, safroleOutput) = runSafrole(safroleInput, step.preState)
 
         // Fallback mode should work even without tickets
-        safrolePostState.timeslot should be >= step.block.header.slot.value.toLong
+        safrolePostState.timeslot should be >= step.block.header.slot.toLong
   }
 
   test("fallback trace: all steps sequential import") {

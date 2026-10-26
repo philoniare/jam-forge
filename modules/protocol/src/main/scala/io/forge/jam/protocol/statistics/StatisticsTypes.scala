@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.statistics
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.{Preimage, AssuranceExtrinsic, Dispute, GuaranteeExtrinsic}
@@ -56,17 +58,7 @@ object StatisticsTypes:
       Size
     )
 
-    given Decoder[StatCount] =
-      Decoder.instance { cursor =>
-        for
-          blocks <- cursor.get[Long]("blocks")
-          tickets <- cursor.get[Long]("tickets")
-          preImages <- cursor.get[Long]("pre_images")
-          preImagesSize <- cursor.get[Long]("pre_images_size")
-          guarantees <- cursor.get[Long]("guarantees")
-          assurances <- cursor.get[Long]("assurances")
-        yield StatCount(blocks, tickets, preImages, preImagesSize, guarantees, assurances)
-      }
+    given Decoder[StatCount] = ConfiguredDecoder.derived
 
   /**
    * Extrinsic data relevant to statistics.
@@ -85,23 +77,14 @@ object StatisticsTypes:
        JamCodecs.compactPrefixedList(summon[Codec[Preimage]]) ::
        JamCodecs.compactPrefixedList(summon[Codec[GuaranteeExtrinsic]]) ::
        JamCodecs.compactPrefixedList(AssuranceExtrinsic.codec(config.coresCount)) ::
-       Dispute.codec(config.votesPerVerdict)).xmap(
+       Dispute.codec).xmap(
         { case (tickets, preimages, guarantees, assurances, disputes) =>
           StatExtrinsic(tickets, preimages, guarantees, assurances, disputes)
         },
         se => (se.tickets, se.preimages, se.guarantees, se.assurances, se.disputes)
       )
 
-    given Decoder[StatExtrinsic] =
-      Decoder.instance { cursor =>
-        for
-          tickets <- cursor.get[List[TicketEnvelope]]("tickets")
-          preimages <- cursor.get[List[Preimage]]("preimages")
-          guarantees <- cursor.get[List[GuaranteeExtrinsic]]("guarantees")
-          assurances <- cursor.get[List[AssuranceExtrinsic]]("assurances")
-          disputes <- cursor.get[Dispute]("disputes")
-        yield StatExtrinsic(tickets, preimages, guarantees, assurances, disputes)
-      }
+    given Decoder[StatExtrinsic] = ConfiguredDecoder.derived
 
   /**
    * Input to the Statistics STF.
@@ -122,14 +105,7 @@ object StatisticsTypes:
       )
 
 
-    given Decoder[StatInput] =
-      Decoder.instance { cursor =>
-        for
-          slot <- cursor.get[Long]("slot")
-          authorIndex <- cursor.get[Long]("author_index")
-          extrinsic <- cursor.get[StatExtrinsic]("extrinsic")
-        yield StatInput(slot, authorIndex, extrinsic)
-      }
+    given Decoder[StatInput] = ConfiguredDecoder.derived
 
   /**
    * Statistics state containing validator stats and metadata.
@@ -138,17 +114,17 @@ object StatisticsTypes:
     valsCurrStats: List[StatCount],
     valsLastStats: List[StatCount],
     slot: Long,
-    currValidators: List[ValidatorKey],
-    prevValidators: List[ValidatorKey] = List.empty
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey] = IndexedSeq.empty
   )
 
   object StatState:
-    def codec(validatorCount: Int): Codec[StatState] =
+    given codec: Codec[StatState] =
       // 0.8.0: ValidatorsStatistics is a bounded sequence (compact length prefix).
       (JamCodecs.compactPrefixedList(summon[Codec[StatCount]]) ::
        JamCodecs.compactPrefixedList(summon[Codec[StatCount]]) ::
        uint32L ::
-       FullJamStateCodecs.validatorListCodec(validatorCount)).xmap(
+       FullJamStateCodecs.validatorListCodec).xmap(
         { case (valsCurrStats, valsLastStats, slot, currValidators) =>
           StatState(valsCurrStats, valsLastStats, slot & 0xFFFFFFFFL, currValidators)
         },
@@ -161,7 +137,7 @@ object StatisticsTypes:
           valsCurrStats <- cursor.get[List[StatCount]]("vals_curr_stats")
           valsLastStats <- cursor.get[List[StatCount]]("vals_last_stats")
           slot <- cursor.get[Long]("slot")
-          currValidators <- cursor.get[List[ValidatorKey]]("curr_validators")
+          currValidators <- cursor.get[IndexedSeq[ValidatorKey]]("curr_validators")
         yield StatState(valsCurrStats, valsLastStats, slot, currValidators)
       }
 
@@ -188,19 +164,11 @@ object StatisticsTypes:
 
   object StatCase:
     def codec(config: ChainConfig): Codec[StatCase] =
-      (StatInput.codec(config) :: StatState.codec(config.validatorCount) :: StatState.codec(config.validatorCount)).xmap(
+      (StatInput.codec(config) :: StatState.codec :: StatState.codec).xmap(
         { case (input, preState, postState) =>
           StatCase(input, preState, None, postState)
         },
         sc => (sc.input, sc.preState, sc.postState)
       )
 
-    given Decoder[StatCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[StatInput]("input")
-          preState <- cursor.get[StatState]("pre_state")
-          output <- cursor.get[Option[StatOutput]]("output")
-          postState <- cursor.get[StatState]("post_state")
-        yield StatCase(input, preState, output, postState)
-      }
+    given Decoder[StatCase] = ConfiguredDecoder.derived

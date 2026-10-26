@@ -52,11 +52,11 @@ object context:
         },
         c => (
           c.anchor,
-          c.anchorSlot.value.toLong & 0xFFFFFFFFL,
+          c.anchorSlot.toLong & 0xFFFFFFFFL,
           c.stateRoot,
           c.beefyRoot,
           c.lookupAnchor,
-          c.lookupAnchorSlot.value.toLong & 0xFFFFFFFFL,
+          c.lookupAnchorSlot.toLong & 0xFFFFFFFFL,
           c.lookupAnchorStateRoot,
           c.prerequisites
         )

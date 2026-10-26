@@ -1,7 +1,7 @@
 package io.forge.jam.pvm.engine
 
 import scala.collection.mutable.ArrayBuffer
-import io.forge.jam.pvm.{Instruction, Opcode}
+import io.forge.jam.pvm.Opcode
 import io.forge.jam.pvm.program.InstructionDecoder
 
 object BlockGasModel:
@@ -78,7 +78,7 @@ object BlockGasModel:
 
   private def attrsAt(code: Array[Byte], bitmask: Array[Byte], iota: Int): InstrAttrs =
     val (instr, skip) = InstructionDecoder.decode(code, bitmask, iota)
-    import Instruction as I
+    import io.forge.jam.pvm.Instruction as I
 
     inline def mk(
         cycles: Int,

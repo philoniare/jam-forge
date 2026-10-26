@@ -3,6 +3,7 @@ package io.forge.jam.network
 import java.net.InetSocketAddress
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, TimeUnit}
 
+import io.forge.jam.core.primitives.Ed25519PublicKey
 import io.netty.bootstrap.Bootstrap
 import io.netty.buffer.{ByteBuf, Unpooled}
 import io.netty.channel.{Channel, ChannelHandlerContext, ChannelInboundHandlerAdapter, ChannelInitializer}
@@ -215,6 +216,9 @@ final class JamnpConnection private[network] (
   lazy val peerKey: Array[Byte] =
     val certs = quic.sslEngine().getSession.getPeerCertificates
     NodeIdentity.peerPublicKey(certs(0).asInstanceOf[X509Certificate])
+
+  /** [[peerKey]] as a content-compared value, for map keys and set membership. */
+  lazy val peerPublicKey: Ed25519PublicKey = Ed25519PublicKey(peerKey)
 
   def negotiatedAlpn: String = quic.sslEngine().getApplicationProtocol
 

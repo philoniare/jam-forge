@@ -21,8 +21,8 @@ object FuzzSpecGenesis:
   def build(
       tiny: RawState,
       config: ChainConfig,
-      validators: List[ValidatorKey],
-      staging: List[ValidatorKey] = Nil
+      validators: IndexedSeq[ValidatorKey],
+      staging: IndexedSeq[ValidatorKey] = IndexedSeq.empty
   ): RawState =
     val iota = if staging.isEmpty then validators else staging
     for set <- List(validators, iota) do
@@ -50,7 +50,7 @@ object FuzzSpecGenesis:
     dst.iota = iota
     dst.gammaK = validators
     dst.gammaZ = BandersnatchVrf
-      .generateRingRoot(validators.map(_.bandersnatch), config.validatorCount)
+      .generateRingRoot(validators.map(_.bandersnatch).toList, config.validatorCount)
       .getOrElse(throw new IllegalStateException("ring root"))
     dst.gammaS = TicketsOrKeys.Keys(fallbackKeys(entropy(2), validators, config.epochLength))
     dst.gammaA = List.empty
@@ -78,7 +78,7 @@ object FuzzSpecGenesis:
     RawState(StateMerklization.stateMerklize(keyvals), keyvals)
 
   /** F(eta_2, kappa) (GP 0.8.0 §safrole eq:fallbackkeysequence). */
-  private def fallbackKeys(entropy: Hash, validators: List[ValidatorKey], epochLength: Int): List[BandersnatchPublicKey] =
+  private def fallbackKeys(entropy: Hash, validators: IndexedSeq[ValidatorKey], epochLength: Int): List[BandersnatchPublicKey] =
     List.tabulate(epochLength) { i =>
       val h = Hashing.blake2b256(entropy.bytes ++ uint32L.encode(i.toLong))
       validators((uint32L.decodeUnsafe(h.bytes) % validators.size).toInt).bandersnatch

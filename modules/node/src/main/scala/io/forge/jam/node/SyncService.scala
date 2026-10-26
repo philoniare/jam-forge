@@ -6,7 +6,6 @@ import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.trie.TrieNode
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
 
@@ -346,7 +345,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     * for an unknown block, or one that can no longer be finalized, is reset.
     */
   def blockRequestHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         decodeBlockRequest(msg) match
           case Left(err) =>
@@ -403,10 +402,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             var imported = 0
             blocks.reverse.foreach { blockBytes =>
               chain.importBlock(blockBytes) match
-                case Right(head) =>
+                case Right(_) =>
                   imported += 1
                   chain.decodeBlock(blockBytes).foreach { b =>
-                    announce(b.header.encode.toArray)
+                    announce(chain.headerCodec.encode(b.header))
                   }
                 case Left(err) =>
                   logger.debug(s"sync import skipped: $err")
@@ -423,7 +422,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   // CE 129 — state request (trie range)
   // =========================================================================
   def stateRequestHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+    (_: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         try
           decodeStateRequest(msg) match

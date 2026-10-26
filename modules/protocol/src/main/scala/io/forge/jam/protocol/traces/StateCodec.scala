@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.traces
 
-import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.{
   Hash,
   BandersnatchPublicKey,
@@ -108,9 +108,6 @@ object StateKeys:
   * structures.
   */
 object StateCodec:
-  // Import codec instances (exclude ticketMarkCodec to avoid ambiguity)
-  import JamCodecs.{ticketMarkCodec as _, given, *}
-  import io.forge.jam.core.types.epoch.ValidatorKey.given_Codec_ValidatorKey
 
   // Bandersnatch ring commitment size (144 bytes)
   private val RING_COMMITMENT_SIZE: Int =
@@ -141,10 +138,10 @@ object StateCodec:
   ): SafroleState =
     var tau: Long = 0
     var eta: List[Hash] = List.fill(4)(Hash.zero)
-    var kappa: List[ValidatorKey] = List.empty
-    var lambda: List[ValidatorKey] = List.empty
-    var gammaK: List[ValidatorKey] = List.empty
-    var iota: List[ValidatorKey] = List.empty
+    var kappa: IndexedSeq[ValidatorKey] = IndexedSeq.empty
+    var lambda: IndexedSeq[ValidatorKey] = IndexedSeq.empty
+    var gammaK: IndexedSeq[ValidatorKey] = IndexedSeq.empty
+    var iota: IndexedSeq[ValidatorKey] = IndexedSeq.empty
     var gammaA: List[TicketMark] = List.empty
     var gammaS: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys =
       io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Keys(
@@ -217,9 +214,9 @@ object StateCodec:
   private def decodeValidatorList(
       value: Array[Byte],
       expectedCount: Int
-  ): List[ValidatorKey] =
+  ): IndexedSeq[ValidatorKey] =
     val codec =
-      FullJamStateCodecs.validatorListCodec(expectedCount)
+      FullJamStateCodecs.validatorListCodec
     codec.decode(value) match
       case Right(validators) => validators
       case Left(_)           =>
@@ -230,12 +227,12 @@ object StateCodec:
           BlsPublicKey(Array.fill(144)(0.toByte)),
           JamBytes.zeros(128)
         )
-        List.fill(expectedCount)(zeroValidator)
+        IndexedSeq.fill(expectedCount)(zeroValidator)
 
   /** Represents decoded safrole gamma state.
     */
   case class SafroleGammaDecoded(
-      gammaK: List[ValidatorKey],
+      gammaK: IndexedSeq[ValidatorKey],
       gammaZ: JamBytes,
       gammaS: io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys,
       gammaA: List[TicketMark]
@@ -252,7 +249,7 @@ object StateCodec:
 
     // gammaK - fixed list of ValidatorKey
     val gammaKCodec =
-      FullJamStateCodecs.validatorListCodec(validatorCount)
+      FullJamStateCodecs.validatorListCodec
     val gammaK = gammaKCodec.decodeAt(value, offset) match
       case Right((validators, used)) =>
         offset += used
@@ -264,7 +261,7 @@ object StateCodec:
           BlsPublicKey(Array.fill(144)(0.toByte)),
           JamBytes.zeros(128)
         )
-        List.fill(validatorCount)(zeroValidator)
+        IndexedSeq.fill(validatorCount)(zeroValidator)
 
     // gammaZ - 144 bytes ring commitment
     val gammaZ = io.forge.jam.core.codec.codecs.bytes(RING_COMMITMENT_SIZE).decodeAt(value, offset) match
@@ -306,7 +303,7 @@ object StateCodec:
     val ticketsListCodec: Codec[List[TicketMark]] =
       JamCodecs.fixedSizeList(ticketMarkCodec, epochLength)
     val keysListCodec: Codec[List[BandersnatchPublicKey]] =
-      JamCodecs.fixedSizeList(summon[Codec[BandersnatchPublicKey]], epochLength)
+      JamCodecs.fixedSizeList(JamCodecs.bandersnatchPublicKeyCodec, epochLength)
 
     Codec.of(
       (w, v) =>

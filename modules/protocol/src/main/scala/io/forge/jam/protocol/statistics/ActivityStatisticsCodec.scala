@@ -73,7 +73,7 @@ object ActivityStatisticsCodec:
   )
 
   /** Codec for the full activity-statistics state item. */
-  def activityStatisticsCodec(validatorCount: Int, coresCount: Int): Codec[ActivityStatistics] =
+  def activityStatisticsCodec(coresCount: Int): Codec[ActivityStatistics] =
     (JamCodecs.compactPrefixedList(statCountCodec) ::
       JamCodecs.compactPrefixedList(statCountCodec) ::
       JamCodecs.fixedSizeList(coreStatisticsCodec, coresCount) ::
@@ -89,11 +89,10 @@ object ActivityStatisticsCodec:
    */
   def decodeActivityStatistics(
       bytes: Array[Byte],
-      validatorCount: Int,
       coresCount: Int
   ): ActivityStatistics =
     FullJamStateCodecs.decodeExact(
-      activityStatisticsCodec(validatorCount, coresCount),
+      activityStatisticsCodec(coresCount),
       bytes,
       "decodeActivityStatistics"
     )

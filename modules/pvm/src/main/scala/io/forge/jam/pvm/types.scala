@@ -30,4 +30,4 @@ object types:
 
   object Reg:
     /** Number of general-purpose registers (r0-r12) */
-    val Count: Int = 13
+    inline val Count = 13

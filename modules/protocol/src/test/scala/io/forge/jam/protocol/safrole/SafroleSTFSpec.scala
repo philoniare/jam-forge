@@ -684,10 +684,10 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
 
   /** iota = six validators on the valid TINY ring; validator 0 is the offender,
     * with a non-zero (0xAB) BLS key. Returns (preStateAtEpochEnd, iota). */
-  private def offenderEpochEndState(cfg: ChainConfig): (SafroleState, List[ValidatorKey]) =
+  private def offenderEpochEndState(cfg: ChainConfig): (SafroleState, IndexedSeq[ValidatorKey]) =
     val iota = tinyBanderKeys.zipWithIndex.map { case (b, i) =>
       tinyValidator(b, edByte = i + 1, blsByte = if i == 0 then 0xAB else i + 1)
-    }
+    }.toIndexedSeq
     val pre = SafroleState(
       tau = cfg.epochLength - 1,
       eta = List.fill(4)(Hash.zero),
@@ -757,7 +757,7 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropertyCh
       val b = new Array[Byte](32); b(31) = i.toByte
       TicketMark(JamBytes(b), UByte(0))
     }
-    val validators = (0 until cfg.validatorCount).toList.map(i => tinyValidator(tinyBanderKeys(i), i + 1, i + 1))
+    val validators = (0 until cfg.validatorCount).map(i => tinyValidator(tinyBanderKeys(i), i + 1, i + 1))
 
     val pre = SafroleState(
       tau = 0L,

@@ -29,16 +29,16 @@ final case class FullJamState(
     entropyPool: List[Hash],
 
     // kappa - Current validators
-    currentValidators: List[ValidatorKey],
+    currentValidators: IndexedSeq[ValidatorKey],
 
     // lambda - Previous validators
-    previousValidators: List[ValidatorKey],
+    previousValidators: IndexedSeq[ValidatorKey],
 
     // iota - Validator queue (pending validators)
-    validatorQueue: List[ValidatorKey],
+    validatorQueue: IndexedSeq[ValidatorKey],
 
     // gamma - Safrole state
-    safroleGammaK: List[ValidatorKey], // gamma_k - next epoch validators
+    safroleGammaK: IndexedSeq[ValidatorKey], // gamma_k - next epoch validators
     safroleGammaZ: JamBytes, // gamma_z - ring root
     safroleGammaS: TicketsOrKeys, // gamma_s - sealing sequence
     safroleGammaA: List[TicketMark], // gamma_a - ticket accumulator

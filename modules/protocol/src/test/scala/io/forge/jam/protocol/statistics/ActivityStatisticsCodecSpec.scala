@@ -69,21 +69,21 @@ class ActivityStatisticsCodecSpec extends AnyFlatSpec with Matchers:
     )
 
   "ActivityStatisticsCodec" should "encode to the pinned wire bytes" in {
-    val codec = ActivityStatisticsCodec.activityStatisticsCodec(2, 2)
+    val codec = ActivityStatisticsCodec.activityStatisticsCodec(2)
     io.forge.jam.core.JamBytes.toHex(codec.encode(fixture)) shouldBe PinnedHex
   }
 
   it should "round-trip the pinned bytes back to the domain values" in {
     val bytes = ActivityStatisticsCodec
-      .activityStatisticsCodec(2, 2)
+      .activityStatisticsCodec(2)
       .encode(fixture)
-    ActivityStatisticsCodec.decodeActivityStatistics(bytes, 2, 2) shouldBe fixture
+    ActivityStatisticsCodec.decodeActivityStatistics(bytes, 2) shouldBe fixture
   }
 
   it should "reject trailing bytes after a valid value" in {
     val bytes = ActivityStatisticsCodec
-      .activityStatisticsCodec(2, 2)
+      .activityStatisticsCodec(2)
       .encode(fixture)
     a[CodecDecodingException] should be thrownBy
-      ActivityStatisticsCodec.decodeActivityStatistics(bytes :+ 0xab.toByte, 2, 2)
+      ActivityStatisticsCodec.decodeActivityStatistics(bytes :+ 0xab.toByte, 2)
   }

@@ -102,7 +102,7 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       // Feed B's branch to A: 3' parks on a side branch (equal height)...
       val sideResult = nodeA.chain.importBlock(block2bBytes)
       sideResult.isLeft shouldBe true
-      sideResult.left.toOption.get should include("side branch")
+      sideResult.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       nodeA.chain.best.hash shouldBe headA2.hash
 
       // ...and 4' makes the branch longer → reorg onto B's chain.
@@ -169,13 +169,13 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       // Disregarding block 2 drops 2 and 3 and adopts 4'.
       nodeA.chain.disregard(headA2.hash) match
         case Right(head) => head.hash shouldBe nodeB.chain.best.hash
-        case Left(err)   => fail(err)
+        case Left(err)   => fail(err.message)
       nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
       nodeA.chain.parentHash(nodeA.chain.best.hash) shouldBe Some(headA1.hash)
       // The new chain extends; the disregarded block is refused from now on.
       val b5 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(5).getOrElse(fail("author 5"))
       nodeA.chain.importBlock(nodeA.chain.encodeBlock(b5)).isRight shouldBe true
-      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)) shouldBe Left("block failed validation before")
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)) shouldBe Left(ChainError.PreviouslyInvalid)
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()

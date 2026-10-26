@@ -229,7 +229,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
           seen += item.headerHash
       )
       acc.toList
-        .sortBy(item => -(item.slot.value.toLong & 0xffffffffL))
+        .sortBy(item => -(item.slot.toLong & 0xffffffffL))
         .take(maxAncestryLength)
     }
 

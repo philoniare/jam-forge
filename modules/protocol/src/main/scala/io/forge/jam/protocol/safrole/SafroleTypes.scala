@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.safrole
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.{JamBytes, StfResult}
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark}
@@ -77,10 +79,10 @@ object SafroleTypes:
   final case class SafroleState(
     tau: Long,
     eta: List[Hash],
-    lambda: List[ValidatorKey],
-    kappa: List[ValidatorKey],
-    gammaK: List[ValidatorKey],
-    iota: List[ValidatorKey],
+    lambda: IndexedSeq[ValidatorKey],
+    kappa: IndexedSeq[ValidatorKey],
+    gammaK: IndexedSeq[ValidatorKey],
+    iota: IndexedSeq[ValidatorKey],
     gammaA: List[TicketMark],
     gammaS: TicketsOrKeys,
     gammaZ: JamBytes,
@@ -94,13 +96,13 @@ object SafroleTypes:
 
   object SafroleState:
     /** Create a codec that knows the validator count and epoch length */
-    def codec(validatorCount: Int, epochLength: Int): Codec[SafroleState] =
+    def codec(epochLength: Int): Codec[SafroleState] =
       val tauCodec: Codec[Long] = uint32L.xmap(_ & 0xFFFFFFFFL, _ & 0xFFFFFFFFL)
       val etaCodec: Codec[List[Hash]] = JamCodecs.fixedSizeList(JamCodecs.hashCodec, 4)
-      val lambdaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
-      val kappaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
-      val gammaKCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
-      val iotaCodec: Codec[List[ValidatorKey]] = FullJamStateCodecs.validatorListCodec(validatorCount)
+      val lambdaCodec: Codec[IndexedSeq[ValidatorKey]] = FullJamStateCodecs.validatorListCodec
+      val kappaCodec: Codec[IndexedSeq[ValidatorKey]] = FullJamStateCodecs.validatorListCodec
+      val gammaKCodec: Codec[IndexedSeq[ValidatorKey]] = FullJamStateCodecs.validatorListCodec
+      val iotaCodec: Codec[IndexedSeq[ValidatorKey]] = FullJamStateCodecs.validatorListCodec
       val gammaACodec: Codec[List[TicketMark]] = JamCodecs.compactPrefixedList(summon[Codec[TicketMark]])
       val gammaSCodec: Codec[TicketsOrKeys] = TicketsOrKeys.codec(epochLength)
       val gammaZCodec: Codec[JamBytes] = bytes(BandersnatchRingCommitmentSize).xmap(
@@ -121,10 +123,10 @@ object SafroleTypes:
       for
         tau <- cursor.get[Long]("tau")
         eta <- cursor.get[List[String]]("eta").map(_.map(h => Hash(parseHex(h))))
-        lambda <- cursor.get[List[ValidatorKey]]("lambda")
-        kappa <- cursor.get[List[ValidatorKey]]("kappa")
-        gammaK <- cursor.get[List[ValidatorKey]]("gamma_k")
-        iota <- cursor.get[List[ValidatorKey]]("iota")
+        lambda <- cursor.get[IndexedSeq[ValidatorKey]]("lambda")
+        kappa <- cursor.get[IndexedSeq[ValidatorKey]]("kappa")
+        gammaK <- cursor.get[IndexedSeq[ValidatorKey]]("gamma_k")
+        iota <- cursor.get[IndexedSeq[ValidatorKey]]("iota")
         gammaA <- cursor.get[List[TicketMark]]("gamma_a")
         gammaS <- cursor.get[TicketsOrKeys]("gamma_s")
         gammaZ <- cursor.get[String]("gamma_z").map(h => JamBytes(parseHex(h)))
@@ -205,9 +207,9 @@ object SafroleTypes:
 
   object SafroleOutputData:
     /** Create a codec that knows the validator count and epoch length */
-    def codec(validatorCount: Int, epochLength: Int): Codec[SafroleOutputData] =
+    def codec(epochLength: Int): Codec[SafroleOutputData] =
       val epochMarkCodec: Codec[Option[EpochMark]] =
-        JamCodecs.optionCodec(EpochMark.epochMarkCodec(validatorCount))
+        JamCodecs.optionCodec(EpochMark.epochMarkCodec)
       val ticketsMarkCodec: Codec[Option[List[TicketMark]]] =
         JamCodecs.optionCodec(JamCodecs.fixedSizeList(summon[Codec[TicketMark]], epochLength))
 
@@ -232,9 +234,9 @@ object SafroleTypes:
     /**
      * Create a config-aware codec for SafroleOutput.
      */
-    def codec(validatorCount: Int, epochLength: Int): Codec[SafroleOutput] =
+    def codec(epochLength: Int): Codec[SafroleOutput] =
       JamCodecs.stfResultCodec(
-        using SafroleOutputData.codec(validatorCount, epochLength),
+        using SafroleOutputData.codec(epochLength),
         summon[Codec[SafroleErrorCode]]
       )
 
@@ -255,10 +257,10 @@ object SafroleTypes:
     import SafroleOutput.circeDecoder
 
     /** Create a config-aware codec for SafroleCase */
-    def codec(validatorCount: Int, epochLength: Int): Codec[SafroleCase] =
+    def codec(epochLength: Int): Codec[SafroleCase] =
       val inputCodec: Codec[SafroleInput] = summon[Codec[SafroleInput]]
-      val stateCodec: Codec[SafroleState] = SafroleState.codec(validatorCount, epochLength)
-      val outputCodec: Codec[SafroleOutput] = SafroleOutput.codec(validatorCount, epochLength)
+      val stateCodec: Codec[SafroleState] = SafroleState.codec(epochLength)
+      val outputCodec: Codec[SafroleOutput] = SafroleOutput.codec(epochLength)
 
       (inputCodec :: stateCodec :: outputCodec :: stateCodec).xmap(
         { case (input, preState, output, postState) =>
@@ -267,11 +269,4 @@ object SafroleTypes:
         sc => (sc.input, sc.preState, sc.output, sc.postState)
       )
 
-    given Decoder[SafroleCase] = Decoder.instance { cursor =>
-      for
-        input <- cursor.get[SafroleInput]("input")
-        preState <- cursor.get[SafroleState]("pre_state")
-        output <- cursor.get[SafroleOutput]("output")
-        postState <- cursor.get[SafroleState]("post_state")
-      yield SafroleCase(input, preState, output, postState)
-    }
+    given Decoder[SafroleCase] = ConfiguredDecoder.derived

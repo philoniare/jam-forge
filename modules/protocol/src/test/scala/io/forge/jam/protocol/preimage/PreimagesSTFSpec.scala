@@ -76,7 +76,7 @@ class PreimagesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckProperty
   test("property: preimage extrinsic has valid requester") {
     forAll(genPreimageExtrinsic) { preimage =>
       // Property: requester service ID should be valid
-      preimage.requester.value.toLong should be >= 0L
+      preimage.requester.toLong should be >= 0L
     }
   }
 
@@ -106,11 +106,11 @@ class PreimagesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckProperty
     forAll(genPreimageExtrinsic, genPreimageExtrinsic) { (p1, p2) =>
       // Ensure they have different requesters for proper sorting test
       whenever(p1.requester.value != p2.requester.value) {
-        val sorted = List(p1, p2).sortBy(p => (p.requester.value.toLong, p.blob.toHex))
+        val sorted = List(p1, p2).sortBy(p => (p.requester.toLong, p.blob.toHex))
 
         // Property: sorted list should be in ascending order by requester first
         if sorted.size == 2 then
-          sorted.head.requester.value.toLong should be <= sorted(1).requester.value.toLong
+          sorted.head.requester.toLong should be <= sorted(1).requester.toLong
       }
     }
   }
@@ -243,10 +243,10 @@ class PreimagesSTFSpec extends AnyFunSuite with Matchers with ScalaCheckProperty
   test("GP: preimages sorted by (requester, blob) with requester as primary key") {
     forAll(genPreimageExtrinsic, genPreimageExtrinsic) { (p1, p2) =>
       whenever(p1.requester.value != p2.requester.value) {
-        val sorted = List(p1, p2).sortBy(p => (p.requester.value.toLong, p.blob.toHex))
+        val sorted = List(p1, p2).sortBy(p => (p.requester.toLong, p.blob.toHex))
 
         // GP: Sorted list should have lower requester first
-        sorted.head.requester.value.toLong should be <= sorted(1).requester.value.toLong
+        sorted.head.requester.toLong should be <= sorted(1).requester.toLong
       }
     }
   }

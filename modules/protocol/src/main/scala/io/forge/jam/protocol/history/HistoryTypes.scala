@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.history
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.Codec
 import io.forge.jam.core.{ChainConfig, constants}
 import io.forge.jam.core.primitives.Hash
@@ -109,11 +111,4 @@ object HistoryTypes:
       )
 
 
-    given Decoder[HistoricalCase] =
-      Decoder.instance { cursor =>
-        for
-          input <- cursor.get[HistoricalInput]("input")
-          preState <- cursor.get[HistoricalState]("pre_state")
-          postState <- cursor.get[HistoricalState]("post_state")
-        yield HistoricalCase(input, preState, postState)
-      }
+    given Decoder[HistoricalCase] = ConfiguredDecoder.derived

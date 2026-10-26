@@ -16,6 +16,33 @@ import io.circe.Decoder
  */
 object primitives:
 
+  /** Constructors shared by the fixed-size byte wrappers. Only the companions use it; each class keeps its own equals/hashCode. */
+  abstract class FixedBytes[T](val Size: Int, name: String):
+    protected def make(bytes: Array[Byte]): T
+
+    def apply(bytes: Array[Byte]): T =
+      require(bytes.length == Size, s"$name must be $Size bytes, got ${bytes.length}")
+      make(bytes.clone())
+
+    def zero: T = make(new Array[Byte](Size))
+
+    /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
+    def wrap(bytes: Array[Byte]): T =
+      require(bytes.length == Size, s"$name must be $Size bytes, got ${bytes.length}")
+      make(bytes)
+
+    /** Copies `bytes` if it has the right size. */
+    def fromArray(bytes: Array[Byte]): Option[T] =
+      if bytes.length == Size then Some(make(bytes.clone())) else None
+
+    def fromHex(hex: String): Either[String, T] =
+      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
+      if cleanHex.length != Size * 2 then
+        Left(s"$name must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
+      else JamBytes.parseHex(cleanHex).map(make)
+
+    given Decoder[T] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid $name: $err"))
+
   // ============================================================================
   // Hash Types (32 bytes = 256 bits)
   // ============================================================================
@@ -51,32 +78,11 @@ object primitives:
         hashCodeCache = h
       h
 
-  object Hash:
-    val Size: Int = 32
-
-    def apply(bytes: Array[Byte]): Hash =
-      require(bytes.length == Size, s"Hash must be $Size bytes, got ${bytes.length}")
-      new Hash(bytes.clone())
+  object Hash extends FixedBytes[Hash](32, "Hash"):
+    protected def make(bytes: Array[Byte]): Hash = new Hash(bytes)
 
     /** The all-zero hash. Shared: like every Hash, its array must never be mutated. */
-    val zero: Hash = new Hash(new Array[Byte](Size))
-
-    /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
-    def wrap(bytes: Array[Byte]): Hash =
-      require(bytes.length == Size, s"Hash must be $Size bytes, got ${bytes.length}")
-      new Hash(bytes)
-
-    /** Copies `bytes` if it has the right size. */
-    def fromArray(bytes: Array[Byte]): Option[Hash] =
-      if bytes.length == Size then Some(new Hash(bytes.clone())) else None
-
-    def fromHex(hex: String): Either[String, Hash] =
-      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
-      if cleanHex.length != Size * 2 then
-        Left(s"Hash must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
-      else JamBytes.parseHex(cleanHex).map(new Hash(_))
-
-    given Decoder[Hash] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid Hash: $err"))
+    override val zero: Hash = new Hash(new Array[Byte](Size))
 
     /** No size check; for hot paths whose input is a 32-byte digest by construction. */
     def wrapUnchecked(bytes: Array[Byte]): Hash = new Hash(bytes)
@@ -102,31 +108,8 @@ object primitives:
 
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object BandersnatchPublicKey:
-    val Size: Int = 32
-
-    def apply(bytes: Array[Byte]): BandersnatchPublicKey =
-      require(bytes.length == Size, s"BandersnatchPublicKey must be $Size bytes, got ${bytes.length}")
-      new BandersnatchPublicKey(bytes.clone())
-
-    def zero: BandersnatchPublicKey = new BandersnatchPublicKey(new Array[Byte](Size))
-
-    /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
-    def wrap(bytes: Array[Byte]): BandersnatchPublicKey =
-      require(bytes.length == Size, s"BandersnatchPublicKey must be $Size bytes, got ${bytes.length}")
-      new BandersnatchPublicKey(bytes)
-
-    /** Copies `bytes` if it has the right size. */
-    def fromArray(bytes: Array[Byte]): Option[BandersnatchPublicKey] =
-      if bytes.length == Size then Some(new BandersnatchPublicKey(bytes.clone())) else None
-
-    def fromHex(hex: String): Either[String, BandersnatchPublicKey] =
-      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
-      if cleanHex.length != Size * 2 then
-        Left(s"BandersnatchPublicKey must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
-      else JamBytes.parseHex(cleanHex).map(new BandersnatchPublicKey(_))
-
-    given Decoder[BandersnatchPublicKey] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid BandersnatchPublicKey: $err"))
+  object BandersnatchPublicKey extends FixedBytes[BandersnatchPublicKey](32, "BandersnatchPublicKey"):
+    protected def make(bytes: Array[Byte]): BandersnatchPublicKey = new BandersnatchPublicKey(bytes)
 
   /** Bandersnatch signature (96 bytes) */
   final case class BandersnatchSignature private (private val underlying: Array[Byte]):
@@ -136,11 +119,8 @@ object primitives:
       case _ => false
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object BandersnatchSignature:
-    val Size: Int = 96
-    def apply(bytes: Array[Byte]): BandersnatchSignature =
-      require(bytes.length == Size)
-      new BandersnatchSignature(bytes.clone())
+  object BandersnatchSignature extends FixedBytes[BandersnatchSignature](96, "BandersnatchSignature"):
+    protected def make(bytes: Array[Byte]): BandersnatchSignature = new BandersnatchSignature(bytes)
 
   // ============================================================================
   // Ed25519 Types
@@ -161,31 +141,8 @@ object primitives:
 
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object Ed25519PublicKey:
-    val Size: Int = 32
-
-    def apply(bytes: Array[Byte]): Ed25519PublicKey =
-      require(bytes.length == Size, s"Ed25519PublicKey must be $Size bytes, got ${bytes.length}")
-      new Ed25519PublicKey(bytes.clone())
-
-    def zero: Ed25519PublicKey = new Ed25519PublicKey(new Array[Byte](Size))
-
-    /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
-    def wrap(bytes: Array[Byte]): Ed25519PublicKey =
-      require(bytes.length == Size, s"Ed25519PublicKey must be $Size bytes, got ${bytes.length}")
-      new Ed25519PublicKey(bytes)
-
-    /** Copies `bytes` if it has the right size. */
-    def fromArray(bytes: Array[Byte]): Option[Ed25519PublicKey] =
-      if bytes.length == Size then Some(new Ed25519PublicKey(bytes.clone())) else None
-
-    def fromHex(hex: String): Either[String, Ed25519PublicKey] =
-      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
-      if cleanHex.length != Size * 2 then
-        Left(s"Ed25519PublicKey must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
-      else JamBytes.parseHex(cleanHex).map(new Ed25519PublicKey(_))
-
-    given Decoder[Ed25519PublicKey] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid Ed25519PublicKey: $err"))
+  object Ed25519PublicKey extends FixedBytes[Ed25519PublicKey](32, "Ed25519PublicKey"):
+    protected def make(bytes: Array[Byte]): Ed25519PublicKey = new Ed25519PublicKey(bytes)
 
   /** Ed25519 signature (64 bytes) */
   final case class Ed25519Signature private (private val underlying: Array[Byte]):
@@ -197,23 +154,8 @@ object primitives:
       case _ => false
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object Ed25519Signature:
-    val Size: Int = 64
-    def apply(bytes: Array[Byte]): Ed25519Signature =
-      require(bytes.length == Size)
-      new Ed25519Signature(bytes.clone())
-
-    given Decoder[Ed25519Signature] = Decoder.decodeString.emap { hex =>
-      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
-      if cleanHex.length != Size * 2 then
-        Left(s"Ed25519Signature must be $Size bytes, got ${cleanHex.length / 2} bytes")
-      else
-        try
-          val bytes = cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
-          Right(Ed25519Signature(bytes))
-        catch
-          case _: NumberFormatException => Left("Invalid hex character")
-    }
+  object Ed25519Signature extends FixedBytes[Ed25519Signature](64, "Ed25519Signature"):
+    protected def make(bytes: Array[Byte]): Ed25519Signature = new Ed25519Signature(bytes)
 
   // ============================================================================
   // BLS Types
@@ -234,31 +176,8 @@ object primitives:
 
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object BlsPublicKey:
-    val Size: Int = 144
-
-    def apply(bytes: Array[Byte]): BlsPublicKey =
-      require(bytes.length == Size, s"BlsPublicKey must be $Size bytes, got ${bytes.length}")
-      new BlsPublicKey(bytes.clone())
-
-    def zero: BlsPublicKey = new BlsPublicKey(new Array[Byte](Size))
-
-    /** Takes ownership of `bytes` without copying; throws on wrong size. The caller must not mutate it afterwards. */
-    def wrap(bytes: Array[Byte]): BlsPublicKey =
-      require(bytes.length == Size, s"BlsPublicKey must be $Size bytes, got ${bytes.length}")
-      new BlsPublicKey(bytes)
-
-    /** Copies `bytes` if it has the right size. */
-    def fromArray(bytes: Array[Byte]): Option[BlsPublicKey] =
-      if bytes.length == Size then Some(new BlsPublicKey(bytes.clone())) else None
-
-    def fromHex(hex: String): Either[String, BlsPublicKey] =
-      val cleanHex = if hex.startsWith("0x") then hex.drop(2) else hex
-      if cleanHex.length != Size * 2 then
-        Left(s"BlsPublicKey must be $Size bytes (${Size * 2} hex chars), got ${cleanHex.length / 2} bytes")
-      else JamBytes.parseHex(cleanHex).map(new BlsPublicKey(_))
-
-    given Decoder[BlsPublicKey] = Decoder.decodeString.emap(hex => fromHex(hex).left.map(err => s"Invalid BlsPublicKey: $err"))
+  object BlsPublicKey extends FixedBytes[BlsPublicKey](144, "BlsPublicKey"):
+    protected def make(bytes: Array[Byte]): BlsPublicKey = new BlsPublicKey(bytes)
 
   /** BLS signature (48 bytes) */
   final case class BlsSignature private (private val underlying: Array[Byte]):
@@ -268,141 +187,146 @@ object primitives:
       case _ => false
     override def hashCode(): Int = java.util.Arrays.hashCode(underlying)
 
-  object BlsSignature:
-    val Size: Int = 48
-    def apply(bytes: Array[Byte]): BlsSignature =
-      require(bytes.length == Size)
-      new BlsSignature(bytes.clone())
+  object BlsSignature extends FixedBytes[BlsSignature](48, "BlsSignature"):
+    protected def make(bytes: Array[Byte]): BlsSignature = new BlsSignature(bytes)
 
   // ============================================================================
   // Protocol Identifiers
   // ============================================================================
 
-  /** Service identifier (32-bit) */
-  opaque type ServiceId = UInt
+  /** Service identifier (32-bit unsigned, held in a Long) */
+  opaque type ServiceId = Long
 
   object ServiceId:
-    def apply(v: UInt): ServiceId = v
+    inline def apply(v: UInt): ServiceId = v.toLong
     @targetName("serviceIdFromInt")
-    def apply(v: Int): ServiceId = UInt(v)
-    val Zero: ServiceId = UInt(0)
+    inline def apply(v: Int): ServiceId = v & 0xffffffffL
+    inline def fromLong(v: Long): ServiceId = v & 0xffffffffL
+    val Zero: ServiceId = 0L
 
   extension (sid: ServiceId)
     @targetName("serviceIdValue")
-    def value: UInt = sid
+    inline def value: UInt = UInt(sid.toInt)
     @targetName("serviceIdToInt")
-    def toInt: Int = sid.signed
+    inline def toInt: Int = sid.toInt
+    @targetName("serviceIdToLong")
+    inline def toLong: Long = sid
 
-  /** Core index (16-bit) - identifies a validator core */
-  opaque type CoreIndex = UShort
+  /** Core index (16-bit unsigned, held in an Int) - identifies a validator core */
+  opaque type CoreIndex = Int
 
   object CoreIndex:
-    def apply(v: UShort): CoreIndex = v
+    inline def apply(v: UShort): CoreIndex = v.toInt
     @targetName("coreIndexFromInt")
-    def apply(v: Int): CoreIndex = UShort(v)
-    val Zero: CoreIndex = UShort(0)
+    inline def apply(v: Int): CoreIndex = v & 0xffff
+    val Zero: CoreIndex = 0
 
   extension (ci: CoreIndex)
     @targetName("coreIndexValue")
-    def value: UShort = ci
+    inline def value: UShort = UShort(ci)
     @targetName("coreIndexToInt")
-    def toInt: Int = ci.toInt
+    inline def toInt: Int = ci
 
-  /** Validator index (16-bit) */
-  opaque type ValidatorIndex = UShort
+  /** Validator index (16-bit unsigned, held in an Int) */
+  opaque type ValidatorIndex = Int
 
   object ValidatorIndex:
-    def apply(v: UShort): ValidatorIndex = v
+    inline def apply(v: UShort): ValidatorIndex = v.toInt
     @targetName("validatorIndexFromInt")
-    def apply(v: Int): ValidatorIndex = UShort(v)
+    inline def apply(v: Int): ValidatorIndex = v & 0xffff
 
   extension (vi: ValidatorIndex)
     @targetName("validatorIndexValue")
-    def value: UShort = vi
+    inline def value: UShort = UShort(vi)
     @targetName("validatorIndexToInt")
-    def toInt: Int = vi.toInt
+    inline def toInt: Int = vi
 
   // ============================================================================
   // Time and Epochs
   // ============================================================================
 
-  /** Timeslot (32-bit) - time is measured in slots */
-  opaque type Timeslot = UInt
+  /** Timeslot (32-bit unsigned, held in a Long) - time is measured in slots */
+  opaque type Timeslot = Long
 
   object Timeslot:
-    def apply(v: UInt): Timeslot = v
+    inline def apply(v: UInt): Timeslot = v.toLong
     @targetName("timeslotFromInt")
-    def apply(v: Int): Timeslot = UInt(v)
-    val Zero: Timeslot = UInt(0)
+    inline def apply(v: Int): Timeslot = v & 0xffffffffL
+    inline def fromLong(v: Long): Timeslot = v & 0xffffffffL
+    val Zero: Timeslot = 0L
 
   extension (ts: Timeslot)
     @targetName("timeslotValue")
-    def value: UInt = ts
+    inline def value: UInt = UInt(ts.toInt)
     @targetName("timeslotToInt")
-    def toInt: Int = ts.signed
+    inline def toInt: Int = ts.toInt
+    @targetName("timeslotToLong")
+    inline def toLong: Long = ts
     @targetName("timeslotPlusInt")
-    def +(n: Int): Timeslot = ts + UInt(n)
+    inline def +(n: Int): Timeslot = (ts + (n & 0xffffffffL)) & 0xffffffffL
     @targetName("timeslotMinusInt")
-    def -(n: Int): Timeslot = ts - UInt(n)
+    inline def -(n: Int): Timeslot = (ts - (n & 0xffffffffL)) & 0xffffffffL
 
-  /** Epoch index (32-bit) */
-  opaque type EpochIndex = UInt
+  /** Epoch index (32-bit unsigned, held in a Long) */
+  opaque type EpochIndex = Long
 
   object EpochIndex:
-    def apply(v: UInt): EpochIndex = v
+    inline def apply(v: UInt): EpochIndex = v.toLong
     @targetName("epochIndexFromInt")
-    def apply(v: Int): EpochIndex = UInt(v)
-    val Zero: EpochIndex = UInt(0)
+    inline def apply(v: Int): EpochIndex = v & 0xffffffffL
+    val Zero: EpochIndex = 0L
 
   extension (e: EpochIndex)
     @targetName("epochIndexValue")
-    def value: UInt = e
+    inline def value: UInt = UInt(e.toInt)
     @targetName("epochIndexToInt")
-    def toInt: Int = e.signed
+    inline def toInt: Int = e.toInt
+    @targetName("epochIndexToLong")
+    inline def toLong: Long = e
 
   // ============================================================================
   // Gas and Balance
   // ============================================================================
 
-  /** Gas amount (64-bit unsigned) */
-  opaque type Gas = ULong
+  /** Gas amount (64-bit unsigned, held in a Long; compared unsigned) */
+  opaque type Gas = Long
 
   object Gas:
-    def apply(v: ULong): Gas = v
+    inline def apply(v: ULong): Gas = v.signed
     @targetName("gasFromLong")
-    def apply(v: Long): Gas = ULong(v)
-    val Zero: Gas = ULong(0)
-    val Max: Gas = ULong(-1L)
+    inline def apply(v: Long): Gas = v
+    val Zero: Gas = 0L
+    val Max: Gas = -1L
 
   extension (g: Gas)
     @targetName("gasValue")
-    def value: ULong = g
+    inline def value: ULong = ULong(g)
     @targetName("gasToLong")
-    def toLong: Long = g.signed
+    inline def toLong: Long = g
     @targetName("gasPlus")
-    def +(other: Gas): Gas = g + other
+    inline def +(other: Gas): Gas = g + other
     @targetName("gasMinus")
-    def -(other: Gas): Gas = g - other
+    inline def -(other: Gas): Gas = g - other
     @targetName("gasGe")
-    def >=(other: Gas): Boolean = g >= other
+    inline def >=(other: Gas): Boolean = java.lang.Long.compareUnsigned(g, other) >= 0
     @targetName("gasLt")
-    def <(other: Gas): Boolean = g < other
+    inline def <(other: Gas): Boolean = java.lang.Long.compareUnsigned(g, other) < 0
 
-  /** Balance amount (64-bit unsigned) */
-  opaque type Balance = ULong
+  /** Balance amount (64-bit unsigned, held in a Long) */
+  opaque type Balance = Long
 
   object Balance:
-    def apply(v: ULong): Balance = v
+    inline def apply(v: ULong): Balance = v.signed
     @targetName("balanceFromLong")
-    def apply(v: Long): Balance = ULong(v)
-    val Zero: Balance = ULong(0)
+    inline def apply(v: Long): Balance = v
+    val Zero: Balance = 0L
 
   extension (b: Balance)
     @targetName("balanceValue")
-    def value: ULong = b
+    inline def value: ULong = ULong(b)
     @targetName("balanceToLong")
-    def toLong: Long = b.signed
+    inline def toLong: Long = b
     @targetName("balancePlus")
-    def +(other: Balance): Balance = b + other
+    inline def +(other: Balance): Balance = b + other
     @targetName("balanceMinus")
-    def -(other: Balance): Balance = b - other
+    inline def -(other: Balance): Balance = b - other

@@ -301,7 +301,7 @@ class BlockImporter(
     }
 
     preimages.foreach { p =>
-      val serviceId = p.requester.value.toLong
+      val serviceId = p.requester.toLong
       val cur = getOrEmpty(serviceId)
       stats(serviceId) = cur.copy(
         providedCount = cur.providedCount + 1,
@@ -334,7 +334,7 @@ class BlockImporter(
   /** The state at the last imported root. Safe to run alongside a later import, though it then reads that import's
     * state if the import commits first; callers that need a given block's state must order the two themselves.
     */
-  def materializePostState(config: ChainConfig): RawState =
+  def materializePostState(): RawState =
     backendLock.synchronized {
       val root = trieStore.currentRoot
       val pairs = trieStore.at(root).getKeyValues(JamBytes.empty, 0)
@@ -372,7 +372,7 @@ object InputExtractor:
           )
 
     SafroleInput(
-      slot = header.slot.value.toLong,
+      slot = header.slot.toLong,
       entropy = vrfOutput,
       extrinsic = tickets
     )
@@ -387,7 +387,7 @@ object InputExtractor:
   def extractAssuranceInput(block: Block): AssuranceInput =
     AssuranceInput(
       assurances = block.extrinsic.assurances,
-      slot = block.header.slot.value.toLong,
+      slot = block.header.slot.toLong,
       parent = block.header.parent
     )
 
@@ -419,7 +419,7 @@ object InputExtractor:
       headerHash = headerHash,
       parentStateRoot = block.header.parentStateRoot,
       accumulateRoot = accumulateRoot,
-      slot = block.header.slot.value.toLong,
+      slot = block.header.slot.toLong,
       workPackages = workPackages
     )
 
@@ -434,7 +434,7 @@ object InputExtractor:
       )
     }
     AuthInput(
-      slot = block.header.slot.value.toLong,
+      slot = block.header.slot.toLong,
       auths = auths
     )
 
@@ -450,7 +450,7 @@ object InputExtractor:
     */
   def extractStatInput(block: Block): StatInput =
     StatInput(
-      slot = block.header.slot.value.toLong,
+      slot = block.header.slot.toLong,
       authorIndex = block.header.authorIndex.toInt.toLong,
       extrinsic = StatExtrinsic(
         tickets = block.extrinsic.tickets,

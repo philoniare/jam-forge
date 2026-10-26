@@ -1,5 +1,7 @@
 package io.forge.jam.core.types
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
@@ -35,12 +37,7 @@ object workpackage:
         srl => (srl.workPackageHash, srl.segmentTreeRoot)
       )
 
-    given Decoder[SegmentRootLookup] = Decoder.instance { cursor =>
-      for
-        workPackageHash <- cursor.get[Hash]("work_package_hash")
-        segmentTreeRoot <- cursor.get[Hash]("segment_tree_root")
-      yield SegmentRootLookup(workPackageHash, segmentTreeRoot)
-    }
+    given Decoder[SegmentRootLookup] = ConfiguredDecoder.derived
 
   /**
    * A work package containing authorization and work items.
@@ -81,7 +78,7 @@ object workpackage:
             items
           )
         },
-        wp => (wp.authCodeHost.value.toLong & 0xFFFFFFFFL, wp.authCodeHash, wp.context, wp.authorization, wp.authorizerConfig, wp.items)
+        wp => (wp.authCodeHost.toLong & 0xFFFFFFFFL, wp.authCodeHash, wp.context, wp.authorization, wp.authorizerConfig, wp.items)
       )
 
     given Decoder[WorkPackage] = Decoder.instance { cursor =>
@@ -197,10 +194,4 @@ object workpackage:
         aa => (aa.guarantee, aa.registeredSlot & 0xFFFFFFFFL)
       )
 
-    given Decoder[AvailabilityAssignment] =
-      Decoder.instance { cursor =>
-        for
-          guarantee <- cursor.get[GuaranteeExtrinsic]("guarantee")
-          registeredSlot <- cursor.get[Long]("registered_slot")
-        yield AvailabilityAssignment(guarantee, registeredSlot)
-      }
+    given Decoder[AvailabilityAssignment] = ConfiguredDecoder.derived

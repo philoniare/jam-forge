@@ -57,12 +57,12 @@ object PreimageTransition:
 
         (prevRequester, prevBlob) match
           case (Some(pr), Some(pb)) =>
-            val comparison = comparePreimages(pr, pb, submission.requester.value.toLong, currentBlob)
+            val comparison = comparePreimages(pr, pb, submission.requester.toLong, currentBlob)
             // Must be strictly less than (sorted and unique means no duplicates)
             if comparison >= 0 then
               result = false
           case _ => // First element, no comparison needed
-        prevRequester = Some(submission.requester.value.toLong)
+        prevRequester = Some(submission.requester.toLong)
         prevBlob = Some(currentBlob)
 
       result
@@ -91,7 +91,7 @@ object PreimageTransition:
     else
       preimages
         .traverse { submission =>
-          val serviceId = submission.requester.value.toLong
+          val serviceId = submission.requester.toLong
           val hash = Hashing.blake2b256(submission.blob).bytes
           val length = submission.blob.length
           Either.cond(
@@ -125,7 +125,7 @@ object PreimageTransition:
       case Right(_)  => ()
 
     for submission <- input.preimages do
-      val serviceId = submission.requester.value.toLong
+      val serviceId = submission.requester.toLong
       val hash = Hashing.blake2b256(submission.blob).bytes
       val length = submission.blob.length
 
@@ -179,7 +179,7 @@ object PreimageTransition:
     val statsUpdates = scala.collection.mutable.Map[Long, (Int, Long)]() // serviceId -> (count, totalSize)
 
     val submissionsByAccount: Map[Long, List[Preimage]] =
-      input.preimages.groupBy(_.requester.value.toLong)
+      input.preimages.groupBy(_.requester.toLong)
 
     // Process preimages and update state
     val updatedAccounts = preState.accounts.map { account =>

@@ -1,5 +1,7 @@
 package io.forge.jam.core.types
 
+import io.circe.derivation.ConfiguredDecoder
+import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.JamBytes
@@ -25,7 +27,7 @@ object extrinsic:
   private val serviceIdCodec: Codec[ServiceId] =
     uint32L.xmap(
       i => ServiceId(UInt(i.toInt)),
-      sid => sid.value.toLong & 0xFFFFFFFFL
+      sid => sid.toLong & 0xFFFFFFFFL
     )
 
   // ============================================================================
@@ -110,10 +112,8 @@ object extrinsic:
   )
 
   object Verdict:
-    /**
-     * Codec for a verdict.
-     */
-    def codec(votesPerVerdict: Int): Codec[Verdict] =
+    /** Codec for a verdict. */
+    given codec: Codec[Verdict] =
       (hashCodec :: PrimitiveCodecs.timeslot :: compactPrefixedList(summon[Codec[Vote]])).xmap(
         { case (target, age, votes) =>
           Verdict(target, age, votes)
@@ -143,10 +143,8 @@ object extrinsic:
   )
 
   object Dispute:
-    /** Create a codec that knows the votes per verdict */
-    def codec(votesPerVerdict: Int): Codec[Dispute] =
-      val verdictCodec = Verdict.codec(votesPerVerdict)
-      (compactPrefixedList(verdictCodec) ::
+    given codec: Codec[Dispute] =
+      (compactPrefixedList(Verdict.codec) ::
        compactPrefixedList(summon[Codec[Culprit]]) ::
        compactPrefixedList(summon[Codec[Fault]])).xmap(
         { case (verdicts, culprits, faults) =>
@@ -155,13 +153,7 @@ object extrinsic:
         d => (d.verdicts, d.culprits, d.faults)
       )
 
-    given Decoder[Dispute] = Decoder.instance { cursor =>
-      for
-        verdicts <- cursor.get[List[Verdict]]("verdicts")
-        culprits <- cursor.get[List[Culprit]]("culprits")
-        faults <- cursor.get[List[Fault]]("faults")
-      yield Dispute(verdicts, culprits, faults)
-    }
+    given Decoder[Dispute] = ConfiguredDecoder.derived
 
   // ============================================================================
   // GuaranteeExtrinsic

@@ -68,10 +68,10 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
       case TicketsOrKeys.Keys(_) => SigningContext.fallbackSealInputData(entropy)
       case TicketsOrKeys.Tickets(t) =>
         SigningContext.safroleTicketInputData(entropy, t((1 % config.epochLength).toInt).attempt.toByte)
-    Fixture(genesis, block, validators(block.header.authorIndex.value.toInt).bandersnatchSecret, sealInput)
+    Fixture(genesis, block, validators(block.header.authorIndex.toInt).bandersnatchSecret, sealInput)
 
   private def resealed(header: Header): Block =
-    val codec = Header.headerCodec(config.validatorCount, config.epochLength)
+    val codec = Header.headerCodec(config.epochLength)
     val unsigned = codec.encode(header.copy(seal = JamBytes.zeros(96))).dropRight(96)
     val seal = BandersnatchWrapper.ietfVrfSign(fixture.secret, fixture.sealInput, unsigned)
     fixture.block.copy(header = header.copy(seal = JamBytes(seal)))
@@ -135,7 +135,7 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
   test("GP: an offenders mark holding the new offenders' keys is accepted (§10.3)") {
     val key = io.forge.jam.core.primitives.Ed25519PublicKey(Array.fill[Byte](32)(7))
     val block = fixture.block.copy(header = fixture.block.header.copy(offendersMark = List(offender)))
-    val ctx = PipelineContext(config, block, new EncodedHeader(block.header), 0L, disputeOffendersMark = List(key))
+    val ctx = PipelineContext(config, block, new EncodedHeader(block.header, config), 0L, disputeOffendersMark = List(key))
     // The step reads only the context.
     IntermediateSteps.validateOffendersMark.run((null, ctx)).isRight shouldBe true
     val wrong = ctx.copy(disputeOffendersMark = Nil)

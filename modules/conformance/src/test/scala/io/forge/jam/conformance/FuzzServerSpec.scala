@@ -14,7 +14,7 @@ import scala.util.Using
 /** Socket-level tests of the fuzz server: real Unix socket, real frames, a public trace. */
 class FuzzServerSpec extends AnyFunSpec with Matchers:
 
-  private val config = ChainConfig.TINY
+  private given config: ChainConfig = ChainConfig.TINY
   private val baseDir = sys.props.getOrElse("jam.base.dir", System.getProperty("user.dir"))
   private lazy val fallback = FuzzClient.TraceDir.find(Paths.get(baseDir, "jamtestvectors", "traces", "fallback"))
 

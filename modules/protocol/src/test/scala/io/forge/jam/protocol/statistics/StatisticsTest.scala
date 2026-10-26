@@ -53,7 +53,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
       valsCurrStats = (0 until validatorCount).map(_ => StatCount.zero).toList,
       valsLastStats = (0 until validatorCount).map(_ => StatCount.zero).toList,
       slot = slot,
-      currValidators = (0 until validatorCount).map(i => validatorKeyFilled(i)).toList
+      currValidators = (0 until validatorCount).map(i => validatorKeyFilled(i))
     )
 
   test("epoch transition detection and stats rotation") {
@@ -65,7 +65,7 @@ class StatisticsTest extends AnyFunSuite with Matchers:
       ),
       valsLastStats = List(StatCount.zero, StatCount.zero),
       slot = 10,
-      currValidators = List(validatorKeyFilled(0), validatorKeyFilled(1))
+      currValidators = IndexedSeq(validatorKeyFilled(0), validatorKeyFilled(1))
     )
 
     val input = StatInput(
@@ -192,8 +192,8 @@ class StatisticsTest extends AnyFunSuite with Matchers:
       valsCurrStats = List.fill(3)(StatCount.zero),
       valsLastStats = List.fill(3)(StatCount.zero),
       slot = 5,
-      currValidators = (0 until 4).map(validatorKeyFilled).toList,
-      prevValidators = List.empty
+      currValidators = (0 until 4).map(validatorKeyFilled),
+      prevValidators = IndexedSeq.empty
     )
 
     val workReport = WorkReport(

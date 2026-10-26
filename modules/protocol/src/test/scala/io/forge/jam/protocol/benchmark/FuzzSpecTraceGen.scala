@@ -44,11 +44,11 @@ object FuzzSpecTraceGen:
     val keys = Array.tabulate(validatorCount)(DevKeyStore.getValidator)
     val validators = keys.toList.map(k => FuzzSpecGenesis.devValidatorKey(k.bandersnatchPublic, k.ed25519Public))
     val staging = validators.take(opts.get("staging").map(_.toInt).getOrElse(validatorCount))
-    val genesisState = FuzzSpecGenesis.build(tiny.state, config, validators, staging)
+    val genesisState = FuzzSpecGenesis.build(tiny.state, config, validators.toIndexedSeq, staging.toIndexedSeq)
     val genesis = Genesis(tiny.header, genesisState)
-    val genesisCodec = Genesis.codec(config.validatorCount, config.epochLength)
+    val genesisCodec = Genesis.codec(config.epochLength)
     Files.write(out.resolve("genesis.bin"), genesisCodec.encode(genesis).toArray)
-    val genesisHash = Hashing.blake2b256(Header.headerCodec(config.validatorCount, config.epochLength).encode(tiny.header))
+    val genesisHash = Hashing.blake2b256(Header.headerCodec(config.epochLength).encode(tiny.header))
     println(s"genesis: ${validators.size} validators (${staging.size} staged), ${config.coresCount} cores, root ${genesisState.stateRoot.toHex}")
 
     val importer = new BlockImporter(config)
@@ -56,10 +56,10 @@ object FuzzSpecTraceGen:
     store.bootstrap(genesisState.keyvals.map(kv => (kv.key, kv.value)))
     val generator = new BlockGenerator(config, keys, store, seed = opts.get("seed").map(_.toLong).getOrElse(42L),
       genesisHeaderHash = Some(genesisHash))
-    val stepCodec = TraceStep.codec(config.validatorCount, config.epochLength, config.coresCount, config.votesPerVerdict)
+    val stepCodec = TraceStep.codec(config.epochLength, config.coresCount)
 
     var root = genesisState.stateRoot
-    var slot = tiny.header.slot.value.toLong + 1
+    var slot = tiny.header.slot.toLong + 1
     var written = 0
     var guarantees = 0
     var assurances = 0

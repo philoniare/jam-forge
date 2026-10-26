@@ -98,7 +98,7 @@ object workitem:
         { case (sid, code, refineGas, accGas, exports, payload, imports, extrinsics) =>
           WorkItem(ServiceId(UInt(sid.toInt)), code, payload, Gas(refineGas), Gas(accGas), imports, extrinsics, UShort(exports))
         },
-        wi => (wi.service.value.toLong & 0xFFFFFFFFL, wi.codeHash, wi.refineGasLimit.toLong, wi.accumulateGasLimit.toLong, wi.exportCount.toInt, wi.payload, wi.importSegments, wi.extrinsic)
+        wi => (wi.service.toLong & 0xFFFFFFFFL, wi.codeHash, wi.refineGasLimit.toLong, wi.accumulateGasLimit.toLong, wi.exportCount.toInt, wi.payload, wi.importSegments, wi.extrinsic)
       )
 
     given Decoder[WorkItem] = Decoder.instance { cursor =>

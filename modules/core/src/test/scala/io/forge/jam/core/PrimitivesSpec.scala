@@ -190,3 +190,21 @@ class PrimitivesSpec extends AnyFlatSpec with Matchers:
     val s2 = BlsSignature(Array.fill[Byte](48)(0x42))
     s1.hashCode shouldBe s2.hashCode
   }
+
+  "Timeslot" should "keep 32-bit unsigned semantics over its Long" in {
+    Timeslot(-1).toLong shouldBe 0xffffffffL
+    Timeslot(-1).value shouldBe UInt(-1)
+    (Timeslot(-1) + 1) shouldBe Timeslot.Zero
+    (Timeslot.Zero - 1).toLong shouldBe 0xffffffffL
+  }
+
+  "Gas" should "compare unsigned, as ULong did" in {
+    (Gas.Max >= Gas(1L)) shouldBe true
+    (Gas(1L) < Gas.Max) shouldBe true
+    (Gas(5L) < Gas(4L)) shouldBe false
+  }
+
+  "ValidatorIndex" should "keep 16-bit unsigned semantics over its Int" in {
+    ValidatorIndex(-1).toInt shouldBe 0xffff
+    ValidatorIndex(3).value.toInt shouldBe 3
+  }

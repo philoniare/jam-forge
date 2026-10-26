@@ -190,7 +190,7 @@ object NativeRunner extends StrictLogging:
       heapTracking: Option[RecompilerMemory.DescribedWithHeap]
   ): (PvmRecompiler.ExecResult, Array[Long], Option[Array[Byte]]) =
     var wrapperRef: NativeInstanceWrapper = null
-    val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _pc: Int) =>
+    val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _: Int) =>
       val wrapper = wrapperRef
       val gasCost = dispatcher.getGasCost(hostCallId.toInt, wrapper)
       val newGas = wrapper.gas - gasCost

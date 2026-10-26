@@ -134,7 +134,6 @@ Native libraries are automatically built by sbt during compilation using Cargo.
 - jam-core
 - jam-crypto
 - jam-pvm
-- Monocle (lens-based state updates)
 
 ### jam-conformance
 
@@ -281,7 +280,7 @@ JAM state is represented as an immutable case class (`FullJamState`) containing:
 
 ### State Updates
 
-State transitions use lenses (Monocle) for type-safe updates:
+Each STF is a function from its pre-state to its post-state; block import applies them to a trie-backed state view (`TrieBackedJamState`) that re-encodes only the components a block changed:
 
 ```scala
 val updatedState = SafroleTransition.transition(

@@ -42,8 +42,8 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
 
   // Get codecs from the types
   private val testCases: List[TestCase[?]] = List(
-    TestCase("header_0", summon[Decoder[Header]], c => Header.headerCodec(c.validatorCount, c.epochLength)),
-    TestCase("header_1", summon[Decoder[Header]], c => Header.headerCodec(c.validatorCount, c.epochLength)),
+    TestCase("header_0", summon[Decoder[Header]], c => Header.headerCodec(c.epochLength)),
+    TestCase("header_1", summon[Decoder[Header]], c => Header.headerCodec(c.epochLength)),
     TestCase("refine_context", summon[Decoder[Context]], static(summon[Codec[Context]])),
     TestCase("work_item", summon[Decoder[WorkItem]], static(summon[Codec[WorkItem]])),
     TestCase("work_result_0", summon[Decoder[WorkResult]], static(summon[Codec[WorkResult]])),
@@ -52,7 +52,7 @@ class CodecTestVectorsSpec extends AnyFlatSpec with Matchers:
     TestCase("work_report", summon[Decoder[WorkReport]], static(summon[Codec[WorkReport]])),
     TestCase("extrinsic", summon[Decoder[Extrinsic]], c => Extrinsic.extrinsicCodec(c)),
     TestCase("block", summon[Decoder[Block]], c => Block.blockCodec(c)),
-    TestCase("disputes_extrinsic", summon[Decoder[Dispute]], c => Dispute.codec(c.votesPerVerdict))
+    TestCase("disputes_extrinsic", summon[Decoder[Dispute]], c => Dispute.codec)
   )
 
   private val listTestCases: List[ListTestCase[?]] = List(

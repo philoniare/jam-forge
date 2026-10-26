@@ -5,7 +5,6 @@ import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
@@ -240,7 +239,7 @@ final class JamNode(
         val t = new Thread(r, "jam-assurance"); t.setDaemon(true); t
       }
     val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances)
-    chain.onImported((head, block) => a.onImported(head, block))
+    chain.onImported((head, _) => a.onImported(head))
 
   /** Enable the auditor role: reports that become available are audited per the tranche
     * rules, announced on CE 144 and judged on CE 145. Tranche 0 starts at the block's slot, or at import without
@@ -365,7 +364,7 @@ final class JamNode(
         Some(head)
       case Left(err) =>
         logger.error(s"authored block failed to import: $err")
-        telemetry.foreach(_.authoringFailed(authoring, err))
+        telemetry.foreach(_.authoringFailed(authoring, err.message))
         None
 
   def start(): JamNode =
@@ -707,10 +706,10 @@ final class JamNode(
     conn
 
   /** Import a locally produced or externally obtained block and announce it. */
-  def importAndAnnounce(blockBytes: Array[Byte]): Either[String, ChainManager#Head] =
+  def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainManager#Head] =
     chain.importBlock(blockBytes).map { head =>
       chain.decodeBlock(blockBytes).foreach { b =>
-        sync.announce(b.header.encode.toArray)
+        sync.announce(chain.headerCodec.encode(b.header))
       }
       head
     }

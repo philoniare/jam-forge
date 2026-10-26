@@ -4,7 +4,7 @@ import java.util.concurrent.{ConcurrentHashMap, Executors, LinkedBlockingQueue, 
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.LittleEndian
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
 import io.forge.jam.node.GrandpaMessages.*
 
@@ -37,7 +37,7 @@ final class GrandpaService(
     def epochMarkerKeys(h: Hash): Option[List[Array[Byte]]] =
       if h == genesisHash then None
       else chain.header(h).flatMap(_.epochMark).map(_.validators.map(_.ed25519.bytes))
-    def finalizeBlock(h: Hash): Either[String, Unit] = chain.finalizeAdopting(h).map(_ => ())
+    def finalizeBlock(h: Hash): Either[String, Unit] = chain.finalizeAdopting(h).left.map(_.message).map(_ => ())
     override def isAudited(h: Hash): Boolean = audited(h)
 
   private def toVote(h: chain.Head): Vote = Vote(h.hash, h.stateRoot, h.slot)
@@ -56,18 +56,18 @@ final class GrandpaService(
   /** One open connection per voter peer. */
   private def voterPeers: List[JamnpConnection] =
     val members = Option(voter).map(_.voterSet.members).getOrElse(Set.empty)
-    distribution.peers.filter(c => members.contains(c.peerKey.toSeq)).distinctBy(_.peerKey.toSeq)
+    distribution.peers.filter(c => members.contains(c.peerPublicKey)).distinctBy(_.peerPublicKey)
 
   private def toVoters(kind: Byte, payload: Array[Byte]): Unit =
     val peers = voterPeers
-    if kind == StreamKind.GrandpaVote then peers.foreach(c => votesSentTo.add(c.peerKey.toSeq))
+    if kind == StreamKind.GrandpaVote then peers.foreach(c => votesSentTo.add(c.peerPublicKey))
     peers.foreach(c => send(c, kind, payload))
 
   private def send(c: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
     distribution.submitSend(() => c.openStream(kind), kind, payload)
 
   /** Voters that have our current round's votes. */
-  private val votesSentTo = ConcurrentHashMap.newKeySet[Seq[Byte]]()
+  private val votesSentTo = ConcurrentHashMap.newKeySet[Ed25519PublicKey]()
   @volatile private var votesRound = (0L, 0L)
   @volatile private var roundSince = 0L
   @volatile private var lastCatchUpAsk = 0L
@@ -94,8 +94,8 @@ final class GrandpaService(
       voterPeers.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
     val votes = if stalled then voter.roundVotes else voter.ourVotes
     if votes.nonEmpty then
-      voterPeers.filterNot(c => votesSentTo.contains(c.peerKey.toSeq)).foreach { c =>
-        votesSentTo.add(c.peerKey.toSeq)
+      voterPeers.filterNot(c => votesSentTo.contains(c.peerPublicKey)).foreach { c =>
+        votesSentTo.add(c.peerPublicKey)
         votes.foreach(v => send(c, StreamKind.GrandpaVote, encodeVoteMessage(v)))
       }
 
@@ -132,7 +132,7 @@ final class GrandpaService(
       resume = storedRound(set.setId)
     )
     logger.info(s"GRANDPA voter started: set ${set.setId} round ${voter.round}, ${set.size} voters, voting=${keys
-        .exists(k => set.members.contains(k.ed25519Public.toSeq))}")
+        .exists(k => set.members.contains(k.ed25519Key))}")
     chain.onImported((head, _) =>
       exec.execute(() => { retryPending(head.hash); voter.step() })
     )

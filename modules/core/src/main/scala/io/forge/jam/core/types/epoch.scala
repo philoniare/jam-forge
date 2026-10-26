@@ -1,6 +1,6 @@
 package io.forge.jam.core.types
 
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
 import io.forge.jam.core.json.JsonHelpers.parseHexBytesFixed
 import io.forge.jam.core.codec.JamCodecs.{hashCodec, bandersnatchPublicKeyCodec, ed25519PublicKeyCodec, compactPrefixedList}
@@ -61,7 +61,7 @@ object epoch:
     /**
      * Codec for the epoch mark.
      */
-    def epochMarkCodec(validatorCount: Int): Codec[EpochMark] =
+    def epochMarkCodec: Codec[EpochMark] =
       (hashCodec :: hashCodec :: compactPrefixedList(summon[Codec[EpochValidatorKey]])).xmap(
         { case (e, te, vs) => EpochMark(e, te, vs) },
         em => (em.entropy, em.ticketsEntropy, em.validators)
@@ -70,8 +70,8 @@ object epoch:
     /**
      * Convenience method to decode with config.
      */
-    def fromBytes(bytes: Array[Byte], config: ChainConfig): Either[String, EpochMark] =
-      epochMarkCodec(config.validatorCount).decode(bytes)
+    def fromBytes(bytes: Array[Byte]): Either[String, EpochMark] =
+      epochMarkCodec.decode(bytes)
 
     given Decoder[EpochMark] =
       Decoder.instance { cursor =>
