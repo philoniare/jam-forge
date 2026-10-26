@@ -54,7 +54,7 @@ class BlockGeneratorTest extends AnyFunSpec with Matchers:
         result match
           case ImportResult.Success(_, _) =>
             parentRoot = importer.currentTrieRoot
-          case ImportResult.Failure(err, msg) =>
+          case ImportResult.Failure(err, msg, _) =>
             fail(s"Block $slot failed: $err - $msg")
 
       info(s"Successfully chained 25 blocks across 2+ epochs")

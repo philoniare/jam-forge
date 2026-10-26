@@ -164,7 +164,7 @@ class JsonTraceRunner(
               keyvalDiffs
             )
 
-        case ImportResult.Failure(error, message) =>
+        case ImportResult.Failure(error, message, _) =>
           // If post_state == pre_state, the test expects block rejection (no state change)
           // In this case, a "failure" with unchanged state is actually correct
           if traceStep.postState.stateRoot == traceStep.preState.stateRoot then

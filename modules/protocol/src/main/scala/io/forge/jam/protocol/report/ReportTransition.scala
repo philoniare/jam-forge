@@ -2,7 +2,7 @@ package io.forge.jam.protocol.report
 
 import io.forge.jam.core.{ChainConfig, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.codec.JamCodecs.encode
-import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.ExecutionResult
@@ -13,7 +13,7 @@ import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.ReportBridge
 import io.forge.jam.protocol.statistics.StatsAggregation
-import io.forge.jam.crypto.Ed25519
+import io.forge.jam.protocol.SignatureBatch
 import spire.math.ULong
 import scala.util.boundary, boundary.break
 
@@ -80,18 +80,21 @@ object ReportTransition:
     input: ReportInput,
     view: TrieBackedJamState,
     skipAncestryValidation: Boolean = false,
-    ancestry: List[AncestorHeader] = List.empty
+    ancestry: List[AncestorHeader] = List.empty,
+    signatures: Option[SignatureBatch] = None
   ): ReportOutput =
     if input.guarantees.isEmpty then
       // With no guarantees every check passes, ρ‡ is kept and the guarantee-derived statistics are zero: what
       // stfInternal gives, without assembling its pre-state (service accounts, package-hash sets).
-      view.cores.statistics = StatsAggregation.coreStatsByCore(Nil, view.config.coresCount)
-      view.serviceStatistics = Nil
-      StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
+      if signatures.exists(!_.verify()) then StfResult.error(ReportErrorCode.BadSignature)
+      else
+        view.cores.statistics = StatsAggregation.coreStatsByCore(Nil, view.config.coresCount)
+        view.serviceStatistics = Nil
+        StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
     else
       val preState = ReportBridge.extract(view)
       val (postState, output) =
-        stfInternal(input, preState, view.config, skipAncestryValidation, ancestry)
+        stfInternal(input, preState, view.config, skipAncestryValidation, ancestry, signatures = signatures)
       ReportBridge.apply(view, postState)
       output
 
@@ -109,22 +112,28 @@ object ReportTransition:
     config: ChainConfig,
     skipAncestryValidation: Boolean = false,
     ancestry: List[AncestorHeader] = List.empty,
-    skipAnchorContext: Boolean = false
+    skipAnchorContext: Boolean = false,
+    signatures: Option[SignatureBatch] = None
   ): (ReportState, ReportOutput) =
     val result =
       for
         _ <- validateGuaranteesOrder(input.guarantees)
         _ <- validateNoDuplicatePackages(input.guarantees, preState, input)
-        _ <- validateAnchorAge(input.guarantees, input.slot, config)
-        _ <- if skipAnchorContext then Right(())
-        else validateAnchor(input.guarantees, preState.recentBlocks, ancestry, input.slot, config, skipLookupAnchor = skipAncestryValidation)
-        processedGuarantees <- processGuarantees(input, preState, config)
+        processedGuarantees <- processGuarantees(
+          input,
+          preState,
+          config,
+          ancestry,
+          skipAncestryValidation,
+          skipAnchorContext,
+          signatures.getOrElse(new SignatureBatch)
+        )
       yield processedGuarantees
 
     result match
       case Left(err) =>
         (preState, StfResult.error(err))
-      case Right((_, packages, guarantors)) =>
+      case Right((packages, guarantors)) =>
         val postState = preState.copy(
           availAssignments = updateAvailAssignments(preState.availAssignments, input.guarantees, input.slot),
           coresStatistics = StatsAggregation.coreStatsByCore(input.guarantees, config.coresCount),
@@ -136,20 +145,24 @@ object ReportTransition:
         )
         (postState, StfResult.success(outputMarks))
 
-  /**
-   * Process all guarantees and collect results.
-   */
   private final case class RotationCache(
     validators: IndexedSeq[ValidatorKey],
     validatorsArr: Array[ValidatorKey],
     coreAssignments: Array[Int]
   )
 
+  private def forEach[A](items: List[A])(check: A => ValidationResult): ValidationResult =
+    items.foldLeft[ValidationResult](Right(()))((result, item) => result.flatMap(_ => check(item)))
+
   private def processGuarantees(
     input: ReportInput,
     preState: ReportState,
-    config: ChainConfig
-  ): Either[ReportErrorCode, (List[WorkReport], List[SegmentRootLookup], List[Hash])] =
+    config: ChainConfig,
+    ancestry: List[AncestorHeader],
+    skipLookupAnchor: Boolean,
+    skipAnchorContext: Boolean,
+    signatures: SignatureBatch
+  ): Either[ReportErrorCode, (List[SegmentRootLookup], List[Hash])] =
     val offendersSet: Set[Hash] = preState.offenders.toSet
     val accountsById: Map[Long, ServiceAccount] =
       val m = scala.collection.mutable.HashMap.empty[Long, ServiceAccount]
@@ -172,102 +185,112 @@ object ReportTransition:
         RotationCache(validators, validators.toArray, assignments)
       })
 
-    val sigBuf = scala.collection.mutable.ArrayBuffer.empty[
-      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
-    ]
+    val batchPackages = input.guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
+    val historyReported: Map[Hash, Hash] =
+      preState.recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
 
-    val reportsBuf     = scala.collection.mutable.ListBuffer.empty[WorkReport]
-    val packagesBuf    = scala.collection.mutable.ListBuffer.empty[SegmentRootLookup]
-    val guarantorsBuf  = scala.collection.mutable.ListBuffer.empty[Hash]
+    for
+      _ <- forEach(input.guarantees)(validateGuarantors(_, input.slot, cacheFor, signatures, config))
+      _ <- ensure(signatures.verify(), ReportErrorCode.BadSignature)
+      _ <- forEach(input.guarantees)(guarantee =>
+        validateReport(
+          guarantee,
+          input,
+          preState,
+          accountsById,
+          offendersSet,
+          cacheFor,
+          ancestry,
+          skipLookupAnchor,
+          skipAnchorContext,
+          batchPackages,
+          historyReported,
+          config
+        )
+      )
+    yield
+      val packages = input.guarantees.map(g => SegmentRootLookup(g.report.packageSpec.hash, g.report.packageSpec.exportsRoot))
+      val guarantors = input.guarantees.flatMap { guarantee =>
+        val cache = cacheFor(computeRotationContext(guarantee.slot.toLong, input.slot, config))
+        guarantee.signatures.map(sig => Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes))
+      }
+      (packages, guarantors)
 
-    boundary:
-      var remaining = input.guarantees
-      while remaining.nonEmpty do
-        val guarantee = remaining.head
-        remaining = remaining.tail
+  private def validateGuarantors(
+    guarantee: GuaranteeExtrinsic,
+    currentSlot: Long,
+    cacheFor: RotationContext => RotationCache,
+    signatures: SignatureBatch,
+    config: ChainConfig
+  ): ValidationResult =
+    val ctx = computeRotationContext(guarantee.slot.toLong, currentSlot, config)
+    lazy val validators =
+      val signingCtx =
+        if ctx.reportRotation > ctx.currentRotation then ctx.copy(reportRotation = ctx.currentRotation, isCurrent = true)
+        else ctx
+      cacheFor(signingCtx).validatorsArr
+    val indices = guarantee.signatures.map(_.validatorIndex.toInt)
+    for
+      _ <- ensure(indices.length >= 2 && indices.length <= 3, ReportErrorCode.InsufficientGuarantees)
+      _ <- ensure(ctx.reportRotation >= ctx.currentRotation - 1, ReportErrorCode.ReportEpochBeforeLast)
+      _ <- ensure(indices.forall(i => i >= 0 && i < validators.length), ReportErrorCode.BadValidatorIndex)
+      _ <- validateGuarantorSignatureOrder(guarantee)
+    yield
+      val message = constants.JAM_GUARANTEE_BYTES ++ Hashing.blake2b256(guarantee.report.encode).bytes
+      signatures.addAll(guarantee.signatures.map(sig => (validators(sig.validatorIndex.toInt).ed25519, message, sig.signature)))
 
-        validateGuarantee(guarantee, input, preState, accountsById, offendersSet, cacheFor, sigBuf, config) match
-          case Left(err) => break(Left(err))
-          case Right(products) =>
-            reportsBuf    += products.report
-            packagesBuf   += products.packageLookup
-            guarantorsBuf ++= products.guarantors
-
-      verifyGuarantorSignatureBatch(sigBuf) match
-        case Left(err) => break(Left(err))
-        case _         => ()
-
-      Right((reportsBuf.toList, packagesBuf.toList, guarantorsBuf.toList))
-
-  /** Per-guarantee accumulation products: the report, its segment-root lookup, its guarantor keys. */
-  private final case class GuaranteeProducts(
-    report: WorkReport,
-    packageLookup: SegmentRootLookup,
-    guarantors: List[Hash]
-  )
-
-  /**
-   * Validate one guarantee and derive its accumulation products.
-   */
-  private def validateGuarantee(
+  private def validateReport(
     guarantee: GuaranteeExtrinsic,
     input: ReportInput,
     preState: ReportState,
     accountsById: Map[Long, ServiceAccount],
     offendersSet: Set[Hash],
     cacheFor: RotationContext => RotationCache,
-    sigBuf: scala.collection.mutable.ArrayBuffer[
-      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
-    ],
+    ancestry: List[AncestorHeader],
+    skipLookupAnchor: Boolean,
+    skipAnchorContext: Boolean,
+    batchPackages: Map[Hash, Hash],
+    historyReported: Map[Hash, Hash],
     config: ChainConfig
-  ): Either[ReportErrorCode, GuaranteeProducts] =
-    for
-      _ <- validateGuarantorSignatureOrder(guarantee)
-      _ <- validateWorkReport(
-        guarantee.report,
-        guarantee.slot.toLong,
-        input.slot,
-        accountsById,
-        preState.authPools,
-        preState.availAssignments,
-        preState.currValidators.size,
-        config
-      )
-      _ <- validateGuarantorSignaturesCached(
-        guarantee,
-        input.slot,
-        offendersSet,
-        cacheFor,
-        sigBuf,
-        config
-      )
-    yield
-      val ctx   = computeRotationContext(guarantee.slot.toLong, input.slot, config)
-      val cache = cacheFor(ctx)
-
-      val packageLookup = SegmentRootLookup(
-        guarantee.report.packageSpec.hash,
-        guarantee.report.packageSpec.exportsRoot
-      )
-
-      val guarantorsBuf = scala.collection.mutable.ListBuffer.empty[Hash]
-      var sigs = guarantee.signatures
-      while sigs.nonEmpty do
-        val sig = sigs.head
-        sigs = sigs.tail
-        guarantorsBuf += Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes)
-
-      GuaranteeProducts(guarantee.report, packageLookup, guarantorsBuf.toList)
-
-  /**
-   * Verify every collected guarantor signature with batch verification.
-   */
-  private def verifyGuarantorSignatureBatch(
-    sigBuf: scala.collection.mutable.ArrayBuffer[
-      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
-    ]
   ): ValidationResult =
-    if !Ed25519.verifyAll(sigBuf.toIndexedSeq) then Left(ReportErrorCode.BadSignature) else Right(())
+    val workReport = guarantee.report
+    val coreIndex = workReport.coreIndex.toInt
+    val activeValidatorCount = preState.currValidators.size
+    for
+      _ <- ensure(guarantee.slot.toLong <= input.slot, ReportErrorCode.FutureReportSlot)
+      _ <- ensure(
+        coreIndex < config.coresCount && coreIndex < activeValidatorCount / 3,
+        ReportErrorCode.BadCoreIndex
+      )
+      _ <- ensure(
+        workReport.packageSpec.erasureShards.toInt == activeValidatorCount,
+        ReportErrorCode.BadErasureShards
+      )
+      _ <- ensure(
+        input.slot - workReport.context.lookupAnchorSlot.toLong <= config.maxLookupAnchorAge,
+        ReportErrorCode.LookupAnchorNotRecent
+      )
+      _ <-
+        if skipAnchorContext then Right(())
+        else validateAnchor(guarantee, preState.recentBlocks, ancestry, input.slot, config, skipLookupAnchor)
+      _ <- ensure(workReport.results.nonEmpty, ReportErrorCode.MissingWorkResults)
+      _ <- ensure(workReport.results.length <= config.maxWorkItems, ReportErrorCode.WorkReportTooBig)
+      _ <- ensure(preState.availAssignments.lift(coreIndex).flatten.isEmpty, ReportErrorCode.CoreEngaged)
+      _ <- validateOutputSize(workReport)
+      _ <- validateWorkResults(workReport, accountsById)
+      _ <- ensure(
+        sumWithin(workReport.results.map(_.accumulateGas.value), config.reportAccGas),
+        ReportErrorCode.WorkReportGasTooHigh
+      )
+      _ <- validateWorkPackageLimits(workReport, config)
+      _ <- validateAuthorizer(workReport, preState.authPools)
+      _ <- ensure(
+        workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
+        ReportErrorCode.TooManyDependencies
+      )
+      _ <- validateDependencies(workReport, batchPackages, historyReported)
+      _ <- validateAssignment(guarantee, input.slot, offendersSet, cacheFor, config)
+    yield ()
 
   /** Validate guarantees are sorted by core index. */
   private def validateGuaranteesOrder(guarantees: List[GuaranteeExtrinsic]): ValidationResult =
@@ -282,173 +305,72 @@ object ReportTransition:
     preState: ReportState,
     input: ReportInput
   ): ValidationResult =
-    boundary:
-      val recentBlocks = preState.recentBlocks
-      val packageHashes = guarantees.map(_.report.packageSpec.hash)
-
+    val packageHashes = guarantees.map(_.report.packageSpec.hash)
+    val historyHashes = preState.recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet
+    val availHashes = preState.availAssignments.flatten.map(_.report.packageSpec.hash).toSet
+    val allPipelinedHashes = historyHashes ++
+      preState.readyQueuePackageHashes ++
+      preState.accumulatedPackageHashes ++
+      availHashes ++
+      input.knownPackages
+    for
       // Check for duplicates within batch
-      if packageHashes.distinct.size != packageHashes.size then
-        break(Left(ReportErrorCode.DuplicatePackage))
-
-      val historyReported: Map[Hash, Hash] =
-        recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
-      val historyHashes = historyReported.keySet
-      val availHashes = preState.availAssignments.flatten.map(_.report.packageSpec.hash).toSet
-      val allPipelinedHashes = historyHashes ++
-        preState.readyQueuePackageHashes ++
-        preState.accumulatedPackageHashes ++
-        availHashes ++
-        input.knownPackages
-      if packageHashes.exists(allPipelinedHashes.contains) then
-        break(Left(ReportErrorCode.DuplicatePackage))
-
-      // Build lookup for current batch packages
-      val batchPackages = guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
-
-      // Validate segment root lookups
-      for
-        guarantee <- guarantees
-        lookup <- guarantee.report.segmentRootLookup
-      do
-        val validLookup = batchPackages.get(lookup.workPackageHash) match
-          case Some(exportsRoot) => lookup.segmentTreeRoot == exportsRoot
-          case None => historyReported.get(lookup.workPackageHash).contains(lookup.segmentTreeRoot)
-        if !validLookup then
-          break(Left(ReportErrorCode.SegmentRootLookupInvalid))
-
-      // Validate prerequisites
-      val batchHashSet = packageHashes.toSet
-      for
-        guarantee <- guarantees
-        prerequisite <- guarantee.report.context.prerequisites
-      do
-        val exists = batchHashSet.contains(prerequisite) ||
-          historyReported.contains(prerequisite)
-        if !exists then
-          break(Left(ReportErrorCode.DependencyMissing))
-
-      Right(())
-
-  /**
-   * Validate lookup anchor slot age: x_t >= H_T - L (eq:limitlookupanchorage).
-   */
-  private def validateAnchorAge(
-    guarantees: List[GuaranteeExtrinsic],
-    currentSlot: Long,
-    config: ChainConfig
-  ): ValidationResult =
-    boundary:
-      for guarantee <- guarantees do
-        val lookupAnchorSlot = guarantee.report.context.lookupAnchorSlot.toLong
-        if currentSlot - lookupAnchorSlot > config.maxLookupAnchorAge then
-          break(Left(ReportErrorCode.LookupAnchorNotRecent))
-      Right(())
+      _ <- ensure(packageHashes.distinct.size == packageHashes.size, ReportErrorCode.DuplicatePackage)
+      _ <- ensure(!packageHashes.exists(allPipelinedHashes.contains), ReportErrorCode.DuplicatePackage)
+    yield ()
 
   /**
    * Validate anchor recency and context.
    */
   private def validateAnchor(
-    guarantees: List[GuaranteeExtrinsic],
+    guarantee: GuaranteeExtrinsic,
     recentBlocks: HistoricalBetaContainer,
     ancestry: List[AncestorHeader],
     currentSlot: Long,
     config: ChainConfig,
     skipLookupAnchor: Boolean
   ): ValidationResult =
-    val batchPackages = guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
-    val historyReported: Map[Hash, Hash] =
-      recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
-
-    boundary:
-      for guarantee <- guarantees do
-        val context = guarantee.report.context
-
-        val lookupAnchorPresent =
-          skipLookupAnchor || {
-            val lookupAnchorSlot = context.lookupAnchorSlot.toLong
-            // GP 0.8.0 §reporting: ∃ h, h' ∈ A with h_t = x_t, H(h) = x_l, h'_p = H(h), h'_r = x_l's post-state
-            if ancestry.nonEmpty then
-              ancestry.exists(a =>
-                a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot &&
-                  a.postStateRoot.forall(_ == context.lookupAnchorStateRoot)
-              )
-            else
-              recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
-                lookupAnchorSlot <= currentSlot &&
-                currentSlot - lookupAnchorSlot <= config.maxLookupAnchorAge
-          }
-        if !lookupAnchorPresent then
-          break(Left(ReportErrorCode.LookupAnchorNotRecent))
-
-        // Find and validate anchor block (gp: within recent history β = last Crecenthistorylen blocks)
-        val anchorBlock = recentBlocks.history.find(_.headerHash == context.anchor)
-        if anchorBlock.isEmpty then
-          break(Left(ReportErrorCode.AnchorNotRecent))
-
-        val anchor = anchorBlock.get
-        if anchor.stateRoot != context.stateRoot then
-          break(Left(ReportErrorCode.BadStateRoot))
-        if anchor.beefyRoot != context.beefyRoot then
-          break(Left(ReportErrorCode.BadBeefyMmrRoot))
-        if anchor.slot != context.anchorSlot.toLong then
-          break(Left(ReportErrorCode.BadAnchorSlot))
-
-        // Validate prerequisites with segment root consistency
-        for prerequisite <- context.prerequisites do
-          val existsInBatch = batchPackages.get(prerequisite).exists { exportsRoot =>
-            guarantee.report.segmentRootLookup.forall(lookup =>
-              lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == exportsRoot
-            )
-          }
-          val existsInHistory = historyReported.get(prerequisite).exists { exportsRoot =>
-            guarantee.report.segmentRootLookup.forall(lookup =>
-              lookup.workPackageHash != prerequisite || lookup.segmentTreeRoot == exportsRoot
-            )
-          }
-          if !existsInBatch && !existsInHistory then
-            break(Left(ReportErrorCode.DependencyMissing))
-
-      Right(())
-
-  /**
-   * Validate work report.
-   */
-  private def validateWorkReport(
-    workReport: WorkReport,
-    guaranteeSlot: Long,
-    currentSlot: Long,
-    accountsById: Map[Long, ServiceAccount],
-    authPools: List[List[Hash]],
-    availAssignments: List[Option[AvailabilityAssignment]],
-    activeValidatorCount: Int,
-    config: ChainConfig
-  ): ValidationResult =
+    val context = guarantee.report.context
+    val lookupAnchorPresent =
+      skipLookupAnchor || {
+        val lookupAnchorSlot = context.lookupAnchorSlot.toLong
+        // GP 0.8.0 §reporting: ∃ h, h' ∈ A with h_t = x_t, H(h) = x_l, h'_p = H(h), h'_r = x_l's post-state
+        if ancestry.nonEmpty then
+          ancestry.exists(a =>
+            a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot &&
+              a.postStateRoot.forall(_ == context.lookupAnchorStateRoot)
+          )
+        else
+          recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
+            lookupAnchorSlot <= currentSlot &&
+            currentSlot - lookupAnchorSlot <= config.maxLookupAnchorAge
+      }
+    // Find and validate anchor block (gp: within recent history β = last Crecenthistorylen blocks)
+    lazy val anchorBlock = recentBlocks.history.find(_.headerHash == context.anchor)
     for
-      _ <- ensure(guaranteeSlot <= currentSlot, ReportErrorCode.FutureReportSlot)
-      _ <- ensure(workReport.results.nonEmpty, ReportErrorCode.MissingWorkResults)
-      _ <- ensure(workReport.results.length <= config.maxWorkItems, ReportErrorCode.WorkReportTooBig)
-      _ <- ensure(availAssignments.lift(workReport.coreIndex.toInt).flatten.isEmpty, ReportErrorCode.CoreEngaged)
-      _ <- validateOutputSize(workReport)
-      _ <- ensure(
-        sumWithin(workReport.results.map(_.accumulateGas.value), config.reportAccGas),
-        ReportErrorCode.WorkReportGasTooHigh
-      )
-      _ <- ensure(
-        workReport.coreIndex.toInt < config.coresCount &&
-          workReport.coreIndex.toInt < activeValidatorCount / 3,
-        ReportErrorCode.BadCoreIndex
-      )
-      _ <- ensure(
-        workReport.packageSpec.erasureShards.toInt == activeValidatorCount,
-        ReportErrorCode.BadErasureShards
-      )
-      _ <- validateWorkPackageLimits(workReport, config)
-      _ <- validateAuthorizer(workReport, authPools)
-      _ <- validateWorkResults(workReport, accountsById)
-      _ <- ensure(
-        workReport.context.prerequisites.length + workReport.segmentRootLookup.length <= config.maxDependencies,
-        ReportErrorCode.TooManyDependencies
-      )
+      _ <- ensure(lookupAnchorPresent, ReportErrorCode.LookupAnchorNotRecent)
+      anchor <- anchorBlock.toRight(ReportErrorCode.AnchorNotRecent)
+      _ <- ensure(anchor.stateRoot == context.stateRoot, ReportErrorCode.BadStateRoot)
+      _ <- ensure(anchor.beefyRoot == context.beefyRoot, ReportErrorCode.BadBeefyMmrRoot)
+      _ <- ensure(anchor.slot == context.anchorSlot.toLong, ReportErrorCode.BadAnchorSlot)
+    yield ()
+
+  private def validateDependencies(
+    workReport: WorkReport,
+    batchPackages: Map[Hash, Hash],
+    historyReported: Map[Hash, Hash]
+  ): ValidationResult =
+    val lookupsValid = workReport.segmentRootLookup.forall { lookup =>
+      batchPackages.get(lookup.workPackageHash) match
+        case Some(exportsRoot) => lookup.segmentTreeRoot == exportsRoot
+        case None => historyReported.get(lookup.workPackageHash).contains(lookup.segmentTreeRoot)
+    }
+    val prerequisitesPresent = workReport.context.prerequisites.forall(prerequisite =>
+      batchPackages.contains(prerequisite) || historyReported.contains(prerequisite)
+    )
+    for
+      _ <- ensure(lookupsValid, ReportErrorCode.SegmentRootLookupInvalid)
+      _ <- ensure(prerequisitesPresent, ReportErrorCode.DependencyMissing)
     yield ()
 
   /** Sum of u64 values at most `limit`, summed in BigInt so it can't wrap. */
@@ -501,7 +423,7 @@ object ReportTransition:
           case Some(account) =>
             if result.codeHash != account.data.service.codeHash then
               break(Left(ReportErrorCode.BadCodeHash))
-            if result.accumulateGas.toLong < account.data.service.minItemGas then
+            if result.accumulateGas.value < ULong(account.data.service.minItemGas) then
               break(Left(ReportErrorCode.ServiceItemGasTooLow))
       Right(())
 
@@ -510,50 +432,22 @@ object ReportTransition:
     val isSortedUnique = ValidationHelpers.isSortedUniqueByInt(guarantee.signatures)(_.validatorIndex.toInt)
     ensure(isSortedUnique, ReportErrorCode.NotSortedOrUniqueGuarantors)
 
-  private def validateGuarantorSignaturesCached(
+  private def validateAssignment(
     guarantee: GuaranteeExtrinsic,
     currentSlot: Long,
     offendersSet: Set[Hash],
     cacheFor: RotationContext => RotationCache,
-    sigBuf: scala.collection.mutable.ArrayBuffer[
-      (Ed25519PublicKey, Array[Byte], io.forge.jam.core.primitives.Ed25519Signature)
-    ],
     config: ChainConfig
   ): ValidationResult =
+    val cache = cacheFor(computeRotationContext(guarantee.slot.toLong, currentSlot, config))
+    val reportedCore = guarantee.report.coreIndex.toInt
     boundary:
-      val sigCount = guarantee.signatures.length
-      if sigCount < 2 || sigCount > 3 then
-        break(Left(ReportErrorCode.InsufficientGuarantees))
-
-      val ctx = computeRotationContext(guarantee.slot.toLong, currentSlot, config)
-      if ctx.reportRotation < ctx.currentRotation - 1 then
-        break(Left(ReportErrorCode.ReportEpochBeforeLast))
-      if ctx.reportRotation > ctx.currentRotation then
-        break(Left(ReportErrorCode.FutureReportSlot))
-
-      val cache = cacheFor(ctx)
-      val validatorsArr = cache.validatorsArr
-      val coreAssignments = cache.coreAssignments
-      val reportedCore = guarantee.report.coreIndex.toInt
-
-      val reportHash = Hashing.blake2b256(guarantee.report.encode)
-      val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
-
-      var sigs = guarantee.signatures
-      while sigs.nonEmpty do
-        val signature = sigs.head
-        sigs = sigs.tail
+      for signature <- guarantee.signatures do
         val idx = signature.validatorIndex.toInt
-        if idx < 0 || idx >= validatorsArr.length then
-          break(Left(ReportErrorCode.BadValidatorIndex))
-
-        val validatorEd25519 = validatorsArr(idx).ed25519
-        if offendersSet.contains(Hash(validatorEd25519.bytes)) then
+        if offendersSet.contains(Hash(cache.validatorsArr(idx).ed25519.bytes)) then
           break(Left(ReportErrorCode.BannedValidator))
-        if coreAssignments(idx) != reportedCore then
+        if cache.coreAssignments(idx) != reportedCore then
           break(Left(ReportErrorCode.WrongAssignment))
-        sigBuf += ((validatorEd25519, message, signature.signature))
-
       Right(())
 
   private def calculateCoreAssignmentsArr(

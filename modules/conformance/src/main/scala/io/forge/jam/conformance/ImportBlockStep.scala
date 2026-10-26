@@ -1,6 +1,6 @@
 package io.forge.jam.conformance
 
-import io.forge.jam.core.Parallel
+import io.forge.jam.core.{ChainConfig, Parallel}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
@@ -19,7 +19,7 @@ object ImportBlockStep:
       stateStore: StateStore,
       blockImporter: BlockImporter,
       block: Block
-  ): Either[String, Hash] =
+  )(using ChainConfig): Either[String, Hash] =
     val parentHash = block.header.parent
     stateStore.get(parentHash) match
       case None =>
@@ -46,5 +46,5 @@ object ImportBlockStep:
             )
             Right(postStateRoot)
 
-          case ImportResult.Failure(error, message) =>
-            Left(s"Import failed: $error - $message")
+          case failure: ImportResult.Failure =>
+            Left(ImportErrorText(block, parentState.stateRoot, failure))

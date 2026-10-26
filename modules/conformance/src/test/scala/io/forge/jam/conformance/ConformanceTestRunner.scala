@@ -28,7 +28,8 @@ object TestResult:
  */
 class ConformanceTestRunner(
   config: ChainConfig = ChainConfig.TINY,
-  faultyMode: Boolean = false // When true, step 29 state root mismatch is expected
+  faultyMode: Boolean = false, // When true, step 29 state root mismatch is expected
+  errorTextDivergences: Set[Int] = Set.empty
 ):
   private given ChainConfig = config
   private val stateStore = new StateStore()
@@ -38,6 +39,8 @@ class ConformanceTestRunner(
 
   // In faulty mode, step 29 has an intentionally wrong expected state root
   private val FAULTY_STEP = 29
+
+  private val ErrorText = "error_text"
 
   /**
    * Run all test cases in a directory.
@@ -74,6 +77,7 @@ class ConformanceTestRunner(
         results += result
 
         result match
+          case TestResult.Failure(_, ErrorText, _, _) =>
           case TestResult.Failure(_, _, _, _) | TestResult.Error(_, _, _) =>
             // Stop on first failure
             break(results.toList)
@@ -111,7 +115,10 @@ class ConformanceTestRunner(
       else
         val expectedStr = formatMessage(expectedMsg)
         val actualStr = formatMessage(actualMsg)
-        TestResult.Failure(index, messageType, expectedStr, actualStr)
+        (actualMsg, expectedMsg) match
+          case (_: ProtocolMessage.ErrorMsg, _: ProtocolMessage.ErrorMsg) =>
+            TestResult.Failure(index, ErrorText, expectedStr, actualStr)
+          case _ => TestResult.Failure(index, messageType, expectedStr, actualStr)
 
     catch
       case e: Exception =>
@@ -207,9 +214,8 @@ class ConformanceTestRunner(
               ak.key.toArray.sameElements(ek.key.toArray) && ak.value.toArray.sameElements(ek.value.toArray)
           }
 
-      case (ProtocolMessage.ErrorMsg(_), ProtocolMessage.ErrorMsg(_)) =>
-        // Error messages are out of spec, just check type matches
-        true
+      case (ProtocolMessage.ErrorMsg(a), ProtocolMessage.ErrorMsg(e)) =>
+        a.message == e.message || errorTextDivergences.contains(currentTestIndex)
 
       case _ =>
         false

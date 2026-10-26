@@ -5,11 +5,12 @@ import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
-import io.forge.jam.crypto.SigningContext
+import io.forge.jam.core.types.tickets.TicketEnvelope
+import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.benchmark.{BlockGenerator, DevKeyStore}
 import io.forge.jam.protocol.safrole.SafroleTransition
-import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleInput, TicketsOrKeys}
+import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleErrorCode, SafroleInput, TicketsOrKeys}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, Genesis, ImportResult, RawState}
 import io.forge.jam.vrfs.BandersnatchWrapper
@@ -26,18 +27,20 @@ import java.util.concurrent.CompletableFuture
 class PendingChecksSpec extends AnyFunSuite with Matchers:
 
   private val config = ChainConfig.TINY
+  private val badSeal = PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature)
+  private val badEntropy = PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)
 
   test("firstFailure reports the first check started, whichever finishes first") {
     val checks = new PendingChecks
     val slow = new CompletableFuture[Option[PipelineError]]
     checks.add(slow)
-    checks.start(Some(PipelineError.InvalidBlockSeal))
+    checks.start(Some(badSeal))
     checks.start(None)
     val reported = CompletableFuture.supplyAsync(() => checks.firstFailure())
     Thread.sleep(50)
     reported.isDone shouldBe false // waits for the earlier check
-    slow.complete(Some(PipelineError.HeaderVerificationErr("first")))
-    reported.get() shouldBe Some(PipelineError.HeaderVerificationErr("first"))
+    slow.complete(Some(PipelineError.InvalidOffendersMark))
+    reported.get() shouldBe Some(PipelineError.InvalidOffendersMark)
   }
 
   test("firstFailure is empty when every check passes") {
@@ -80,6 +83,8 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
   private def wrongEntropySource: JamBytes =
     JamBytes(BandersnatchWrapper.ietfVrfSign(fixture.secret, SigningContext.entropyInputData(new Array[Byte](32)), Array.empty))
 
+  private val malformedEntropySource: JamBytes = JamBytes(Array.fill[Byte](96)(0xff.toByte))
+
   /** Flips a byte of the proof, after the 32-byte output, so the VRF output is unchanged. */
   private def corrupt(signature: JamBytes): JamBytes =
     val b = signature.toArray
@@ -88,44 +93,81 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
 
   private val offender = Hash(Array.fill[Byte](32)(7))
 
+  private lazy val badTicket: TicketEnvelope =
+    val ticket = TestFileLoader
+      .loadJsonFromTestVectors[io.circe.Json]("traces/safrole", "00000012")
+      .flatMap(_.hcursor.downField("block").downField("extrinsic").downField("tickets").downN(0)
+        .as[TicketEnvelope].left.map(_.getMessage))
+      .fold(e => fail(s"cannot load a ticket: $e"), identity)
+    val signature = ticket.signature.toArray
+    signature(200) = (signature(200) ^ 1).toByte
+    ticket.copy(signature = JamBytes(signature))
+
+  private def withBadTicket: Block =
+    val extrinsic = fixture.block.extrinsic.copy(tickets = List(badTicket))
+    val header = fixture.block.header.copy(extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, config))
+    resealed(header).copy(extrinsic = extrinsic)
+
   private def importResult(block: Block): ImportResult =
     new BlockImporter(config).importBlock(block, fixture.genesis)
 
   private def failsWith(block: Block, expected: PipelineError): Unit =
     importResult(block) match
-      case ImportResult.Failure(_, message) => message shouldBe expected.message
+      case ImportResult.Failure(_, message, _) => message shouldBe expected.message
       case other                            => fail(s"expected ${expected.message}, got $other")
 
   test("the untampered block imports") {
     importResult(fixture.block) shouldBe a[ImportResult.Success]
   }
 
-  test("GP: a bad seal is reported as InvalidBlockSeal (eq. 6.16)") {
+  test("GP: a bad seal is reported as BadSealSignature (eq. 6.16)") {
     val h = fixture.block.header
-    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(h.seal))), PipelineError.InvalidBlockSeal)
+    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(h.seal))), badSeal)
   }
 
   test("GP: a bad entropy source under a valid seal is reported as an invalid entropy signature (eq. 6.17)") {
     failsWith(
       resealed(fixture.block.header.copy(entropySource = wrongEntropySource)),
-      PipelineError.HeaderVerificationErr("Invalid entropy VRF signature")
+      badEntropy
     )
+  }
+
+  test("GP: a malformed entropy source under a valid seal is reported as an invalid entropy signature (eq. 6.17)") {
+    BandersnatchVrf.getVrfOutput(malformedEntropySource.toArray) shouldBe None
+    failsWith(
+      resealed(fixture.block.header.copy(entropySource = malformedEntropySource)),
+      badEntropy
+    )
+  }
+
+  test("GP: a bad seal wins over a malformed entropy source, as the seal is checked first") {
+    val h = fixture.block.header.copy(entropySource = malformedEntropySource)
+    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), badSeal)
   }
 
   test("GP: a bad seal wins over a bad entropy source, as the seal is checked first") {
     val h = fixture.block.header.copy(entropySource = wrongEntropySource)
-    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), PipelineError.InvalidBlockSeal)
+    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), badSeal)
+  }
+
+  test("GP: a bad ticket proof under a valid header is reported as BadTicketProof (eq. 6.30)") {
+    failsWith(withBadTicket, PipelineError.SafroleErr(SafroleErrorCode.BadTicketProof))
+  }
+
+  test("a bad seal wins over a bad ticket proof, as the header is verified before the tickets") {
+    val block = withBadTicket
+    failsWith(block.copy(header = block.header.copy(seal = corrupt(block.header.seal))), badSeal)
   }
 
   test("a bad entropy source wins over an error of a later step (offenders mark)") {
     val h = fixture.block.header.copy(entropySource = wrongEntropySource, offendersMark = List(offender))
-    failsWith(resealed(h), PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
+    failsWith(resealed(h), badEntropy)
   }
 
   test("a bad seal wins over an error of a later step (offenders mark)") {
     // The mark changes the signed header, so the original seal no longer verifies.
     val h = fixture.block.header.copy(offendersMark = List(offender))
-    failsWith(fixture.block.copy(header = h), PipelineError.InvalidBlockSeal)
+    failsWith(fixture.block.copy(header = h), badSeal)
   }
 
   test("the later step's error is reported when the signatures are valid") {

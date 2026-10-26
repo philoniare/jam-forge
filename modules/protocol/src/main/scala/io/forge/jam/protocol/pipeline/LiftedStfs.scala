@@ -29,9 +29,15 @@ import io.forge.jam.protocol.pipeline.StfLifters.*
 object LiftedStfs:
 
   // 1. Safrole STF
-  val safrole: StfStepWith[SafroleOutputData] = liftStandardCtx(
+  val safroleEpoch: StfStepWith[SafroleOutputData] = liftStandardCtx(
+    stf = (input: SafroleInput, view, _) => SafroleTransition.epochStfView(input, view),
+    extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block),
+    wrapError = (e: SafroleErrorCode) => PipelineError.SafroleErr(e)
+  )
+
+  val safroleTickets: StfStepWith[Unit] = liftStandardCtx(
     stf = (input: SafroleInput, view, ctx) =>
-      SafroleTransition.stfView(
+      SafroleTransition.ticketsStfView(
         input,
         view,
         Some(_.foreach(check =>
@@ -60,7 +66,7 @@ object LiftedStfs:
 
   val assurances: StfStepWith[AssuranceOutputMarks] = liftStandardCtx(
     stf = (input: AssuranceInput, view, ctx) =>
-      AssuranceTransition.stfViewWithValidators(input, view, ctx.preSafroleValidators),
+      AssuranceTransition.stfViewWithValidators(input, view, ctx.preSafroleValidators, Some(ctx.signatures)),
     extractInput = ctx => InputExtractor.extractAssuranceInput(ctx.block),
     wrapError = (e: AssuranceErrorCode) => PipelineError.AssuranceErr(e)
   )
@@ -70,15 +76,18 @@ object LiftedStfs:
       skipAncestryValidation: Boolean,
       ancestry: List[AncestorHeader] = List.empty
   ): StfStepWith[ReportOutputMarks] =
-    liftStandard(
-      stf = (input, view) =>
-        ReportTransition.stfView(input, view, skipAncestryValidation, ancestry),
+    liftStandardCtx(
+      stf = (input: ReportInput, view, ctx) =>
+        ReportTransition.stfView(input, view, skipAncestryValidation, ancestry, Some(ctx.signatures)),
       extractInput = ctx =>
         ReportInput(
           guarantees = ctx.block.extrinsic.guarantees,
           slot = ctx.block.header.slot.toLong
         ),
-      wrapError = (e: ReportErrorCode) => PipelineError.ReportErr(e)
+      wrapError = {
+        case ReportErrorCode.BadSignature => PipelineError.BadSignatureBatch
+        case e                            => PipelineError.ReportErr(e)
+      }
     )
 
   def accumulation(

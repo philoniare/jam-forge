@@ -9,6 +9,7 @@ import io.forge.jam.protocol.assurance.AssuranceTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AssuranceBridge
 import io.forge.jam.crypto.Ed25519
+import io.forge.jam.protocol.SignatureBatch
 
 /**
  * Assurances State Transition Function.
@@ -101,7 +102,8 @@ object AssuranceTransition:
 
   private def validateAssurances(
     input: AssuranceInput,
-    state: AssuranceState
+    state: AssuranceState,
+    signatures: Option[SignatureBatch]
   ): Option[AssuranceErrorCode] =
     if input.assurances.isEmpty then
       None
@@ -117,7 +119,11 @@ object AssuranceTransition:
           val validators = state.currValidators.toIndexedSeq
           // One batch verification for up to V signatures; it fails exactly when some signature does.
           val items = input.assurances.toIndexedSeq.map(a => assuranceSignatureItem(a, validators(a.validatorIndex.toInt)))
-          if !Ed25519.verifyAll(items) then Some(AssuranceErrorCode.BadSignature) else None
+          signatures match
+            case Some(batch) =>
+              batch.addAll(items)
+              None
+            case None => if !Ed25519.verifyAll(items) then Some(AssuranceErrorCode.BadSignature) else None
       }
 
   /**
@@ -179,11 +185,12 @@ object AssuranceTransition:
   def stfViewWithValidators(
     input: AssuranceInput,
     view: TrieBackedJamState,
-    validators: IndexedSeq[ValidatorKey]
+    validators: IndexedSeq[ValidatorKey],
+    signatures: Option[SignatureBatch] = None
   ): AssuranceOutput =
     val preStateBase = AssuranceBridge.extract(view)
     val preState = preStateBase.copy(currValidators = validators)
-    val (postState, output) = stfInternal(input, preState, view.config)
+    val (postState, output) = stfInternal(input, preState, view.config, signatures)
     AssuranceBridge.apply(view, postState)
     output
 
@@ -198,7 +205,8 @@ object AssuranceTransition:
   def stfInternal(
     input: AssuranceInput,
     preState: AssuranceState,
-    config: ChainConfig
+    config: ChainConfig,
+    signatures: Option[SignatureBatch] = None
   ): (AssuranceState, AssuranceOutput) =
     // Handle timeouts first
     val postTimeoutState = handleTimeouts(preState, input.slot, config)
@@ -208,7 +216,7 @@ object AssuranceTransition:
       (preState, StfResult.error(AssuranceErrorCode.CoreNotEngaged))
     else
       // Validate assurances
-      validateAssurances(input, preState) match
+      validateAssurances(input, preState, signatures) match
         case Some(error) =>
           (preState, StfResult.error(error))
         case None =>

@@ -487,7 +487,7 @@ final class ChainManager(
     val preState = RawState(bestHead.stateRoot, Nil)
     val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.toLong)
     importer.importBlock(block, preState, ancestry) match
-      case ImportResult.Failure(error, message) =>
+      case ImportResult.Failure(error, message, _) =>
         markInvalid(headerHashOf(block))
         Left(ChainError.ImportFailed(error, message))
       case ImportResult.Success(postRoot, _) =>

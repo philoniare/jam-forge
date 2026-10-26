@@ -9,12 +9,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import java.nio.file.{Files, Paths}
 import scala.jdk.CollectionConverters.*
 
-/** Ticket proofs are verified alongside the rest of the block import. A block carrying
-  * a bad proof must still be rejected with BadTicketProof, ahead of the seal it invalidates, and the untampered block
-  * then imports to the trace's root.
-  */
 class DeferredTicketProofSpec extends AnyFunSuite:
-  test("GP: a block with a bad ticket proof is rejected with BadTicketProof (eq. 6.30)") {
+  test("a block whose ticket was tampered with is rejected for its seal, as the header is verified first") {
     given config: ChainConfig = ChainConfig.TINY
     val dir = Paths.get("jamtestvectors/traces/safrole")
     val genesisCodec = Genesis.codec(config.epochLength)
@@ -48,7 +44,7 @@ class DeferredTicketProofSpec extends AnyFunSuite:
           header = block.header.copy(extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, config))
         )
         val result = ImportBlockStep(store, importer, bad)
-        assert(result.left.exists(_.contains("BadTicketProof")), s"${file.getFileName}: $result")
+        assert(result.left.exists(_.endsWith("BadSealSignature")), s"${file.getFileName}: $result")
         tampered += 1
       val imported = ImportBlockStep(store, importer, block)
       assert(imported == Right(step.postState.stateRoot), file.getFileName)

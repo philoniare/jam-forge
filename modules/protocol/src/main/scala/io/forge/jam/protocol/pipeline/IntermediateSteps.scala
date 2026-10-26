@@ -22,13 +22,9 @@ object IntermediateSteps:
     val kappa = view.validators.current
     val pool = view.entropy.pool
     if authorIndex < 0 || authorIndex >= kappa.length then
-      Left(
-        PipelineError.HeaderVerificationErr(s"InvalidAuthorIndex: $authorIndex >= ${kappa.length}")
-      )
+      Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidAuthorIndex))
     else if pool.length != 4 then
-      Left(
-        PipelineError.HeaderVerificationErr(s"CorruptEntropyPool: length ${pool.length} != 4")
-      )
+      throw new IllegalStateException(s"Corrupt entropy pool: length ${pool.length} != 4")
     else
       val blockAuthorKey = kappa(authorIndex).bandersnatch
 
@@ -39,11 +35,11 @@ object IntermediateSteps:
       view.gamma.st match
         case TicketsOrKeys.Keys(keys) =>
           if slotIndex < 0 || slotIndex >= keys.length then
-            Left(PipelineError.HeaderVerificationErr(s"InvalidSlotIndex: $slotIndex >= ${keys.length}"))
+            throw new IllegalStateException(s"Sealer sequence too short: $slotIndex >= ${keys.length}")
           else
             val expectedKey = keys(slotIndex)
             if expectedKey != blockAuthorKey then
-              Left(PipelineError.HeaderVerificationErr("UnexpectedAuthor"))
+              Left(PipelineError.HeaderErr(HeaderErrorCode.UnexpectedAuthor))
             else
               val vrfInput = SigningContext.fallbackSealInputData(entropy)
               ctx.pendingChecks.start {
@@ -53,13 +49,13 @@ object IntermediateSteps:
                   encodedHeader,
                   block.header.seal.toArray
                 )
-                if vrfResult.isEmpty then Some(PipelineError.InvalidBlockSeal) else None
+                if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature)) else None
               }
               Right(())
 
         case TicketsOrKeys.Tickets(tickets) =>
           if slotIndex < 0 || slotIndex >= tickets.length then
-            Left(PipelineError.HeaderVerificationErr(s"InvalidSlotIndex: $slotIndex >= ${tickets.length}"))
+            throw new IllegalStateException(s"Sealer sequence too short: $slotIndex >= ${tickets.length}")
           else
             val ticket = tickets(slotIndex)
             val vrfInput = SigningContext.safroleTicketInputData(entropy, ticket.attempt.toByte)
@@ -71,10 +67,10 @@ object IntermediateSteps:
                 block.header.seal.toArray
               )
               vrfResult match
-                case None => Some(PipelineError.InvalidBlockSeal)
+                case None => Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
                 case Some(vrfOutput) =>
                   if !java.util.Arrays.equals(ticket.id.toArray, vrfOutput) then
-                    Some(PipelineError.HeaderVerificationErr("InvalidAuthorTicket"))
+                    Some(PipelineError.HeaderErr(HeaderErrorCode.InvalidAuthorTicket))
                   else None
             }
             Right(())
@@ -87,11 +83,9 @@ object IntermediateSteps:
       val computedExtrinsicHash =
         ExtrinsicHashing.computeExtrinsicHash(block.extrinsic, ctx.config)
       if computedExtrinsicHash != block.header.extrinsicHash then
-        Left(PipelineError.HeaderVerificationErr("Invalid extrinsic hash"))
+        Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidExtrinsicHash))
       else Right(())
-    catch
-      case e: Exception =>
-        Left(PipelineError.HeaderVerificationErr(s"Extrinsic hash validation failed: ${e.getMessage}"))
+    catch case _: Exception => Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidExtrinsicHash))
   }
 
   val validateEntropyVrf: StfStep = validate { (view, ctx) =>
@@ -99,13 +93,13 @@ object IntermediateSteps:
     val authorIndex = block.header.authorIndex.toInt
     val kappa = view.validators.current
     if authorIndex < 0 || authorIndex >= kappa.length then
-      Left(PipelineError.HeaderVerificationErr(s"InvalidAuthorIndex: $authorIndex >= ${kappa.length}"))
+      Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidAuthorIndex))
     else
       val blockAuthorKey = kappa(authorIndex).bandersnatch
 
       val sealVrfOutput = BandersnatchVrf.getVrfOutput(block.header.seal.toArray)
       if sealVrfOutput.isEmpty then
-        Left(PipelineError.HeaderVerificationErr("Cannot extract VRF output from seal"))
+        Left(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
       else
         val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
         ctx.pendingChecks.start {
@@ -115,8 +109,7 @@ object IntermediateSteps:
             Array.empty[Byte],
             block.header.entropySource.toArray
           )
-          if vrfResult.isEmpty then Some(PipelineError.HeaderVerificationErr("Invalid entropy VRF signature"))
-          else None
+          if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)) else None
         }
         Right(())
   }
@@ -124,7 +117,7 @@ object IntermediateSteps:
   val validateEpochMark: StfStep = validate { (_, ctx) =>
     val safroleEpochMark = ctx.safroleOutput.flatMap(_.epochMark)
     if safroleEpochMark != ctx.block.header.epochMark then
-      Left(PipelineError.InvalidEpochMark)
+      Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidEpochMark))
     else
       Right(())
   }
@@ -132,7 +125,7 @@ object IntermediateSteps:
   val validateTicketsMark: StfStep = validate { (_, ctx) =>
     val safroleTicketsMark = ctx.safroleOutput.flatMap(_.ticketsMark)
     if safroleTicketsMark != ctx.block.header.ticketsMark then
-      Left(PipelineError.InvalidTicketsMark)
+      Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidTicketsMark))
     else
       Right(())
   }

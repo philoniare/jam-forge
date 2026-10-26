@@ -413,7 +413,7 @@ class ReportTest extends AnyFunSuite with Matchers:
         hash = Hash(Array.fill(32)(0x11.toByte)),
         length = UInt(1000),
         erasureRoot = Hash(Array.fill(32)(0x12.toByte)),
-        erasureShards = UShort(0),
+        erasureShards = UShort(TinyConfig.validatorCount),
         exportsRoot = Hash(Array.fill(32)(0x13.toByte)),
         exportsCount = UShort(1)
       ),

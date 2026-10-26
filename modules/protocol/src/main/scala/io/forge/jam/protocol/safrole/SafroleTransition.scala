@@ -63,6 +63,26 @@ object SafroleTransition extends StrictLogging:
     SafroleBridge.apply(view, postState)
     output
 
+  def epochStfView(input: SafroleInput, view: TrieBackedJamState): SafroleOutput =
+    val preState = SafroleBridge.extract(view)
+    guarded(advance(input, preState, view.config)) match
+      case Right((postState, output)) =>
+        SafroleBridge.apply(view, postState)
+        StfResult.success(output)
+      case Left(error) => StfResult.error(error)
+
+  def ticketsStfView(
+    input: SafroleInput,
+    view: TrieBackedJamState,
+    deferProofs: Option[DeferredProofs] = None
+  ): StfResult[Unit, SafroleErrorCode] =
+    val state = SafroleBridge.extract(view)
+    guarded(applyTickets(input, state, view.config, deferProofs)) match
+      case Right(postState) =>
+        SafroleBridge.apply(view, postState)
+        StfResult.success(())
+      case Left(error) => StfResult.error(error)
+
   /**
    * Internal Safrole STF implementation using SafroleState.
    *
@@ -78,16 +98,22 @@ object SafroleTransition extends StrictLogging:
     config: ChainConfig,
     deferProofs: Option[DeferredProofs] = None
   ): (SafroleState, SafroleOutput) =
-    try
-      if input.slot <= preState.tau then
-        (preState, StfResult.error(SafroleErrorCode.BadSlot))
-      else
-        processValidSlot(input, preState, config, deferProofs)
+    val result = guarded(
+      advance(input, preState, config).flatMap((advanced, output) =>
+        applyTickets(input, advanced, config, deferProofs).map(_ -> output)
+      )
+    )
+    result match
+      case Right((postState, output)) => (postState, StfResult.success(output))
+      case Left(error)                => (preState, StfResult.error(error))
+
+  private def guarded[A](run: => Either[SafroleErrorCode, A]): Either[SafroleErrorCode, A] =
+    try run
     catch
       case e: SafroleCryptoFailure => throw e
       case e @ (_: io.forge.jam.core.codec.CodecDecodingException | _: IllegalArgumentException) =>
         logger.error("safrole input/state rejected, reporting Reserved", e)
-        (preState, StfResult.error(SafroleErrorCode.Reserved))
+        Left(SafroleErrorCode.Reserved)
 
   /** Epoch timing context extracted from slot values */
   private case class EpochContext(
@@ -108,51 +134,44 @@ object SafroleTransition extends StrictLogging:
       newPhase = slot % epochLength
     )
 
-  /**
-   * Process a valid slot transition.
-   */
-  private def processValidSlot(
+  private def advance(
     input: SafroleInput,
     preState: SafroleState,
+    config: ChainConfig
+  ): Either[SafroleErrorCode, (SafroleState, SafroleOutputData)] =
+    if input.slot <= preState.tau then Left(SafroleErrorCode.BadSlot)
+    else
+      val ctx = epochContext(preState, input.slot, config.epochLength)
+
+      // Check for tickets_mark condition: same epoch, crossing cutoff, accumulator full
+      val ticketsMark = Option.when(
+        ctx.crossingTicketCutoff(config.ticketCutoff) &&
+          preState.gammaA.size == config.epochLength
+      )(transformTicketsSequence(preState.gammaA))
+
+      // Handle epoch transition if needed
+      val (stateAfterEpoch, epochMark) =
+        if ctx.crossingEpochBoundary then
+          val (newState, mark) = handleEpochTransition(preState, preState.postOffenders, ctx, config)
+          (newState, Some(mark))
+        else
+          (preState, None)
+
+      // Process entropy accumulation and update timeslot
+      val newEta0 = Hashing.blake2b256(preState.eta.head.bytes ++ input.entropy.bytes)
+      val advanced = stateAfterEpoch.copy(eta = newEta0 :: stateAfterEpoch.eta.tail, tau = input.slot)
+      Right((advanced, SafroleOutputData(epochMark, ticketsMark)))
+
+  private def applyTickets(
+    input: SafroleInput,
+    advanced: SafroleState,
     config: ChainConfig,
     deferProofs: Option[DeferredProofs]
-  ): (SafroleState, SafroleOutput) =
-    val ctx = epochContext(preState, input.slot, config.epochLength)
-
-    // Check for tickets_mark condition: same epoch, crossing cutoff, accumulator full
-    val ticketsMark = Option.when(
-      ctx.crossingTicketCutoff(config.ticketCutoff) &&
-        preState.gammaA.size == config.epochLength
-    )(transformTicketsSequence(preState.gammaA))
-
-    // Handle epoch transition if needed
-    val (stateAfterEpoch, epochMark) =
-      if ctx.crossingEpochBoundary then
-        val (newState, mark) = handleEpochTransition(preState, preState.postOffenders, ctx, config)
-        (newState, Some(mark))
-      else
-        (preState, None)
-
-    // Use post-epoch gammaZ for ticket verification
-    val ticketVerificationGammaZ = stateAfterEpoch.gammaZ
-
-    // Process ticket submissions
-    val ticketResult =
-      if input.extrinsic.isEmpty then Right(stateAfterEpoch)
-      else
-        processExtrinsics(stateAfterEpoch, input.extrinsic, ctx.newPhase, ticketVerificationGammaZ, config, deferProofs)
-
-    ticketResult match
-      case Left(error) =>
-        (preState, StfResult.error(error))
-      case Right(stateAfterTickets) =>
-        // Process entropy accumulation and update timeslot
-        val newEta0 = Hashing.blake2b256(preState.eta.head.bytes ++ input.entropy.bytes)
-        val finalState = stateAfterTickets.copy(
-          eta = newEta0 :: stateAfterTickets.eta.tail,
-          tau = input.slot
-        )
-        (finalState, StfResult.success(SafroleOutputData(epochMark, ticketsMark)))
+  ): Either[SafroleErrorCode, SafroleState] =
+    if input.extrinsic.isEmpty then Right(advanced)
+    else
+      val phase = input.slot % config.epochLength
+      processExtrinsics(advanced, input.extrinsic, phase, advanced.gammaZ, config, deferProofs)
 
   /**
    * Handle epoch transition.
@@ -264,102 +283,56 @@ object SafroleTransition extends StrictLogging:
     else if tickets.length > config.maxTicketsPerExtrinsic then
       Left(SafroleErrorCode.Reserved)
     else
-      val eta2 = postState.eta(2)
-      def verify(ticket: TicketEnvelope): Option[TicketMark] =
-        BandersnatchWrapper
-          .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.validatorCount)
-      val accumulatorIds = scala.collection.mutable.HashSet.from(postState.gammaA.iterator.map(_.id))
-      def process(marks: List[Option[TicketMark]]) =
-        processTickets(
-          postState,
-          tickets.zip(marks),
-          config,
-          None,
-          accumulatorIds,
-          scala.collection.mutable.HashSet.empty[JamBytes],
-          scala.collection.mutable.ListBuffer.empty[TicketMark],
-          0
-        )
-      deferProofs match
-        case None =>
-          process(Parallel.map(tickets)(verify)).left.map(_._1)
-        case Some(handOver) =>
-          val ids = tickets.map(t => BandersnatchVrf.ringVrfOutput(t.signature.toArray).map(JamBytes(_)))
-          val checks = tickets.zip(ids).map {
-            case (ticket, Some(id)) => Parallel.async(verify(ticket).exists(_.id == id))
-            case (_, None)          => CompletableFuture.completedFuture(false)
-          }
-          process(tickets.zip(ids).map((t, id) => id.map(TicketMark(_, t.attempt)))) match
-            case Right(state) =>
-              handOver(checks)
-              Right(state)
-            case Left((error, firstUnchecked)) =>
-              // Report what a check in ticket order would: a bad proof of a ticket before the failing check wins.
-              if checks.take(firstUnchecked).exists(c => !Parallel.await(c)) then Left(SafroleErrorCode.BadTicketProof)
-              else Left(error)
+      val ids = tickets.map(t =>
+        JamBytes(BandersnatchVrf.ringVrfOutput(t.signature.toArray).getOrElse(t.signature.toArray.take(32)))
+      )
+      checkTickets(postState, tickets, ids, config).flatMap { marks =>
+        val eta2 = postState.eta(2)
+        def proofHolds(ticket: TicketEnvelope, mark: TicketMark): Boolean =
+          BandersnatchWrapper
+            .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.validatorCount)
+            .exists(_.id == mark.id)
+        val accumulated = accumulate(postState, marks, config)
+        deferProofs match
+          case None =>
+            if !Parallel.map(tickets.zip(marks))(proofHolds).forall(identity) then Left(SafroleErrorCode.BadTicketProof)
+            else accumulated
+          case Some(handOver) =>
+            val checks = tickets.zip(marks).map((ticket, mark) => Parallel.async(proofHolds(ticket, mark)))
+            accumulated match
+              case Right(state) =>
+                handOver(checks)
+                Right(state)
+              case Left(error) =>
+                if checks.exists(c => !Parallel.await(c)) then Left(SafroleErrorCode.BadTicketProof) else Left(error)
+      }
 
-  /**
-   * Process tickets recursively using tail recursion. An error comes with how many tickets' proofs a sequential check
-   * would have verified before reaching it.
-   */
-  @scala.annotation.tailrec
-  private def processTickets(
+  private def checkTickets(
     postState: SafroleState,
-    remainingTickets: List[(TicketEnvelope, Option[TicketMark])],
-    config: ChainConfig,
-    previousId: Option[JamBytes],
-    accumulatorIds: scala.collection.mutable.HashSet[JamBytes],
-    accumulatedIds: scala.collection.mutable.HashSet[JamBytes],
-    accumulatedTickets: scala.collection.mutable.ListBuffer[TicketMark],
-    index: Int
-  ): Either[(SafroleErrorCode, Int), SafroleState] =
-    remainingTickets match
-      case Nil =>
-        // All tickets processed, update accumulator
-        if accumulatedTickets.nonEmpty then
-          val combinedTickets = (postState.gammaA ++ accumulatedTickets)
-            .sortBy(_.id)
-            .take(config.epochLength)
-          val survivingIds = combinedTickets.map(_.id).toSet
-          if accumulatedTickets.exists(t => !survivingIds.contains(t.id)) then
-            Left((SafroleErrorCode.Reserved, index))
-          else
-            Right(postState.copy(gammaA = combinedTickets.toList))
-        else
-          Right(postState)
+    tickets: List[TicketEnvelope],
+    ids: List[JamBytes],
+    config: ChainConfig
+  ): Either[SafroleErrorCode, List[TicketMark]] =
+    val accumulatorIds = postState.gammaA.iterator.map(_.id).toSet
+    val maxAttempts = maxTicketEntries(postState.gammaK.size, config)
+    if ids.exists(accumulatorIds.contains) || ids.distinct.size != ids.size then
+      Left(SafroleErrorCode.DuplicateTicket)
+    else if ids.zip(ids.drop(1)).exists((previous, current) => previous >= current) then
+      Left(SafroleErrorCode.BadTicketOrder)
+    else if tickets.exists(_.attempt.toInt >= maxAttempts) then
+      Left(SafroleErrorCode.BadTicketAttempt)
+    else
+      Right(tickets.zip(ids).map((ticket, id) => TicketMark(id, ticket.attempt)))
 
-      case (ticket, proof) :: rest =>
-        if ticket.attempt.toInt >= maxTicketEntries(postState.gammaK.size, config) then
-          Left((SafroleErrorCode.BadTicketAttempt, index))
-        else
-          proof match
-            case None =>
-              Left((SafroleErrorCode.BadTicketProof, index))
-            case Some(ticketBody) =>
-              val currentId = ticketBody.id
-
-              // Check for duplicates in accumulator
-              if accumulatorIds.contains(currentId) then
-                Left((SafroleErrorCode.DuplicateTicket, index + 1))
-              // Check for duplicates in new tickets being added
-              else if accumulatedIds.contains(currentId) then
-                Left((SafroleErrorCode.DuplicateTicket, index + 1))
-              // Check ordering against previous ticket
-              else if previousId.exists(_ >= currentId) then
-                Left((SafroleErrorCode.BadTicketOrder, index + 1))
-              else
-                accumulatedIds.add(currentId)
-                accumulatedTickets += ticketBody
-                processTickets(
-                  postState,
-                  rest,
-                  config,
-                  Some(currentId),
-                  accumulatorIds,
-                  accumulatedIds,
-                  accumulatedTickets,
-                  index + 1
-                )
+  private def accumulate(
+    postState: SafroleState,
+    marks: List[TicketMark],
+    config: ChainConfig
+  ): Either[SafroleErrorCode, SafroleState] =
+    val combined = (postState.gammaA ++ marks).sortBy(_.id).take(config.epochLength)
+    val survivingIds = combined.map(_.id).toSet
+    if marks.exists(t => !survivingIds.contains(t.id)) then Left(SafroleErrorCode.Reserved)
+    else Right(postState.copy(gammaA = combined))
 
   private def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =
     if pendingSetSize <= 0 then config.ticketsPerValidator

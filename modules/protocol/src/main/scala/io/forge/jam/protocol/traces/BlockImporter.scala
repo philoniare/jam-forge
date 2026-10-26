@@ -33,7 +33,8 @@ object ImportResult:
 
   final case class Failure(
       error: ImportError,
-      message: String = ""
+      message: String = "",
+      cause: Option[PipelineError] = None
   ) extends ImportResult
 
 /** Errors that can occur during block import.
@@ -50,6 +51,7 @@ enum ImportError:
   case HistoryError
   case PreimageError
   case ReportError
+  case SignatureError
   case StatisticsError
   case UnknownError
 
@@ -162,7 +164,7 @@ class BlockImporter(
 
       pipelineResult match
         case Left(error) =>
-          ImportResult.Failure(mapPipelineError(error), error.message)
+          ImportResult.Failure(mapPipelineError(error), error.message, Some(error))
 
         case Right(result) =>
           // Reports left the guarantee-derived core and service statistics in the view; add the rest to them.
@@ -213,11 +215,9 @@ class BlockImporter(
     case PipelineError.AssuranceErr(_)          => ImportError.AssuranceError
     case PipelineError.ReportErr(_)             => ImportError.ReportError
     case PipelineError.PreimageErr(_)           => ImportError.PreimageError
-    case PipelineError.HeaderVerificationErr(_) => ImportError.InvalidHeader
-    case PipelineError.InvalidEpochMark         => ImportError.InvalidHeader
-    case PipelineError.InvalidTicketsMark       => ImportError.InvalidHeader
-    case PipelineError.InvalidBlockSeal         => ImportError.InvalidHeader
+    case PipelineError.HeaderErr(_)             => ImportError.InvalidHeader
     case PipelineError.InvalidOffendersMark     => ImportError.InvalidHeader
+    case PipelineError.BadSignatureBatch        => ImportError.SignatureError
 
   /** Compute final core statistics by combining:
     *   1. Guarantee-based stats (bundleSize, gasUsed, extrinsicCount, etc.),
@@ -353,27 +353,14 @@ object InputExtractor:
     val tickets = block.extrinsic.tickets
 
     // The header.entropySource is a 96-byte Bandersnatch IETF VRF signature.
-    val entropyBytes = header.entropySource.toArray
+    BandersnatchWrapper.ensureLibraryLoaded()
     val vrfOutput =
-      try
-        BandersnatchWrapper.ensureLibraryLoaded()
-        val output = BandersnatchWrapper.getIetfVrfOutput(entropyBytes)
-        if output != null && output.length == 32 then Hash(output)
-        else
-          throw new IllegalStateException(
-            "Bandersnatch IETF VRF output extraction failed for header entropy source"
-          )
-      catch
-        case e: IllegalStateException => throw e
-        case e: Exception =>
-          throw new IllegalStateException(
-            s"Bandersnatch native VRF-output extraction unavailable for header entropy source: ${e.getMessage}",
-            e
-          )
+      try Option(BandersnatchWrapper.getIetfVrfOutput(header.entropySource.toArray)).filter(_.length == 32)
+      catch case _: RuntimeException => None
 
     SafroleInput(
       slot = header.slot.toLong,
-      entropy = vrfOutput,
+      entropy = vrfOutput.fold(Hash(new Array[Byte](32)))(Hash(_)),
       extrinsic = tickets
     )
 

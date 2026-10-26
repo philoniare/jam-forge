@@ -127,6 +127,12 @@ object DisputeTransition:
 
       // 2. Validate each verdict (must happen before culprit target validation)
       for verdict <- disputes.verdicts do
+        // Validate votes are sorted and unique by index
+        if !ValidationHelpers.isSortedUniqueByInt(verdict.votes)(
+            _.validatorIndex.toInt
+          )
+        then break(Left(DisputeErrorCode.JudgementsNotSortedUnique))
+
         // Validate judgment age
         if !validateJudgementAge(verdict, currentEpoch) then
           break(Left(DisputeErrorCode.BadJudgementAge))
@@ -140,12 +146,6 @@ object DisputeTransition:
         // Validate vote distribution
         if !validateVoteDistribution(positiveVotes, validatorSet.size) then
           break(Left(DisputeErrorCode.BadVoteSplit))
-
-        // Validate votes are sorted and unique by index
-        if !ValidationHelpers.isSortedUniqueByInt(verdict.votes)(
-            _.validatorIndex.toInt
-          )
-        then break(Left(DisputeErrorCode.JudgementsNotSortedUnique))
 
         // Verify all vote signatures as one batch
         val voteCount = verdict.votes.size

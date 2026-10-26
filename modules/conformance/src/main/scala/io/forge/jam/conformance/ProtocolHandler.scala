@@ -197,7 +197,7 @@ class ProtocolHandler(
     */
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
     val result =
-      try ImportBlockStep(stateStore, blockImporter, importBlock.block)
+      try ImportBlockStep(stateStore, blockImporter, importBlock.block)(using config)
       catch
         case NonFatal(error) =>
           throw new IllegalStateException(

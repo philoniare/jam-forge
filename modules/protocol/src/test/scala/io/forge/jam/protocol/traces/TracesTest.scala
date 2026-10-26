@@ -514,7 +514,7 @@ class TracesTest extends AnyFunSuite with Matchers:
       new BlockImporter(config).importBlock(step.block, step.preState) match
         case ImportResult.Success(root, _) =>
           root shouldBe step.postState.stateRoot withClue s"Post-state root mismatch in $traceName step $stepName"
-        case ImportResult.Failure(error, message) =>
+        case ImportResult.Failure(error, message, _) =>
           step.postState.stateRoot shouldBe step.preState.stateRoot withClue
             s"$traceName step $stepName rejected ($error: $message) but a state change was expected"
 

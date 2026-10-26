@@ -7,6 +7,7 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.epoch.ValidatorKey
+import io.forge.jam.protocol.SignatureBatch
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData
 
@@ -65,7 +66,8 @@ final case class PipelineContext(
   accumulationStats: Map[Long, (Long, Int)] = Map.empty,
   accumulationTransferCounts: Map[Long, Int] = Map.empty,
   posteriorOffenders: List[Ed25519PublicKey] = List.empty,
-  pendingChecks: PendingChecks = new PendingChecks
+  pendingChecks: PendingChecks = new PendingChecks,
+  signatures: SignatureBatch = new SignatureBatch
 )
 
 object PipelineContext:

@@ -41,14 +41,16 @@ object BlockPipeline:
       _ <- setPosteriorOffenders
 
       // Step 1: Safrole
-      safroleOut <- safrole
+      safroleOut <- safroleEpoch
       _ <- storeSafroleOutput(safroleOut)
 
       // Step 2: Block seal validation (uses post-Safrole state)
-      _ <- validateBlockSeal
       _ <- validateEpochMark
       _ <- validateTicketsMark
+      _ <- validateBlockSeal
       _ <- validateEntropyVrf
+
+      _ <- safroleTickets
 
       // Capture post-Safrole tau for later restoration
       postSafroleTau <- inspect((v, _) => v.timeslot)
