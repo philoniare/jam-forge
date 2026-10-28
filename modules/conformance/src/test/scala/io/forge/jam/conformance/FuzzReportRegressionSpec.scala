@@ -18,7 +18,8 @@ import scala.util.Using
   * post-state root. Without a genesis the session starts from the first step's pre-state, with no ancestry.
   *
   * The bundled corpus is the jamforge-failing subset of the jam-conformance fuzz reports (fuzz-reports/0.8.0, branch
-  * v0.8.0). Set `JAM_FUZZ_REPORT_TRACES=<dir>` to replay another traces directory instead.
+  * v0.8.0, plus the PR #217 batch in jam-conformance/jam-fuzzing). Set `JAM_FUZZ_REPORT_TRACES=<dir>` to replay
+  * another traces directory instead.
   */
 class FuzzReportRegressionSpec extends AnyFunSuite with Matchers:
   private val config = ChainConfig.TINY

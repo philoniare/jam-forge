@@ -284,16 +284,18 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     // Determine new service ID
     val minPublicServiceIndex = context.minPublicServiceIndex
-    val unsignedRequestedServiceId = requestedServiceId & 0xffffffffL
+    // GP 0.8.0 §accumulatefunctions `new`: the desired id is the whole 64-bit register 12, so high bits put it
+    // outside the protected range S_S.
     val usedRegistrarPrivilege =
-      context.serviceIndex == context.x.registrar && unsignedRequestedServiceId < minPublicServiceIndex
+      context.serviceIndex == context.x.registrar &&
+        java.lang.Long.compareUnsigned(requestedServiceId, minPublicServiceIndex) < 0
     val newServiceId: Long =
       if usedRegistrarPrivilege then
         // Registrar can request specific service ID below minPublicServiceIndex
-        if context.x.accounts.contains(unsignedRequestedServiceId) then
+        if context.x.accounts.contains(requestedServiceId) then
           setReg(instance, 7, HostCallResult.FULL)
           return
-        unsignedRequestedServiceId
+        requestedServiceId
       else
         // Use pre-calculated nextAccountIndex
         context.nextAccountIndex

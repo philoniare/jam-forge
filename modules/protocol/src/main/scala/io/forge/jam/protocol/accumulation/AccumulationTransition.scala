@@ -207,8 +207,9 @@ object AccumulationTransition:
     val newRecords = queuedReports.map { report =>
       val prereqs = report.context.prerequisites
       val segmentDeps = report.segmentRootLookup.map(_.workPackageHash)
-      // D(r) is a set union: a package that is both a prerequisite and a segment-root lookup key counts once.
-      val allDeps = (prereqs ++ segmentDeps).distinct.filter(h =>
+      // D(r) is a set union (GP 0.8.0 §accumulation D(r)), so a package that is both a prerequisite and a lookup key
+      // counts once, and sets serialize in sorted order (GP 0.8.0 appendix C; omega is C(14) in appendix D).
+      val allDeps = (prereqs ++ segmentDeps).distinct.sorted.filter(h =>
         !accumulatedSnapshot.contains(JamBytes(h.bytes))
       )
       AccumulationReadyRecord(report, allDeps)
