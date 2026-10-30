@@ -119,16 +119,17 @@ final class ServiceStorageView private (
   /**
    * Applies the writes `child` (from [[fork]]) made since it was forked. Two services of one batch may not both alter
    * the same service, so a key that another absorbed fork already set to a
-   * different value makes the block invalid, as conflicting account updates do.
+   * different value makes the block invalid, as conflicting account updates do. Writes to keys failing `keep` are
+   * dropped.
    */
-  def absorb(child: ServiceStorageView): Unit =
+  def absorb(child: ServiceStorageView, keep: JamBytes => Boolean = _ => true): Unit =
     val base = child.batchStart.getOrElse(
       throw new IllegalArgumentException("absorb expects a view made by fork")
     )
     child.pending.foreach { (k, v) =>
       val inherited = base.get(k)
       // The fork shares its base's entries, so an entry it did not write is the very same Option instance.
-      if !inherited.exists(_ eq v) then
+      if !inherited.exists(_ eq v) && keep(k) then
         pending.get(k) match
           case Some(current) if !inherited.exists(_ eq current) && current != v =>
             throw new RuntimeException(

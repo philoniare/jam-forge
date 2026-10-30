@@ -797,11 +797,20 @@ object AccumulationTransition:
           .toMap
         sortedServices.map(byService)
     for
-      s      <- sortedServices
-      parent <- executor.storageView
-      child  <- forks(s)
-    do parent.absorb(child)
+      (s, result) <- sortedServices.zip(results)
+      parent      <- executor.storageView
+      child       <- forks(s)
+    do parent.absorb(child, keepsWrite(s, initialState, result.postState))
     results
+
+  /** ∆* accounts' = (d ∪ n) ∖ m: from service `s`'s run only its own account and the
+    * accounts it created (n) or removed (m) carry over. An account it ejected and recreated under one id is in
+    * neither, so its storage writes are dropped and the prior account stays.
+    */
+  private def keepsWrite(s: Long, initialState: PartialState, postState: PartialState)(key: JamBytes): Boolean =
+    StateKey.serviceIdOf(key).forall { id =>
+      id == s || initialState.accounts.contains(id) != postState.accounts.contains(id)
+    }
 
   /** Everything the per-service execution loop accumulates across one batch.
     */
@@ -1009,13 +1018,14 @@ object AccumulationTransition:
     for (id, _) <- initialState.accounts do
       if !postState.accounts.contains(id) then changes.removedAccounts += id
 
-    for (key, value) <- postState.rawServiceDataByStateKey do
+    val keep = keepsWrite(serviceId, initialState, postState)
+    for (key, value) <- postState.rawServiceDataByStateKey if keep(key) do
       val initValue = initialState.rawServiceDataByStateKey.get(key)
       if initValue.isEmpty || initValue.get != value then
         changes.rawServiceDataUpdates(key) = value
 
     // Check for removed rawServiceData keys
-    for (key, _) <- initialState.rawServiceDataByStateKey do
+    for (key, _) <- initialState.rawServiceDataByStateKey if keep(key) do
       if !postState.rawServiceDataByStateKey.contains(key) then
         changes.rawServiceDataRemovals += key
 

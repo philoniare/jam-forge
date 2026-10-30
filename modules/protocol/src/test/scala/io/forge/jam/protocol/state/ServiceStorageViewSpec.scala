@@ -50,6 +50,18 @@ class ServiceStorageViewSpec extends AnyFlatSpec with Matchers:
     parent.getByStateKey(staged) shouldBe None
   }
 
+  it should "drop a fork's writes that fail the keep filter (accounts' = (d ∪ n) ∖ m)" in {
+    val parent = new ServiceStorageView(StateTrie.empty(new InMemoryTrieBackend()))
+    parent.putByStateKey(key(0x06, 0x00), bytes(6))
+    val a = parent.fork()
+    a.deleteByStateKey(key(0x06, 0x00))
+    a.putByStateKey(key(0x07, 0x00), bytes(7))
+
+    parent.absorb(a, _ != key(0x06, 0x00))
+    parent.getByStateKey(key(0x06, 0x00)) shouldBe Some(bytes(6))
+    parent.getByStateKey(key(0x07, 0x00)) shouldBe Some(bytes(7))
+  }
+
   it should "roll a fork back to its own savepoint without touching the parent or other forks" in {
     val parent = new ServiceStorageView(StateTrie.empty(new InMemoryTrieBackend()))
     val a = parent.fork()

@@ -28,6 +28,7 @@ class CrossBatchVisibilitySpec extends AnyFunSuite with Matchers:
   private val B = 10L // writes in batch 1 (always-accumulate)
   private val C = 20L // runs in batch 1 next to B
   private val D = 30L // second transfer destination, so batch 2 has two services
+  private val N = 40L // created during a run
 
   /** One service's run: sees the operands, may call host calls, returns its deferred transfers. */
   private type Script = Calls => List[DeferredTransfer]
@@ -241,13 +242,31 @@ class CrossBatchVisibilitySpec extends AnyFunSuite with Matchers:
     }
 
     test(s"GP: two services of one batch writing one key differently make the block invalid ($path)") {
-      val shared = StateKey.computeStorageStateKey(D, sKey)
-      val scripts: Map[Long, Script] = Map(
-        B -> { c => c.ctx.writeRawData(shared, bytes(1)); Nil },
-        C -> { c => c.ctx.writeRawData(shared, bytes(2)); Nil }
-      )
+      // Both create service N (as `new` does), so N is in n for each and its writes carry over.
+      val shared = StateKey.computeStorageStateKey(N, sKey)
+      def create(c: Calls, value: JamBytes): List[DeferredTransfer] =
+        c.ctx.x.accounts = c.ctx.x.accounts.updated(N, account(N))
+        c.ctx.writeRawData(shared, value)
+        Nil
+      val scripts: Map[Long, Script] = Map(B -> (create(_, bytes(1))), C -> (create(_, bytes(2))))
       val e = intercept[RuntimeException](run(parallel, Nil, scripts))
       e.getMessage should include("block invalid")
+    }
+
+    test(s"a service's writes to an account it ejects and recreates are dropped ($path, accounts' = (d ∪ n) ∖ m)") {
+      val dKey = StateKey.computeStorageStateKey(D, sKey)
+      val scripts: Map[Long, Script] = Map(
+        B -> { c =>
+          val prior = c.ctx.x.accounts(D)
+          c.ctx.x.accounts = c.ctx.x.accounts.removed(D)
+          c.ctx.deleteRawData(dKey)
+          c.ctx.x.accounts = c.ctx.x.accounts.updated(D, prior)
+          c.ctx.writeRawData(dKey, bytes(2))
+          Nil
+        }
+      )
+      val r = run(parallel, Seq(dKey -> bytes(1)), scripts)
+      r.view.getByStateKey(dKey) shouldBe Some(bytes(1))
     }
 
   test("GP: the parallel and sequential accpar paths produce the same posterior (eq. 12.18)") {

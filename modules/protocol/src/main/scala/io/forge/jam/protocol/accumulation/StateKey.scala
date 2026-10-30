@@ -162,6 +162,17 @@ object StateKey:
 
     timeslots.toList
 
+  /** The service a service-data key C(s, h) or account record key C(255, s) belongs to; None for chapter keys. */
+  def serviceIdOf(key: JamBytes): Option[Long] =
+    val arr = key.toArray
+    if arr.length < 8 || isChapterKey(arr) then None
+    else
+      val off = if isAccountRecordKey(arr) then 1 else 0
+      Some(
+        (arr(off) & 0xffL) | ((arr(off + 2) & 0xffL) << 8) | ((arr(off + 4) & 0xffL) << 16) |
+          ((arr(off + 6) & 0xffL) << 24)
+      )
+
   def isUnprovidedRequest(data: JamBytes): Boolean =
     scala.util.Try(decodePreimageInfoValue(data).isEmpty).getOrElse(false)
 
