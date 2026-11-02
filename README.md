@@ -189,6 +189,13 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ---
 
+## 💳 Addresses
+
+- **Polkadot Asset Hub:** `15tgSQA8ge7S5jZDevXPdiTXjRV1toyD57XSJvLYqSVQbTAg`
+- **Kusama Asset Hub:** `HTzxPEwTDrtPrN9TzHSPWzP2Pmc1BEFSzdhYHd9m9gP9vuF`
+
+---
+
 <div align="center">
   <strong>Built with ❤️ using Scala 3</strong>
   <br>
