@@ -11,3 +11,6 @@
 	path = jam-conformance
 	url = git@github.com:davxy/jam-conformance.git
 	fetchRecurseSubmodules = false
+[submodule "jam-crypto"]
+	path = jam-crypto
+	url = https://github.com/jam-conformance/jam-crypto

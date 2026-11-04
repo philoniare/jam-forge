@@ -1,19 +1,16 @@
 package io.forge.jam.crypto
 
 import io.circe.{Decoder, HCursor}
-import io.circe.parser.*
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature}
-
-import scala.io.Source
 
 /**
  * Tests for Ed25519 signature verification (ZIP-215 rules), single and batched.
  */
 class Ed25519Test extends AnyFunSuite with Matchers:
 
-  /** Test vector case from vectors.json */
+  /** A case of jam-crypto ed25519/vectors.json */
   case class TestVector(
     number: Int,
     desc: String,
@@ -43,16 +40,8 @@ class Ed25519Test extends AnyFunSuite with Matchers:
     val cleanHex = hex.stripPrefix("0x")
     cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-  private def loadTestVectors(): List[TestVector] =
-    val stream = getClass.getResourceAsStream("/ed25519-vectors.json")
-    val source = Source.fromInputStream(stream)
-    try
-      val json = source.mkString
-      decode[List[TestVector]](json)(using Decoder.decodeList(using TestVector.given_Decoder_TestVector)) match
-        case Right(vectors) => vectors
-        case Left(err) => throw new RuntimeException(s"Failed to parse test vectors: $err")
-    finally
-      source.close()
+  // jam-crypto/ed25519: 196 ZIP-215 vectors (14 x 14 small-order A and R encodings).
+  private def loadTestVectors(): List[TestVector] = JamCryptoVectors.load[List[TestVector]]("ed25519/vectors.json")
 
   test("Should return false on invalid input sizes") {
     val emptyMsg: Array[Byte] = Array.empty[Byte]
@@ -142,6 +131,13 @@ class Ed25519Test extends AnyFunSuite with Matchers:
     ) {
       divergent shouldBe empty
     }
+  }
+
+  test("every jam-crypto ZIP-215 vector verifies") {
+    // A and R are small-order and s = 0, so [8][s]B = [8]R + [8][k]A holds for every encoding ZIP-215 decodes.
+    val vectors = loadTestVectors()
+    vectors.map(_.number) shouldBe (1 to 196)
+    vectors.filterNot(verifyVector).map(v => s"#${v.number} (${v.desc})") shouldBe empty
   }
 
   private def item(v: TestVector) =

@@ -1,15 +1,13 @@
-package io.forge.jam.protocol.erasure
+package io.forge.jam.crypto
 
 import io.circe.{Decoder, HCursor}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful
 import io.forge.jam.core.ChainConfig
-import io.forge.jam.crypto.ErasureCoding
-import io.forge.jam.protocol.TestFileLoader
 
 /**
- * Tests for Erasure Coding using Reed-Solomon via native JNI bindings and the jamtestvectors.
+ * Tests for Erasure Coding using Reed-Solomon via native JNI bindings and the jam-crypto erasure-coding vectors.
  */
 class ErasureCodingTest extends AnyFunSuite with Matchers:
 
@@ -31,91 +29,33 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
           dataHex <- c.downField("data").as[String]
           shardsHex <- c.downField("shards").as[List[String]]
         yield ErasureCodingTestVector(
-          hexToBytes(dataHex),
-          shardsHex.map(hexToBytes).toArray
+          JamCryptoVectors.hex(dataHex),
+          shardsHex.map(JamCryptoVectors.hex).toArray
         )
 
-  private def hexToBytes(hex: String): Array[Byte] =
-    val cleanHex = hex.stripPrefix("0x")
-    cleanHex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+  // jam-crypto/erasure-coding: reference erasure_shards dumps, tiny (6 shards) and full (1023 shards).
+  private val vectorSets = Seq("tiny" -> TinyConfig, "full" -> FullConfig)
 
-  private def bytesToHex(bytes: Array[Byte]): String =
-    "0x" + bytes.map(b => f"${b & 0xff}%02x").mkString
+  private def vectors(config: String): List[(String, ErasureCodingTestVector)] =
+    val files = JamCryptoVectors.jsonFiles(s"erasure-coding/vectors/$config")
+    files.map(f => f -> JamCryptoVectors.load[ErasureCodingTestVector](f))
 
   test("Native library should be available") {
     ErasureCoding.isAvailable shouldBe true
   }
 
-  test("Conformance test vectors - tiny config") {
-    val folderPath = "erasure/tiny"
-    val basicSize = basicSizeForConfig(TinyConfig)
-    val validatorCount = TinyConfig.validatorCount
-
-    val testFilesResult = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
-    testFilesResult
-      .isRight shouldBe true withClue s"Failed to list tiny test vectors: ${testFilesResult.left.getOrElse("")}"
-
-    val testFiles = testFilesResult.getOrElse(List.empty)
-    testFiles should not be empty withClue "Should have test files in tiny folder"
-
-    for filename <- testFiles do
-      withClue(s"Test vector $filename: ") {
-        val vectorResult = TestFileLoader.loadJsonFromTestVectors[ErasureCodingTestVector](folderPath, filename)
-        vectorResult.isRight shouldBe true withClue s"Failed to load: ${vectorResult.left.getOrElse("")}"
-
-        val vector = vectorResult.toOption.get
-
-        // Chunk the data
-        val chunkResult = ErasureCoding.chunk(vector.data, basicSize, validatorCount)
-        chunkResult.isRight shouldBe true withClue s"Chunk failed: ${chunkResult.left.map(_.getMessage).getOrElse("")}"
-
-        val chunks = chunkResult.toOption.get
-
-        // Verify shard count
-        chunks.length shouldBe vector.shards.length withClue "Shard count mismatch"
-
-        // Verify each shard matches expected
-        for i <- chunks.indices do
-          withClue(s"Shard $i mismatch - got ${bytesToHex(chunks(i))}, expected ${bytesToHex(vector.shards(i))}: ") {
-            chunks(i) shouldBe vector.shards(i)
-          }
-      }
-  }
-
-  test("Conformance test vectors - full config") {
-    val folderPath = "erasure/full"
-    val basicSize = basicSizeForConfig(FullConfig)
-    val validatorCount = FullConfig.validatorCount
-
-    val testFilesResult = TestFileLoader.getTestFilenamesFromTestVectors(folderPath)
-    testFilesResult
-      .isRight shouldBe true withClue s"Failed to list full test vectors: ${testFilesResult.left.getOrElse("")}"
-
-    val testFiles = testFilesResult.getOrElse(List.empty)
-    testFiles should not be empty withClue "Should have test files in full folder"
-
-    for filename <- testFiles do
-      withClue(s"Test vector $filename: ") {
-        val vectorResult = TestFileLoader.loadJsonFromTestVectors[ErasureCodingTestVector](folderPath, filename)
-        vectorResult.isRight shouldBe true withClue s"Failed to load: ${vectorResult.left.getOrElse("")}"
-
-        val vector = vectorResult.toOption.get
-
-        // Chunk the data
-        val chunkResult = ErasureCoding.chunk(vector.data, basicSize, validatorCount)
-        chunkResult.isRight shouldBe true withClue s"Chunk failed: ${chunkResult.left.map(_.getMessage).getOrElse("")}"
-
-        val chunks = chunkResult.toOption.get
-
-        // Verify shard count
-        chunks.length shouldBe vector.shards.length withClue "Shard count mismatch"
-
-        // Verify each shard matches expected
-        for i <- chunks.indices do
-          withClue(s"Shard $i mismatch: ") {
-            chunks(i) shouldBe vector.shards(i)
-          }
-      }
+  test("Conformance test vectors - chunk gives each vector's shards") {
+    for (name, config) <- vectorSets do
+      val basicSize = basicSizeForConfig(config)
+      val vs = vectors(name)
+      vs.map(_._2.data.length) shouldBe List(100, 10000, 3, 32, 4096, 4104) withClue s"$name lengths"
+      for (file, vector) <- vs do
+        withClue(s"$file: ") {
+          val chunks = ErasureCoding.chunk(vector.data, basicSize, config.validatorCount).toOption.get
+          chunks.length shouldBe config.validatorCount
+          for i <- chunks.indices do
+            withClue(s"shard $i: ")(chunks(i) shouldBe vector.shards(i))
+        }
   }
 
   test("Chunk and reconstruct roundtrip (tiny config)") {
@@ -256,16 +196,30 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
   }
 
   test("Conformance test vectors - reconstruct from recovery shards") {
-    for (folder, config) <- Seq("erasure/tiny" -> TinyConfig, "erasure/full" -> FullConfig) do
+    for (name, config) <- vectorSets do
       val basicSize = basicSizeForConfig(config)
       val originalCount = basicSize / 2
-      for filename <- TestFileLoader.getTestFilenamesFromTestVectors(folder).toOption.get do
-        withClue(s"$folder/$filename: ") {
-          val vector = TestFileLoader.loadJsonFromTestVectors[ErasureCodingTestVector](folder, filename).toOption.get
+      for (file, vector) <- vectors(name) do
+        withClue(s"$file: ") {
           val shards = vector.shards.zipWithIndex.drop(originalCount).map((d, i) => ErasureCoding.Shard(d, i))
           val rebuilt = ErasureCoding.reconstruct(shards, basicSize, config.validatorCount).toOption.get
           rebuilt.take(vector.data.length) shouldBe vector.data
           rebuilt.drop(vector.data.length).forall(_ == 0) shouldBe true
+        }
+  }
+
+  test("any recovery-threshold subset of a vector's shards rebuilds its data") {
+    val rng = new scala.util.Random(7)
+    for (name, config) <- vectorSets do
+      val basicSize = basicSizeForConfig(config)
+      val originalCount = basicSize / 2
+      for (file, vector) <- vectors(name); _ <- 0 until 3 do
+        withClue(s"$file: ") {
+          val picked = rng.shuffle(vector.shards.indices.toList).take(originalCount)
+          val shards = picked.map(i => ErasureCoding.Shard(vector.shards(i), i)).toArray
+          val rebuilt = ErasureCoding.reconstruct(shards, basicSize, config.validatorCount).toOption.get
+          rebuilt.take(vector.data.length) shouldBe vector.data
+          ErasureCoding.reconstruct(shards.tail, basicSize, config.validatorCount).isLeft shouldBe true
         }
   }
 
@@ -306,11 +260,10 @@ class ErasureCodingTest extends AnyFunSuite with Matchers:
   }
 
   test("Conformance test vectors - chunkSegments gives each vector's shards") {
-    for (folder, config) <- Seq("erasure/tiny" -> TinyConfig, "erasure/full" -> FullConfig) do
+    for (name, config) <- vectorSets do
       val basicSize = basicSizeForConfig(config)
-      for filename <- TestFileLoader.getTestFilenamesFromTestVectors(folder).toOption.get do
-        withClue(s"$folder/$filename: ") {
-          val vector = TestFileLoader.loadJsonFromTestVectors[ErasureCodingTestVector](folder, filename).toOption.get
+      for (file, vector) <- vectors(name) do
+        withClue(s"$file: ") {
           // The vector's data as three segments of one length: each must code to the vector's shards.
           val shards =
             ErasureCoding.chunkSegments(IndexedSeq.fill(3)(vector.data), basicSize, config.validatorCount).toOption.get
