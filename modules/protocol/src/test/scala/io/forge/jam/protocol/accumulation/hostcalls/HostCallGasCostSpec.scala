@@ -209,6 +209,40 @@ class HostCallGasCostSpec extends HostCallTestBase:
     HostCallGas.fnmemgas(3358L, huge) shouldBe Long.MaxValue
   }
 
+  test("memory-sized host-call costs are c + Σ ⌈L·ℓ/1024⌉ saturated as a whole, never wrapped negative") {
+    val z = ULong(8522824353721756824L)
+    val huge = ULong(-1L)
+    def expected(c: Long, terms: (Long, ULong)*): Long =
+      val u = (n: ULong) => BigInt(n.toString)
+      val total = terms.foldLeft(BigInt(c)) { case (acc, (l, n)) => acc + (BigInt(l) * u(n) + 1023) / 1024 }
+      total.min(BigInt(Long.MaxValue)).toLong
+    val costs = List(
+      "provide" -> (HostCallGas.provideGas(z), expected(3980L, 2264L -> z)),
+      "read" -> (HostCallGas.readGas(huge, huge), expected(2407L, 1736L -> huge, 248L -> huge)),
+      "read (value only)" -> (HostCallGas.readGas(ULong(32L), huge), expected(2407L, 1736L -> ULong(32L), 248L -> huge)),
+      "write" -> (HostCallGas.writeGas(huge, huge), expected(2442L, 3358L -> huge, 216L -> huge)),
+      "lookup" -> (HostCallGas.lookupGas(huge), expected(600L, 248L -> huge)),
+      "fetch" -> (HostCallGas.fetchGas(ULong(14L), huge), expected(287L, 400L -> huge)),
+      "historical_lookup" -> (HostCallGas.historicalLookupGas(huge), expected(1125L, 264L -> huge)),
+      "machine" -> (HostCallGas.machineGas(huge), expected(1862L, 112L -> huge)),
+      "peek" -> (HostCallGas.peekGas(huge), expected(377L, 336L -> huge)),
+      "poke" -> (HostCallGas.pokeGas(huge), expected(297L, 224L -> huge))
+    )
+    costs.foreach { case (name, (cost, want)) => withClue(name)(cost shouldBe want) }
+    HostCallGas.provideGas(z) shouldBe Long.MaxValue
+    HostCallGas.writeGas(huge, huge) shouldBe Long.MaxValue
+  }
+
+  test("a saturated PROVIDE cost exceeds the gas counter (OOG, not a gas refund)") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    instance.setReg(9, 8522824353721756824L)
+    val cost = hostCalls.getGasCost(HostCall.PROVIDE, instance)
+    cost should be > 0L
+    (2806L - cost) should be < 0L
+  }
+
   // ===========================================================================
   // GROW_HEAP exclusion + unknown-call cost
   // ===========================================================================

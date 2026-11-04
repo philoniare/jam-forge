@@ -6,10 +6,17 @@ object HostCallGas:
 
   val Cgasunknown: Long = 1000L
 
-  def fnmemgas(L: Long, l: ULong): Long =
-    val product = BigInt(L) * unsignedBigInt(l)
-    val ceilDiv = (product + 1023) / 1024
-    saturate(ceilDiv)
+  def fnmemgas(L: Long, l: ULong): Long = saturate(memgas(L, l))
+
+  /** fnmemgas: ⌈L·ℓ/1024⌉, unbounded. */
+  private def memgas(L: Long, l: ULong): BigInt = (BigInt(L) * unsignedBigInt(l) + 1023) / 1024
+
+  /** `c + Σ fnmemgas(L, ℓ)` over unbounded naturals, saturated once at the end. Saturating each term and then adding
+    * the constant in `Long` wraps to a negative cost, which would add gas instead of failing the check
+    * ϱ < g (OOG).
+    */
+  private def memCost(c: Long, terms: (Long, ULong)*): Long =
+    saturate(terms.foldLeft(BigInt(c)) { case (acc, (l, n)) => acc + memgas(l, n) })
 
   private def saturatingMulAdd(base: Long, rate: Long, count: ULong): Long =
     saturate(BigInt(base) + BigInt(rate) * unsignedBigInt(count))
@@ -54,43 +61,43 @@ object HostCallGas:
     val (c, l) =
       if selector < ULong(16L) then fetchCaseCost(selector.toInt)
       else fetchOtherwiseCost
-    c + fnmemgas(l, z)
+    memCost(c, l -> z)
 
   val CgasLconst: Long = 600L
   val CgasLlinear: Long = 248L
-  def lookupGas(z: ULong): Long = CgasLconst + fnmemgas(CgasLlinear, z)
+  def lookupGas(z: ULong): Long = memCost(CgasLconst, CgasLlinear -> z)
 
   val CgasRconst: Long = 2407L
   val CgasRkeylinear: Long = 1736L
   val CgasRvallinear: Long = 248L
   def readGas(keyLen: ULong, valLen: ULong): Long =
-    CgasRconst + fnmemgas(CgasRkeylinear, keyLen) + fnmemgas(CgasRvallinear, valLen)
+    memCost(CgasRconst, CgasRkeylinear -> keyLen, CgasRvallinear -> valLen)
 
   val CgasWconst: Long = 2442L
   val CgasWkeylinear: Long = 3358L
   val CgasWvallinear: Long = 216L
   def writeGas(keyLen: ULong, valLen: ULong): Long =
-    CgasWconst + fnmemgas(CgasWkeylinear, keyLen) + fnmemgas(CgasWvallinear, valLen)
+    memCost(CgasWconst, CgasWkeylinear -> keyLen, CgasWvallinear -> valLen)
 
   val CgasI: Long = 703L
 
   val CgasHconst: Long = 1125L
   val CgasHlinear: Long = 264L
-  def historicalLookupGas(z: ULong): Long = CgasHconst + fnmemgas(CgasHlinear, z)
+  def historicalLookupGas(z: ULong): Long = memCost(CgasHconst, CgasHlinear -> z)
 
   val CgasE: Long = 3521L
 
   val CgasMconst: Long = 1862L
   val CgasMlinear: Long = 112L
-  def machineGas(codeLen: ULong): Long = CgasMconst + fnmemgas(CgasMlinear, codeLen)
+  def machineGas(codeLen: ULong): Long = memCost(CgasMconst, CgasMlinear -> codeLen)
 
   val CgasPconst: Long = 377L
   val CgasPlinear: Long = 336L
-  def peekGas(z: ULong): Long = CgasPconst + fnmemgas(CgasPlinear, z)
+  def peekGas(z: ULong): Long = memCost(CgasPconst, CgasPlinear -> z)
 
   val CgasOconst: Long = 297L
   val CgasOlinear: Long = 224L
-  def pokeGas(z: ULong): Long = CgasOconst + fnmemgas(CgasOlinear, z)
+  def pokeGas(z: ULong): Long = memCost(CgasOconst, CgasOlinear -> z)
 
   val CgasZfreeconst: Long = 212L
   val CgasZfreelinear: Long = 118L
@@ -141,4 +148,4 @@ object HostCallGas:
 
   val CgasAriesconst: Long = 3980L
   val CgasArieslinear: Long = 2264L
-  def provideGas(z: ULong): Long = CgasAriesconst + fnmemgas(CgasArieslinear, z)
+  def provideGas(z: ULong): Long = memCost(CgasAriesconst, CgasArieslinear -> z)
