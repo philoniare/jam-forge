@@ -234,6 +234,11 @@ class RefineHostCalls(
     val codeLen = getReg(instance, 8)
     val pc = getReg(instance, 9).toLong
 
+    // Omega_M: at most 63 inner VMs; FULL is checked first.
+    if context.innerPvms.size >= RefineHostCalls.MaxInnerPvms then
+      setReg(instance, 7, HostCallResult.FULL)
+      return
+
     // A length beyond the 32-bit address space can never be readable → panic.
     if codeLen > ULong(Int.MaxValue) ||
       !instance.isMemoryReadable(codeAddr.toInt, codeLen.toInt)
@@ -455,6 +460,10 @@ class RefineHostCalls(
       case Some(guest) =>
         setReg(instance, 7, ULong(guest.pc))
         context.innerPvms.remove(n.toLong)
+
+object RefineHostCalls:
+  /** Inner-VM limit of Omega_M: machine returns FULL once 63 exist. */
+  val MaxInnerPvms: Int = 63
 
 /** Fetch-value resolution shared between the refine and is-authorized
   * dispatchers. Absent inputs (`None`) make

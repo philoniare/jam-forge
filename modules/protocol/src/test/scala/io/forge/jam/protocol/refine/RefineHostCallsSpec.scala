@@ -369,6 +369,14 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     ULong(instance.reg(7)) shouldBe HostCallResult.HUH
   }
 
+  test("MACHINE returns FULL once 63 inner VMs exist") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    (0 until 63).foreach(i => createMachine(hc) shouldBe i.toLong)
+    ULong(createMachine(hc)) shouldBe HostCallResult.FULL
+    ctx.innerPvms.size shouldBe 63
+  }
+
   test("MACHINE reuses the lowest expunged index") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
