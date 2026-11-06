@@ -343,20 +343,6 @@ class ProvideHostCallSpec extends HostCallTestBase:
       }
   }
 
-  test("READ: a key length of exactly 2^32 truncates to 0, not to a panic") {
-    val context = createTestContext()
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = new PageMapLikeInstance
-
-    instance.setReg(7, 0xffffffffffffffffL)
-    instance.setReg(8, 0x10000)
-    instance.setReg(9, 0x1_00000000L)
-    instance.setReg(10, 0x20000)
-
-    noException should be thrownBy hostCalls.dispatch(HostCall.READ, instance)
-    ULong(instance.reg(7)) shouldBe HostCallResult.NONE
-  }
-
   test("WRITE: PANICs when the key or value length narrows to a negative Int") {
     for (keyLen, valueLen) <- Seq(
         (0xffffffffL, 4L),

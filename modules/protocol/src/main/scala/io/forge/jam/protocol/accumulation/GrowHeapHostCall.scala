@@ -20,17 +20,16 @@ object GrowHeapHostCall:
       case Some((h, b)) =>
         val hU = ULong(h)
         val bU = ULong(b)
-        if requested <= hU || requested > bU then
-          instance.setGas(instance.gas - CgasGeminiConst)
+        val noChange = requested <= hU || requested > bU
+        val deltaPages = if noChange then 0L else (requested - hU).toLong
+        val g = CgasGeminiConst + deltaPages * CgasGeminiLinear
+        if instance.gas < g then
+          instance.setGas(0L)
+          instance.forceOutOfGas()
+        else if noChange then
+          instance.setGas(instance.gas - g)
           instance.setReg(7, hU.signed)
         else
-          val deltaPages = (requested - hU).toLong
-          val g = CgasGeminiConst + deltaPages * CgasGeminiLinear
-          if instance.gas < g then
-            instance.setGas(0L)
-            instance.setReg(7, hU.signed)
-            instance.forceOutOfGas()
-          else
-            instance.setGas(instance.gas - g)
-            instance.growHeapPages(deltaPages)
-            instance.setReg(7, requested.signed)
+          instance.setGas(instance.gas - g)
+          instance.growHeapPages(deltaPages)
+          instance.setReg(7, requested.signed)

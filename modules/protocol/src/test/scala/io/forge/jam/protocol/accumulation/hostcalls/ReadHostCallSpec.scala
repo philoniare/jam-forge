@@ -143,3 +143,18 @@ class ReadHostCallSpec extends HostCallTestBase:
     // Empty slice: the sentinel is untouched.
     instance.readBytes(outputAddr, 1).get shouldBe Array[Byte](0x7f)
   }
+
+  test("READ with key length 2^32 or 2^32 + 4 panics instead of truncating") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    instance.writeBytes(0x10000, Array[Byte](1, 2, 3, 4))
+    for keyLen <- Seq(1L << 32, (1L << 32) + 4L) do
+      instance.setReg(7, -1L)
+      instance.setReg(8, 0x10000)
+      instance.setReg(9, keyLen)
+      instance.setReg(10, 0x10100)
+      instance.setReg(11, 0)
+      instance.setReg(12, 0)
+      an[io.forge.jam.protocol.HostCallPanic] should be thrownBy hostCalls.dispatch(HostCall.READ, instance)
+  }

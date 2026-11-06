@@ -129,7 +129,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleRead(instance: PvmInstance): Unit =
     val serviceId = getReg(instance, 7).toLong
     val keyAddr = argAddr(instance, 8)
-    val keyLen = getReg(instance, 9) & ULong(0xffffffffL)
+    val keyLen = getReg(instance, 9)
     val outputAddr = argAddr(instance, 10)
 
     // Read key from memory - PANIC on memory failure
@@ -176,8 +176,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleWrite(instance: PvmInstance): Unit =
     val keyAddr = argAddr(instance, 7)
     val valueAddr = argAddr(instance, 9)
-    val keyLen: Long = (getReg(instance, 8) & ULong(0xffffffffL)).toLong
-    val valueLen: Long = (getReg(instance, 10) & ULong(0xffffffffL)).toLong
+    val keyLenU = getReg(instance, 8)
+    val valueLenU = getReg(instance, 10)
 
     val account = context.x.accounts.get(context.serviceIndex)
     if account.isEmpty then
@@ -188,7 +188,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     val acc = account.get
 
     // Read key from memory
-    val keyBuffer = readGuestBytes(instance, keyAddr, ULong(keyLen), "Write")
+    val keyBuffer = readGuestBytes(instance, keyAddr, keyLenU, "Write")
+    val keyLen: Long = keyLenU.toLong
 
     val key = JamBytes(keyBuffer)
     // Hashed once: the read of the old value and the staged write both use it.
@@ -205,8 +206,9 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
     // Calculate new footprint to check threshold
     val newValue =
-      if valueLen == 0L then None
-      else Some(JamBytes(readGuestBytes(instance, valueAddr, ULong(valueLen), "Write")))
+      if valueLenU == ULong(0L) then None
+      else Some(JamBytes(readGuestBytes(instance, valueAddr, valueLenU, "Write")))
+    val valueLen: Long = valueLenU.toLong
 
     // Calculate bytes/items delta for threshold check
     val (bytesDelta, itemsDelta): (Long, Int) = (valueLen, keyWasPresent) match

@@ -83,6 +83,32 @@ class GrowHeapHostCallSpec extends HostCallTestBase:
     instance.growHeapPagesGrown shouldBe 0L // no pages marked
   }
 
+  test("GROW_HEAP no-change branch is OOG when gas < 275, registers unchanged") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    for r7 <- Seq(48L, 10L, 2000000L) do
+      val instance = createMockInstance(gas = CgasGeminiConst - 1)
+      instance.configureGrowHeap(hInitial = 48L, maxPage = 1044431L)
+      instance.setReg(7, r7)
+      hostCalls.dispatch(HostCall.GROW_HEAP, instance)
+      instance.gas shouldBe 0L
+      instance.isForcedOutOfGas shouldBe true
+      instance.reg(7) shouldBe r7
+      instance.growHeapPagesGrown shouldBe 0L
+  }
+
+  test("GROW_HEAP no-change branch with exactly 275 gas succeeds") {
+    val context = createTestContext()
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance(gas = CgasGeminiConst)
+    instance.configureGrowHeap(hInitial = 48L, maxPage = 1044431L)
+    instance.setReg(7, 48L)
+    hostCalls.dispatch(HostCall.GROW_HEAP, instance)
+    instance.gas shouldBe 0L
+    instance.isForcedOutOfGas shouldBe false
+    instance.reg(7) shouldBe 48L
+  }
+
   test("GROW_HEAP: instance without a heap-page model throws (PANIC), never fabricates a heap pointer") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)

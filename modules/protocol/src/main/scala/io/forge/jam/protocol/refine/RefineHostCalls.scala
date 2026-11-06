@@ -414,7 +414,8 @@ class RefineHostCalls(
               outcome = InterruptKind.Panic
               running = false
 
-        LittleEndian.put(block, 0, guestInstance.gas, 8)
+        val guestGasLeft = math.max(0L, guestInstance.gas)
+        LittleEndian.put(block, 0, guestGasLeft, 8)
         var i = 0
         while i < 13 do
           LittleEndian.put(block, 8 + 8 * i, guestInstance.regs(i), 8)
@@ -433,6 +434,7 @@ class RefineHostCalls(
               .getOrElse(guest.pc)
         guest.pc = pcNow
         guest.gasChargedFlag = guestInstance.gasChargedFlag
+        instance.setGas(instance.gas + guestGasLeft)
 
         outcome match
           case InterruptKind.Ecalli(hostId) =>

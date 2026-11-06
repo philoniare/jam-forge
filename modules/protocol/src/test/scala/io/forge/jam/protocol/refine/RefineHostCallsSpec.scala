@@ -620,6 +620,55 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     regsAfter(0) shouldBe 0xffff0000L
   }
 
+  private def chargeAndDispatch(hc: RefineHostCalls, id: Int, instance: MockPvmInstance): Unit =
+    instance.setGas(instance.gas - hc.getGasCost(id, instance))
+    hc.dispatch(id, instance)
+
+  test("INVOKE refunds the guest's unused gas to the caller (gas* = max(gas - g, 0) + g_R')") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    chargeAndDispatch(hc, HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
+    readInvokeBlock(instance, 0x8000)._1 shouldBe 78L
+    instance.gas shouldBe 1_000_000L - (968L + 100L) + 78L
+  }
+
+  test("INVOKE on a missing machine charges C_K + g_R and refunds nothing (WHO)") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L)
+    instance.setReg(7, 5L)
+    instance.setReg(8, 0x8000L)
+    chargeAndDispatch(hc, HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.WHO
+    instance.gas shouldBe 1_000_000L - (968L + 100L)
+  }
+
+  test("INVOKE after guest OOG keeps the uncharged g_R' and refunds it") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 1L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    chargeAndDispatch(hc, HostCall.INVOKE, instance)
+
+    ULong(instance.reg(7)) shouldBe HostCallResult.OOG
+    readInvokeBlock(instance, 0x8000)._1 shouldBe 1L
+    instance.gas shouldBe 1_000_000L - 968L
+  }
+
   test("GP: INVOKE stores pc 0 after a guest halt, and EXPUNGE returns it") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
