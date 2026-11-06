@@ -83,7 +83,6 @@ object AssuranceTypes:
    * Error codes for the Assurances STF.
    */
   enum AssuranceErrorCode:
-    case BadAttestationParent
     case BadValidatorIndex
     case CoreNotEngaged
     case BadSignature
@@ -102,7 +101,6 @@ object AssuranceTypes:
     given Decoder[AssuranceErrorCode] =
       Decoder.instance { cursor =>
         cursor.as[String].map {
-          case "bad_attestation_parent" => AssuranceErrorCode.BadAttestationParent
           case "bad_validator_index" => AssuranceErrorCode.BadValidatorIndex
           case "core_not_engaged" => AssuranceErrorCode.CoreNotEngaged
           case "bad_signature" => AssuranceErrorCode.BadSignature

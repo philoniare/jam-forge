@@ -43,7 +43,7 @@ object IntermediateSteps:
             else
               val vrfInput = SigningContext.fallbackSealInputData(entropy)
               ctx.pendingChecks.start {
-                val vrfResult = BandersnatchVrf.ietfVrfVerify(
+                val vrfResult = BandersnatchVrf.thinVrfVerify(
                   blockAuthorKey.bytes,
                   vrfInput,
                   encodedHeader,
@@ -60,7 +60,7 @@ object IntermediateSteps:
             val ticket = tickets(slotIndex)
             val vrfInput = SigningContext.safroleTicketInputData(entropy, ticket.attempt.toByte)
             ctx.pendingChecks.start {
-              val vrfResult = BandersnatchVrf.ietfVrfVerify(
+              val vrfResult = BandersnatchVrf.thinVrfVerify(
                 blockAuthorKey.bytes,
                 vrfInput,
                 encodedHeader,
@@ -103,7 +103,7 @@ object IntermediateSteps:
       else
         val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
         ctx.pendingChecks.start {
-          val vrfResult = BandersnatchVrf.ietfVrfVerify(
+          val vrfResult = BandersnatchVrf.thinVrfVerify(
             blockAuthorKey.bytes,
             vrfInput,
             Array.empty[Byte],

@@ -109,10 +109,10 @@ class BlockGenerator(
       case TicketsOrKeys.Tickets(tickets) =>
         SigningContext.safroleTicketInputData(sealEntropy, tickets(slotIndex).attempt.toByte)
 
-    val dummySeal = BandersnatchWrapper.ietfVrfSign(authorBsSecret, sealVrfInput, Array.empty)
-    val sealVrfOutput = BandersnatchWrapper.getIetfVrfOutput(dummySeal)
+    val dummySeal = BandersnatchWrapper.thinVrfSign(authorBsSecret, sealVrfInput, Array.empty)
+    val sealVrfOutput = BandersnatchWrapper.getThinVrfOutput(dummySeal)
     val entropyVrfInput = SigningContext.entropyInputData(sealVrfOutput)
-    val entropyVrf = BandersnatchWrapper.ietfVrfSign(authorBsSecret, entropyVrfInput, Array.empty)
+    val entropyVrf = BandersnatchWrapper.thinVrfSign(authorBsSecret, entropyVrfInput, Array.empty)
 
     val headerCodec = Header.headerCodec(config.epochLength)
     val headerWithEntropy = Header(
@@ -130,7 +130,7 @@ class BlockGenerator(
 
     val fullHeaderBytes = headerCodec.encode(headerWithEntropy)
     val encodedUnsignedHeader = fullHeaderBytes.dropRight(96)
-    val seal = BandersnatchWrapper.ietfVrfSign(authorBsSecret, sealVrfInput, encodedUnsignedHeader)
+    val seal = BandersnatchWrapper.thinVrfSign(authorBsSecret, sealVrfInput, encodedUnsignedHeader)
     val finalHeader = headerWithEntropy.copy(seal = JamBytes(seal))
 
     val finalHeaderBytes = headerCodec.encode(finalHeader)

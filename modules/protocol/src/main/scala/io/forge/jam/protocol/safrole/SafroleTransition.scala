@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.safrole
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, StfResult}
-import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey, BlsPublicKey}
+import io.forge.jam.core.primitives.{Hash, BandersnatchPublicKey, Ed25519PublicKey}
 import io.forge.jam.core.codec.codecs.uint32L
 import io.forge.jam.core.types.epoch.{ValidatorKey, EpochMark, EpochValidatorKey}
 import io.forge.jam.core.types.tickets.{TicketEnvelope, TicketMark}
@@ -202,18 +202,11 @@ object SafroleTransition extends StrictLogging:
     val newLambda = preState.kappa
     val newKappa = preState.gammaK
 
-    // Load new pending validators with offender filtering
+    // Phi(iota): offenders become the null key K_0
     val offenderSet = posteriorOffenders.map(o => JamBytes(o.bytes)).toSet
     val newGammaK = preState.iota.map { validator =>
-      if offenderSet.contains(JamBytes(validator.ed25519.bytes)) then
-        validator.copy(
-          bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
-          ed25519 = Ed25519PublicKey(new Array[Byte](32)),
-          bls = BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
-          metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
-        )
-      else
-        validator
+      if offenderSet.contains(JamBytes(validator.ed25519.bytes)) then ValidatorKey.nullKey
+      else validator
     }
 
     // Generate new ring root.

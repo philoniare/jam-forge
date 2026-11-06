@@ -2,7 +2,6 @@ package io.forge.jam.protocol.accumulation.hostcalls
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.accumulation._
 import spire.math.ULong
 
@@ -134,22 +133,21 @@ class QueryHostCallSpec extends HostCallTestBase:
     instance.setReg(7, keyAddr)
     instance.setReg(8, 0xffffffffL)
 
-    val ex = intercept[HostCallPanic] {
-      hostCalls.dispatch(HostCall.QUERY, instance)
-    }
-    ex.getMessage should include("PANIC")
+    // z = 2^32-1 is outside N_P, so QUERY is HUH and never decodes the guest-written value.
+    noException should be thrownBy hostCalls.dispatch(HostCall.QUERY, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.HUH
 
-  test("QUERY: PANICs (not IllegalStateException) on a guest-written info value with count > 3") {
+  test("QUERY with the aliasing z = 2^32-1 is HUH, not a decode of a value with count > 3") {
     // 0x10 -> compact integer 16, which fails the `count > 3` well-formedness check.
     writeThenQueryWithAliasedZ(Array[Byte](0x10))
   }
 
-  test("QUERY: PANICs on a guest-written info value whose length contradicts its count") {
+  test("QUERY with the aliasing z = 2^32-1 is HUH, not a decode of a value whose length contradicts its count") {
     // count = 2 demands 1 + 8 bytes; only 2 are present.
     writeThenQueryWithAliasedZ(Array[Byte](0x02, 0x00))
   }
 
-  test("QUERY: PANICs on a guest-written info value with a truncated compact prefix") {
+  test("QUERY with the aliasing z = 2^32-1 is HUH, not a decode of a truncated compact prefix") {
     // Multi-byte compact prefix with no continuation bytes: drives the decoder
     // off the end of the value rather than tripping either explicit check.
     writeThenQueryWithAliasedZ(Array[Byte](0x80.toByte))

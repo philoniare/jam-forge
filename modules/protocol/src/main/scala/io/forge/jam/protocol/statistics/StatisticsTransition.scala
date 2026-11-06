@@ -73,7 +73,7 @@ object StatisticsTransition:
         blocks = a.blocks + 1,
         tickets = a.tickets + input.extrinsic.tickets.size,
         preImages = a.preImages + input.extrinsic.preimages.size,
-        preImagesSize = a.preImagesSize + input.extrinsic.preimages.map(_.blob.length).sum
+        preImagesSize = a.preImagesSize + input.extrinsic.preimages.map(_.blob.length.toLong).sum
       )
 
     // For each guarantee, determine which validator set to use based on epoch

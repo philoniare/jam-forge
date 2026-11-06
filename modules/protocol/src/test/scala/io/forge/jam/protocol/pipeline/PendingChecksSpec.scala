@@ -76,12 +76,12 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
   private def resealed(header: Header): Block =
     val codec = Header.headerCodec(config.epochLength)
     val unsigned = codec.encode(header.copy(seal = JamBytes.zeros(96))).dropRight(96)
-    val seal = BandersnatchWrapper.ietfVrfSign(fixture.secret, fixture.sealInput, unsigned)
+    val seal = BandersnatchWrapper.thinVrfSign(fixture.secret, fixture.sealInput, unsigned)
     fixture.block.copy(header = header.copy(seal = JamBytes(seal)))
 
   /** A valid VRF signature by the author, but over a different input than the seal's output. */
   private def wrongEntropySource: JamBytes =
-    JamBytes(BandersnatchWrapper.ietfVrfSign(fixture.secret, SigningContext.entropyInputData(new Array[Byte](32)), Array.empty))
+    JamBytes(BandersnatchWrapper.thinVrfSign(fixture.secret, SigningContext.entropyInputData(new Array[Byte](32)), Array.empty))
 
   private val malformedEntropySource: JamBytes = JamBytes(Array.fill[Byte](96)(0xff.toByte))
 

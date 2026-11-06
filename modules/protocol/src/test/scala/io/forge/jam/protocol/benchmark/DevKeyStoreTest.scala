@@ -9,10 +9,11 @@ class DevKeyStoreTest extends AnyFunSpec with Matchers:
     it("should derive keys matching genesis validators"):
       val validators = DevKeyStore.getAllTinyValidators()
 
-      // Expected Bandersnatch public keys from genesis (first 8 bytes hex)
+      // Expected public keys of the trivial validators (first 8 bytes hex), as in the jam-test-vectors STF
+      // vectors. The Bandersnatch keys are the ark-vrf 0.6.0 ones (VRF spec draft 35).
       val expectedBs = List(
-        "ff71c6c03ff88adb", "dee6d555b82024f1", "9326edb21e554171",
-        "0746846d17469fb2", "151e5c8fe2b9d8a6", "2105650944fcd101"
+        "4fc1cc2146c5463a", "4d5c855aebc996a8", "60a294af38653b7f",
+        "1e50be41fa601015", "b9b83ef77c1fda8f", "7ef0acbb01d1ad5d"
       )
       val expectedEd = List(
         "4418fb8c85bb3985", "ad93247bd0130755", "cab2b9ff25c2410f",
@@ -46,12 +47,12 @@ class DevKeyStoreTest extends AnyFunSpec with Matchers:
 
       val vrfInput = "test vrf input".getBytes
       val auxData = "test aux".getBytes
-      val sig = io.forge.jam.vrfs.BandersnatchWrapper.ietfVrfSign(v0.bandersnatchSecret, vrfInput, auxData)
+      val sig = io.forge.jam.vrfs.BandersnatchWrapper.thinVrfSign(v0.bandersnatchSecret, vrfInput, auxData)
       sig should not be null
       sig.length shouldBe 96
 
       // Verify the signature
-      val output = io.forge.jam.vrfs.BandersnatchWrapper.ietfVrfVerify(
+      val output = io.forge.jam.vrfs.BandersnatchWrapper.thinVrfVerify(
         v0.bandersnatchPublic, vrfInput, auxData, sig
       )
       output should not be null

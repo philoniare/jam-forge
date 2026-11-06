@@ -203,11 +203,10 @@ object complextypes:
 
   given Decoder[AssuranceExtrinsic] = Decoder.instance { cursor =>
     for
-      anchor <- cursor.downField("anchor").as[Hash]
       bitfield <- cursor.downField("bitfield").as[JamBytes]
       validatorIndex <- cursor.downField("validator_index").as[Int]
       signature <- cursor.downField("signature").as[Ed25519Signature]
-    yield AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(validatorIndex), signature)
+    yield AssuranceExtrinsic(Hash.zero, bitfield, ValidatorIndex(validatorIndex), signature)
   }
 
   given Decoder[Verdict] = Decoder.instance { cursor =>

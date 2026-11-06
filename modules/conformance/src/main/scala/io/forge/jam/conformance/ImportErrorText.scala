@@ -48,7 +48,6 @@ object ImportErrorText:
     case SafroleErrorCode.DuplicateTicket  => "duplicate ticket"
 
   private def assurances(code: AssuranceErrorCode): String = code match
-    case AssuranceErrorCode.BadAttestationParent      => "bad attestation parent"
     case AssuranceErrorCode.BadValidatorIndex         => "bad attestation validator index"
     case AssuranceErrorCode.CoreNotEngaged            => "core not engaged"
     case AssuranceErrorCode.BadSignature              => "bad signature"

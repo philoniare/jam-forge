@@ -224,7 +224,8 @@ class HostCallGasCostSpec extends HostCallTestBase:
       "lookup" -> (HostCallGas.lookupGas(huge), expected(600L, 248L -> huge)),
       "fetch" -> (HostCallGas.fetchGas(ULong(14L), huge), expected(287L, 400L -> huge)),
       "historical_lookup" -> (HostCallGas.historicalLookupGas(huge), expected(1125L, 264L -> huge)),
-      "machine" -> (HostCallGas.machineGas(huge), expected(1862L, 112L -> huge)),
+      "compile (memory)" -> (HostCallGas.compileGas(ULong(0L), huge), expected(1862L, 264L -> huge)),
+      "compile (db)" -> (HostCallGas.compileGas(ULong(1L), huge), expected(1862L, 366L -> huge)),
       "peek" -> (HostCallGas.peekGas(huge), expected(377L, 336L -> huge)),
       "poke" -> (HostCallGas.pokeGas(huge), expected(297L, 224L -> huge))
     )

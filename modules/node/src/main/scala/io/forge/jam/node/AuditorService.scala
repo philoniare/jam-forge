@@ -181,7 +181,7 @@ final class AuditorService(
     t.validators.zipWithIndex.flatMap((k, i) => byPublic.get(Ed25519PublicKey(k)).map(i -> _))
 
   private def initialTranche(t: Tracked, v: Int, keys: ValidatorKeySet): Unit =
-    val s0 = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
+    val s0 = BandersnatchWrapper.thinVrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
     BandersnatchVrf.getVrfOutput(s0).foreach { y =>
       val cores = initialCores(t.q, y)
       val items = cores.sorted.flatMap(c => t.reportHashes(c).map(c -> _))
@@ -200,7 +200,7 @@ final class AuditorService(
       val forced = negative.get(h).exists(_.nonEmpty)
       if !forced && noShows.isEmpty then None
       else
-        val sig = BandersnatchWrapper.ietfVrfSign(
+        val sig = BandersnatchWrapper.thinVrfSign(
           keys.bandersnatchSecret,
           laterInput(t.vrfOutput, h, n),
           Array.emptyByteArray
@@ -476,13 +476,13 @@ final class AuditorService(
       val selected =
         if n == 0 then
           BandersnatchVrf
-            .ietfVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence)
+            .thinVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence)
             .exists(y => a.items.map(_._1).toSet.subsetOf(initialCores(t.q, y).toSet))
         else
           decodeLaterEvidence(evidence, a.items.size).toOption.exists { perReport =>
             a.items.zip(perReport).forall { case ((_, h), (sig, noShows)) =>
               BandersnatchVrf
-                .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
+                .thinVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
                 .exists(y =>
                   negative.get(h).exists(_.nonEmpty) ||
                     escalates(y, t.validators.size, noShows.map(_.validator).distinct.size)

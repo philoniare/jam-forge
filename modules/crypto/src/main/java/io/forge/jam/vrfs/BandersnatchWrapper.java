@@ -142,9 +142,9 @@ public class BandersnatchWrapper {
     );
 
     /**
-     * Get the VRF output from an IETF VRF signature.
+     * Get the VRF output from a Bandersnatch (Thin VRF) signature.
      */
-    public static native byte[] getIetfVrfOutput(byte[] signature);
+    public static native byte[] getThinVrfOutput(byte[] signature);
 
     /**
      * Get the VRF output hash (the ticket identifier) of a ring VRF signature, without verifying its proof.
@@ -162,14 +162,14 @@ public class BandersnatchWrapper {
     public static native byte[] publicFromSecret(byte[] secretBytes);
 
     /**
-     * Sign using IETF VRF.
+     * Sign using Thin VRF (IETF VRF before draft 35).
      */
-    public static native byte[] ietfVrfSign(byte[] secretBytes, byte[] vrfInput, byte[] auxData);
+    public static native byte[] thinVrfSign(byte[] secretBytes, byte[] vrfInput, byte[] auxData);
 
     /**
-     * Verify an IETF VRF signature.
+     * Verify a Thin VRF signature.
      */
-    public static native byte[] ietfVrfVerify(
+    public static native byte[] thinVrfVerify(
         byte[] publicBytes,
         byte[] vrfInput,
         byte[] auxData,

@@ -324,7 +324,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleQuery(instance: PvmInstance): Unit =
     val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
-    if zFull > ULong(0xffffffffL) then
+    if !inPreimageLen(zFull) then
       setReg(instance, 7, HostCallResult.HUH)
       return
     val length: Long = zFull.toLong
@@ -383,7 +383,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleSolicit(instance: PvmInstance): Unit =
     val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
-    if zFull > ULong(0xffffffffL) then
+    if !inPreimageLen(zFull) then
       setReg(instance, 7, HostCallResult.HUH)
       return
     val length: Long = zFull.toLong
@@ -487,7 +487,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   protected def handleForget(instance: PvmInstance): Unit =
     val hashAddr = argAddr(instance, 7)
     val zFull = getReg(instance, 8)
-    if zFull > ULong(0xffffffffL) then
+    if !inPreimageLen(zFull) then
       setReg(instance, 7, HostCallResult.HUH)
       return
     val length: Long = zFull.toLong
@@ -600,7 +600,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     */
   protected def handleProvide(instance: PvmInstance): Unit =
     val zFull = getReg(instance, 9)
-    if zFull > ULong(0xffffffffL) then
+    if !inPreimageLen(zFull) then
       setReg(instance, 7, HostCallResult.HUH)
       return
 

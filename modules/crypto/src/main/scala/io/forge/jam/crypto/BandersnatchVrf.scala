@@ -238,15 +238,15 @@ object BandersnatchVrf:
       case _: RuntimeException | _: LinkageError => false
 
   /**
-   * Verify an IETF VRF signature and return the VRF output.
+   * Verify a Bandersnatch Thin VRF signature and return the VRF output.
    *
    * @param publicKey The Bandersnatch public key (32 bytes)
    * @param vrfInput The VRF input data (signing context + entropy + optional attempt)
    * @param auxData Auxiliary data bound to the signature (e.g., encoded header)
-   * @param signature The 96-byte IETF VRF signature (seal)
+   * @param signature The 96-byte Thin VRF signature (seal)
    * @return Some(vrfOutput) if verification succeeds, None otherwise
    */
-  def ietfVrfVerify(
+  def thinVrfVerify(
     publicKey: Array[Byte],
     vrfInput: Array[Byte],
     auxData: Array[Byte],
@@ -254,7 +254,7 @@ object BandersnatchVrf:
   ): Option[Array[Byte]] =
     try
       JniBandersnatchWrapper.ensureLibraryLoaded()
-      val result = JniBandersnatchWrapper.ietfVrfVerify(publicKey, vrfInput, auxData, signature)
+      val result = JniBandersnatchWrapper.thinVrfVerify(publicKey, vrfInput, auxData, signature)
       if result == null || result.length != 32 then
         None
       else
@@ -263,9 +263,9 @@ object BandersnatchVrf:
       case _: RuntimeException => None
 
   /**
-   * Extract VRF output from an IETF VRF signature without verification.
+   * Extract VRF output from a Thin VRF signature without verification.
    *
-   * @param signature The 96-byte IETF VRF signature
+   * @param signature The 96-byte Thin VRF signature
    * @return Some(vrfOutput) with 32-byte output, None on failure
    */
   /**
@@ -283,7 +283,7 @@ object BandersnatchVrf:
   def getVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
     try
       JniBandersnatchWrapper.ensureLibraryLoaded()
-      val result = JniBandersnatchWrapper.getIetfVrfOutput(signature)
+      val result = JniBandersnatchWrapper.getThinVrfOutput(signature)
       if result == null || result.length != 32 then
         None
       else

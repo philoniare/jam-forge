@@ -153,9 +153,9 @@ final class BlockAuthor(
 
     // H_vrfsig: VRF over Xentropy ++ Y(sealsig); the seal's VRF output is
     // fixed by (context, key) alone, so a message-less pre-signature yields it.
-    val preSeal = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, Array.empty)
-    val sealVrfOutput = BandersnatchWrapper.getIetfVrfOutput(preSeal)
-    val entropyVrf = BandersnatchWrapper.ietfVrfSign(
+    val preSeal = BandersnatchWrapper.thinVrfSign(keys.bandersnatchSecret, sealVrfInput, Array.empty)
+    val sealVrfOutput = BandersnatchWrapper.getThinVrfOutput(preSeal)
+    val entropyVrf = BandersnatchWrapper.thinVrfSign(
       keys.bandersnatchSecret,
       SigningContext.entropyInputData(sealVrfOutput),
       Array.empty
@@ -180,7 +180,7 @@ final class BlockAuthor(
     val unsignedHeaderBytes =
       headerCodec.encode(unsealed).dropRight(96)
     val seal =
-      BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
+      BandersnatchWrapper.thinVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
     val block = Block(unsealed.copy(seal = JamBytes(seal)), extrinsic)
 
     pools.removeTickets(includedTickets.map(_._1))

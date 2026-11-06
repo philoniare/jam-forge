@@ -87,9 +87,18 @@ object HostCallGas:
 
   val CgasE: Long = 3521L
 
-  val CgasMconst: Long = 1862L
-  val CgasMlinear: Long = 112L
-  def machineGas(codeLen: ULong): Long = memCost(CgasMconst, CgasMlinear -> codeLen)
+  /** compile: M_{Γ,m,c}, M_{Γ,d,c}, M_{Γ,m,ℓ}, M_{Γ,d,ℓ}. */
+  val CgasGammamemconst: Long = 1862L
+  val CgasGammadbconst: Long = 1862L
+  val CgasGammamemlinear: Long = 264L
+  val CgasGammadblinear: Long = 366L
+  def compileGas(mode: ULong, len: ULong): Long =
+    if mode == ULong(0L) then memCost(CgasGammamemconst, CgasGammamemlinear -> len)
+    else if mode == ULong(1L) then memCost(CgasGammadbconst, CgasGammadblinear -> len)
+    else CgasGammamemconst
+
+  /** machine: flat M_M (the program is read by compile). */
+  val CgasM: Long = 1862L
 
   val CgasPconst: Long = 377L
   val CgasPlinear: Long = 336L

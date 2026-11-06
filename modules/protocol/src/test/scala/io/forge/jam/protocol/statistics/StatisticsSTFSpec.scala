@@ -49,9 +49,13 @@ class StatisticsSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPropert
     zero.assurances shouldBe 0L
   }
 
-  test("property: StatCount size is 24 bytes") {
-    // Property: StatCount should be 6 x 4 bytes = 24 bytes
-    StatCount.Size shouldBe 24
+  test("StatCount fields are compact naturals and pre-images size goes past 2^32") {
+    val codec = summon[io.forge.jam.core.codec.Codec[StatCount]]
+    codec.encode(StatCount.zero).length shouldBe 6
+    val big = StatCount(1, 2, 3, 1L << 40, 200, 70000)
+    val bytes = codec.encode(big)
+    bytes.length shouldBe 1 + 1 + 1 + 6 + 2 + 3
+    codec.decode(bytes) shouldBe Right(big)
   }
 
   test("property: valsCurrStats size matches validator count") {

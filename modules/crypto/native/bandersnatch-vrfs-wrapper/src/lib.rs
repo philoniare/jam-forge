@@ -1,16 +1,16 @@
 use ark_ec_vrfs::reexports::ark_serialize;
-use ark_ec_vrfs::ring::RingProofParams;
+use ark_ec_vrfs::ring::RingSetup;
 use ark_ec_vrfs::suites::bandersnatch::BandersnatchSha512Ell2;
-use ark_ec_vrfs::{Input, Output, Public, Secret};
+use ark_ec_vrfs::{Input, Output, Public, Secret, VrfIo};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-// Type aliases for IETF VRF
-type IetfProof = ark_ec_vrfs::ietf::Proof<BandersnatchSha512Ell2>;
+// Bandersnatch signatures are Thin VRF proofs (VRF spec draft 35), no longer IETF VRF.
+type ThinProof = ark_ec_vrfs::thin::Proof<BandersnatchSha512Ell2>;
 
 // Type aliases for Bandersnatch suite
 type RingProof = ark_ec_vrfs::ring::Proof<BandersnatchSha512Ell2>;
 type PcsParams = ark_ec_vrfs::ring::PcsParams<BandersnatchSha512Ell2>;
-type RingParams = RingProofParams<BandersnatchSha512Ell2>;
+type RingParams = RingSetup<BandersnatchSha512Ell2>;
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jbyte, jbyteArray, jint};
 use jni::JNIEnv;
@@ -62,7 +62,7 @@ fn ring_verifier(commitment: &[u8], ring_size: jint) -> Result<Arc<RingVerifier>
     let parsed = RingCommitment::deserialize_compressed(commitment)
         .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
     let ring_ctx = ring_context(ring_size)?;
-    let verifier = Arc::new(ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)));
+    let verifier = Arc::new(ring_ctx.ring_context().ring_verifier(ring_ctx.verifier_key_from_commitment(parsed)));
     *lock(&LAST_VERIFIER) = Some((commitment.to_vec(), size, verifier.clone()));
     Ok(verifier)
 }
@@ -95,7 +95,6 @@ fn checked_public(bytes: &[u8]) -> Option<BanderPublic> {
 enum VrfError {
     DeserializationError(&'static str),
     VerificationError,
-    ConversionError,
     RingContextMissing(usize),
 }
 
@@ -104,7 +103,6 @@ impl std::fmt::Display for VrfError {
         match self {
             VrfError::DeserializationError(msg) => write!(f, "Deserialization error: {}", msg),
             VrfError::VerificationError => write!(f, "VRF verification failed"),
-            VrfError::ConversionError => write!(f, "Data conversion error"),
             VrfError::RingContextMissing(n) => write!(f, "Ring context for ring size {} is not initialized", n),
         }
     }
@@ -197,13 +195,11 @@ struct Verifier {
 
 impl Verifier {
     fn new(ring: Vec<BanderPublic>, ring_size: jint) -> Result<Self, VrfError> {
-        // Backend currently requires the wrapped type (plain affine points)
-        let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
         let builders = ring_builder(ring_size)?;
         let (empty, lagrange) = &*builders;
         let mut builder = empty.clone();
         builder
-            .append(&pts, lagrange)
+            .append(&ring, lagrange)
             .map_err(|_| VrfError::DeserializationError("ring larger than the ring context it was built for"))?;
         let commitment = builder.finalize().commitment();
         Ok(Self { commitment })
@@ -221,22 +217,17 @@ impl Verifier {
         commitment: &[u8],
         ring_size: jint,
     ) -> Result<[u8; 32], VrfError> {
-        use ark_ec_vrfs::ring::Verifier as _;
-
         let signature = RingVrfSignature::deserialize_compressed(signature)
             .map_err(|_| VrfError::DeserializationError("invalid signature format"))?;
         let input_data = [b"jam_ticket_seal", &entropy[..], &[attempt]].concat();
 
-        let input = vrf_input_point(&input_data);
-        let output = signature.output;
+        let io = VrfIo { input: vrf_input_point(&input_data), output: signature.output };
 
         let verifier = ring_verifier(commitment, ring_size)?;
-        if BanderPublic::verify(input, output, &[], &signature.proof, &verifier).is_err() {
+        if signature.proof.verify(io, [], &verifier).is_err() {
             return Err(VrfError::VerificationError);
         }
-        output.hash()[..32]
-            .try_into()
-            .map_err(|_| VrfError::ConversionError)
+        Ok(output_hash(&signature.output))
     }
 }
 
@@ -297,7 +288,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVerifierCom
             Ok(public_key) => ring.push(public_key),
             Err(_e) => {
                 // Use a padding point as key
-                ring.push(BanderPublic::from_affine(RingParams::padding_point()));
+                ring.push(BanderPublic::padding());
             }
         }
     }
@@ -341,8 +332,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
     attempt: jbyte,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
-    use ark_ec_vrfs::ring::Prover as _;
-
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         std::ptr::null_mut()
@@ -389,30 +378,31 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ringVrfSign(
         let key_slice = &key_bytes[i * PUBLIC_KEY_SIZE..(i + 1) * PUBLIC_KEY_SIZE];
         match BanderPublic::deserialize_compressed_unchecked(&mut &key_slice[..]) {
             Ok(public_key) => ring.push(public_key),
-            Err(_e) => ring.push(BanderPublic::from_affine(RingParams::padding_point())),
+            Err(_e) => ring.push(BanderPublic::padding()),
         }
     }
 
     let input_data = [b"jam_ticket_seal", &entropy_data[..], &[attempt as u8]].concat();
-    let input = vrf_input_point(&input_data);
-    let output = secret.output(input);
+    let io = secret.vrf_io(vrf_input_point(&input_data));
 
-    let pts: Vec<_> = ring.iter().map(|pk| pk.0).collect();
     let ring_ctx = match ring_context(ring_size) {
         Ok(ctx) => ctx,
         Err(e) => return return_error_local(&mut env, &e.to_string()),
     };
-    let prover_key = ring_ctx.prover_key(&pts);
-    let prover = ring_ctx.prover(prover_key, prover_index as usize);
+    let prover_key = match ring_ctx.prover_key(&ring) {
+        Ok(k) => k,
+        Err(e) => return return_error_local(&mut env, &format!("Failed to build prover key: {:?}", e)),
+    };
+    let prover = ring_ctx.ring_context().ring_prover(prover_key, prover_index as usize);
 
     let proof = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        secret.prove(input, output, &[], &prover)
+        secret.prove_ring(io, [], &prover)
     })) {
         Ok(p) => p,
         Err(_) => return return_error_local(&mut env, "Panic during ring proof generation"),
     };
 
-    let signature = RingVrfSignature { output, proof };
+    let signature = RingVrfSignature { output: io.output, proof };
     let mut buf = Vec::new();
     if signature.serialize_compressed(&mut buf).is_err() {
         return return_error_local(&mut env, "Failed to serialize ring signature");
@@ -479,11 +469,16 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     })
 }
 
-/// IETF VRF signature structure (96 bytes: 32 output + 64 proof)
+/// Bandersnatch signature (Thin VRF): 32 output + 32 R + 32 s = 96 bytes.
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
-struct IetfVrfSignature {
+struct ThinVrfSignature {
     output: BanderOutput,
-    proof: IetfProof,
+    proof: ThinProof,
+}
+
+/// Y(o): the first 32 bytes of the output hash.
+fn output_hash(output: &BanderOutput) -> [u8; 32] {
+    output.hash::<32>()
 }
 
 /// Create a secret key from a 32-byte seed
@@ -508,7 +503,11 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed
         return return_error_local(&mut env, "Seed must be exactly 32 bytes");
     }
 
-    let secret = BanderSecret::from_seed(&seed_data);
+    let seed: [u8; 32] = match seed_data[..].try_into() {
+        Ok(s) => s,
+        Err(_) => return return_error_local(&mut env, "Seed must be exactly 32 bytes"),
+    };
+    let secret = BanderSecret::from_seed(seed);
 
     // Serialize the secret key (scalar)
     let mut buf = Vec::new();
@@ -560,9 +559,9 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecr
     })
 }
 
-/// IETF VRF sign - creates a 96-byte signature
+/// Bandersnatch signature (Thin VRF) - creates a 96-byte signature
 #[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_thinVrfSign(
     mut env: JNIEnv,
     _class: JClass,
     secret_bytes: JByteArray,
@@ -570,8 +569,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
     aux_data: JByteArray,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
-    use ark_ec_vrfs::ietf::Prover as _;
-
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         std::ptr::null_mut()
@@ -597,18 +594,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
         Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
     };
 
-    let input = vrf_input_point(&vrf_input_data);
-    let output = secret.output(input);
-    let proof = secret.prove(input, output, &aux);
+    let io = secret.vrf_io(vrf_input_point(&vrf_input_data));
+    let proof = secret.prove_thin(io, &aux);
 
-    // IETF signature structure: output (32 bytes) + proof (64 bytes) = 96 bytes
-    #[derive(CanonicalSerialize)]
-    struct IetfSig {
-        output: BanderOutput,
-        proof: IetfProof,
-    }
-
-    let signature = IetfSig { output, proof };
+    let signature = ThinVrfSignature { output: io.output, proof };
     let mut buf = Vec::new();
     if signature.serialize_compressed(&mut buf).is_err() {
         return return_error_local(&mut env, "Failed to serialize signature");
@@ -621,9 +610,9 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
     })
 }
 
-/// IETF VRF verify - verifies signature and returns 32-byte output hash
+/// Bandersnatch signature (Thin VRF) verify - verifies signature and returns 32-byte output hash
 #[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_thinVrfVerify(
     mut env: JNIEnv,
     _class: JClass,
     public_bytes: JByteArray,
@@ -632,8 +621,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
     signature: JByteArray,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
-    use ark_ec_vrfs::ietf::Verifier as _;
-
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
@@ -667,21 +654,18 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         None => return return_error_local(&mut env, "Failed to deserialize public key"),
     };
 
-    let sig = match IetfVrfSignature::deserialize_compressed(&sig_data[..]) {
+    let sig = match ThinVrfSignature::deserialize_compressed(&sig_data[..]) {
         Ok(s) => s,
         Err(_) => return return_error_local(&mut env, "Failed to deserialize signature"),
     };
 
-    let input = vrf_input_point(&vrf_input_data);
-    let output = sig.output;
+    let io = VrfIo { input: vrf_input_point(&vrf_input_data), output: sig.output };
 
-    if public.verify(input, output, &aux, &sig.proof).is_err() {
-        return return_error_local(&mut env, "IETF VRF verification failed");
+    if public.verify_thin(io, &aux, &sig.proof).is_err() {
+        return return_error_local(&mut env, "Bandersnatch signature verification failed");
     }
 
-    let output_hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
-
-    match env.byte_array_from_slice(&output_hash) {
+    match env.byte_array_from_slice(&output_hash(&sig.output)) {
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
@@ -720,21 +704,19 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getVrfOutput(
         Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
     };
 
-    let input = vrf_input_point(&vrf_input_data);
-    let output = secret.output(input);
-    let output_hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
+    let output = secret.output(vrf_input_point(&vrf_input_data));
 
-    match env.byte_array_from_slice(&output_hash) {
+    match env.byte_array_from_slice(&output_hash(&output)) {
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
     })
 }
 
-/// Extract the VRF output from an IETF VRF signature.
+/// Extract the VRF output from a Bandersnatch (Thin VRF) signature.
 /// The signature is 96 bytes and the output is 32 bytes.
 #[no_mangle]
-pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutput(
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getThinVrfOutput(
     mut env: JNIEnv,
     _class: JClass,
     signature: JByteArray,
@@ -758,17 +740,12 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getIetfVrfOutp
         return return_error_local(&mut env, "Signature must be at least 96 bytes");
     }
 
-    // Deserialize the IETF VRF signature
-    let signature = match IetfVrfSignature::deserialize_compressed_unchecked(&signature_data[..]) {
+    let signature = match ThinVrfSignature::deserialize_compressed_unchecked(&signature_data[..]) {
         Ok(sig) => sig,
-        Err(_) => return return_error_local(&mut env, "Failed to deserialize IETF VRF signature"),
+        Err(_) => return return_error_local(&mut env, "Failed to deserialize Bandersnatch signature"),
     };
 
-    // Extract the output hash (32 bytes)
-    let output_hash = signature.output.hash();
-    let output_bytes: [u8; 32] = output_hash[..32].try_into().unwrap_or([0u8; 32]);
-
-    match env.byte_array_from_slice(&output_bytes) {
+    match env.byte_array_from_slice(&output_hash(&signature.output)) {
         Ok(array) => array.into_raw(),
         Err(_) => return_error_local(&mut env, "Failed to create output array"),
     }
@@ -793,8 +770,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_getRingVrfOutp
         Ok(o) => o,
         Err(_) => return throw_exception(&mut env, "Invalid ring VRF output point"),
     };
-    let hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
-    match env.byte_array_from_slice(&hash) {
+    match env.byte_array_from_slice(&output_hash(&output)) {
         Ok(array) => array.into_raw(),
         Err(_) => throw_exception(&mut env, "Failed to create output array"),
     }
@@ -821,26 +797,25 @@ mod tests {
         // Check what we'd actually use in ring construction
         let point_for_ring = match BanderPublic::deserialize_compressed(&zeros[..]) {
             Ok(pk) => pk,
-            Err(_) => BanderPublic::from_affine(RingParams::padding_point()),
+            Err(_) => BanderPublic::padding(),
         };
 
         // Serialize the padding point
-        let padding = RingParams::padding_point();
+        let padding = BanderPublic::padding();
         let mut padding_buf = Vec::new();
         padding.serialize_compressed(&mut padding_buf).unwrap();
 
         // Serialize what we got
         let mut actual_buf = Vec::new();
         point_for_ring
-            .0
             .serialize_compressed(&mut actual_buf)
             .unwrap();
 
         println!("Padding point:     {}", hex::encode(&padding_buf));
         println!("Actual used point: {}", hex::encode(&actual_buf));
 
-        // Expected from spec: 92ca79e61dd90c1573a8693f199bf6e1e86835cc715cdcf93f5ef222560023aa
-        let expected = "92ca79e61dd90c1573a8693f199bf6e1e86835cc715cdcf93f5ef222560023aa";
+        // Bandersnatch VRF spec draft 35 section 5: y = 3087..5354 little-endian, x sign bit set.
+        let expected = "da5ca18e76fbd5467319795e26fd80f0b9cf7fc888d995348b7ff299197a42c4";
         println!("Expected padding:  {}", expected);
 
         assert_eq!(
@@ -852,7 +827,7 @@ mod tests {
 
     #[test]
     fn checked_public_caches_valid_keys_and_rejects_bad_ones() {
-        let secret = BanderSecret::from_seed(&[7u8; 32]);
+        let secret = BanderSecret::from_seed([7u8; 32]);
         let mut bytes = Vec::new();
         secret.public().serialize_compressed(&mut bytes).unwrap();
         let first = checked_public(&bytes).expect("valid key");

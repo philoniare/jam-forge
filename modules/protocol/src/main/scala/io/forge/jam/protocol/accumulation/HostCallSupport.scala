@@ -68,6 +68,10 @@ private[accumulation] trait HostCallSupport:
   protected def argAddr(instance: PvmInstance, reg: Int): Int =
     io.forge.jam.protocol.refine.PvmRunner.memAddr(instance.reg(reg))
 
+  /** z ∈ N_P: query, solicit, forget, provide and new return HUH otherwise. */
+  protected def inPreimageLen(z: ULong): Boolean =
+    z < ULong(io.forge.jam.core.constants.PreimageLenBound)
+
   protected def panic(message: String): Nothing =
     throw new io.forge.jam.protocol.HostCallPanic(message)
 

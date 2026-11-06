@@ -65,6 +65,11 @@ object constants:
   /** Cmaxpackageimports: maximum imported segments per work package. */
   val Cmaxpackageimports: Int = 3072
 
+  /** N_P = N_{2^32-2}: lengths under which a preimage may be solicited.
+    * Exclusive bound, so 2^32-2 itself is rejected.
+    */
+  val PreimageLenBound: Long = (1L << 32) - 2
+
   /** Cmaxpackageexports: maximum exported segments per work package. */
   val Cmaxpackageexports: Int = 3072
 

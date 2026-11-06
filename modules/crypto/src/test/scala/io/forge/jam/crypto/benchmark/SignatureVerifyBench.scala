@@ -11,7 +11,7 @@ import scala.util.Random
 
 /**
  * Signature verification benchmark. Ed25519 single and batch (a full-config block's 1023
- * assurances), Bandersnatch IETF VRF (block seal and entropy), and Bandersnatch ring VRF (Safrole tickets) at ring
+ * assurances), Bandersnatch Thin VRF (block seal and entropy), and Bandersnatch ring VRF (Safrole tickets) at ring
  * sizes 6 (tiny) and 1023 (full), plus the ring commitment built at each epoch change.
  *
  * Args: optional subset of `ed25519`, `ietf`, `ring`. Prints `RESULT name value unit` lines; single-thread figures
@@ -64,10 +64,10 @@ object SignatureVerifyBench:
       val aux = rng.nextBytes(600)
       (BandersnatchWrapper.publicFromSecret(secret), input, aux, secret)
     }
-    def sign() = cases.map((_, in, aux, sk) => BandersnatchWrapper.ietfVrfSign(sk, in, aux))
+    def sign() = cases.map((_, in, aux, sk) => BandersnatchWrapper.thinVrfSign(sk, in, aux))
     val sigs = sign()
     def verify(): Unit = cases.zip(sigs).foreach { case ((pk, in, aux, _), sig) =>
-      if BandersnatchVrf.ietfVrfVerify(pk, in, aux, sig).isEmpty then throw new IllegalStateException("bad seal")
+      if BandersnatchVrf.thinVrfVerify(pk, in, aux, sig).isEmpty then throw new IllegalStateException("bad seal")
     }
     for _ <- 1 to 3 do { sign(); verify() }
     result("bandersnatch_ietf_sign", median(Seq.fill(Runs)(timeMs(sign())._2)) * 1000 / n, "us/sig")

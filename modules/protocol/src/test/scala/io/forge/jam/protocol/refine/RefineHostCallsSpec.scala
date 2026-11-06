@@ -334,7 +334,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
   }
 
   // =========================================================================
-  // machine / peek / poke / pages / expunge
+  // compile / machine / peek / poke / pages / expunge
   // =========================================================================
 
   /** Minimal valid deblob-format blob: 0 jump-table entries, entry size 0,
@@ -342,30 +342,52 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     */
   private val validGuestCode: Array[Byte] = Array[Byte](0, 0, 1, 0, 1)
 
-  private def createMachine(hc: RefineHostCalls, pc: Long = 7L): Long =
+  /** compile (m = 0): store `blob`, read from memory, as a module; returns r7. */
+  private def compileFromMemory(hc: RefineHostCalls, blob: Array[Byte]): Long =
     val instance = newInstance()
-    instance.writeBytes(0x5000, validGuestCode) shouldBe true
-    instance.setReg(7, 0x5000L)
-    instance.setReg(8, validGuestCode.length.toLong)
-    instance.setReg(9, pc)
+    instance.writeBytes(0x5000, blob) shouldBe true
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x5000L)
+    instance.setReg(9, blob.length.toLong)
+    hc.dispatch(HostCall.COMPILE, instance)
+    instance.reg(7)
+
+  private def machine(hc: RefineHostCalls, handle: Long, pc: Long): Long =
+    val instance = newInstance()
+    instance.setReg(7, handle)
+    instance.setReg(8, pc)
     hc.dispatch(HostCall.MACHINE, instance)
     instance.reg(7)
 
-  test("MACHINE allocates ascending indices for valid code and HUH for garbage") {
+  private def expunge(hc: RefineHostCalls, mode: Long, n: Long): Long =
+    val instance = newInstance()
+    instance.setReg(7, mode)
+    instance.setReg(8, n)
+    hc.dispatch(HostCall.EXPUNGE, instance)
+    instance.reg(7)
+
+  private def createMachine(hc: RefineHostCalls, pc: Long = 7L): Long =
+    val h = compileFromMemory(hc, validGuestCode)
+    machine(hc, h, pc)
+
+  test("COMPILE (m = 0) stores modules under ascending handles and is HUH for garbage") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
-    createMachine(hc) shouldBe 0L
-    createMachine(hc) shouldBe 1L
-    ctx.innerPvms(0L).pc shouldBe 7L
+    compileFromMemory(hc, validGuestCode) shouldBe 0L
+    compileFromMemory(hc, validGuestCode) shouldBe 1L
+    ULong(compileFromMemory(hc, Array[Byte](-1, -1, -1))) shouldBe HostCallResult.HUH
+    ctx.modules.keySet shouldBe Set(0L, 1L)
+  }
 
-    // Garbage code → HUH
+  test("COMPILE panics on unreadable memory and is HUH for an unknown mode") {
+    val hc = new RefineHostCalls(newContext())
     val instance = newInstance()
-    instance.writeBytes(0x5000, Array[Byte](-1, -1, -1)) shouldBe true
-    instance.setReg(7, 0x5000L)
-    instance.setReg(8, 3L)
-    instance.setReg(9, 0L)
-    hc.dispatch(HostCall.MACHINE, instance)
+    instance.setReg(7, 0L); instance.setReg(8, 0x100000L - 2L); instance.setReg(9, 16L)
+    intercept[HostCallPanic](hc.dispatch(HostCall.COMPILE, instance))
+
+    instance.setReg(7, 2L); instance.setReg(8, 0x5000L); instance.setReg(9, 5L)
+    hc.dispatch(HostCall.COMPILE, instance)
     ULong(instance.reg(7)) shouldBe HostCallResult.HUH
   }
 
@@ -377,19 +399,76 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     ctx.innerPvms.size shouldBe 63
   }
 
+  test("COMPILE (m = 1) reads the slice [f, f + l) of a preimage at the lookup anchor") {
+    val hash = Hash(Array.fill[Byte](32)(0x44))
+    val stored = Array[Byte](9, 9) ++ validGuestCode ++ Array[Byte](8, 8)
+    val accounts = new MapLookupService(Map((42L, hash) -> stored), Set(42L))
+    val ctx = newContext(accounts = accounts)
+    val hc = new RefineHostCalls(ctx)
+    val instance = newInstance()
+    instance.writeBytes(0x3000, hash.bytes.toArray) shouldBe true
+    instance.setReg(7, 1L); instance.setReg(8, 0x3000L); instance.setReg(9, validGuestCode.length.toLong)
+    instance.setReg(10, 2L); instance.setReg(11, -1L) // own service
+    hc.dispatch(HostCall.COMPILE, instance)
+    instance.reg(7) shouldBe 0L
+    ctx.modules(0L).code.toSeq shouldBe validGuestCode.toSeq
+    accounts.lookups.last shouldBe ((42L, ctx.lookupAnchorTimeslot, hash))
+
+    // Missing preimage or unknown service: NONE.
+    instance.setReg(7, 1L); instance.setReg(8, 0x3000L); instance.setReg(11, 7L)
+    hc.dispatch(HostCall.COMPILE, instance)
+    ULong(instance.reg(7)) shouldBe HostCallResult.NONE
+  }
+
+  test("COMPILE is FULL once 128 handles are in use") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    (0 until 128).foreach(i => compileFromMemory(hc, validGuestCode) shouldBe i.toLong)
+    ULong(compileFromMemory(hc, validGuestCode)) shouldBe HostCallResult.FULL
+  }
+
+  test("MACHINE instantiates a module, is WHO for an unknown handle and FULL at 63 instances") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val h = compileFromMemory(hc, validGuestCode)
+
+    machine(hc, h, 7L) shouldBe 0L
+    machine(hc, h, 7L) shouldBe 1L
+    ctx.innerPvms(0L).pc shouldBe 7L
+    ctx.innerPvms(0L).handle shouldBe h
+    ULong(machine(hc, 5L, 0L)) shouldBe HostCallResult.WHO
+
+    (2 until 63).foreach(_ => machine(hc, h, 0L))
+    ULong(machine(hc, h, 0L)) shouldBe HostCallResult.FULL
+  }
+
   test("MACHINE reuses the lowest expunged index") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
     createMachine(hc) shouldBe 0L
     createMachine(hc) shouldBe 1L
 
-    val instance = newInstance()
-    instance.setReg(7, 0L)
-    hc.dispatch(HostCall.EXPUNGE, instance)
-    instance.reg(7) shouldBe 7L // returns the guest's pc
+    expunge(hc, 0L, 0L) shouldBe 7L // returns the guest's pc
     ctx.innerPvms.contains(0L) shouldBe false
 
     createMachine(hc) shouldBe 0L
+  }
+
+  test("EXPUNGE m = 1 drops a module, but its handle stays taken while an instance uses it") {
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val h = compileFromMemory(hc, validGuestCode)
+    machine(hc, h, 0L) shouldBe 0L
+
+    ULong(expunge(hc, 1L, h)) shouldBe HostCallResult.OK
+    ctx.modules.contains(h) shouldBe false
+    ULong(expunge(hc, 1L, h)) shouldBe HostCallResult.WHO
+    ULong(machine(hc, h, 0L)) shouldBe HostCallResult.WHO
+
+    // Handle 0 is still held by machine 0, so the next module gets 1.
+    compileFromMemory(hc, validGuestCode) shouldBe 1L
+    ULong(expunge(hc, 0L, 9L)) shouldBe HostCallResult.WHO
+    ULong(expunge(hc, 2L, 0L)) shouldBe HostCallResult.HUH
   }
 
   test("PEEK/POKE report WHO for a missing machine and OOB before pages are granted") {
@@ -559,13 +638,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
       blob: Array[Byte],
       pc: Long
   ): Long =
-    val instance = newInstance()
-    instance.writeBytes(0x5000, blob) shouldBe true
-    instance.setReg(7, 0x5000L)
-    instance.setReg(8, blob.length.toLong)
-    instance.setReg(9, pc)
-    hc.dispatch(HostCall.MACHINE, instance)
-    instance.reg(7)
+    machine(hc, compileFromMemory(hc, blob), pc)
 
   /** Write the 112-byte invoke block (gas + 13 registers) at `addr`. */
   private def writeInvokeBlock(
@@ -684,9 +757,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     ULong(instance.reg(7)) shouldBe HostCallResult.HALT
     ctx.innerPvms(0L).pc shouldBe 0L
 
-    instance.setReg(7, 0L)
-    hc.dispatch(HostCall.EXPUNGE, instance)
-    instance.reg(7) shouldBe 0L
+    expunge(hc, 0L, 0L) shouldBe 0L
   }
 
   test("GP: INVOKE stores pc 0 after a guest panic") {

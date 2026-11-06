@@ -17,10 +17,7 @@ import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.core.codec.Codec
 import spire.math.ULong
 
-/** Host-call dispatcher for the refine invocation
-  * INVOKE (12) is not yet wired to the interpreter and currently reports WHAT;
-  * every other refine host call is implemented per the spec.
-  */
+/** Host-call dispatcher for the refine invocation. */
 class RefineHostCalls(
     val context: RefineContext
 ) extends HostCallDispatcher:
@@ -68,8 +65,9 @@ class RefineHostCalls(
       case HostCall.HISTORICAL_LOOKUP =>
         HostCallGas.historicalLookupGas(getReg(instance, 11))
       case HostCall.EXPORT => HostCallGas.CgasE
-      case HostCall.MACHINE =>
-        HostCallGas.machineGas(getReg(instance, 8))
+      case HostCall.COMPILE =>
+        HostCallGas.compileGas(getReg(instance, 7), getReg(instance, 9))
+      case HostCall.MACHINE => HostCallGas.CgasM
       case HostCall.PEEK =>
         HostCallGas.peekGas(getReg(instance, 10))
       case HostCall.POKE =>
@@ -96,6 +94,7 @@ class RefineHostCalls(
       case HostCall.FETCH             => handleFetch(instance)
       case HostCall.HISTORICAL_LOOKUP => handleHistoricalLookup(instance)
       case HostCall.EXPORT            => handleExport(instance)
+      case HostCall.COMPILE           => handleCompile(instance)
       case HostCall.MACHINE           => handleMachine(instance)
       case HostCall.PEEK              => handlePeek(instance)
       case HostCall.POKE              => handlePoke(instance)
@@ -226,40 +225,92 @@ class RefineHostCalls(
       context.exports += segment
 
   // ===========================================================================
-  // machine (8) — Omega_M
+  // compile (9) — Omega_Γ: store a program module, read from memory
+  // (m = 0) or from a preimage of a service (m = 1), under the lowest free handle.
   // ===========================================================================
 
-  private def handleMachine(instance: PvmInstance): Unit =
-    val codeAddr = getReg(instance, 7)
-    val codeLen = getReg(instance, 8)
-    val pc = getReg(instance, 9).toLong
+  private def handleCompile(instance: PvmInstance): Unit =
+    val m = getReg(instance, 7)
+    val p = getReg(instance, 8)
+    val l = getReg(instance, 9)
+    val f = getReg(instance, 10)
+    val i = getReg(instance, 11)
 
-    // Omega_M: at most 63 inner VMs; FULL is checked first.
-    if context.innerPvms.size >= RefineHostCalls.MaxInnerPvms then
+    val used = context.usedHandles
+    if used.size >= 128 then
       setReg(instance, 7, HostCallResult.FULL)
       return
 
-    // A length beyond the 32-bit address space can never be readable → panic.
-    if codeLen > ULong(Int.MaxValue) ||
-      !instance.isMemoryReadable(codeAddr.toInt, codeLen.toInt)
-    then
-      panic(
-        s"Machine PANIC: code not readable at 0x${codeAddr.toLong.toHexString} len $codeLen"
-      )
+    def readable(addr: ULong, len: ULong): Boolean =
+      len <= ULong(Int.MaxValue) && instance.isMemoryReadable(PvmRunner.memAddr(addr.signed), len.toInt)
 
-    val code = new Array[Byte](codeLen.toInt)
-    if !readMemory(instance, codeAddr.toInt, code) then
-      panic(s"Machine PANIC: failed to read code")
+    // None = ∅ (no program), Some(None) = error (panic), Some(Some(blob)) = the program
+    val program: Option[Option[Array[Byte]]] =
+      if m == ULong(0L) then
+        if readable(p, l) then
+          val buf = new Array[Byte](l.toInt)
+          Some(Option.when(readMemory(instance, PvmRunner.memAddr(p.signed), buf))(buf))
+        else Some(None)
+      else if m == ULong(1L) then
+        if !readable(p, ULong(32L)) then Some(None)
+        else
+          val hash = new Array[Byte](32)
+          if !readMemory(instance, PvmRunner.memAddr(p.signed), hash) then Some(None)
+          else
+            val ownServiceId = context.workItem.service.value.toLong
+            val sid: Option[Long] =
+              if i == ULong.MaxValue then Some(ownServiceId)
+              else Option.when(i <= ULong(0xffffffffL))(i.toLong)
+            sid
+              .filter(context.accounts.serviceExists)
+              .flatMap(id => context.accounts.historicalLookup(id, context.lookupAnchorTimeslot, Hash(hash)))
+              .map { h =>
+                val size = ULong(h.length.toLong)
+                val fStar = if f < size then f else size
+                val rest = size - fStar
+                val lStar = if l < rest then l else rest
+                Some(h.slice(fStar.toInt, fStar.toInt + lStar.toInt))
+              }
+      else None
 
-    val parsed = getOrCompileMachineModule(code)
-
-    parsed match
+    program match
+      case Some(None) =>
+        panic(s"Compile PANIC: program not readable at 0x${p.toLong.toHexString}")
+      case None if m == ULong(1L) =>
+        setReg(instance, 7, HostCallResult.NONE)
       case None =>
         setReg(instance, 7, HostCallResult.HUH)
-      case Some(module) =>
-        val n = context.nextMachineIndex
-        context.innerPvms.update(n, new InnerPvm(code, module, new GuestRam, pc))
-        setReg(instance, 7, ULong(n))
+      case Some(Some(code)) =>
+        getOrCompileMachineModule(code) match
+          case None =>
+            setReg(instance, 7, HostCallResult.HUH)
+          case Some(module) =>
+            var k = 0L
+            while used.contains(k) do k += 1
+            context.modules.update(k, new CompiledModule(code, module))
+            setReg(instance, 7, ULong(k))
+
+  // ===========================================================================
+  // machine (10) — Omega_M: instantiate the compiled module h at pc i
+  // ===========================================================================
+
+  private def handleMachine(instance: PvmInstance): Unit =
+    val h = getReg(instance, 7)
+    val pc = getReg(instance, 8).toLong
+
+    // Omega_M: at most 63 inner VMs; FULL is checked first.
+    if context.innerPvms.size >= RefineHostCalls.MaxInnerPvms then setReg(instance, 7, HostCallResult.FULL)
+    else
+      context.modules.get(h.toLong) match
+        case None =>
+          setReg(instance, 7, HostCallResult.WHO)
+        case Some(compiled) =>
+          val n = context.nextMachineIndex
+          context.innerPvms.update(
+            n,
+            new InnerPvm(compiled.code, compiled.module, new GuestRam, pc, handle = h.toLong)
+          )
+          setReg(instance, 7, ULong(n))
 
   private def getOrCompileMachineModule(
       code: Array[Byte]
@@ -434,6 +485,7 @@ class RefineHostCalls(
               .getOrElse(guest.pc)
         guest.pc = pcNow
         guest.gasChargedFlag = guestInstance.gasChargedFlag
+        // Omega_K: gas* = max(gas - g, 0) + g_R'; g = C_K + g_R was charged up front.
         instance.setGas(instance.gas + guestGasLeft)
 
         outcome match
@@ -451,17 +503,25 @@ class RefineHostCalls(
             setReg(instance, 7, HostCallResult.HALT)
 
   // ===========================================================================
-  // expunge (13) — Omega_X
+  // expunge (15) — Omega_X: m = 0 removes instance n, m = 1 removes module n
   // ===========================================================================
 
   private def handleExpunge(instance: PvmInstance): Unit =
-    val n = getReg(instance, 7)
-    context.innerPvms.get(n.toLong) match
-      case None =>
-        setReg(instance, 7, HostCallResult.WHO)
-      case Some(guest) =>
-        setReg(instance, 7, ULong(guest.pc))
-        context.innerPvms.remove(n.toLong)
+    val m = getReg(instance, 7)
+    val n = getReg(instance, 8)
+    if m == ULong(0L) then
+      context.innerPvms.get(n.toLong) match
+        case None =>
+          setReg(instance, 7, HostCallResult.WHO)
+        case Some(guest) =>
+          setReg(instance, 7, ULong(guest.pc))
+          context.innerPvms.remove(n.toLong)
+    else if m == ULong(1L) then
+      if context.modules.contains(n.toLong) then
+        context.modules.remove(n.toLong)
+        setReg(instance, 7, HostCallResult.OK)
+      else setReg(instance, 7, HostCallResult.WHO)
+    else setReg(instance, 7, HostCallResult.HUH)
 
 object RefineHostCalls:
   /** Inner-VM limit of Omega_M: machine returns FULL once 63 exist. */

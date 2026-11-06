@@ -18,7 +18,7 @@ object ActivityStatisticsCodec:
       service: List[ServiceStatisticsEntry]
   )
 
-  /** Per-validator counters: 6 x u32 LE (24 bytes). */
+  /** Per-validator counters: 6 compact naturals. */
   val statCountCodec: Codec[StatCount] = summon[Codec[StatCount]]
 
   /** Per-core record: 8 compact integers (d, p, i, x, z, e, b, u). */

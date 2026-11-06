@@ -286,28 +286,28 @@ class ProvideHostCallSpec extends HostCallTestBase:
     pm.isReadable(UInt(0x10005), -1)._1 shouldBe true
   }
 
-  test("PROVIDE: PANICs (not NegativeArraySizeException) when z = 0xFFFFFFFF") {
+  test("PROVIDE with z = 2^32-2 or 2^32-1 (outside N_P) is HUH") {
     val targetId = 200L
-    val context = createTestContext()
-    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
+    for z <- Seq(0xfffffffeL, 0xffffffffL) do
+      val context = createTestContext()
+      context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
+      val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+      val instance = new PageMapLikeInstance
 
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = new PageMapLikeInstance
+      instance.setReg(7, targetId)
+      instance.setReg(8, 0x10000)
+      instance.setReg(9, z)
 
-    instance.setReg(7, targetId)
-    instance.setReg(8, 0x10000)
-    instance.setReg(9, 0xffffffffL) // passes the `z > 2^32-1` HUH guard; .toInt = -1
-
-    val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
-      hostCalls.dispatch(HostCall.PROVIDE, instance)
-    }
-    ex.getMessage should include("Provide PANIC")
-    context.provisions shouldBe empty
+      withClue(s"z=0x${z.toHexString}: ") {
+        hostCalls.dispatch(HostCall.PROVIDE, instance)
+        ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+        context.provisions shouldBe empty
+      }
   }
 
-  test("PROVIDE: PANICs for every z that narrows to a negative Int") {
+  test("PROVIDE: PANICs (not NegativeArraySizeException) for every z in N_P that narrows to a negative Int") {
     val targetId = 200L
-    for z <- Seq(0x80000000L, 0xc0000000L, 0xfffffffeL, 0xffffffffL) do
+    for z <- Seq(0x80000000L, 0xc0000000L, 0xfffffffdL) do
       val context = createTestContext()
       context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
       val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)

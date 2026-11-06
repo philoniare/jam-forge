@@ -26,11 +26,7 @@ import io.forge.jam.core.codec.FullJamStateCodecs
  */
 object StatisticsTypes:
 
-  /**
-   * Statistics counter for a single validator.
-   * Each field is a 4-byte unsigned integer (u32).
-   * Fixed size: 24 bytes (6 * 4 bytes)
-   */
+  /** Statistics counter for a single validator. */
   final case class StatCount(
     blocks: Long,
     tickets: Long,
@@ -41,21 +37,19 @@ object StatisticsTypes:
   )
 
   object StatCount:
-    val Size: Int = 24 // 6 * 4 bytes
-
     def zero: StatCount = StatCount(0, 0, 0, 0, 0, 0)
 
-    /** Per-validator counters: 6 x u32 LE (GP 0.8.0 appendix D, pi_V). */
+    /** Per-validator counters: 6 compact naturals, pre-images size up to 2^64. */
     given Codec[StatCount] = Codec.of(
       (w, sc) =>
-        w.u32(sc.blocks)
-        w.u32(sc.tickets)
-        w.u32(sc.preImages)
-        w.u32(sc.preImagesSize)
-        w.u32(sc.guarantees)
-        w.u32(sc.assurances),
-      r => StatCount(r.u32(), r.u32(), r.u32(), r.u32(), r.u32(), r.u32()),
-      Size
+        w.compact(sc.blocks)
+        w.compact(sc.tickets)
+        w.compact(sc.preImages)
+        w.compact(sc.preImagesSize)
+        w.compact(sc.guarantees)
+        w.compact(sc.assurances),
+      r => StatCount(r.compact(), r.compact(), r.compact(), r.compact(), r.compact(), r.compact()),
+      12
     )
 
     given Decoder[StatCount] = ConfiguredDecoder.derived

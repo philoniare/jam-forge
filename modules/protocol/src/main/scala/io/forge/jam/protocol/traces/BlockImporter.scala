@@ -352,10 +352,10 @@ object InputExtractor:
     val header = block.header
     val tickets = block.extrinsic.tickets
 
-    // The header.entropySource is a 96-byte Bandersnatch IETF VRF signature.
+    // The header.entropySource is a 96-byte Bandersnatch Thin VRF signature.
     BandersnatchWrapper.ensureLibraryLoaded()
     val vrfOutput =
-      try Option(BandersnatchWrapper.getIetfVrfOutput(header.entropySource.toArray)).filter(_.length == 32)
+      try Option(BandersnatchWrapper.getThinVrfOutput(header.entropySource.toArray)).filter(_.length == 32)
       catch case _: RuntimeException => None
 
     SafroleInput(

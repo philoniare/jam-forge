@@ -175,7 +175,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
         val y = io.forge.jam.crypto.BandersnatchVrf.getVrfOutput(header.entropySource.toArray).get
         val items = Seq(report.coreIndex.toInt -> reportHash)
         val s0 = io.forge.jam.vrfs.BandersnatchWrapper
-          .ietfVrfSign(devKeys(2).bandersnatchSecret, AuditSelection.initialInput(y), Array.emptyByteArray)
+          .thinVrfSign(devKeys(2).bandersnatchSecret, AuditSelection.initialInput(y), Array.emptyByteArray)
         val sig = io.forge.jam.crypto.Ed25519ZebraWrapper
           .sign(devKeys(2).ed25519Secret, AuditSelection.announcementMessage(0, items, available.hash))
         val stream = connCtoA.openStream(StreamKind.AuditAnnouncement).get(10, TimeUnit.SECONDS)

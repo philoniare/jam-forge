@@ -62,8 +62,9 @@ object extrinsic:
   // ============================================================================
 
   /**
-   * An assurance extrinsic from a validator.
-   * Size depends on coresCount: 32 + ceil(coresCount/8) + 2 + 64 bytes
+   * An assurance extrinsic from a validator: ceil(coresCount/8) + 2 + 64 bytes in a block. The block
+   * carries no anchor; `anchor` is the parent the assurance was signed for, kept for JAMNP CE 141 and the pool, and
+   * zero when decoded from a block.
    */
   final case class AssuranceExtrinsic(
     anchor: Hash,
@@ -76,16 +77,16 @@ object extrinsic:
     /** Create a codec that knows the cores count */
     def codec(coresCount: Int): Codec[AssuranceExtrinsic] =
       val bitfieldSize = (coresCount + 7) / 8
-      (hashCodec :: bytes(bitfieldSize) :: PrimitiveCodecs.validatorIndex :: PrimitiveCodecs.ed25519Signature).xmap(
-        { case (anchor, bitfield, idx, sig) =>
-          AssuranceExtrinsic(anchor, bitfield, idx, sig)
+      (bytes(bitfieldSize) :: PrimitiveCodecs.validatorIndex :: PrimitiveCodecs.ed25519Signature).xmap(
+        { case (bitfield, idx, sig) =>
+          AssuranceExtrinsic(Hash.zero, bitfield, idx, sig)
         },
-        ae => (ae.anchor, ae.bitfield, ae.validatorIndex, ae.signature)
+        ae => (ae.bitfield, ae.validatorIndex, ae.signature)
       )
 
     given Decoder[AssuranceExtrinsic] = Decoder.instance { cursor =>
       for
-        anchor <- cursor.get[Hash]("anchor")
+        anchor <- cursor.getOrElse[Hash]("anchor")(Hash.zero)
         bitfield <- cursor.get[String]("bitfield")
         validatorIndex <- cursor.get[Int]("validator_index")
         signature <- cursor.get[Ed25519Signature]("signature")

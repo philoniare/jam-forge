@@ -107,6 +107,19 @@ object epoch:
     val Size: Int = 336 // 32 + 32 + 144 + 128
     val MetadataSize: Int = 128
 
+    /** The null key K_0: zero Bandersnatch, BLS and metadata, and
+      * Ed25519 `[2, 0, ...]`, which encodes no curve point (all-zero Ed25519 is a small-order point).
+      */
+    def nullKey: ValidatorKey =
+      val ed = new Array[Byte](Ed25519PublicKey.Size)
+      ed(0) = 2
+      ValidatorKey(
+        BandersnatchPublicKey(new Array[Byte](BandersnatchPublicKey.Size)),
+        Ed25519PublicKey(ed),
+        BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
+        JamBytes.zeros(MetadataSize)
+      )
+
     /** Deserialize from JamBytes (336 bytes) */
     def fromJamBytes(jb: JamBytes): ValidatorKey =
       require(jb.length == Size, s"ValidatorKey requires $Size bytes, got ${jb.length}")

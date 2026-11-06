@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.assurance
 
 import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
-import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature}
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature, Hash}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.extrinsic.AssuranceExtrinsic
 import io.forge.jam.core.types.workpackage.WorkReport
@@ -41,10 +41,11 @@ object AssuranceTransition:
    */
   private def assuranceSignatureItem(
     assurance: AssuranceExtrinsic,
+    parent: Hash,
     validatorKey: ValidatorKey
   ): (Ed25519PublicKey, Array[Byte], Ed25519Signature) =
-    // First create combined data and hash it
-    val serializedData = assurance.anchor.bytes ++ assurance.bitfield.toArray
+    // X_A ++ H(E(H_p, f)): bound to the block's parent.
+    val serializedData = parent.bytes ++ assurance.bitfield.toArray
     val dataHash = Hashing.blake2b256(serializedData)
 
     // Create final message by prepending context
@@ -90,13 +91,10 @@ object AssuranceTransition:
 
   private def validateNonSig(
     assurance: AssuranceExtrinsic,
-    input: AssuranceInput,
     state: AssuranceState
   ): Option[AssuranceErrorCode] =
     if assurance.validatorIndex.toInt >= state.currValidators.size then
       Some(AssuranceErrorCode.BadValidatorIndex)
-    else if assurance.anchor != input.parent then
-      Some(AssuranceErrorCode.BadAttestationParent)
     else
       None
 
@@ -109,7 +107,7 @@ object AssuranceTransition:
       None
     else
       val nonSigError = input.assurances.iterator
-        .map(a => validateNonSig(a, input, state))
+        .map(a => validateNonSig(a, state))
         .collectFirst { case Some(err) => err }
 
       nonSigError.orElse {
@@ -118,7 +116,7 @@ object AssuranceTransition:
         else
           val validators = state.currValidators.toIndexedSeq
           // One batch verification for up to V signatures; it fails exactly when some signature does.
-          val items = input.assurances.toIndexedSeq.map(a => assuranceSignatureItem(a, validators(a.validatorIndex.toInt)))
+          val items = input.assurances.toIndexedSeq.map(a => assuranceSignatureItem(a, input.parent, validators(a.validatorIndex.toInt)))
           signatures match
             case Some(batch) =>
               batch.addAll(items)

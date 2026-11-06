@@ -13,8 +13,12 @@ final class InnerPvm(
     val module: InterpretedModule,
     val ram: GuestRam,
     var pc: Long,
-    var gasChargedFlag: Boolean = false
+    var gasChargedFlag: Boolean = false,
+    val handle: Long = 0L
 )
+
+/** A program module stored by compile: the program blob and its parsed form. */
+final class CompiledModule(val code: Array[Byte], val module: InterpretedModule)
 
 trait HistoricalLookupService:
   /** True when the service account exists in the drawn-upon state. */
@@ -30,7 +34,7 @@ trait HistoricalLookupService:
   ): Option[Array[Byte]]
 
 /** Mutable context threaded through a refine invocation (Psi_R): the
-  * work-package being refined, the (m, e) host-call context pair — inner PVMs
+  * work-package being refined, the (m, c, e) host-call context triple — inner PVMs, compiled modules
   * and exported segments — and the read-only inputs the fetch host call can
   * serve.
   *
@@ -57,6 +61,9 @@ final class RefineContext(
   /** m: integrated inner-PVM instances, keyed by machine index. */
   val innerPvms: mutable.LongMap[InnerPvm] = mutable.LongMap.empty
 
+  /** c: compiled program modules, keyed by handle. */
+  val modules: mutable.LongMap[CompiledModule] = mutable.LongMap.empty
+
   /** e: segments exported so far by this invocation, each Csegmentsize long. */
   val exports: mutable.ArrayBuffer[Array[Byte]] = mutable.ArrayBuffer.empty
 
@@ -64,6 +71,10 @@ final class RefineContext(
 
   def lookupAnchorTimeslot: Long =
     workPackage.context.lookupAnchorSlot.toLong
+
+  /** H: handles in use, by stored modules and by the instances made from them (Omega_Γ). */
+  def usedHandles: Set[Long] =
+    modules.keySet.toSet ++ innerPvms.values.map(_.handle)
 
   /** Lowest natural number not already used as a machine index (Omega_M's n). */
   def nextMachineIndex: Long =

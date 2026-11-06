@@ -30,7 +30,7 @@ object HostCall:
   val INFO: Int = 6
 
   // ===========================================================================
-  // Refine-Only Host Calls (7-14)
+  // Refine-Only Host Calls (7-15).
   // ===========================================================================
 
   /** historical_lookup (7): Look up historical preimage data */
@@ -39,66 +39,69 @@ object HostCall:
   /** export (8): Export a segment to the work report output */
   val EXPORT: Int = 8
 
-  /** machine (9): Create a new inner PVM instance */
-  val MACHINE: Int = 9
+  /** compile (9): Store a program module, from memory or a preimage */
+  val COMPILE: Int = 9
 
-  /** peek (10): Read memory from an inner PVM instance */
-  val PEEK: Int = 10
+  /** machine (10): Create a new inner PVM instance from a compiled module */
+  val MACHINE: Int = 10
 
-  /** poke (11): Write memory to an inner PVM instance */
-  val POKE: Int = 11
+  /** peek (11): Read memory from an inner PVM instance */
+  val PEEK: Int = 11
 
-  /** pages (12): Modify page access rights of an inner PVM instance */
-  val PAGES: Int = 12
+  /** poke (12): Write memory to an inner PVM instance */
+  val POKE: Int = 12
 
-  /** invoke (13): Execute an inner PVM instance */
-  val INVOKE: Int = 13
+  /** pages (13): Modify page access rights of an inner PVM instance */
+  val PAGES: Int = 13
 
-  /** expunge (14): Remove an inner PVM instance */
-  val EXPUNGE: Int = 14
+  /** invoke (14): Execute an inner PVM instance */
+  val INVOKE: Int = 14
+
+  /** expunge (15): Remove an inner PVM instance or a compiled module */
+  val EXPUNGE: Int = 15
 
   // ===========================================================================
-  // Accumulate-Specific Host Calls (15-27)
+  // Accumulate-Specific Host Calls (16-28)
   // ===========================================================================
 
-  /** bless (15): Set privileged services (manager, assigners, delegator, registrar, always-acc) */
-  val BLESS: Int = 15
+  /** bless (16): Set privileged services (manager, assigners, delegator, registrar, always-acc) */
+  val BLESS: Int = 16
 
-  /** assign (16): Set core assigner and authorization queue (privileged) */
-  val ASSIGN: Int = 16
+  /** assign (17): Set core assigner and authorization queue (privileged) */
+  val ASSIGN: Int = 17
 
-  /** designate (17): Set validator queue (privileged) */
-  val DESIGNATE: Int = 17
+  /** designate (18): Set validator queue (privileged) */
+  val DESIGNATE: Int = 18
 
-  /** checkpoint (18): Save current state x to checkpoint y */
-  val CHECKPOINT: Int = 18
+  /** checkpoint (19): Save current state x to checkpoint y */
+  val CHECKPOINT: Int = 19
 
-  /** new (19): Create new service account */
-  val NEW: Int = 19
+  /** new (20): Create new service account */
+  val NEW: Int = 20
 
-  /** upgrade (20): Upgrade service code hash */
-  val UPGRADE: Int = 20
+  /** upgrade (21): Upgrade service code hash */
+  val UPGRADE: Int = 21
 
-  /** transfer (21): Queue a deferred transfer */
-  val TRANSFER: Int = 21
+  /** transfer (22): Queue a deferred transfer */
+  val TRANSFER: Int = 22
 
-  /** eject (22): Eject (remove) another service account */
-  val EJECT: Int = 22
+  /** eject (23): Eject (remove) another service account */
+  val EJECT: Int = 23
 
-  /** query (23): Query preimage request status */
-  val QUERY: Int = 23
+  /** query (24): Query preimage request status */
+  val QUERY: Int = 24
 
-  /** solicit (24): Request a preimage */
-  val SOLICIT: Int = 24
+  /** solicit (25): Request a preimage */
+  val SOLICIT: Int = 25
 
-  /** forget (25): Forget a preimage request */
-  val FORGET: Int = 25
+  /** forget (26): Forget a preimage request */
+  val FORGET: Int = 26
 
-  /** yield (26): Set accumulation output hash */
-  val YIELD: Int = 26
+  /** yield (27): Set accumulation output hash */
+  val YIELD: Int = 27
 
-  /** provide (27): Provide a preimage for another service */
-  val PROVIDE: Int = 27
+  /** provide (28): Provide a preimage for another service */
+  val PROVIDE: Int = 28
 
   // ===========================================================================
   // Debug Host Call
@@ -118,6 +121,7 @@ object HostCall:
     case INFO => "INFO"
     case HISTORICAL_LOOKUP => "HISTORICAL_LOOKUP"
     case EXPORT => "EXPORT"
+    case COMPILE => "COMPILE"
     case MACHINE => "MACHINE"
     case PEEK => "PEEK"
     case POKE => "POKE"
