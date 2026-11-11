@@ -3,7 +3,7 @@ package io.forge.jam.core.types
 import io.forge.jam.core.codec.*
 import io.forge.jam.core.codec.codecs.*
 import io.forge.jam.core.primitives.{Hash, Timeslot}
-import io.forge.jam.core.codec.JamCodecs.{hashCodec, compactInt}
+import io.forge.jam.core.codec.JamCodecs.hashCodec
 import io.circe.Decoder
 
 /**
@@ -16,12 +16,12 @@ object context:
    *
    * Encoding order:
    * - anchor: 32 bytes
-   * - anchorSlot: 4 bytes (little-endian)      [new in 0.8.0, GP #526]
+   * - anchorSlot: 4 bytes (little-endian)
    * - stateRoot: 32 bytes
    * - beefyRoot: 32 bytes
    * - lookupAnchor: 32 bytes
    * - lookupAnchorSlot: 4 bytes (little-endian)
-   * - lookupAnchorStateRoot: 32 bytes          [new in 0.8.0, GP #526]
+   * - lookupAnchorStateRoot: 32 bytes
    * - prerequisites: compact length prefix + list of 32-byte hashes
    */
   final case class Context(
@@ -44,7 +44,7 @@ object context:
        hashCodec ::               // lookupAnchor
        uint32L ::                 // lookupAnchorSlot (4 bytes LE unsigned)
        hashCodec ::               // lookupAnchorStateRoot
-       listOfN(compactInt, hashCodec)  // prerequisites with compact length prefix
+       compactPrefixedStrictlyAscending(hashCodec, identity[Hash])  // prerequisites - set, strictly increasing
       ).xmap(
         { case (anchor, anchorSlot, stateRoot, beefyRoot, lookupAnchor, slot, lookupAnchorStateRoot, prereqs) =>
           Context(anchor, Timeslot(anchorSlot.toInt), stateRoot, beefyRoot, lookupAnchor,

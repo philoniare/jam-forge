@@ -1,7 +1,7 @@
 package io.forge.jam.core
 
 /**
- * Constants from the JAM Gray Paper.
+ * JAM protocol constants.
  */
 object constants:
   
@@ -58,6 +58,12 @@ object constants:
   /** Prefix for invalid vote signatures (disputes) */
   val JAM_INVALID: String = "jam_invalid"
   val JAM_INVALID_BYTES: Array[Byte] = JAM_INVALID.getBytes("UTF-8")
+
+  /** Cmaxextrinsicverdicts = 16: maximum number of verdicts in a disputes extrinsic. */
+  val Cmaxextrinsicverdicts: Int = 16
+
+  /** Cmaxextrinsicoffenses = 16: maximum number each of culprits or faults in a disputes extrinsic. */
+  val Cmaxextrinsicoffenses: Int = 16
 
   /** Cmaxservicecodesize: maximum size in bytes of a service's code blob. */
   val Cmaxservicecodesize: Int = 4_000_000

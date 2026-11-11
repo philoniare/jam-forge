@@ -9,9 +9,12 @@ import io.forge.jam.core.primitives.{
   BandersnatchPublicKey,
   Ed25519PublicKey,
   BlsPublicKey,
-  Ed25519Signature
+  Ed25519Signature,
+  Timeslot,
+  ValidatorIndex
 }
-import io.forge.jam.core.types.extrinsic.Dispute
+import io.forge.jam.core.types.extrinsic.{Dispute, Verdict}
+import io.forge.jam.core.types.work.Vote
 import io.forge.jam.core.types.dispute.{Culprit, Fault}
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.core.types.epoch.ValidatorKey
@@ -188,6 +191,52 @@ class DisputeTest extends AnyFunSuite with Matchers:
     output.isLeft shouldBe true
   }
 
+  private def dummyVerdicts(n: Int): List[Verdict] =
+    List.tabulate(n)(i =>
+      Verdict(
+        Hash(Array.fill(32)(i.toByte)),
+        Timeslot(0),
+        List(Vote(vote = true, ValidatorIndex(0), Ed25519Signature(Array.fill(64)(0.toByte))))
+      )
+    )
+
+  private def dummyCulprits(n: Int): List[Culprit] =
+    List.tabulate(n)(i =>
+      Culprit(Hash(Array.fill(32)(i.toByte)), Ed25519PublicKey(Array.fill(32)(i.toByte)),
+        Ed25519Signature(Array.fill(64)(0.toByte)))
+    )
+
+  private def dummyFaults(n: Int): List[Fault] =
+    List.tabulate(n)(i =>
+      Fault(Hash(Array.fill(32)(i.toByte)), vote = true, Ed25519PublicKey(Array.fill(32)(i.toByte)),
+        Ed25519Signature(Array.fill(64)(0.toByte)))
+    )
+
+  private def runDisputes(disputes: Dispute): Option[DisputeErrorCode] =
+    val (_, output) = DisputeTransition.stfInternal(DisputeInput(disputes), emptyDisputeState(6, 2), ChainConfig.TINY)
+    output.left.toOption
+
+  private val limitErrors = Set(DisputeErrorCode.TooManyVerdicts, DisputeErrorCode.TooManyOffenses)
+
+  test("disputes extrinsic with 17 verdicts is rejected (Cmaxextrinsicverdicts = 16)") {
+    runDisputes(Dispute(dummyVerdicts(17), List.empty, List.empty)) shouldBe Some(DisputeErrorCode.TooManyVerdicts)
+  }
+
+  test("disputes extrinsic with 17 culprits is rejected (Cmaxextrinsicoffenses = 16)") {
+    runDisputes(Dispute(List.empty, dummyCulprits(17), List.empty)) shouldBe Some(DisputeErrorCode.TooManyOffenses)
+  }
+
+  test("disputes extrinsic with 17 faults is rejected (Cmaxextrinsicoffenses = 16)") {
+    runDisputes(Dispute(List.empty, List.empty, dummyFaults(17))) shouldBe Some(DisputeErrorCode.TooManyOffenses)
+  }
+
+  test("disputes extrinsic with 16 verdicts, culprits and faults passes the size limits") {
+    // The dummy entries fail later content checks; only the size limits are under test here.
+    runDisputes(Dispute(dummyVerdicts(16), List.empty, List.empty)).forall(e => !limitErrors.contains(e)) shouldBe true
+    runDisputes(Dispute(List.empty, dummyCulprits(16), List.empty)).forall(e => !limitErrors.contains(e)) shouldBe true
+    runDisputes(Dispute(List.empty, List.empty, dummyFaults(16))).forall(e => !limitErrors.contains(e)) shouldBe true
+  }
+
   test("stfInternal re-sorts psi components to ascending order") {
     val config = ChainConfig.TINY
     def hh(b: Int): Hash = Hash(Array.fill(32)(b.toByte))
@@ -237,7 +286,7 @@ class DisputeTest extends AnyFunSuite with Matchers:
           assertDisputeStateEquals(testCase.postState, postState, testCaseName)
   }
 
-  test("GP: tiny disputes vectors round-trip through the binary DisputeCase codec") {
+  test("tiny disputes vectors round-trip through the binary DisputeCase codec") {
     val folderPath = "stf/disputes/tiny"
     val codec = DisputeCase.codec(TinyConfig.coresCount)
     for testCaseName <- TestFileLoader.getTestFilenamesFromTestVectors(folderPath).getOrElse(List.empty) do
@@ -271,9 +320,9 @@ class DisputeTest extends AnyFunSuite with Matchers:
           assertDisputeStateEquals(testCase.postState, postState, testCaseName)
   }
 
-  test("GP: tiny vectors still pass when |kappa| differs from ChainConfig.validatorCount (resized set)") {
+  test("tiny vectors still pass when |kappa| differs from ChainConfig.validatorCount (resized set)") {
     // Under the fuzz spec a designate can shrink the set below V, so verdict thresholds must come from the
-    // verdict's own key-set (GP 0.8.0 §judgments eq:verdicts), never from the configured V.
+    // verdict's own key-set, never from the configured V.
     val resized = TinyConfig.copy(validatorCount = ChainConfig.FUZZ.validatorCount)
     val folderPath = "stf/disputes/tiny"
     val testCaseNames = TestFileLoader.getTestFilenamesFromTestVectors(folderPath).getOrElse(List.empty)

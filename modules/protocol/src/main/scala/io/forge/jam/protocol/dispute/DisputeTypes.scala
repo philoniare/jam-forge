@@ -127,6 +127,9 @@ object DisputeTypes:
     case BadGuarantorKey             // 13
     case BadAuditorKey               // 14
     case BadVotesCount               // 15
+    // Not in the STF vectors' ErrorCode enum: extrinsic size limits.
+    case TooManyVerdicts             // 16: |E_V| > Cmaxextrinsicverdicts
+    case TooManyOffenses             // 17: |E_C| or |E_F| > Cmaxextrinsicoffenses
 
   object DisputeErrorCode:
     given Codec[DisputeErrorCode] = byte.emap(

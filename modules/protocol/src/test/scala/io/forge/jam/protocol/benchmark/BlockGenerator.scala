@@ -172,7 +172,7 @@ class BlockGenerator(
     else
       (List.empty, List.empty)
 
-  /** One bit per core, `ceil(C/8)` octets (GP 0.8.0 §reporting_assurance). */
+  /** One bit per core, `ceil(C/8)` octets. */
   private def buildAssuranceBitfield(core0: Boolean, core1: Boolean): Array[Byte] =
     val bits = new Array[Byte]((config.coresCount + 7) / 8)
     bits(0) = ((if core0 then 1 else 0) | (if core1 then 2 else 0)).toByte
@@ -249,6 +249,8 @@ class BlockGenerator(
       recentPackageHashes.toList
         .filter(historyHashes.contains)
         .take(1 + rng.nextInt(2))
+        .distinct
+        .sorted // prerequisites are a set: encoded strictly increasing
     else List.empty
 
     val report = WorkReport(
@@ -301,7 +303,7 @@ class BlockGenerator(
 
   // --- Helpers ---
 
-  /** P(|kappa'|, eta'_2, t): guarantor cores for the active set (GP 0.8.0 §reporting_assurance "Guarantor Assignments"). */
+  /** P(|kappa'|, eta'_2, t): guarantor cores for the active set. */
   private def calculateCoreAssignments(randomness: Hash, slot: Long, setSize: Int): List[Int] =
     val cores = math.max(1, setSize / 3)
     val shuffledIndices = Shuffle.jamComputeShuffle(setSize, randomness)

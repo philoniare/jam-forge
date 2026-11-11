@@ -26,8 +26,7 @@ class AccumulationExecutor(
     currentStorageView = view
   def storageView: Option[ServiceStorageView] = currentStorageView
 
-  /** Execute accumulation for a single service. Implements the Psi_A function
-    * from Gray Paper.
+  /** Execute accumulation for a single service. Implements the Psi_A function.
     */
   def executeService(
       partialState: PartialState,
@@ -46,8 +45,9 @@ class AccumulationExecutor(
     val acc = account.get
     val codeHash = acc.info.codeHash
 
-    // Look up service code from service's own preimages
-    val preimage = acc.preimages.get(Hash(codeHash.bytes.toArray))
+    val preimage = acc.preimages
+      .get(Hash(codeHash.bytes.toArray))
+      .orElse(readOwnPreimage(partialState, serviceId, codeHash.bytes.toArray, storageView))
 
     if preimage.isEmpty then
       return createEmptyResult(partialState, Some(serviceId), operands)
@@ -73,7 +73,7 @@ class AccumulationExecutor(
       )
     )
 
-    // Calculate initial nextAccountIndex per Gray Paper:
+    // Calculate initial nextAccountIndex:
     // nextfreeid = check((decode[4]{blake(encode(serviceId, entropyaccumulator', timeslot))} mod (2^32-Cminpublicindex-2^8)) + Cminpublicindex)
     val minPublicServiceIndex = config.minPublicServiceIndex
     val initialIndex = calculateInitialIndex(serviceId, entropy, timeslot)
@@ -169,6 +169,18 @@ class AccumulationExecutor(
       gasUsed,
       if exitReason == ExitReason.HALT then Some(output) else None
     )
+
+  /** The preimage blob `serviceId` holds under `hash` in the state this run starts from */
+  private def readOwnPreimage(
+      partialState: PartialState,
+      serviceId: Long,
+      hash: Array[Byte],
+      storageView: Option[ServiceStorageView]
+  ): Option[JamBytes] =
+    val blobStateKey = StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, JamBytes(hash))
+    storageView match
+      case Some(v) => v.getByStateKey(blobStateKey)
+      case None    => partialState.rawServiceDataByStateKey.get(blobStateKey)
 
   /** Get or compile a module from code bytes (process-wide cache).
     */

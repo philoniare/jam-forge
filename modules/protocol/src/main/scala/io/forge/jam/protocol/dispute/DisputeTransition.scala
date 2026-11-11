@@ -269,12 +269,27 @@ object DisputeTransition:
       Right(())
 
   /** Validate all disputes. Validation order is critical:
+    *   0. Extrinsic size limits (at most Cmaxextrinsicverdicts verdicts and
+    *      Cmaxextrinsicoffenses each of culprits and faults)
     *   1. Validate verdicts first (ordering and content)
     *   2. Then validate culprits (can now check targets against validated
     *      verdicts)
     *   3. Finally validate faults
     */
   private def validateDisputes(
+      disputes: Dispute,
+      state: DisputeState,
+      config: ChainConfig
+  ): Option[DisputeErrorCode] =
+    if disputes.verdicts.size > constants.Cmaxextrinsicverdicts then
+      Some(DisputeErrorCode.TooManyVerdicts)
+    else if disputes.culprits.size > constants.Cmaxextrinsicoffenses ||
+      disputes.faults.size > constants.Cmaxextrinsicoffenses
+    then Some(DisputeErrorCode.TooManyOffenses)
+    else validateDisputeContents(disputes, state, config)
+
+  /** Steps 1-3 of [[validateDisputes]]. */
+  private def validateDisputeContents(
       disputes: Dispute,
       state: DisputeState,
       config: ChainConfig
@@ -343,7 +358,7 @@ object DisputeTransition:
       )
     ) { (state, verdict) =>
       // Thresholds follow the verdict's own key-set (kappa or lambda), whose size may differ from
-      // `config.validatorCount` once a designate has resized the set (GP 0.8.0 §judgments eq:verdicts).
+      // `config.validatorCount` once a designate has resized the set.
       val setSize = getValidatorSet(verdict, preState, config.epochLength).size
       val positiveVotes = verdict.votes.count(_.vote)
       if positiveVotes >= superMajorityOf(setSize) then

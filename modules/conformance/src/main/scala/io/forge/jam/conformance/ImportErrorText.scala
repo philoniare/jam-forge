@@ -71,6 +71,8 @@ object ImportErrorText:
     case DisputeErrorCode.BadGuarantorKey           => "bad guarantor key"
     case DisputeErrorCode.BadAuditorKey             => "bad auditor key"
     case DisputeErrorCode.BadVotesCount             => "bad votes count"
+    case DisputeErrorCode.TooManyVerdicts           => "too many verdicts"
+    case DisputeErrorCode.TooManyOffenses           => "too many culprits or faults"
 
   private def reports(code: ReportErrorCode): String = code match
     case ReportErrorCode.BadCoreIndex                => "bad core index for work report"

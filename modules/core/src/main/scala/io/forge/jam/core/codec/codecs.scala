@@ -4,8 +4,8 @@ import io.forge.jam.core.JamBytes
 
 import scala.collection.mutable.ListBuffer
 
-/** Primitive codecs and combinators for the JAM serialization format (GP 0.8.0 appendix C). Integers are
-  * little-endian; "compact" is the variable-length natural encoding of eq. (C.6).
+/** Primitive codecs and combinators for the JAM serialization format. Integers are
+  * little-endian; "compact" is the variable-length natural encoding.
   */
 object codecs:
 
@@ -28,7 +28,7 @@ object codecs:
     1
   )
 
-  /** Compact natural (eq. C.6), 0 to 2^64-1 held as an unsigned Long. */
+  /** Compact natural, 0 to 2^64-1 held as an unsigned Long. */
   val compactLong: Codec[Long] = Codec.of((w, v) => w.compact(v), _.compact(), 9)
 
   /** Compact natural that must fit an Int, for lengths and counts. */
@@ -55,7 +55,7 @@ object codecs:
   /** All remaining bytes; only meaningful as the last field. */
   val remainingBytes: Codec[JamBytes] = Codec.of((w, v) => w.bytes(v), r => JamBytes.wrap(r.bytes(r.remaining)))
 
-  /** Compact length prefix followed by that many bytes (eq. C.8, the `↕` prefix). */
+  /** Compact length prefix followed by that many bytes (the `↕` prefix). */
   val compactBytes: Codec[JamBytes] = Codec.of(
     (w, v) =>
       w.compact(v.length.toLong)
@@ -89,7 +89,7 @@ object codecs:
       val n = sizeCodec.read(in)
       valueCodec.read(in.sub(n))
 
-  /** Option with a 0/1 discriminator byte (eq. C.11). */
+  /** Option with a 0/1 discriminator byte. */
   def option[A](c: Codec[A]): Codec[Option[A]] = new Codec[Option[A]]:
     def write(out: ByteWriter, value: Option[A]): Unit = value match
       case None => out.u8(0)
@@ -117,8 +117,22 @@ object codecs:
       value.foreach(c.write(out, _))
     def read(in: ByteReader): List[A] = readN(in, c, countCodec.read(in))
 
-  /** Compact length prefix, then that many elements (eq. C.8). */
+  /** Compact length prefix, then that many elements. */
   def compactPrefixedList[A](c: Codec[A]): Codec[List[A]] = listOfN(compactInt, c)
+
+  /** As [[compactPrefixedList]], but decoding rejects elements whose keys are not strictly increasing.
+    *
+    * A dictionary is encoded as its pairs ordered by key and a set as its elements with `a < b < c < …`, so an
+    * out-of-order or repeated key is not a valid encoding.
+    * Encoding writes the list as given.
+    */
+  def compactPrefixedStrictlyAscending[A, K](c: Codec[A], key: A => K)(using ord: Ordering[K]): Codec[List[A]] =
+    compactPrefixedList(c).emap(
+      xs =>
+        if xs.lazyZip(xs.drop(1)).forall((a, b) => ord.lt(key(a), key(b))) then Right(xs)
+        else Left("keys are not strictly increasing (unsorted or duplicate)"),
+      identity
+    )
 
   /** As [[compactPrefixedList]], for sequences read by index. */
   def compactPrefixedVector[A](c: Codec[A]): Codec[IndexedSeq[A]] = new Codec[IndexedSeq[A]]:

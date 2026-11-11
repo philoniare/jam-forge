@@ -134,7 +134,7 @@ object workpackage:
        hashCodec ::                                    // authorizerHash - 32 bytes
        compactInteger ::                               // authGasUsed - compact integer
        PrimitiveCodecs.compactBytes ::                    // authOutput - compact length + bytes
-       compactPrefixedList(Codec[SegmentRootLookup]) :: // segmentRootLookup - compact length + items
+       compactPrefixedStrictlyAscending(Codec[SegmentRootLookup], _.workPackageHash) :: // segmentRootLookup - dictionary, keys strictly increasing
        compactPrefixedList(Codec[WorkResult])          // results - compact length + items
       ).xmap(
         { case (packageSpec, context, coreIndex, authorizerHash, authGasUsed, authOutput, segmentRootLookup, results) =>
