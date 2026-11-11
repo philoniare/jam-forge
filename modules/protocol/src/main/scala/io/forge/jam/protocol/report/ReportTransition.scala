@@ -169,6 +169,7 @@ object ReportTransition:
       preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a))
       m.toMap
     val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
+    val ancestorIndex = new AncestorIndex(ancestry)
 
     def cacheFor(ctx: RotationContext): RotationCache =
       val key = (ctx.reportRotation.toLong << 1) | (if ctx.isCurrent then 1L else 0L)
@@ -200,7 +201,7 @@ object ReportTransition:
           accountsById,
           offendersSet,
           cacheFor,
-          ancestry,
+          ancestorIndex,
           skipLookupAnchor,
           skipAnchorContext,
           batchPackages,
@@ -246,7 +247,7 @@ object ReportTransition:
     accountsById: Map[Long, ServiceAccount],
     offendersSet: Set[Hash],
     cacheFor: RotationContext => RotationCache,
-    ancestry: List[AncestorHeader],
+    ancestry: AncestorIndex,
     skipLookupAnchor: Boolean,
     skipAnchorContext: Boolean,
     batchPackages: Map[Hash, Hash],
@@ -325,7 +326,7 @@ object ReportTransition:
   private def validateAnchor(
     guarantee: GuaranteeExtrinsic,
     recentBlocks: HistoricalBetaContainer,
-    ancestry: List[AncestorHeader],
+    ancestry: AncestorIndex,
     currentSlot: Long,
     config: ChainConfig,
     skipLookupAnchor: Boolean
@@ -336,10 +337,7 @@ object ReportTransition:
         val lookupAnchorSlot = context.lookupAnchorSlot.toLong
         // GP 0.8.0 §reporting: ∃ h, h' ∈ A with h_t = x_t, H(h) = x_l, h'_p = H(h), h'_r = x_l's post-state
         if ancestry.nonEmpty then
-          ancestry.exists(a =>
-            a.headerHash == context.lookupAnchor && a.slot == lookupAnchorSlot &&
-              a.postStateRoot.forall(_ == context.lookupAnchorStateRoot)
-          )
+          ancestry.containsLookupAnchor(context.lookupAnchor, lookupAnchorSlot, context.lookupAnchorStateRoot)
         else
           recentBlocks.history.exists(_.headerHash == context.lookupAnchor) &&
             lookupAnchorSlot <= currentSlot &&

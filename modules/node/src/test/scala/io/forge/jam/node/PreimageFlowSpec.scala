@@ -35,7 +35,7 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers:
 
   test("announcedMeta evicts the oldest entry once the cap is exceeded") {
     val dir = Files.createTempDirectory("jam-preimage-cap-spec")
-    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"))
+    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false)
     val blockStore = BlockStore.open(dir.resolve("blocks"))
     val chain = new ChainManager(ChainConfig.TINY, trieBackend, blockStore)
     val egress = newEgress()

@@ -292,6 +292,28 @@ object ReportTypes:
   final case class AncestorHeader(slot: Long, headerHash: Hash, postStateRoot: Option[Hash] = None)
 
   /**
+   * The ancestor set indexed by header hash, so the lookup-anchor check costs O(1) per guarantee instead of a scan
+   * of A. `containsLookupAnchor` answers exactly `ancestry.exists(a => a.headerHash == hash && a.slot == slot &&
+   * a.postStateRoot.forall(_ == postStateRoot))`; entries sharing a hash are all kept. Built on first use.
+   */
+  final class AncestorIndex(ancestry: List[AncestorHeader]):
+    def nonEmpty: Boolean = ancestry.nonEmpty
+
+    private lazy val byHash: java.util.HashMap[Hash, List[AncestorHeader]] =
+      val m = new java.util.HashMap[Hash, List[AncestorHeader]](math.max(16, ancestry.size * 4 / 3 + 1))
+      ancestry.foreach { a =>
+        val prev = m.get(a.headerHash)
+        m.put(a.headerHash, if prev == null then a :: Nil else a :: prev)
+      }
+      m
+
+    def containsLookupAnchor(hash: Hash, slot: Long, postStateRoot: Hash): Boolean =
+      ancestry.nonEmpty && {
+        val entries = byHash.get(hash)
+        entries != null && entries.exists(a => a.slot == slot && a.postStateRoot.forall(_ == postStateRoot))
+      }
+
+  /**
    * Report input containing guarantees and slot.
    */
   final case class ReportInput(

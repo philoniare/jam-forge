@@ -532,6 +532,33 @@ class ReportTest extends AnyFunSuite with Matchers:
       Some(ReportErrorCode.AnchorNotRecent)
   }
 
+  test("lookup anchor in a node-shaped ancestor set: found, wrong slot, wrong root and too old") {
+    // A as the node builds it for a block at slot 30 (L = 24): one header per slot 6..29, newest first, each with
+    // its posterior state root; the header at slot 5 is beyond the window, so the walk left it out.
+    val blockSlot = 30L
+    def headerAt(slot: Long): Hash = Hash(Array.tabulate(32)(i => if i == 0 then slot.toByte else 0x77.toByte))
+    def rootAt(slot: Long): Hash = if slot == 10L then Hash.zero else Hash(Array.fill(32)(slot.toByte))
+    val ancestry = (29L to 6L by -1L).map(s => AncestorHeader(s, headerAt(s), Some(rootAt(s)))).toList
+    val preState = createMinimalState(
+      TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)
+    def outcome(lookupAnchor: Hash, lookupAnchorSlot: Int, ancestors: List[AncestorHeader]) =
+      val input = anchorGuaranteeInput(
+        anchor = Hash(Array.fill(32)(0xEE.toByte)), // absent from β -> AnchorNotRecent once lookup passes
+        lookupAnchor = lookupAnchor,
+        lookupAnchorSlot = lookupAnchorSlot,
+        blockSlot = blockSlot.toInt)
+      ReportTransition.stfInternal(input, preState, TinyConfig, ancestry = ancestors)._2.swap.toOption
+    // The guarantee's lookupAnchorStateRoot is zero, which is the recorded root at slot 10 only.
+    outcome(headerAt(10L), 10, ancestry) shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    outcome(headerAt(10L), 11, ancestry) shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    outcome(headerAt(12L), 12, ancestry) shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    outcome(headerAt(5L), 5, ancestry) shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+    // A hash recorded twice (conformance ancestry can repeat one): any matching entry suffices.
+    val repeated = ancestry :+ AncestorHeader(12L, headerAt(10L), None)
+    outcome(headerAt(10L), 12, repeated) shouldBe Some(ReportErrorCode.AnchorNotRecent)
+    outcome(headerAt(10L), 13, repeated) shouldBe Some(ReportErrorCode.LookupAnchorNotRecent)
+  }
+
   test("future lookup-anchor slot passes the age check when ancestry validation is skipped") {
     val preState = createMinimalState(
       TinyConfig.validatorCount, TinyConfig.coresCount, recentBlocks = betaWithBlock01)

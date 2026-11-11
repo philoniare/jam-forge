@@ -28,6 +28,11 @@ final class ChainManager(
     val blockStore: BlockStore
 ) extends LazyLogging:
 
+  require(
+    !trieBackend.tracksGarbage,
+    "ChainManager never runs trie gc: open its RocksDbTrieBackend with trackGarbage = false"
+  )
+
   private val trieStore = new StateTrieStore(trieBackend)
   private val importer =
     new BlockImporter(
@@ -37,6 +42,15 @@ final class ChainManager(
       gcAfterImport = false
     )
   private val blockCodec = Block.blockCodec(config)
+
+  // Stored headers by hash for the ancestor walk; keeps the last L slots (plus an epoch of slack for empty slots, so
+  // the header that ends a walk usually stays in memory too).
+  private[node] val headerLinks =
+    new HeaderLinkCache(config.maxLookupAnchorAge + config.epochLength, h => blockStore.getHeader(h))
+
+  private def storeBlock(hash: Hash, parent: Hash, headerBytes: Array[Byte], blockBytes: Array[Byte]): Unit =
+    blockStore.putBlock(hash, parent, headerBytes, blockBytes)
+    headerLinks.record(hash, headerBytes)
 
   final case class Head(hash: Hash, slot: Long, stateRoot: Hash)
 
@@ -371,6 +385,7 @@ final class ChainManager(
             )
           )
         bestHead = Head(bestHash, metaLong("best_slot").getOrElse(0L), root)
+        headerLinks.advance(bestHead.slot)
         val genesisHash = blockStore
           .getHead(BlockStore.GenesisHead)
           .getOrElse(
@@ -392,8 +407,9 @@ final class ChainManager(
           trieStore.bootstrap(spec.genesisState.map(kv => (kv.key, kv.value)))
         val genesisHash = spec.genesisHeaderHash
         spec.genesisHeaderBytes.foreach { hb =>
-          blockStore.putBlock(genesisHash, Hash.zero, hb, Array.emptyByteArray)
+          storeBlock(genesisHash, Hash.zero, hb, Array.emptyByteArray)
         }
+        headerLinks.advance(0L)
         blockStore.setHead(BlockStore.GenesisHead, genesisHash)
         blockStore.setHead(BlockStore.BestHead, genesisHash)
         blockStore.setHead(BlockStore.FinalizedHead, genesisHash)
@@ -457,7 +473,7 @@ final class ChainManager(
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
               // Known parent on some branch: store and evaluate.
-              blockStore.putBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
+              storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
               val height = parentHeight + 1
               putBlockHeight(hash, height)
               recordForkChoiceMeta(hash, block)
@@ -493,7 +509,8 @@ final class ChainManager(
       case ImportResult.Success(postRoot, _) =>
         val hash = headerHashOf(block)
         val slot = block.header.slot.toLong
-        blockStore.putBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
+        storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
+        headerLinks.advance(slot)
         recordForkChoiceMeta(hash, block)
         blockStore.setHead(BlockStore.BestHead, hash)
         blockStore.setMeta("state_root", postRoot.bytes.toArray)
@@ -511,7 +528,8 @@ final class ChainManager(
         Right(bestHead)
 
   /** Ancestor set A for a block on `parent` at `slot`: stored headers back to slot - L (GP 0.8.0 §header
-    * eq:ancestors), each with its posterior state root read from its child's prior state root.
+    * eq:ancestors), each with its posterior state root read from its child's prior state root. Follows `parent`'s
+    * own chain (not the best chain); headers come from [[headerLinks]], which falls back to the block store.
     */
   private[node] def ancestorsOf(parent: Hash, parentPostRoot: Hash, slot: Long): List[AncestorHeader] =
     val out = List.newBuilder[AncestorHeader]
@@ -519,15 +537,13 @@ final class ChainManager(
     var postRoot = parentPostRoot
     var more = true
     while more do
-      blockStore.getHeader(cursor).filter(_.length >= 100) match
-        case Some(h) =>
-          val hSlot = io.forge.jam.core.LittleEndian.get(h, 96, 4)
-          if slot - hSlot > config.maxLookupAnchorAge then more = false
+      headerLinks.get(cursor) match
+        case Some(link) =>
+          if slot - link.slot > config.maxLookupAnchorAge then more = false
           else
-            out += AncestorHeader(hSlot, cursor, Some(postRoot))
-            postRoot = Hash(h.slice(32, 64))
-            val p = Hash(h.take(32))
-            if p == Hash.zero then more = false else cursor = p
+            out += AncestorHeader(link.slot, cursor, Some(postRoot))
+            postRoot = link.priorStateRoot
+            if link.parent == Hash.zero then more = false else cursor = link.parent
         case None => more = false
     out.result()
 

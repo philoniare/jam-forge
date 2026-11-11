@@ -236,13 +236,12 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
     */
   protected def handleNew(instance: PvmInstance): Unit =
     val codeHashAddr = argAddr(instance, 7)
-    val codeHashLength = argU32(instance, 8)
+    val codeHashLength: Long = argU32(instance, 8)
       .getOrElse(
         panic(
           "New PANIC: preimage length out of 32-bit range"
         )
       )
-      .toInt
     val minAccumulateGas = getReg(instance, 9).toLong
     val minMemoGas = getReg(instance, 10).toLong
     val gratisStorage = getReg(instance, 11).toLong

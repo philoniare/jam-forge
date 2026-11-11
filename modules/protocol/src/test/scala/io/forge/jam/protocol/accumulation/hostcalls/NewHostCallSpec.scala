@@ -104,3 +104,64 @@ class NewHostCallSpec extends HostCallTestBase:
 
     ULong(instance.reg(7)) shouldBe HostCallResult.FULL
   }
+
+  // Omega_N: l is any value in N_{2^32}; a.octets = 81 + l and
+  // a.minbalance = B_S + 2*B_I + (81 + l)*B_L - gratis. With the test caller
+  // (items = 5, octets = 100, gratis = 0) its own threshold is 100 + 50 + 100 = 250.
+  private val callerThreshold = 250L
+  private def newThreshold(l: Long): Long = 100L + 2L * 10L + (81L + l)
+
+  private def runNew(balance: Long, length: Long): (AccumulationContext, MockPvmInstance, Array[Byte]) =
+    val context = createTestContext(balance = balance)
+    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
+    val instance = createMockInstance()
+    val codeHash = Array.fill[Byte](32)(0xcd.toByte)
+    val codeHashAddr = 0x10000
+    instance.writeBytes(codeHashAddr, codeHash)
+    instance.setReg(7, codeHashAddr)
+    instance.setReg(8, length)
+    instance.setReg(9, 100L)
+    instance.setReg(10, 50L)
+    instance.setReg(11, 0L)
+    instance.setReg(12, 0L)
+    hostCalls.dispatch(HostCall.NEW, instance)
+    (context, instance, codeHash)
+
+  private def assertCreated(length: Long, balance: Long): Unit =
+    val (context, instance, codeHash) = runNew(balance, length)
+    val newServiceId = instance.reg(7)
+    newServiceId should be >= testConfig.minPublicServiceIndex
+    val created = context.x.accounts(newServiceId)
+    created.info.bytesUsed shouldBe 81L + length
+    created.info.items shouldBe 2
+    created.info.balance shouldBe newThreshold(length)
+    created.preimageRequests.keySet shouldBe Set(
+      PreimageKey(io.forge.jam.core.primitives.Hash(codeHash), length)
+    )
+    context.x.accounts(100L).info.balance shouldBe balance - newThreshold(length)
+
+  test("NEW: length 2^31 with sufficient balance returns OK with footprint 81 + 2^31") {
+    val l = 1L << 31
+    assertCreated(l, newThreshold(l) + callerThreshold)
+  }
+
+  test("NEW: length 2^32 - 1 with sufficient balance returns OK with footprint 81 + l") {
+    val l = 0xffffffffL
+    assertCreated(l, newThreshold(l) + callerThreshold)
+  }
+
+  test("NEW: length 2^31 with balance one short returns CASH and creates nothing") {
+    val l = 1L << 31
+    val balance = newThreshold(l) + callerThreshold - 1L
+    val (context, instance, _) = runNew(balance, l)
+    ULong(instance.reg(7)) shouldBe HostCallResult.CASH
+    context.x.accounts.keySet shouldBe Set(100L)
+    context.x.accounts(100L).info.balance shouldBe balance
+  }
+
+  test("NEW: small length at the exact balance boundary is unchanged (OK, then CASH one below)") {
+    val l = 1000L
+    assertCreated(l, newThreshold(l) + callerThreshold)
+    val (_, instance, _) = runNew(newThreshold(l) + callerThreshold - 1L, l)
+    ULong(instance.reg(7)) shouldBe HostCallResult.CASH
+  }

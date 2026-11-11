@@ -5,6 +5,7 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
 import io.forge.jam.core.types.tickets.TicketEnvelope
+import io.forge.jam.protocol.preimage.PreimageTransition
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -129,10 +130,14 @@ final class ExtrinsicPools:
       .filter(_.anchor == parent)
       .sortBy(_.validatorIndex.toInt)
 
+  /** Preimages for inclusion, in the order block import requires:
+    * by requester, then by blob bytes, not by hash.
+    * Unique, since the pool is keyed by (requester, blob hash).
+    */
   def takePreimages(usable: Preimage => Boolean = _ => true): List[Preimage] =
     preimages.values.asScala.toList
       .filter(usable)
-      .sortBy(p => (p.requester.toLong, Hashing.blake2b256(p.blob.toArray).toHex))
+      .sorted(using PreimageTransition.preimageOrdering)
 
   def findPreimage(hash: Hash): Option[Preimage] =
     preimages.values.asScala.find(p => Hashing.blake2b256(p.blob.toArray) == hash)

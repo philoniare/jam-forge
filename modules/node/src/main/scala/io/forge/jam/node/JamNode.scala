@@ -49,7 +49,7 @@ final class JamNode(
   private def openStores(): (RocksDbTrieBackend, BlockStore, ShardStore) =
     // RocksDB creates only the leaf directory, so a fresh --data path must exist first.
     Files.createDirectories(nodeConfig.dataDir)
-    val trie = RocksDbTrieBackend.open(nodeConfig.dataDir.resolve("state"))
+    val trie = RocksDbTrieBackend.open(nodeConfig.dataDir.resolve("state"), trackGarbage = false)
     try
       val blocks = BlockStore.open(nodeConfig.dataDir.resolve("blocks"))
       try

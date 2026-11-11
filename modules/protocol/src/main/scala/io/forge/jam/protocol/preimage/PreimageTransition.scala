@@ -15,7 +15,7 @@ import io.forge.jam.protocol.state.TrieBackedJamState
  *
  * Manages preimage storage and retrieval by service account:
  * - Validates preimage was solicited (lookup entry exists with empty timestamp list)
- * - Checks sorted/unique ordering by (requester, blake2b hash)
+ * - Checks sorted/unique ordering by (requester, blob)
  * - Stores preimage data by service account
  * - Updates lookup metadata with submission timestamp
  * - Updates service statistics with provided count and size
@@ -41,9 +41,17 @@ object PreimageTransition:
       compareUnsigned(blob1, blob2)
 
   /**
+   * The order the preimages extrinsic must follow:
+   * by requester, then by blob compared lexicographically as unsigned bytes.
+   * Block authors must use this to assemble the extrinsic.
+   */
+  val preimageOrdering: Ordering[Preimage] = (a, b) =>
+    comparePreimages(a.requester.toLong, a.blob.toArray, b.requester.toLong, b.blob.toArray)
+
+  /**
    * Check that preimages are sorted by (requester, blob) and unique.
    */
-  private def arePreimagesSortedAndUnique(preimages: List[Preimage]): Boolean =
+  def arePreimagesSortedAndUnique(preimages: List[Preimage]): Boolean =
     if preimages.size <= 1 then true
     else
       var prevRequester: Option[Long] = None

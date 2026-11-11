@@ -39,11 +39,12 @@ final class RocksDbTrieBackend private (
     nodeRefsCf: ColumnFamilyHandle,
     valueRefsCf: ColumnFamilyHandle,
     ownedHandles: Seq[ColumnFamilyHandle],
-    resources: Seq[AutoCloseable]
+    resources: Seq[AutoCloseable],
+    val tracksGarbage: Boolean
 ) extends StateTrieBackend
     with AutoCloseable:
 
-  // Hashes whose count a delta may have taken to zero or below; gc() checks each.
+  // Hashes whose count a delta may have taken to zero or below; gc() checks each. Always empty unless tracksGarbage.
   private val deadNodeCandidates = mutable.Set[Hash]()
   private val deadValueCandidates = mutable.Set[Hash]()
   private val writeOptions = new WriteOptions()
@@ -90,17 +91,24 @@ final class RocksDbTrieBackend private (
           batch.put(valuesCf, key(h), v.toArrayUnsafe)
         case BackendOp.NodeRefDelta(h, d) =>
           batch.merge(nodeRefsCf, key(h), encodeLE8(d))
-          if d < 0 then deadNodeCandidates.add(h)
+          if d < 0 && tracksGarbage then deadNodeCandidates.add(h)
         case BackendOp.RawValueRefDelta(h, d) =>
           batch.merge(valueRefsCf, key(h), encodeLE8(d))
-          if d < 0 then deadValueCandidates.add(h)
+          if d < 0 && tracksGarbage then deadValueCandidates.add(h)
       }
       db.write(writeOptions, batch)
       written.foreach(n => nodeCache.put(n.hash, n))
     finally batch.close()
 
-  /** Deletes every candidate node and value whose count is at or below zero, in one atomic write. */
+  /**
+   * Deletes every candidate node and value whose count is at or below zero, in one atomic write. Throws when garbage
+   * tracking is off: there are no candidates to check, and such a store's counts are not safe to collect by.
+   */
   def gc(): Unit =
+    if !tracksGarbage then
+      throw new UnsupportedOperationException(
+        "RocksDbTrieBackend.gc: garbage tracking is off for this store (opened with trackGarbage = false)"
+      )
     val batch = new WriteBatch()
     try
       val deletedNodes = mutable.ArrayBuffer[Hash]()
@@ -141,6 +149,9 @@ final class RocksDbTrieBackend private (
     nodeCache.clear()
     deadNodeCandidates.clear()
     deadValueCandidates.clear()
+
+  /** Number of dead-candidate hashes awaiting the next gc(); always 0 with tracking off. */
+  def pendingDeadCandidates: Int = deadNodeCandidates.size + deadValueCandidates.size
 
   def nodeRefcount(h: Hash): Long = readCount(nodeRefsCf, h)
   def valueRefcount(h: Hash): Long = readCount(valueRefsCf, h)
@@ -207,8 +218,11 @@ object RocksDbTrieBackend:
         entries.set(i, null)
         i += 1
 
-  /** Open (creating if absent) a trie backend at `path`. */
-  def open(path: Path): RocksDbTrieBackend =
+  /**
+   * Open (creating if absent) a trie backend at `path`. Pass `trackGarbage = false` when nothing will call `gc()`, as
+   * in the node, which keeps replaced roots readable for reorgs; the class comment says what that gives up.
+   */
+  def open(path: Path, trackGarbage: Boolean = true): RocksDbTrieBackend =
     RocksDB.loadLibrary()
     val resources = mutable.ArrayBuffer[AutoCloseable]()
     def own[A <: AutoCloseable](a: A): A =
@@ -253,7 +267,8 @@ object RocksDbTrieBackend:
         nodeRefsCf = hs(3),
         valueRefsCf = hs(4),
         ownedHandles = hs,
-        resources = resources.reverse.toSeq
+        resources = resources.reverse.toSeq,
+        tracksGarbage = trackGarbage
       )
     catch
       case e: Throwable =>

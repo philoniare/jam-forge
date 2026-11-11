@@ -287,6 +287,110 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     finally deleteRecursively(dir)
   }
 
+  /**
+   * Saves `rounds` blocks of `perRound` overwritten keys each on `backend`, never calling gc. Returns every root saved
+   * with its key-values, plus the dead-candidate count after each save.
+   */
+  private def saveRounds(
+      backend: RocksDbTrieBackend,
+      rounds: Int,
+      perRound: Int
+  ): (Vector[(Hash, Map[JamBytes, JamBytes])], Vector[Int]) =
+    val rng = new scala.util.Random(17)
+    var state = Map.empty[JamBytes, JamBytes]
+    var root = Hash.zero
+    val roots = Vector.newBuilder[(Hash, Map[JamBytes, JamBytes])]
+    val pending = Vector.newBuilder[Int]
+    for _ <- 1 to rounds do
+      val updates = (0 until perRound).map(_ => key31(rng.nextInt(256)) -> JamBytes(rng.nextBytes(40)))
+      val trie = StateTrie.at(backend, root)
+      trie.update(updates.map((k, v) => k -> Some(v)))
+      trie.save()
+      root = trie.rootHash
+      state = state ++ updates
+      roots += ((root, state))
+      pending += backend.pendingDeadCandidates
+    (roots.result(), pending.result())
+
+  test("with garbage tracking on and no gc, dead candidates grow with every save (what the node used to do)") {
+    withBackend { backend =>
+      val (_, pending) = saveRounds(backend, rounds = 200, perRound = 20)
+      // Every save replaces the nodes on its touched paths, so the in-heap set only grows while gc does not run.
+      pending.sliding(2).foreach { case Seq(a, b) => b should be >= a }
+      pending.last should be > 20 * pending.head
+      backend.gc()
+      backend.pendingDeadCandidates shouldBe 0
+    }
+  }
+
+  test("with garbage tracking off, no dead candidates are held however many saves") {
+    val dir = Files.createTempDirectory("jam-rocksdb-notrack")
+    try
+      val backend = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      try
+        backend.tracksGarbage shouldBe false
+        val (_, pending) = saveRounds(backend, rounds = 200, perRound = 20)
+        pending.foreach(_ shouldBe 0)
+      finally backend.close()
+    finally deleteRecursively(dir)
+  }
+
+  test("with garbage tracking off, every earlier root stays readable, and gc refuses to run") {
+    val dir = Files.createTempDirectory("jam-rocksdb-notrack-roots")
+    try
+      val backend = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      try
+        val (roots, _) = saveRounds(backend, rounds = 60, perRound = 15)
+        an[UnsupportedOperationException] should be thrownBy backend.gc()
+        roots.foreach { (root, state) =>
+          val trie = StateTrie.at(backend, root)
+          state.foreach((k, v) => withClue(s"root $root key $k: ")(trie.read(k) shouldBe Some(v)))
+          trie.getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe state
+        }
+        // Reorg shape: build a sibling of an old root and still read both branches.
+        val (oldRoot, oldState) = roots(10)
+        val side = StateTrie.at(backend, oldRoot)
+        val sideUpdates = (0 until 15).map(i => key31(300 + i) -> JamBytes(Array.fill[Byte](40)(i.toByte)))
+        side.update(sideUpdates.map((k, v) => k -> Some(v)))
+        side.save()
+        StateTrie.at(backend, side.rootHash).getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe
+          oldState ++ sideUpdates
+        val (lastRoot, lastState) = roots.last
+        StateTrie.at(backend, lastRoot).getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe lastState
+      finally backend.close()
+    finally deleteRecursively(dir)
+  }
+
+  test("garbage tracking off writes the same nodes and refcounts as tracking on") {
+    val dirOff = Files.createTempDirectory("jam-rocksdb-off")
+    val dirOn = Files.createTempDirectory("jam-rocksdb-on")
+    try
+      val off = RocksDbTrieBackend.open(dirOff, trackGarbage = false)
+      val on = RocksDbTrieBackend.open(dirOn)
+      try
+        val (rootsOff, _) = saveRounds(off, rounds = 40, perRound = 10)
+        val (rootsOn, _) = saveRounds(on, rounds = 40, perRound = 10)
+        rootsOff.map(_._1) shouldBe rootsOn.map(_._1)
+        val stack = scala.collection.mutable.Stack.from(rootsOn.map(_._1))
+        val seen = scala.collection.mutable.HashSet[Hash]()
+        while stack.nonEmpty do
+          val h = stack.pop()
+          if seen.add(h) then
+            val n = on.readNode(h)
+            off.readNode(h) shouldBe n
+            off.nodeRefcount(h) shouldBe on.nodeRefcount(h)
+            n.filter(_.nodeType == io.forge.jam.core.trie.TrieNodeType.Branch).foreach { b =>
+              stack.push(Hash.wrap(b.left.toArray))
+              stack.push(Hash.wrap(b.right.toArray))
+            }
+      finally
+        off.close()
+        on.close()
+    finally
+      deleteRecursively(dirOff)
+      deleteRecursively(dirOn)
+  }
+
   test("clear empties everything") {
     withBackend { backend =>
       val value = JamBytes(Array.fill[Byte](40)(4))

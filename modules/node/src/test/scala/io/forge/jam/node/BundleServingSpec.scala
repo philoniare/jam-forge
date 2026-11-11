@@ -81,7 +81,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       maxSubmissionBytes: Long = GuarantorService.DefaultMaxSubmissionBytes
   ): (GuarantorService, SegmentPool, Path) =
     val dir = Files.createTempDirectory("jam-bundle-serving-spec")
-    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"))
+    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false)
     val blockStore = BlockStore.open(dir.resolve("blocks"))
     val chain = new ChainManager(ChainConfig.TINY, trieBackend, blockStore)
     val distribution = new DistributionService(new ExtrinsicPools, coresCount = 1, newEgress())

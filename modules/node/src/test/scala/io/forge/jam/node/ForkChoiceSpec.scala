@@ -6,6 +6,7 @@ import io.circe.Decoder
 import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -120,6 +121,23 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       val block5 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(5).getOrElse(fail("author 5"))
       nodeA.chain.importBlock(nodeA.chain.encodeBlock(block5)).isRight shouldBe true
       nodeA.chain.best.slot shouldBe 5L
+
+      // After the reorg each block's ancestor set is its own branch's, as the uncached store walk gives, whether the
+      // headers come from the import-filled cache or from the store.
+      val chainA = nodeA.chain
+      val stored = List(block1, block2b, block3b, block5).map(chainA.headerHashOf) :+ headA2.hash
+      stored.foreach { h =>
+        val slot = chainA.slotOf(h).get
+        val root = chainA.postStateRoot(h).getOrElse(Hash.zero)
+        val expected = AncestryOracle.walk(chainA.blockStore, chainA.config, h, root, slot + 1)
+        chainA.ancestorsOf(h, root, slot + 1) shouldBe expected
+        chainA.headerLinks.clear()
+        chainA.ancestorsOf(h, root, slot + 1) shouldBe expected
+      }
+      val onAbandoned = chainA.ancestorsOf(headA2.hash, Hash.zero, 6L).map(_.headerHash)
+      onAbandoned should contain(headA2.hash)
+      onAbandoned should not contain chainA.headerHashOf(block2b)
+      chainA.ancestorsOf(chainA.best.hash, chainA.best.stateRoot, 6L).map(_.headerHash) should not contain headA2.hash
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()
@@ -298,5 +316,16 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       node.chain.ancestorAtHeight(best.hash, 2L) shouldBe Some(fin.hash)
     finally
       if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
+  test("ChainManager refuses a trie backend that tracks garbage, since it never runs gc") {
+    val dir = Files.createTempDirectory("jam-forkchoice-gc")
+    val trie = io.forge.jam.db.RocksDbTrieBackend.open(dir.resolve("trie"))
+    val blocks = io.forge.jam.db.BlockStore.open(dir.resolve("blocks"))
+    try an[IllegalArgumentException] should be thrownBy new ChainManager(ChainConfig.TINY, trie, blocks)
+    finally
+      blocks.close()
+      trie.close()
       cleanup(dir)
   }
