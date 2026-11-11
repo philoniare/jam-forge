@@ -12,20 +12,28 @@ class ServiceCodeSpec extends AnyFunSuite:
   private def jamBlob(stack: Int = 0, p: Array[Byte] = pvmBlob): Array[Byte] =
     le(0, 3) ++ le(0, 3) ++ le(0, 2) ++ le(stack, 3) ++ le(p.length, 4) ++ p
 
-  test("GP: a standard JAM program blob decodes"):
+  test("a standard JAM program blob decodes"):
     val blob = ServiceCode.parseBlob(jamBlob())
     assert(blob.map(_.code.toSeq) == Some(Seq[Byte](0)))
 
-  test("GP: a bare PVM blob is not a JAM program blob (Y = ∅)"):
+  test("a bare PVM blob is not a JAM program blob (Y = ∅)"):
     assert(ServiceCode.parseBlob(pvmBlob).isEmpty)
 
-  test("GP: a PolkaVM-style blob is not a JAM program blob (Y = ∅)"):
+  test("a PolkaVM-style blob is not a JAM program blob (Y = ∅)"):
     assert(ServiceCode.parseBlob(Array[Byte](1, 0, 0, 0, 0, 0)).isEmpty)
 
-  test("GP: trailing bytes after the PVM blob make Y = ∅"):
+  test("trailing bytes after the PVM blob make Y = ∅"):
     assert(ServiceCode.parseBlob(jamBlob() :+ 0.toByte).isEmpty)
 
-  test("GP: any E_3 stack size is accepted, up to 2^24 - 1"):
+  test("an inexact deblob encoding inside the program blob is rejected (deblob = ∇, Psi panics)"):
+    // Trailing octet after the bitmask (the outer E_4 length covers it).
+    assert(ServiceCode.parseBlob(jamBlob(p = pvmBlob :+ 0.toByte)).isEmpty)
+    // Non-zero bitmask padding bit (|c| = 1).
+    assert(ServiceCode.parseBlob(jamBlob(p = Array[Byte](0, 0, 1, 0, 3))).isEmpty)
+    // |c| = 1 as the non-shortest [0x80, 0x01].
+    assert(ServiceCode.parseBlob(jamBlob(p = Array[Byte](0, 0, -128, 1, 0, 1))).isEmpty)
+
+  test("any E_3 stack size is accepted, up to 2^24 - 1"):
     assert(ServiceCode.parseBlob(jamBlob(stack = 1_000_001)).map(_.stackSize) == Some(1_000_001))
     assert(ServiceCode.parseBlob(jamBlob(stack = 0xFFFFFF)).map(_.stackSize) == Some(0xFFFFFF))
 

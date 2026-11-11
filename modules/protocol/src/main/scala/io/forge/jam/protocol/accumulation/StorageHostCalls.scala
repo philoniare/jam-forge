@@ -111,12 +111,12 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       return
 
     val data = preimage match
-      case Some(bytes) => bytes.toArray
+      case Some(bytes) => bytes
       case None        =>
         setReg(instance, 7, HostCallResult.NONE)
         return
 
-    val slice = data.slice(actualOffset, actualOffset + actualLength)
+    val slice = requestedSlice(data, actualOffset, actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
       setReg(instance, 7, HostCallResult.OOB)
@@ -153,14 +153,14 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       value = context.readRawDataFor(targetServiceId, stateKey)
 
     val data = value match
-      case Some(bytes) => bytes.toArray
+      case Some(bytes) => bytes
       case None        =>
         setReg(instance, 7, HostCallResult.NONE)
         return
 
     val actualOffset = argClampedLen(instance, 11, data.length.toLong)
     val actualLength = argClampedLen(instance, 12, data.length.toLong - actualOffset)
-    val slice = data.slice(actualOffset, actualOffset + actualLength)
+    val slice = requestedSlice(data, actualOffset, actualLength)
 
     if !writeMemory(instance, outputAddr, slice) then
       panic(

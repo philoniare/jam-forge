@@ -2,7 +2,7 @@ package io.forge.jam.protocol.accumulation
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.pvm.engine.{InterpretedModule, ModuleCache}
-import io.forge.jam.pvm.program.ProgramBlob
+import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
 
 /** Service-code preimage handling shared by the accumulate and refine executors */
 object ServiceCode:
@@ -82,6 +82,7 @@ object ServiceCode:
     if codeLen < 0 || offset.toLong + codeLen != data.length then return None
     val codeAndJumpTable = new Array[Byte](codeLen)
     System.arraycopy(data, offset, codeAndJumpTable, 0, codeLen)
+    if !Deblob.isExactEncoding(codeAndJumpTable) then return None
 
     val heapSize = heapPages * JAM_PAGE_SIZE
     val totalRwSize = rwDataLen + heapSize

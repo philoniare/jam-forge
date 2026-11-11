@@ -133,7 +133,7 @@ object ProgramBlob:
    * Read a varint from data at offset
    * Returns (value, newOffset) or None on failure.
    */
-  private def readJamFormatVarint(data: Array[Byte], offset: Int): Option[(Long, Int)] =
+  private[program] def readJamFormatVarint(data: Array[Byte], offset: Int): Option[(Long, Int)] =
     if offset >= data.length then return None
 
     val firstByte = data(offset) & 0xFF

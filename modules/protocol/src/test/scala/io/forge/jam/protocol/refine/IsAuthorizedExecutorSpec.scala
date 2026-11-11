@@ -127,6 +127,33 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
     hc.getGasCost(io.forge.jam.protocol.accumulation.HostCall.GROW_HEAP, instance) shouldBe 0L
   }
 
+  test("is-authorized FETCH panics when the output address is >= 2^32 (no 32-bit truncation)") {
+    val wp = workPackage(5L)
+    val hc = new IsAuthorizedHostCalls(config, wp)
+    // Addresses below 2^16 are never accessible, as in a real PVM.
+    val instance = new io.forge.jam.protocol.accumulation.MockPvmInstance(
+      memorySize = 0x100000,
+      initialGas = 1_000_000L
+    ):
+      override def isMemoryAccessible(address: Int, length: Int): Boolean =
+        (length == 0 || address >= 0x10000) && super.isMemoryAccessible(address, length)
+
+    def fetchToken(addr: Long): Unit =
+      instance.setReg(7, addr)
+      instance.setReg(8, 0L) // offset
+      instance.setReg(9, 3L) // length
+      instance.setReg(10, 9L) // selector 9: authorization token
+      hc.dispatch(io.forge.jam.protocol.accumulation.HostCall.FETCH, instance)
+
+    // Low 32 bits point at writable memory, but o ∉ writable(μ) over the full 64-bit o.
+    a[io.forge.jam.protocol.HostCallPanic] should be thrownBy fetchToken((1L << 32) + 0x20000L)
+    instance.readBytes(0x20000, 3).get shouldBe Array[Byte](0, 0, 0)
+
+    fetchToken(0x20000L)
+    instance.reg(7) shouldBe 3L
+    instance.readBytes(0x20000, 3).get shouldBe Array[Byte](0x0a, 0x0b, 0x0c)
+  }
+
   test("authorizerHash is blake(authCodeHash ++ authorizerConfig)") {
     val wp = workPackage(5L)
     val expected = Hashing.blake2b256(

@@ -58,7 +58,7 @@ private final class IsAuthorizedHostCalls(
 
   private def handleFetch(instance: PvmInstance): Unit =
     val selector = ULong(instance.reg(10))
-    val outputAddr = instance.reg(7).toInt
+    val outputAddr = PvmRunner.memAddr(instance.reg(7))
     val r11 = ULong(instance.reg(11))
     val r12 = ULong(instance.reg(12))
 

@@ -337,10 +337,12 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
   // machine / peek / poke / pages / expunge
   // =========================================================================
 
-  /** Minimal valid deblob-format blob: 0 jump-table entries, entry size 0,
-    * 1-byte code (panic), 1-byte bitmask.
+  /** Small valid deblob-format blob: 0 jump-table entries, entry size 0,
+    * 8-byte code (7 × fallthrough, then trap), bitmask 0xff, so every pc in
+    * 0..7 is an instruction start.
     */
-  private val validGuestCode: Array[Byte] = Array[Byte](0, 0, 1, 0, 1)
+  private val validGuestCode: Array[Byte] =
+    Array[Byte](0, 0, 8, 1, 1, 1, 1, 1, 1, 1, 0, -1)
 
   private def createMachine(hc: RefineHostCalls, pc: Long = 7L): Long =
     val instance = newInstance()
@@ -367,6 +369,105 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     instance.setReg(9, 0L)
     hc.dispatch(HostCall.MACHINE, instance)
     ULong(instance.reg(7)) shouldBe HostCallResult.HUH
+  }
+
+  /** MACHINE with raw blob bytes at 0x5000 and entry pc; returns r7. */
+  private def machineWithBlob(hc: RefineHostCalls, blob: Array[Byte], pc: Long): Long =
+    val instance = newInstance()
+    instance.writeBytes(0x5000, blob) shouldBe true
+    instance.setReg(7, 0x5000L)
+    instance.setReg(8, blob.length.toLong)
+    instance.setReg(9, pc)
+    hc.dispatch(HostCall.MACHINE, instance)
+    instance.reg(7)
+
+  // Omega_M: (continue, HUH, m) otherwhen deblob(p, i) = error. deblob needs the exact
+  // encoding, v_blob(c, k, 0) (known opcodes, last instruction in T) and v_inst(c, k, i).
+
+  test("MACHINE is HUH when the last instruction is not a terminator") {
+    val hc = new RefineHostCalls(newContext())
+    // load_imm r7, 42 — a well-framed blob whose only instruction is not in T.
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, 3, 51, 7, 42, 1), pc = 0L)) shouldBe HostCallResult.HUH
+  }
+
+  test("MACHINE is HUH when an instruction has an unknown opcode") {
+    val hc = new RefineHostCalls(newContext())
+    // opcode 3 is not in U; the program still ends in trap.
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, 2, 3, 0, 3), pc = 0L)) shouldBe HostCallResult.HUH
+  }
+
+  test("MACHINE is HUH when the entry pc is not an instruction start") {
+    val hc = new RefineHostCalls(newContext())
+    // load_imm r7, 42 ; trap — instructions at 0 and 3 only.
+    val blob = Array[Byte](0, 0, 4, 51, 7, 42, 0, 9)
+    for pc <- Seq(1L, 2L, 4L, 1L << 32, -1L) do
+      withClue(s"pc=0x${pc.toHexString}: ") {
+        ULong(machineWithBlob(hc, blob, pc)) shouldBe HostCallResult.HUH
+      }
+    // The same code (now cached) is accepted at a valid entry.
+    machineWithBlob(hc, blob, pc = 3L) shouldBe 0L
+    machineWithBlob(hc, blob, pc = 0L) shouldBe 1L
+  }
+
+  test("MACHINE entry check is per call even with a module cache") {
+    val ctx = new RefineContext(
+      config = config,
+      workPackage = testWorkPackage(List(testWorkItem())),
+      workItemIndex = 0,
+      coreIndex = 1,
+      authorizerTrace = Array.empty,
+      importSegments = IndexedSeq(IndexedSeq.empty),
+      extrinsicData = IndexedSeq(IndexedSeq.empty),
+      exportSegmentOffset = 0L,
+      accounts = new MapLookupService(Map.empty, Set.empty),
+      machineModuleCache = Some(new BoundedModuleCache(4))
+    )
+    val hc = new RefineHostCalls(ctx)
+    val blob = Array[Byte](0, 0, 4, 51, 7, 42, 0, 9)
+    machineWithBlob(hc, blob, pc = 0L) shouldBe 0L
+    ULong(machineWithBlob(hc, blob, pc = 1L)) shouldBe HostCallResult.HUH
+    machineWithBlob(hc, blob, pc = 3L) shouldBe 1L
+  }
+
+  test("MACHINE is HUH for encodings deblob rejects (trailing octet, padding bits, long varint)") {
+    val hc = new RefineHostCalls(newContext())
+    // Baseline: [trap], bitmask 0x01.
+    machineWithBlob(hc, Array[Byte](0, 0, 1, 0, 1), pc = 0L) shouldBe 0L
+    // One octet after the bitmask: no (c, k, j) decomposes p exactly.
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, 1, 0, 1, 0), pc = 0L)) shouldBe HostCallResult.HUH
+    // Bitmask padding bit set: E(k) packs |c| = 1 bit, so the other 7 bits are zero.
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, 1, 0, 3), pc = 0L)) shouldBe HostCallResult.HUH
+    // |c| = 1 as the two-octet [0x80, 0x01]: not E(1) = [0x01].
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, -128, 1, 0, 1), pc = 0L)) shouldBe HostCallResult.HUH
+    // Empty code: v_blob(c, k, 0) is false for |c| = 0.
+    ULong(machineWithBlob(hc, Array[Byte](0, 0, 0), pc = 0L)) shouldBe HostCallResult.HUH
+  }
+
+  test("MACHINE accepts a valid blob with a jump table") {
+    val hc = new RefineHostCalls(newContext())
+    // |j| = 2, z = 1, j = [0, 0]; code = [trap].
+    machineWithBlob(hc, Array[Byte](2, 1, 1, 0, 0, 0, 1), pc = 0L) shouldBe 0L
+  }
+
+  test("MACHINE panics when the code address is >= 2^32 (no 32-bit truncation)") {
+    val hc = new RefineHostCalls(newContext())
+    // Addresses below 2^16 are never accessible, as in a real PVM.
+    val instance = new MockPvmInstance(memorySize = 0x100000, initialGas = 1_000_000L):
+      override def isMemoryAccessible(address: Int, length: Int): Boolean =
+        (length == 0 || address >= 0x10000) && super.isMemoryAccessible(address, length)
+    instance.writeBytes(0x20000, validGuestCode) shouldBe true
+    instance.setReg(7, (1L << 32) + 0x20000L) // low 32 bits point at the valid blob
+    instance.setReg(8, validGuestCode.length.toLong)
+    instance.setReg(9, 0L)
+    a[HostCallPanic] should be thrownBy hc.dispatch(HostCall.MACHINE, instance)
+    hc.context.innerPvms shouldBe empty
+
+    // Sanity: the same blob at the in-range address is accepted.
+    instance.setReg(7, 0x20000L)
+    instance.setReg(8, validGuestCode.length.toLong)
+    instance.setReg(9, 0L)
+    hc.dispatch(HostCall.MACHINE, instance)
+    instance.reg(7) shouldBe 0L
   }
 
   test("MACHINE returns FULL once 63 inner VMs exist") {
@@ -484,7 +585,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
   }
 
   test("PAGES: a mode register >= 2^63 is HUH, not a signed-negative fall-through") {
-    // gp Omega_Z: r >= 5 => HUH. `getReg(10).toLong` narrows the u64 mode
+    // Omega_Z: r >= 5 => HUH. `getReg(10).toLong` narrows the u64 mode
     // register to a SIGNED Long, so r = 2^63 became negative, `r > 4` was
     // false, and the call fell through to `guest.ram.applyPages(p, c, r)`
     // where `variant match { case _ => AccessWrite }` silently granted write
@@ -620,6 +721,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     regsAfter(0) shouldBe 0xffff0000L
   }
 
+  /** Charge getGasCost then dispatch, as PvmRunner does. */
   private def chargeAndDispatch(hc: RefineHostCalls, id: Int, instance: MockPvmInstance): Unit =
     instance.setGas(instance.gas - hc.getGasCost(id, instance))
     hc.dispatch(id, instance)
@@ -665,11 +767,12 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     chargeAndDispatch(hc, HostCall.INVOKE, instance)
 
     ULong(instance.reg(7)) shouldBe HostCallResult.OOG
+    // Psi_1: a block that can't be paid for leaves the counter unchanged.
     readInvokeBlock(instance, 0x8000)._1 shouldBe 1L
     instance.gas shouldBe 1_000_000L - 968L
   }
 
-  test("GP: INVOKE stores pc 0 after a guest halt, and EXPUNGE returns it") {
+  test("INVOKE stores pc 0 after a guest halt, and EXPUNGE returns it") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
@@ -689,7 +792,7 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     instance.reg(7) shouldBe 0L
   }
 
-  test("GP: INVOKE stores pc 0 after a guest panic") {
+  test("INVOKE stores pc 0 after a guest panic") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
@@ -729,6 +832,41 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     instance.setReg(8, 0x8000L)
     hc.dispatch(HostCall.INVOKE, instance)
     ULong(instance.reg(7)) shouldBe HostCallResult.HALT
+  }
+
+  /** Run `ecalli <immBytes>; JumpIndirect r0 + 0` in an inner machine and return ω'₇, ω'₈. */
+  private def invokeGuestEcalli(immBytes: Array[Byte]): (Long, Long) =
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx)
+    val code = (10.toByte +: immBytes) ++ Array[Byte](50, 0)
+    // Instructions start at offset 0 and at the JumpIndirect after the immediate.
+    val bitmask = Array[Byte]((1 | (1 << (1 + immBytes.length))).toByte)
+    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    hc.dispatch(HostCall.INVOKE, instance)
+    (instance.reg(7), instance.reg(8))
+
+  test("INVOKE returns the 64-bit sign-extended host id for a negative ecalli immediate") {
+    // ν_X = X_1(0x80) = 2^64 − 128, and Ω_K sets ω'₈ = h.
+    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x80.toByte))
+    ULong(r7) shouldBe HostCallResult.HOST
+    r8 shouldBe 0xffffffffffffff80L
+  }
+
+  test("INVOKE returns the 64-bit sign-extended host id for a 4-byte ecalli immediate") {
+    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x00, 0x00, 0x00, 0x80.toByte))
+    ULong(r7) shouldBe HostCallResult.HOST
+    r8 shouldBe 0xffffffff80000000L
+  }
+
+  test("INVOKE returns a small positive ecalli host id unchanged") {
+    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x7f))
+    ULong(r7) shouldBe HostCallResult.HOST
+    r8 shouldBe 0x7fL
   }
 
   test("INVOKE reports FAULT with the faulting page address") {

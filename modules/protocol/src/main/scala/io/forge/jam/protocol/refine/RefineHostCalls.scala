@@ -12,14 +12,14 @@ import io.forge.jam.protocol.accumulation.{ConstantsBlob, GrowHeapHostCall, Host
 import io.forge.jam.pvm.InterruptKind
 import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.GuestRam
-import io.forge.jam.pvm.program.ProgramBlob
+import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.core.codec.Codec
 import spire.math.ULong
 
 /** Host-call dispatcher for the refine invocation
   * INVOKE (12) is not yet wired to the interpreter and currently reports WHAT;
-  * every other refine host call is implemented per the spec.
+  * every other refine host call is implemented.
   */
 class RefineHostCalls(
     val context: RefineContext
@@ -240,18 +240,19 @@ class RefineHostCalls(
       return
 
     // A length beyond the 32-bit address space can never be readable → panic.
+    val addr = PvmRunner.memAddr(codeAddr.signed)
     if codeLen > ULong(Int.MaxValue) ||
-      !instance.isMemoryReadable(codeAddr.toInt, codeLen.toInt)
+      !instance.isMemoryReadable(addr, codeLen.toInt)
     then
       panic(
         s"Machine PANIC: code not readable at 0x${codeAddr.toLong.toHexString} len $codeLen"
       )
 
     val code = new Array[Byte](codeLen.toInt)
-    if !readMemory(instance, codeAddr.toInt, code) then
+    if !readMemory(instance, addr, code) then
       panic(s"Machine PANIC: failed to read code")
-
     val parsed = getOrCompileMachineModule(code)
+      .filter(module => Deblob.isValidEntry(module.blob, pc))
 
     parsed match
       case None =>
@@ -275,15 +276,18 @@ class RefineHostCalls(
   private def compileMachineModule(
       code: Array[Byte]
   ): Option[InterpretedModule] =
-    ProgramBlob
-      .fromCodeAndJumpTable(
-        data = code,
-        roData = Array.empty,
-        rwData = Array.empty,
-        stackSize = 0,
-        is64Bit = true
-      )
-      .flatMap(blob => InterpretedModule.create(blob).toOption)
+    if !Deblob.isExactEncoding(code) then None
+    else
+      ProgramBlob
+        .fromCodeAndJumpTable(
+          data = code,
+          roData = Array.empty,
+          rwData = Array.empty,
+          stackSize = 0,
+          is64Bit = true
+        )
+        .filter(Deblob.isValidCode)
+        .flatMap(blob => InterpretedModule.create(blob).toOption)
 
   // ===========================================================================
   // peek (9) — Omega_P: outer[o..o+z) := guest[s..s+z)
@@ -439,7 +443,7 @@ class RefineHostCalls(
         outcome match
           case InterruptKind.Ecalli(hostId) =>
             setReg(instance, 7, HostCallResult.HOST)
-            setReg(instance, 8, ULong(hostId.toLong))
+            setReg(instance, 8, ULong(hostId.signed.toLong))
           case InterruptKind.Segfault(info) =>
             setReg(instance, 7, HostCallResult.FAULT)
             setReg(instance, 8, ULong(info.pageAddress.toLong))
@@ -598,9 +602,9 @@ object RefineFetch:
       case 7 =>
         workPackage.map(encodeWorkPackage)
       case 8 =>
-        workPackage.map(_.authorizerConfig.toArray)
+        workPackage.map(_.authorizerConfig.toArrayUnsafe)
       case 9 =>
-        workPackage.map(_.authorization.toArray)
+        workPackage.map(_.authorization.toArrayUnsafe)
       case 10 =>
         workPackage.map(wp => encodeScodec(summon[Codec[Context]], wp.context))
       case 11 =>
@@ -619,7 +623,7 @@ object RefineFetch:
         for
           wp <- workPackage
           i <- idx(r11, wp.items.size)
-        yield wp.items(i).payload.toArray
+        yield wp.items(i).payload.toArrayUnsafe
       case _ => None
 
   def encodeWorkPackage(wp: WorkPackage): Array[Byte] =

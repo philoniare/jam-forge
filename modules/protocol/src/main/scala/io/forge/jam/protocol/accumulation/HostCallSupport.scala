@@ -28,9 +28,9 @@ private[accumulation] trait HostCallSupport:
   protected def setReg(instance: PvmInstance, reg: Int, value: ULong): Unit =
     instance.setReg(reg, value.signed)
 
-  /** Read a register as a spec offset/length argument and clamp it to
-    * `available` using unsigned-64-bit min(), matching the spec's
-    * `f = min(f_0, len(v))` / `l = min(z, len(v) - f)` semantics. `available`
+  /** Read a register as an offset/length argument and clamp it to
+    * `available` using unsigned-64-bit min(), i.e.
+    * `f = min(f_0, len(v))` / `l = min(z, len(v) - f)`. `available`
     * is a non-negative buffer length (always <= Int.MaxValue), so the clamped
     * result fits in a non-negative Int. A normal small register value <=
     * `available` is returned unchanged; a huge value (e.g. 2^32) clamps to
@@ -45,18 +45,27 @@ private[accumulation] trait HostCallSupport:
     val cap = ULong(available)
     (if v < cap then v else cap).toLong.toInt
 
+  /** Fresh copy of `value[offset ..+ length]`, without materialising the rest of
+    * `value`. `offset` and `length` must already be clamped by [[argClampedLen]]
+    * (`offset <= |value|`, `length <= |value| - offset`).
+    */
+  protected def requestedSlice(value: JamBytes, offset: Int, length: Int): Array[Byte] =
+    val out = new Array[Byte](length)
+    value.copyToArray(out, 0, offset, length)
+    out
+
   /** Read a register as a full-width (unsigned 64-bit) service id. Does NOT mask
-    * to 32 bits; the spec compares the full register against the `2^64 - 1`
+    * to 32 bits; the full register is compared against the `2^64 - 1`
     * sentinel and against the `Nbits(32)` bound, so masking would conflate
     * distinct destinations (e.g. `2^32 + d` vs `d`).
     */
   protected def argServiceId(instance: PvmInstance, reg: Int): ULong =
     getReg(instance, reg)
 
-  /** Read a register as a value that the spec constrains to `Nbits(32)`
+  /** Read a register as a value constrained to `Nbits(32)`
     * (preimage lengths, counts, core/service indices used as array bounds).
     * Returns the value as a Long when it fits in 32 bits, or `None` when it is
-    * `>= 2^32` so the caller can apply the spec's out-of-range handling (panic
+    * `>= 2^32` so the caller can apply its out-of-range handling (panic
     * or WHO) instead of silently truncating. A healthy small value is returned
     * unchanged.
     */
