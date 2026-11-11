@@ -1,6 +1,5 @@
 package io.forge.jam.pvm.engine
 
-import scala.collection.mutable.ArrayBuffer
 import io.forge.jam.pvm.Opcode
 import io.forge.jam.pvm.program.InstructionDecoder
 
@@ -35,7 +34,7 @@ object BlockGasModel:
   private val AluDivUnits = Units(1, 0, 0, 0, 1)
   private val TwoAluUnits = Units(2, 0, 0, 0, 0) // trailing_zero_bits_* row
 
-  /** Initial capacities t^init = (4, 4, 4, 1, 1) (eq:gascostforblock ~1004). */
+  /** Initial capacities t^init = (4, 4, 4, 1, 1). */
   private val InitialUnits = Units(4, 4, 4, 1, 1)
 
   private final class RobEntry(
@@ -266,6 +265,32 @@ object BlockGasModel:
   private def shiftOp(cycles: Int, a: Int, b: Int, d: Int, s1: Int, s2: Int, skip: Int): InstrAttrs =
     InstrAttrs(cycles, pShift(a, b, s1, d), AluUnit, bit(s1) | bit(s2), bit(d), false, false, skip)
 
+  /**
+   * Ring capacity for the live window of the reorder buffer. Must be a power of two strictly greater
+   * than [[MaxLiveRobEntries]] so a live entry's slot is never reused while it can still be referenced.
+   */
+  private inline val RobRingSize = 64
+  private inline val RobRingMask = RobRingSize - 1
+
+  /**
+   * Simulates the per-basic-block gas model in time linear in the block length.
+   *
+   * The model's reorder buffer only ever grows, but its retired entries (state "none") are inert:
+   *
+   *   - Retired entries always form a prefix. In the cycle step an entry becomes "none" iff every
+   *     entry up to and including it was FIN or "none", so `[0, head)` is retired and
+   *     `[head, tail)` is not.
+   *   - A retired entry was FIN before, and FIN is only reached from EXE with cyclesLeft = 0, which
+   *     never changes again. So any dependency on a retired entry is already satisfied, and leaving
+   *     retired entries out of a new entry's dependency set does not change find-ready-to-start.
+   *   - Retired entries are never WAIT or EXE, so they never start, release units or change state,
+   *     and their clobbered-register sets are only ever read to build dependency sets.
+   *
+   * Only the live window `[head, tail)` is therefore scanned. Its size `l` is `tail - head` and is
+   * at most 32 (decode requires `l < 32`), so it fits a 64-slot ring indexed by absolute ROB index.
+   * A stored dependency `k` with `k < head` is retired, which means it is satisfied (cyclesLeft = 0).
+   * Any other `k` is still live, and its slot has not been reused.
+   */
   def gasCostForBlock(code: Array[Byte], bitmask: Array[Byte], blockStart: Int): Long =
     var iota = blockStart
     var iotaDone = false // iota == none
@@ -273,39 +298,38 @@ object BlockGasModel:
     var d = MaxDecodePerCycle
     var e = MaxStartPerCycle
     var units = InitialUnits
-    val rob = ArrayBuffer.empty[RobEntry]
+    val ring = new Array[RobEntry](RobRingSize)
+    var head = 0 // absolute ROB index of the first non-retired entry
+    var tail = 0 // absolute ROB index one past the last entry (= total entries decoded)
     // Attributes of the instruction at iota (recomputed only when iota moves).
     var attrs: InstrAttrs = attrsAt(code, bitmask, iota)
 
     def findReadyToStart(): Int =
-      var j = 0
-      while j < rob.length do
-        val en = rob(j)
+      var j = head
+      while j < tail do
+        val en = ring(j & RobRingMask)
         if en.state == StateWaiting && (en.units <= units) then
           var depsOk = true
           val deps = en.deps
           var k = 0
           while depsOk && k < deps.length do
-            if rob(deps(k)).cyclesLeft != 0 then depsOk = false
+            val dep = deps(k)
+            if dep >= head && ring(dep & RobRingMask).cyclesLeft != 0 then depsOk = false
             k += 1
           if depsOk then return j
         j += 1
       -1
 
     while true do
-      var live = 0
-      var i = 0
-      while i < rob.length do
-        if rob(i).state != StateRetired then live += 1
-        i += 1
+      val live = tail - head
 
       if !iotaDone && attrs.decodeSlots <= d && live < MaxLiveRobEntries then
         if attrs.isMoveReg then
           val src = attrs.srcMask
           val dst = attrs.dstMask
-          var j = 0
-          while j < rob.length do
-            val en = rob(j)
+          var j = head
+          while j < tail do
+            val en = ring(j & RobRingMask)
             if (en.regsMask & src) != 0 then en.regsMask |= dst
             else en.regsMask &= ~dst
             j += 1
@@ -316,20 +340,22 @@ object BlockGasModel:
           val src = attrs.srcMask
           val dst = attrs.dstMask
           var depsCount = 0
-          var j = 0
-          while j < rob.length do
-            if (rob(j).regsMask & src) != 0 then depsCount += 1
+          var j = head
+          while j < tail do
+            if (ring(j & RobRingMask).regsMask & src) != 0 then depsCount += 1
             j += 1
           val deps = new Array[Int](depsCount)
           var di = 0
-          j = 0
-          while j < rob.length do
-            if (rob(j).regsMask & src) != 0 then
+          j = head
+          while j < tail do
+            val en = ring(j & RobRingMask)
+            if (en.regsMask & src) != 0 then
               deps(di) = j
               di += 1
-            rob(j).regsMask &= ~dst
+            en.regsMask &= ~dst
             j += 1
-          rob += new RobEntry(StateDecoding, attrs.cycles, deps, dst, attrs.units)
+          ring(tail & RobRingMask) = new RobEntry(StateDecoding, attrs.cycles, deps, dst, attrs.units)
+          tail += 1
           d -= attrs.decodeSlots
           if attrs.isTerminator then iotaDone = true
           else
@@ -339,7 +365,7 @@ object BlockGasModel:
         val ready = findReadyToStart()
         if ready >= 0 && e > 0 then
           e -= 1
-          val en = rob(ready)
+          val en = ring(ready & RobRingMask)
           units = units - en.units
           en.state = StateExecuting
         else if iotaDone && live == 0 then
@@ -348,15 +374,16 @@ object BlockGasModel:
           d = MaxDecodePerCycle
           e = MaxStartPerCycle
           cycles += 1
-          var j = 0
-          while j < rob.length do
-            val en = rob(j)
+          var j = head
+          while j < tail do
+            val en = ring(j & RobRingMask)
             if en.state == StateExecuting && en.cyclesLeft == 1 then units = units + en.units
             j += 1
+          // Every entry before `head` is retired, so the retired-prefix condition holds on entry.
           var prefixDone = true
-          j = 0
-          while j < rob.length do
-            val en = rob(j)
+          j = head
+          while j < tail do
+            val en = ring(j & RobRingMask)
             val oldState = en.state
             val oldCycles = en.cyclesLeft
             en.state =
@@ -367,6 +394,10 @@ object BlockGasModel:
             if oldState == StateExecuting && oldCycles > 0 then en.cyclesLeft = oldCycles - 1
             prefixDone = prefixDone && (oldState == StateExecuted || oldState == StateRetired)
             j += 1
+          // Newly retired entries form a prefix of the live window; drop them.
+          while head < tail && ring(head & RobRingMask).state == StateRetired do
+            ring(head & RobRingMask) = null
+            head += 1
 
     throw new IllegalStateException("unreachable")
 

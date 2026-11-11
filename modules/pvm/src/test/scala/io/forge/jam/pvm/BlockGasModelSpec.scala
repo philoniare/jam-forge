@@ -130,7 +130,7 @@ class BlockGasModelSpec extends AnyFlatSpec with Matchers:
     cost(divU64(4, 2, 3), moveReg(4, 9), add64(5, 4, 6), trap) shouldBe 60L
   }
 
-  // GP #559: the cmov destination register is also counted as a source register.
+  // The cmov destination register is also counted as a source register.
   it should "make cmov_iz wait on a pending write to its destination (cost 62)" in {
     cost(divU64(1, 2, 3), cmovIz(1, 4, 5), trap) shouldBe 62L
   }
@@ -159,4 +159,23 @@ class BlockGasModelSpec extends AnyFlatSpec with Matchers:
     val (code, bm) = program(trap, Array[Byte](40))
     BlockGasModel.gasCostForBlock(code, bm, 0) shouldBe 2L
     BlockGasModel.gasCostForBlock(code, bm, 1) shouldBe 15L
+  }
+
+  // ---------------------------------------------------------------------
+  // Running time
+  // ---------------------------------------------------------------------
+
+  it should "cost a 1M-instruction block in linear time" in {
+    // 1M one-byte `unlikely` instructions then trap. A quadratic simulation takes about 68 s for 80k
+    // instructions, so 1M would take hours. The linear model takes well under a second. The 60 s
+    // bound leaves a large margin for a loaded machine.
+    val n = 1_000_000
+    val code = new Array[Byte](n + 1)
+    java.util.Arrays.fill(code, 0, n, 2.toByte)
+    val bm = Array.fill[Byte]((code.length + 7) / 8)(0xff.toByte)
+    val t0 = System.nanoTime()
+    val gas = BlockGasModel.gasCostForBlock(code, bm, 0)
+    val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+    gas should be > 0L
+    withClue(s"elapsed ${elapsedMs}ms:") { elapsedMs should be < 60_000L }
   }
