@@ -127,7 +127,10 @@ object workpackage:
     given Codec[WorkReport] =
       (Codec[PackageSpec] ::                           // packageSpec - 102 bytes
        Codec[Context] ::                               // context - variable size
-       compactInt ::                                   // coreIndex - compact integer
+       compactInt.emap[Int](                           // coreIndex - compact integer, rejected (not masked) if >= 2^16
+         v => if v <= 0xffff then Right(v) else Left(s"core index $v out of range (must be < 65536)"),
+         identity
+       ) ::
        hashCodec ::                                    // authorizerHash - 32 bytes
        compactInteger ::                               // authGasUsed - compact integer
        PrimitiveCodecs.compactBytes ::                    // authOutput - compact length + bytes

@@ -47,11 +47,11 @@ object dispute:
     val Size: Int = Hash.Size + 1 + Ed25519PublicKey.Size + Ed25519Signature.Size // 129 bytes
 
     given Codec[Fault] =
-      (hashCodec :: byte :: ed25519PublicKeyCodec :: PrimitiveCodecs.ed25519Signature).xmap(
-        { case (target, voteByte, key, sig) =>
-          Fault(target, voteByte != 0, key, sig)
+      (hashCodec :: bool :: ed25519PublicKeyCodec :: PrimitiveCodecs.ed25519Signature).xmap(
+        { case (target, vote, key, sig) =>
+          Fault(target, vote, key, sig)
         },
-        f => (f.target, (if f.vote then 1 else 0).toByte, f.key, f.signature)
+        f => (f.target, f.vote, f.key, f.signature)
       )
 
     given Decoder[Fault] = ConfiguredDecoder.derived

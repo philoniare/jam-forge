@@ -62,7 +62,7 @@ object work:
   /**
    * Execution result - either Ok with output data or an error.
    *
-   * Encoding per Gray Paper:
+   * Encoding:
    * - Ok: 0x00 + compact length prefix + data bytes
    * - OOG (Out of Gas): 0x01
    * - Panic: 0x02
@@ -89,7 +89,7 @@ object work:
     private val BadCodeTag: Byte = 0x05
     private val CodeTooLargeTag: Byte = 0x06
 
-    /** Work execution result: a tag byte, plus the length-prefixed output for `Ok` (GP 0.8.0 appendix C, O). */
+    /** Work execution result: a tag byte, plus the length-prefixed output for `Ok`. */
     given Codec[ExecutionResult] = Codec.of(
       (w, value) =>
         value match
@@ -162,12 +162,12 @@ object work:
     val Size: Int = 1 + 2 + Ed25519Signature.Size // 67 bytes
 
     given Codec[Vote] =
-      (byte :: uint16L :: PrimitiveCodecs.ed25519Signature).xmap(
+      (bool :: uint16L :: PrimitiveCodecs.ed25519Signature).xmap(
         {
-          case (voteByte, idx, sig) =>
-            Vote(voteByte != 0, ValidatorIndex(idx), sig)
+          case (vote, idx, sig) =>
+            Vote(vote, ValidatorIndex(idx), sig)
         },
-        v => ((if v.vote then 1 else 0).toByte, v.validatorIndex.toInt, v.signature)
+        v => (v.vote, v.validatorIndex.toInt, v.signature)
       )
 
     given Decoder[Vote] = Decoder.instance { cursor =>

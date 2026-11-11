@@ -25,16 +25,19 @@ object workresult:
   )
 
   object RefineLoad:
+    private def bounded(name: String, v: Long, max: Long): Either[String, Long] =
+      if java.lang.Long.compareUnsigned(v, max) <= 0 then Right(v)
+      else Left(s"RefineLoad.$name ${java.lang.Long.toUnsignedString(v)} out of range (max $max)")
+
     given Codec[RefineLoad] =
-      (compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger).xmap(
+      (compactInteger :: compactInteger :: compactInteger :: compactInteger :: compactInteger).emap(
         { case (gasUsed, imports, extrinsicCount, extrinsicSize, exports) =>
-          RefineLoad(
-            Gas(gasUsed),
-            UShort(imports.toInt),
-            UShort(extrinsicCount.toInt),
-            UInt(extrinsicSize.toInt),
-            UShort(exports.toInt)
-          )
+          for
+            i <- bounded("imports", imports, 0xffffL)
+            c <- bounded("extrinsicCount", extrinsicCount, 0xffffL)
+            s <- bounded("extrinsicSize", extrinsicSize, 0xffffffffL)
+            e <- bounded("exports", exports, 0xffffL)
+          yield RefineLoad(Gas(gasUsed), UShort(i.toInt), UShort(c.toInt), UInt(s.toInt), UShort(e.toInt))
         },
         rl => (rl.gasUsed.toLong, rl.imports.toLong, rl.extrinsicCount.toLong, rl.extrinsicSize.toLong, rl.exports.toLong)
       )
