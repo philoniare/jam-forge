@@ -7,7 +7,7 @@ import io.forge.jam.core.types.block.{Block, Extrinsic}
 import io.forge.jam.core.types.extrinsic.Dispute
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
-import io.forge.jam.crypto.SigningContext
+import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
 import io.forge.jam.protocol.pipeline.ExtrinsicHashing
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleInput, TicketsOrKeys}
@@ -28,6 +28,37 @@ final class BlockAuthor(
 
   private val ourBandersnatchKeys: Map[BandersnatchPublicKey, ValidatorKeySet] =
     validators.map(v => v.bandersnatchKey -> v).toMap
+
+  /** Ticket ids our keys win with under one seal entropy, by id: (keys, attempt). A ticket's id is the VRF output
+    * of its key over `jam_ticket_seal ++ entropy ++ attempt`, which is also what the seal for its slot outputs, so
+    * the ids follow from the keys alone. Remembered for the last entropy (one epoch's sealing).
+    */
+  @volatile private var derivedTickets: (JamBytes, Map[Hash, (ValidatorKeySet, spire.math.UByte)]) = null
+
+  private def derivedTicketIds(sealEntropy: Array[Byte]): Map[Hash, (ValidatorKeySet, spire.math.UByte)] =
+    val key = JamBytes(sealEntropy)
+    val cached = derivedTickets
+    if cached != null && cached._1 == key then cached._2
+    else
+      val ids = (for
+        ks <- validators
+        attempt <- 0 until chain.config.ticketsPerValidator
+        output <- BandersnatchVrf.getVrfOutput(
+          BandersnatchWrapper.ietfVrfSign(
+            ks.bandersnatchSecret,
+            SigningContext.safroleTicketInputData(sealEntropy, attempt.toByte),
+            Array.emptyByteArray
+          )
+        )
+      yield Hash(output) -> (ks, spire.math.UByte(attempt))).toMap
+      derivedTickets = (key, ids)
+      ids
+
+  /** Our keys and attempt for ticket `id`: from the tickets this process generated, or else derived from our keys,
+    * so a ticket made before a restart (or by another process holding the same keys) still seals its slot.
+    */
+  private[node] def ownTicket(id: Hash, sealEntropy: Array[Byte]): Option[(ValidatorKeySet, spire.math.UByte)] =
+    Option(ownTickets.get(id)).orElse(derivedTicketIds(sealEntropy).get(id))
 
   /** Try to author a block for `slot` on top of the current best head.
     * Returns the block when one of our keys owns the slot.
@@ -112,9 +143,9 @@ final class BlockAuthor(
           case None     => return None
       case TicketsOrKeys.Tickets(marks) =>
         val mark = marks(slotIndex)
-        ownTickets.get(Hash(mark.id.toArray)) match
-          case null => return None
-          case (ks, attempt) =>
+        ownTicket(Hash(mark.id.toArray), sealEntropy) match
+          case None => return None
+          case Some((ks, attempt)) =>
             if attempt != mark.attempt then return None
             (ks, SigningContext.safroleTicketInputData(sealEntropy, attempt.toByte))
 

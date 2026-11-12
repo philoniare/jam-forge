@@ -11,6 +11,7 @@ import io.forge.jam.core.JamBytes
   *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
   *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
+  *          [--finality-peers N]
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -64,6 +65,7 @@ object Main:
         .getOrElse(SlotClock.JamCommonEraSeconds),
       reusePort = flags.contains("--reuse-port"),
       grandpa = flags.contains("--grandpa"),
+      finalityPeers = opts.get("finality-peers").map(_.toInt),
       telemetry = opts.get("telemetry").map(parseHostPort),
       submitPort = opts.get("submit-port").map(_.toInt)
     )

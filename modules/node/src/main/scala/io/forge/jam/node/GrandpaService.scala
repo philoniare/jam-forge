@@ -210,8 +210,16 @@ final class GrandpaService(
     val ours = chain.finalized.slot
     pendingCommits.prune(ours, voter.voterSet.setId)
     justificationRequests.retain((_, slot) => slot > ours)
-    voterPeers.foreach { conn =>
+    // Any peer will do, voter or not: a justification is checked against the voter set, not against who sent it.
+    distribution.peers.distinctBy(_.peerPublicKey).foreach { conn =>
       sync.peerFinal(conn).filter(f => f.slot > ours + 1).foreach { f =>
+        // A node that joined late is voter sets behind: the peer's justification is signed by a set we have not
+        // reached, so the set changes in between are asked for first (CE 153) and applied in order.
+        val ourSet = voter.voterSet.setId
+        warpRequests.retain(_ >= ourSet)
+        if chain.hasBlock(f.hash) && warpRequests.tryStart(ourSet, conn.peerPublicKey) then
+          logger.debug(s"GRANDPA: peer final slot ${f.slot} is ahead of ours ($ours); asking for set changes from $ourSet")
+          requestWarpSync(conn, ourSet)
         if justificationRequests.tryStart((f.hash, f.slot), conn.peerPublicKey) then
           requestJustification(conn, f.hash, f.slot)
       }
@@ -354,8 +362,12 @@ final class GrandpaService(
         stream.send(payload)
         stream.finish()
         if done.poll(20, TimeUnit.SECONDS) != null then
-          Option(received.poll()).foreach(bytes => exec.execute(() => guarded(f(bytes))))
-        else stream.reset() // timed out: give the stream up on both sides
+          val answer = Option(received.poll())
+          if answer.isEmpty then logger.debug(s"${StreamKind.name(kind)}: the peer closed the stream without an answer")
+          answer.foreach(bytes => exec.execute(() => guarded(f(bytes))))
+        else
+          logger.debug(s"${StreamKind.name(kind)}: no answer in 20 s")
+          stream.reset() // timed out: give the stream up on both sides
       catch
         case e: Exception =>
           stream.reset()
@@ -383,6 +395,7 @@ final class GrandpaService(
     request(conn, StreamKind.WarpSyncRequest, LittleEndian.encode(fromSet, 4)) { bytes =>
       decodeWarpFragments(bytes, chain.headerCodec) match
         case Right(fragments) =>
+          logger.debug(s"CE153: ${fragments.size} set-change fragment(s) from set $fromSet")
           val applied = fragments.map { f =>
             val j = f.justification
             applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn))

@@ -24,6 +24,21 @@ final case class NodeConfig(
     telemetry: Option[InetSocketAddress] = None,
     /** GRANDPA finality instead of the devnet quorum rule and following peers' finality. */
     grandpa: Boolean = false,
+    /** How many distinct peers must announce a block as finalized (UP 0 `Final`) before this node finalizes it.
+      * None: 2V/3 of the validators, which only a node connected to most of them reaches. A lower number is a
+      * decision to trust those peers: their announcement is not a proof, and a finalized block is never reorged
+      * away. For a node that can reach only a bootnode (validators on a private network), 1 follows that node.
+      */
+    finalityPeers: Option[Int] = None,
+    /** Delete blocks more than a day (`maxLookupAnchorAge` slots) behind finality. Off by default: a node that
+      * keeps them can serve the whole chain to a node joining from genesis, which is the only way to join until
+      * there is a state-sync client; one that prunes can only serve the last day.
+      */
+    pruneFinalizedHistory: Boolean = false,
+    /** Delete the state of blocks more than a day (`maxLookupAnchorAge` slots) behind finality. On by default;
+      * nothing reads it.
+      */
+    pruneOldState: Boolean = true,
     /** Loopback port of the local submission endpoint ([[SubmitServer]]), from `--submit-port N`. */
     submitPort: Option[Int] = None,
     /** First retry delay for a lost bootnode connection; doubles per failed
@@ -85,7 +100,14 @@ final class JamNode(
   /** Checks of received guarantees, assurances and tickets, kept off the network event loops. */
   private val inbound: InboundWork = InboundWork.pooled()
 
-  val chain = new ChainManager(spec.config, trieBackend, blockStore)
+  val chain =
+    new ChainManager(
+      spec.config,
+      trieBackend,
+      blockStore,
+      pruneFinalizedHistory = nodeConfig.pruneFinalizedHistory,
+      pruneOldState = nodeConfig.pruneOldState
+    )
   val sync = new SyncService(chain)
   val pools = new ExtrinsicPools
   val distribution = new DistributionService(
@@ -397,6 +419,12 @@ final class JamNode(
       chain.onImported((_, _) => sync.followPeerFinality(peerFinalityQuorum))
 
     chain.onImported((head, block) => preimages.onImported(head, block))
+    // Custody units are kept for 28 days (672 epochs) after they were last stored, as exported-segment shards
+    // must be; bundle shards share the unit and so are kept as long, which is more than required.
+    chain.onImported { (_, _) =>
+      val deleted = shardStore.deleteStoredBefore(System.currentTimeMillis() / 1000 - JamNode.shardRetentionSeconds(spec.config))
+      if deleted > 0 then logger.info(s"expired $deleted shard custody unit(s) older than 28 days")
+    }
     chain.onImported((head, block) => pruneTickets(head, block))
     // Peers' blocks consume pooled extrinsics too, not only our own.
     chain.onImported { (head, block) =>
@@ -527,7 +555,8 @@ final class JamNode(
     nodeConfig.grandpa || !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
 
   /** Peers whose announced finality we follow: with this node they make the finality quorum (2V/3+1). */
-  private def peerFinalityQuorum: Int = math.max(spec.finalityQuorum - 1, 1)
+  private def peerFinalityQuorum: Int =
+    nodeConfig.finalityPeers.map(math.max(_, 1)).getOrElse(math.max(spec.finalityQuorum - 1, 1))
 
   /** Whether UP 0 should be open to `peer` (JAMNP-S UP 0). */
   private def announcementWanted(peer: Array[Byte]): Boolean =
@@ -795,6 +824,10 @@ final class JamNode(
     trieBackend.close()
 
 object JamNode:
+
+  /** How long shard custody units are kept: 672 complete epochs (28 days at the full configuration). */
+  def shardRetentionSeconds(config: io.forge.jam.core.ChainConfig): Long =
+    672L * config.epochLength * config.slotDuration
 
   /** Upper bound on the redial backoff. */
   val MaxRedialMillis: Long = 16000L

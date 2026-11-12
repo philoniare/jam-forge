@@ -36,6 +36,8 @@ final class RocksDbTrieBackend private (
     valuesCf: ColumnFamilyHandle,
     nodeRefsCf: ColumnFamilyHandle,
     valueRefsCf: ColumnFamilyHandle,
+    journalCf: ColumnFamilyHandle,
+    nodeBornCf: ColumnFamilyHandle,
     ownedHandles: Seq[ColumnFamilyHandle],
     resources: Seq[AutoCloseable],
     val tracksGarbage: Boolean
@@ -50,6 +52,102 @@ final class RocksDbTrieBackend private (
 
   // RocksDB copies keys and values into its own buffers, so the backing arrays can be passed as they are.
   private inline def key(h: Hash): Array[Byte] = h.toArrayUnsafe
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Pruning by journal (the node's way of reclaiming replaced states; independent of garbage tracking and gc).
+  //
+  // A save made inside [[withJournal]] belongs to one block at one height. Two things are recorded with it, in the
+  // same atomic write:
+  //   - journal(block): the nodes the save replaced, i.e. those in the parent's trie and not in the block's;
+  //   - born(node): the greatest height of any save that added the node (a "max" merge, so no read is needed).
+  // When the block's parent state is no longer wanted, [[pruneJournal]] deletes each journalled node that no save
+  // above the block's height has added again. Nodes are content-addressed, so a later block (on any branch) can
+  // bring a replaced node back; `born` is what tells. A save made outside a journal marks its nodes as never
+  // deletable. A deleted regular leaf releases one reference to its raw value, which goes when none is left: the
+  // value count is one per leaf node ever written and is only ever too high, never too low.
+  // ---------------------------------------------------------------------------------------------------------
+
+  @volatile private var journalLabel: Hash = null
+  @volatile private var journalHeight: Long = 0L
+
+  /** Run `body` (one block's import) with its trie save attributed to block `label` at `height`. */
+  def withJournal[A](label: Hash, height: Long)(body: => A): A =
+    journalLabel = label
+    journalHeight = height
+    try body
+    finally journalLabel = null
+
+  private def encodeBE8(v: Long): Array[Byte] = java.nio.ByteBuffer.allocate(8).putLong(v).array()
+
+  /** The greatest height a save added node `h` at; 0 when unknown (written before journals existed). */
+  private[db] def nodeBornAt(h: Hash): Long =
+    val b = db.get(nodeBornCf, key(h))
+    if b == null || b.length != 8 then 0L else java.nio.ByteBuffer.wrap(b).getLong
+
+  /** Nodes journalled for block `label`, if any. */
+  private[db] def journalOf(label: Hash): List[Hash] =
+    val b = db.get(journalCf, key(label))
+    if b == null then Nil
+    else (0 until b.length / 32).map(i => Hash.wrap(java.util.Arrays.copyOfRange(b, i * 32, i * 32 + 32))).toList
+
+  /** Trie nodes and raw values on disk, by a full scan: for tests and diagnostics. */
+  def storedCounts: (Long, Long) =
+    def count(cf: ColumnFamilyHandle): Long =
+      val it = db.newIterator(cf)
+      try
+        var n = 0L
+        it.seekToFirst()
+        while it.isValid do
+          n += 1
+          it.next()
+        n
+      finally it.close()
+    (count(nodesCf), count(valuesCf))
+
+  /** Forget block `label`'s journal without acting on it (a block that was never on the finalized chain). */
+  def dropJournal(label: Hash): Unit = db.delete(journalCf, key(label))
+
+  /** The state before block `label` (at `height`) is no longer wanted: delete the nodes its save replaced that
+    * nothing above `height` added again, with the raw values that leaves no leaf for. Returns (nodes, values)
+    * deleted. Must run on the thread that saves, and only for a block every retained state descends from.
+    */
+  def pruneJournal(label: Hash, height: Long): (Int, Int) =
+    val journalled = journalOf(label)
+    if journalled.isEmpty then
+      dropJournal(label)
+      (0, 0)
+    else
+      val batch = new WriteBatch()
+      try
+        val deletedNodes = mutable.ArrayBuffer[Hash]()
+        val valueDeltas = mutable.LinkedHashMap[Hash, Long]()
+        journalled.foreach { h =>
+          if nodeBornAt(h) <= height then
+            val bytes = db.get(nodesCf, key(h))
+            if bytes != null then
+              val node = TrieNode.decodeArray(bytes)
+              if node.nodeType == TrieNodeType.RegularLeaf then
+                val v = Hash.wrap(node.right.toArrayUnsafe)
+                valueDeltas.update(v, valueDeltas.getOrElse(v, 0L) - 1)
+              batch.delete(nodesCf, key(h))
+              batch.delete(nodeRefsCf, key(h))
+              batch.delete(nodeBornCf, key(h))
+              deletedNodes += h
+        }
+        var deletedValues = 0
+        val values = valueDeltas.keys.toIndexedSeq
+        readCounts(valueRefsCf, values).lazyZip(values).foreach { (stored, v) =>
+          if stored + valueDeltas(v) <= 0 then
+            batch.delete(valuesCf, key(v))
+            batch.delete(valueRefsCf, key(v))
+            deletedValues += 1
+          else batch.merge(valueRefsCf, key(v), encodeLE8(valueDeltas(v)))
+        }
+        batch.delete(journalCf, key(label))
+        db.write(writeOptions, batch)
+        deletedNodes.foreach(nodeCache.remove)
+        (deletedNodes.size, deletedValues)
+      finally batch.close()
 
   private def readCount(cf: ColumnFamilyHandle, h: Hash): Long =
     val bytes = db.get(cf, key(h))
@@ -80,6 +178,10 @@ final class RocksDbTrieBackend private (
   def batchUpdate(ops: Seq[BackendOp]): Unit =
     val batch = new WriteBatch()
     val written = mutable.ArrayBuffer[TrieNode]()
+    val label = journalLabel
+    // Outside a journal the height is unknown: such nodes are marked as added "at the end of time" and never pruned.
+    val born = encodeBE8(if label == null then Long.MaxValue else journalHeight)
+    val replaced = new java.io.ByteArrayOutputStream()
     try
       ops.foreach {
         case BackendOp.WriteNode(node) =>
@@ -90,10 +192,16 @@ final class RocksDbTrieBackend private (
         case BackendOp.NodeRefDelta(h, d) =>
           batch.merge(nodeRefsCf, key(h), encodeLE8(d))
           if d < 0 && tracksGarbage then deadNodeCandidates.add(h)
+          if d > 0 then batch.merge(nodeBornCf, key(h), born)
+          else if d < 0 && label != null then replaced.write(key(h))
         case BackendOp.RawValueRefDelta(h, d) =>
           batch.merge(valueRefsCf, key(h), encodeLE8(d))
           if d < 0 && tracksGarbage then deadValueCandidates.add(h)
       }
+      if label != null && replaced.size > 0 then
+        // A block saves once; if it ever saved twice, the second save's replaced nodes are added to the first's.
+        val earlier = db.get(journalCf, key(label))
+        batch.put(journalCf, key(label), if earlier == null then replaced.toByteArray else earlier ++ replaced.toByteArray)
       db.write(writeOptions, batch)
       written.foreach(n => nodeCache.put(n.hash, n))
     finally batch.close()
@@ -141,7 +249,7 @@ final class RocksDbTrieBackend private (
   def clear(): Unit =
     val begin = new Array[Byte](32)
     val end = Array.fill[Byte](33)(0xff.toByte)
-    Seq(nodesCf, valuesCf, nodeRefsCf, valueRefsCf).foreach { cf =>
+    Seq(nodesCf, valuesCf, nodeRefsCf, valueRefsCf, journalCf, nodeBornCf).foreach { cf =>
       db.deleteRange(cf, begin, end)
     }
     nodeCache.clear()
@@ -178,7 +286,7 @@ final class RocksDbTrieBackend private (
 
 object RocksDbTrieBackend:
   private val CfNames =
-    Seq("trie-nodes", "trie-values", "trie-node-refs", "trie-value-refs")
+    Seq("trie-nodes", "trie-values", "trie-node-refs", "trie-value-refs", "trie-journal", "trie-node-born")
 
   /**
    * Slots in the decoded-node cache: enough for most upper levels of a 1M-key trie, so a read or a block's update
@@ -243,12 +351,23 @@ object RocksDbTrieBackend:
         .setTableFormatConfig(tableConfig())
         .setCompressionType(CompressionType.NO_COMPRESSION)
         .setMergeOperator(own(new UInt64AddOperator()))
+      // Greatest height a node was added at: merged with "max" over 8-byte big-endian heights, which compare as
+      // bytes the way they compare as numbers.
+      val bornOptions = own(new ColumnFamilyOptions())
+        .setTableFormatConfig(tableConfig())
+        .setCompressionType(CompressionType.NO_COMPRESSION)
+        .setMergeOperatorName("max")
+      val journalOptions = own(new ColumnFamilyOptions())
+        .setTableFormatConfig(tableConfig())
+        .setCompressionType(CompressionType.NO_COMPRESSION)
       val descriptors = Seq(
         "default" -> defaultOptions,
         CfNames(0) -> nodeOptions,
         CfNames(1) -> valueOptions,
         CfNames(2) -> refOptions,
-        CfNames(3) -> refOptions
+        CfNames(3) -> refOptions,
+        CfNames(4) -> journalOptions,
+        CfNames(5) -> bornOptions
       ).map((n, o) => new ColumnFamilyDescriptor(n.getBytes("UTF-8"), o))
       val handles = new java.util.ArrayList[ColumnFamilyHandle]()
       val options = own(
@@ -266,6 +385,8 @@ object RocksDbTrieBackend:
         valuesCf = hs(2),
         nodeRefsCf = hs(3),
         valueRefsCf = hs(4),
+        journalCf = hs(5),
+        nodeBornCf = hs(6),
         ownedHandles = hs,
         resources = resources.reverse.toSeq,
         tracksGarbage = trackGarbage

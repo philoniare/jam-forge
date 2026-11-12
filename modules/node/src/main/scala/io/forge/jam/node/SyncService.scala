@@ -400,9 +400,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       conn: JamnpConnection,
       from: Hash,
       maxBlocks: Int = SyncService.MaxBlocksPerRequest,
-      onDone: () => Unit = () => ()
+      onDone: () => Unit = () => (),
+      ascending: Boolean = false
   ): Unit =
-    val request = new FetchRequest(conn, from, maxBlocks, onDone)
+    val request = new FetchRequest(conn, from, maxBlocks, onDone, ascending)
     // A peer can announce faster than we fetch (each fetch waits on it for up to 30 s), so the waiting fetches
     // are bounded: one per (peer, block), a few per peer, and when over a limit the oldest gives way. A fetch
     // walks back from its block, so the newest one covers what an older one for the same chain would have brought.
@@ -456,7 +457,8 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       val conn: JamnpConnection,
       val from: Hash,
       val maxBlocks: Int,
-      val onDone: () => Unit
+      val onDone: () => Unit,
+      val ascending: Boolean = false
   )
 
   /** Fetches waiting for the import thread, oldest first. Guarded by itself. */
@@ -487,7 +489,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         // Nothing a fetch throws may end the loop: no later fetch would ever run.
         try
           // An earlier fetch walking back from a descendant may already have brought this block.
-          try if !chain.hasBlock(next.from) then fetch(next.conn, next.from, next.maxBlocks)
+          try if next.ascending || !chain.hasBlock(next.from) then fetch(next.conn, next.from, next.maxBlocks, next.ascending)
           finally
             val released = pendingFetches.synchronized {
               inFlight = null
@@ -519,7 +521,13 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         continue = !importExecutor.isShutdown && pendingFetches.synchronized(!pendingFetches.isEmpty) &&
           fetchLoopScheduled.compareAndSet(false, true)
 
-  private def fetch(conn: JamnpConnection, from: Hash, maxBlocks: Int): Unit =
+  /** Ask `conn` for the blocks after our best head, when its chain is ahead by more than a descending request
+    * from its tip can bridge. Repeats (from [[fetch]]) while blocks keep arriving.
+    */
+  private def catchUp(conn: JamnpConnection): Unit =
+    if conn.isOpen then requestAndImport(conn, chain.best.hash, SyncService.MaxBlocksPerRequest, ascending = true)
+
+  private def fetch(conn: JamnpConnection, from: Hash, maxBlocks: Int, ascending: Boolean): Unit =
         try
           val stream = conn
             .openStream(StreamKind.BlockRequest)
@@ -529,7 +537,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
           val done = new LinkedBlockingQueue[java.lang.Boolean]()
           stream.onMessage(received.offer(_))
           stream.onClosed(() => done.offer(true))
-          stream.send(encodeBlockRequest(from, ascending = false, maxBlocks = maxBlocks.toLong))
+          stream.send(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong))
           stream.finish()
 
           if done.poll(20, TimeUnit.SECONDS) == null then
@@ -545,7 +553,8 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
               next = received.poll()
             // Oldest first; skip blocks until one extends our best head.
             var imported = 0
-            blocks.reverse.foreach { blockBytes =>
+            var unknownParent = false
+            (if ascending then blocks.toList else blocks.reverse.toList).foreach { blockBytes =>
               chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
                 case Right(_) =>
                   imported += 1
@@ -553,10 +562,15 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
                     announce(chain.headerCodec.encode(b.header))
                   }
                 case Left(err) =>
+                  if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
                   logger.debug(s"sync import skipped: $err")
             }
             if imported > 0 then
               logger.info(s"synced $imported block(s); best=${chain.best.slot}")
+            // The peer's blocks do not reach back to our head (a descending request), or more may follow (an
+            // ascending one that brought some): go on from our head.
+            if (ascending && imported > 0) || (!ascending && imported == 0 && unknownParent) then catchUp(conn)
+            else if ascending && blocks.isEmpty then logger.info("catch-up: the peer returned no block after our head")
         catch
           case e: Exception =>
             logger.warn(s"block sync failed: ${e.getMessage}")

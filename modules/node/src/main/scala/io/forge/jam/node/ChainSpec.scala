@@ -84,18 +84,61 @@ object ChainSpec:
   private def parseHex(s: String): Array[Byte] =
     JamBytes.fromHexUnsafe(s).toArray
 
-  /** Config of a JIP-4 spec without `config`: the one whose C and E match `protocol_parameters`, where C is E_2 at
-    * byte 24 and E is E_4 at byte 30 (after B_I, B_L, B_S and D; the layout polkajam's `dump-spec` writes).
+  /** Config of a JIP-4 spec without `config`, from its `protocol_parameters` (the protocol constants in a fixed
+    * order, each a fixed-width little-endian integer at the offsets read below) and the number of validators in the
+    * genesis state. A built-in config is used when it matches; otherwise the full config with the spec's values.
     */
-  private def configFromParameters(hex: String): Either[String, ChainConfig] =
+  private def configFromParameters(hex: String, validators: Option[Int]): Either[String, ChainConfig] =
     val p = parseHex(hex)
     if p.length < 34 then Left("protocol_parameters too short")
     else
-      val cores = io.forge.jam.core.LittleEndian.get(p, 24, 2).toInt
-      val epoch = io.forge.jam.core.LittleEndian.get(p, 30, 4).toInt
+      def at(offset: Int, size: Int): Long = io.forge.jam.core.LittleEndian.get(p, offset, size)
+      val cores = at(24, 2).toInt
+      val epoch = at(30, 4).toInt
       ChainConfig.byName.values
-        .find(c => c.coresCount == cores && c.epochLength == epoch)
-        .toRight(s"no known config with C=$cores, E=$epoch")
+        .find(c => c.coresCount == cores && c.epochLength == epoch && validators.forall(_ == c.validatorCount))
+        .map(Right(_))
+        .getOrElse {
+          if p.length < 122 then Left(s"no known config with $cores cores and epoch length $epoch, and protocol_parameters is too short to build one")
+          else
+            validators.toRight("no known config for protocol_parameters, and no validator set in genesis_state").map { v =>
+              val pieceSize = ChainConfig.ecPieceSizeFor(v)
+              ChainConfig.FULL.copy(
+                validatorCount = v,
+                coresCount = cores,
+                preimageExpungePeriod = at(26, 4).toInt,
+                epochLength = epoch,
+                reportAccGas = at(34, 8),
+                maxRefineGas = at(50, 8),
+                maxBlockGas = at(58, 8),
+                maxBlockHistory = at(66, 2).toInt,
+                maxWorkItems = at(68, 2).toInt,
+                maxDependencies = at(70, 2).toInt,
+                maxTicketsPerExtrinsic = at(72, 2).toInt,
+                maxLookupAnchorAge = at(74, 4),
+                slotDuration = at(80, 2).toInt,
+                authQueueSize = at(82, 2).toInt,
+                rotationPeriod = at(84, 2).toInt,
+                assuranceTimeoutPeriod = at(88, 2).toInt,
+                contestDuration = at(118, 4).toInt,
+                ecPieceSize = pieceSize,
+                numEcPiecesPerSegment = 4104 / pieceSize,
+                additionalMinBalancePerStateItem = at(0, 8),
+                additionalMinBalancePerStateByte = at(8, 8),
+                serviceMinBalance = at(16, 8)
+              )
+            }
+        }
+
+  /** Validators in the genesis state: the length prefix of the current set (state key 8). */
+  private def genesisValidatorCount(state: List[KeyValue]): Option[Int] =
+    state.find(kv => kv.key.toArray.headOption.contains(8.toByte) && kv.key.toArray.drop(1).forall(_ == 0)).flatMap { kv =>
+      try
+        io.forge.jam.core.codec.JamCodecs.decodeCompactInteger(kv.value.toArray, 0) match
+          case (n, used) if (kv.value.length - used) == n * 336L => Some(n.toInt)
+          case _ => None
+      catch case _: Exception => None
+    }
 
   /** `genesis_state` as a list of {key, value} or, as in JIP-4, an object of key -> value. */
   private def genesisState(c: HCursor): Decoder.Result[List[KeyValue]] =
@@ -119,7 +162,7 @@ object ChainSpec:
       id = id,
       config = configName
         .map(ChainConfig.fromName)
-        .orElse(parameters.map(configFromParameters))
+        .orElse(parameters.map(configFromParameters(_, genesisValidatorCount(state))))
         .getOrElse(Left("chain spec needs config or protocol_parameters"))
         .fold(e => throw new IllegalArgumentException(e), identity),
       genesisHeaderBytes = header.map(parseHex),

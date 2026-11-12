@@ -23,6 +23,11 @@ object ChainManager:
     */
   val MaxUnverifiedBlocks: Int = 1024
 
+  /** Finalized blocks pruned at one finalization. Finality advances a block or a few at a time, so this only
+    * limits how fast a backlog (a node upgraded with a long history) is worked off.
+    */
+  val MaxPrunedPerFinalization: Int = 512
+
   /** Of those, from one peer: a quarter, so one peer cannot use up the node's allowance. */
   val MaxUnverifiedPerPeer: Int = 256
 
@@ -47,7 +52,15 @@ final class ChainManager(
     val blockStore: BlockStore,
     maxUnverifiedBlocks: Int = ChainManager.MaxUnverifiedBlocks,
     maxUnverifiedPerPeer: Int = ChainManager.MaxUnverifiedPerPeer,
-    maxUnverifiedBytes: Long = ChainManager.MaxUnverifiedBytes
+    maxUnverifiedBytes: Long = ChainManager.MaxUnverifiedBytes,
+    /** Delete finalized history more than `maxLookupAnchorAge` slots behind the finalized block (see "Pruning of
+      * finalized history").
+      */
+    pruneFinalizedHistory: Boolean = false,
+    /** Delete the state of blocks more than `maxLookupAnchorAge` slots behind the finalized block (they are never
+      * read again).
+      */
+    pruneOldState: Boolean = true
 ) extends LazyLogging:
 
   require(
@@ -132,6 +145,8 @@ final class ChainManager(
               val e = it.next()
               if blockHeight(e.getKey).getOrElse(0L) <= finalizedHeight then it.remove()
             pruneUnverified(slot, finalizedHeight)
+            indexFinalized(hash, finalizedHeight)
+            pruneHistory(hash, slot, finalizedHeight)
             logger.info(s"finalized ${hash.toHex.take(18)} slot=$slot")
             Right(Head(hash, slot, root))
     }
@@ -377,7 +392,9 @@ final class ChainManager(
     leafMap.clear()
     val finalizedHeight =
       blockStore.getHead(BlockStore.FinalizedHead).flatMap(blockHeight).getOrElse(0L)
-    val stack = mutable.ArrayDeque(genesisHash)
+    // From the oldest block kept: what was below it has been pruned, child lists included.
+    val floor = pruneFloor
+    val stack = mutable.ArrayDeque(if floor == Hash.zero then genesisHash else floor)
     val visited = mutable.HashSet.empty[Hash]
     while stack.nonEmpty do
       val h = stack.removeHead()
@@ -431,9 +448,11 @@ final class ChainManager(
         )
         false
       case None =>
-        val root =
-          trieStore.bootstrap(spec.genesisState.map(kv => (kv.key, kv.value)))
         val genesisHash = spec.genesisHeaderHash
+        // Genesis's nodes are added at height 0, so a later block's replacements of them can be pruned.
+        val root = trieBackend.withJournal(genesisHash, 0L) {
+          trieStore.bootstrap(spec.genesisState.map(kv => (kv.key, kv.value)))
+        }
         spec.genesisHeaderBytes.foreach { hb =>
           storeBlock(genesisHash, Hash.zero, hb, Array.emptyByteArray)
         }
@@ -608,6 +627,143 @@ final class ChainManager(
       if doomed.nonEmpty then
         logger.info(s"pruned ${doomed.size} unverified side-branch block(s) at or below finalized slot $finalizedSlot")
 
+  // ---------------------------------------------------------------------------------------------------------
+  // Pruning of finalized history
+  //
+  // A node needs the headers of the last `maxLookupAnchorAge` slots (the ancestor set a lookup anchor is checked
+  // against) and nothing else of the finalized chain. Everything of a block is therefore deleted once it is more
+  // than `maxLookupAnchorAge` slots behind the finalized block: body, header, fork-choice and equivocation
+  // metadata, its finality proof (warp-sync fragments are kept apart, per voter set), and every side branch that
+  // forks off it. The oldest block kept (the "floor") anchors the walk and the leaf rebuild after a restart;
+  // genesis is always kept.
+  // ---------------------------------------------------------------------------------------------------------
+
+  private def finalizedIndexKey(height: Long): String = f"fin:$height%016x"
+
+  /** The oldest main-chain block whose data is kept; genesis until anything has been pruned. */
+  private def pruneFloor: Hash =
+    blockStore.getMeta("prune_floor").filter(_.length == 32).map(Hash(_))
+      .orElse(blockStore.getHead(BlockStore.GenesisHead))
+      .getOrElse(Hash.zero)
+
+  private[node] def pruneFloorHeight: Long = blockHeight(pruneFloor).getOrElse(0L)
+
+  /** State trie nodes and raw values on disk (a full scan; for tests and diagnostics). */
+  private[node] def storedStateCounts: (Long, Long) = trieBackend.storedCounts
+
+  /** Record the finalized chain by height, from `hash` down to the first block already recorded, so pruning can
+    * walk it upward from the floor. Entries above `height` belong to a finalized head this one replaced (finality
+    * followed from peers may move it back) and are dropped.
+    */
+  private def indexFinalized(hash: Hash, height: Long): Unit =
+    var stale = height + 1
+    while blockStore.getMeta(finalizedIndexKey(stale)).isDefined do
+      blockStore.deleteMeta(finalizedIndexKey(stale))
+      stale += 1
+    val floorHeight = pruneFloorHeight
+    var cursor: Option[Hash] = Some(hash)
+    var h = height
+    var recorded = false
+    while !recorded && cursor.isDefined && h >= floorHeight do
+      val c = cursor.get
+      if blockStore.getMeta(finalizedIndexKey(h)).exists(java.util.Arrays.equals(_, c.bytes.toArray)) then
+        recorded = true
+      else
+        blockStore.setMeta(finalizedIndexKey(h), c.bytes.toArray)
+        cursor = parentOf(c)
+        h -= 1
+
+  /** Delete what lies more than `maxLookupAnchorAge` slots behind the finalized block, at most
+    * `MaxPrunedPerFinalization` main-chain blocks at a time so a finalization never stalls on a long backlog (the
+    * rest goes at the next ones).
+    */
+  private def pruneHistory(finalizedHash: Hash, finalizedSlot: Long, finalizedHeight: Long): Unit =
+    val cutoff = finalizedSlot - config.maxLookupAnchorAge
+    if (pruneFinalizedHistory || pruneOldState) && cutoff > 0 then
+      var floor = pruneFloor
+      var floorHeight = blockHeight(floor).getOrElse(0L)
+      val genesis = blockStore.getHead(BlockStore.GenesisHead)
+      var pruned = 0
+      var forks = 0
+      var stateNodes = 0
+      var stateValues = 0
+      var more = true
+      while more && pruned < ChainManager.MaxPrunedPerFinalization do
+        // The floor goes once the block after it is itself outside the window; the finalized block always stays.
+        val next = blockStore.getMeta(finalizedIndexKey(floorHeight + 1)).filter(_.length == 32).map(Hash(_))
+        next match
+          case Some(n) if floorHeight + 1 < finalizedHeight && n != finalizedHash &&
+                blockStore.getHeader(n).isDefined && slotOfHeader(n) < cutoff =>
+            // Side branches off the old floor fork outside the lookup-anchor window: none can be adopted.
+            // Blocks go only when asked (pruneFinalizedHistory); the state before the new floor goes either way,
+            // so a side branch off the old floor is unusable from here on and its journal is dropped.
+            val branches = blockStore.children(floor).filterNot(_ == n)
+            if pruneFinalizedHistory then branches.foreach(root => forks += deleteBranch(root))
+            else branches.foreach(dropBranchJournals)
+            blockStore.setMeta("prune_floor", n.bytes.toArray)
+            if pruneFinalizedHistory then
+              if !genesis.contains(floor) then deleteBlockRecord(floor, finalizedChain = true)
+              blockStore.deleteMeta(finalizedIndexKey(floorHeight))
+            // The old floor's state goes: every state still kept descends from `n`, so the nodes `n` replaced
+            // are unreachable unless a later block brought them back.
+            if pruneOldState then
+              val (nodes, values) = trieBackend.pruneJournal(n, floorHeight + 1)
+              stateNodes += nodes
+              stateValues += values
+            else trieBackend.dropJournal(n)
+            floor = n
+            floorHeight += 1
+            pruned += 1
+          case _ => more = false
+      if pruned > 0 then
+        logger.info(
+          s"pruned ${if pruneFinalizedHistory then pruned else 0} finalized block(s), $forks side-branch block(s), " +
+            s"$stateNodes state node(s) and $stateValues value(s) of $pruned state(s) more than ${config.maxLookupAnchorAge} slots behind finalized slot " +
+            s"$finalizedSlot; oldest kept at height $floorHeight"
+        )
+
+  /** Drop the state journals of `root` and everything built on it, keeping the blocks. */
+  private def dropBranchJournals(root: Hash): Unit =
+    val stack = mutable.ArrayDeque(root)
+    while stack.nonEmpty do
+      val h = stack.removeHead()
+      trieBackend.dropJournal(h)
+      blockStore.children(h).foreach(stack.append)
+
+  /** Delete the block `root` and everything built on it; returns how many blocks went. */
+  private def deleteBranch(root: Hash): Int =
+    val stack = mutable.ArrayDeque(root)
+    val order = mutable.ListBuffer.empty[Hash]
+    while stack.nonEmpty do
+      val h = stack.removeHead()
+      order += h
+      blockStore.children(h).foreach(stack.append)
+    // Children before parents, so each delete finds its parent's child list.
+    order.reverseIterator.foreach(deleteBlockRecord(_, finalizedChain = false))
+    order.size
+
+  /** Delete everything stored under one block. The equivocation mark of its slot goes only with the finalized
+    * chain's block: a side-branch block may sit at a slot that is not finalized yet, where the mark still counts.
+    */
+  private def deleteBlockRecord(h: Hash, finalizedChain: Boolean): Unit =
+    val parent = parentOf(h).getOrElse(Hash.zero)
+    untrackUnverified(h)
+    header(h).foreach { hd =>
+      val slot = hd.slot.toLong
+      val authorKey = s"slotauthor:$slot:${hd.authorIndex.toInt}"
+      if blockStore.getMeta(authorKey).exists(java.util.Arrays.equals(_, h.bytes.toArray)) then
+        blockStore.deleteMeta(authorKey)
+      if finalizedChain then blockStore.deleteMeta(s"equivocated:$slot")
+    }
+    blockStore.deleteBlock(h, parent)
+    // A side branch's journal is never acted on: it describes what the branch replaced, not the finalized chain.
+    if !finalizedChain then trieBackend.dropJournal(h)
+    headerLinks.invalidate(h)
+    leafMap.remove(h)
+    List("height", "ticketed", "marked", "weight", "blockroot", "unverified", "invalid", "grandpa:just").foreach(k =>
+      blockStore.deleteMeta(s"$k:${h.toHex}")
+    )
+
   /** Import a block: extends the best head directly, or is stored as a side
     * branch and adopted via reorg when its branch becomes strictly heavier
     * (ticket-sealed count, then height) and holds no equivocation. A side-branch
@@ -663,7 +819,10 @@ final class ChainManager(
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
     val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.toLong)
-    importer.importBlock(block, preState, ancestry) match
+    // The save belongs to this block at this height: what it replaces can be deleted once the parent's state is no
+    // longer kept (see pruneHistory).
+    val journalHeight = blockHeight(parent).getOrElse(0L) + 1
+    trieBackend.withJournal(headerHashOf(block), journalHeight)(importer.importBlock(block, preState, ancestry)) match
       case ImportResult.Failure(error, message, _) =>
         markInvalid(headerHashOf(block))
         Left(ChainError.ImportFailed(error, message))
@@ -829,7 +988,9 @@ final class ChainManager(
     else None
 
   def stateAt(headerHash: Hash): Option[StateTrie] =
-    blockRoot(headerHash).map(root => StateTrie.at(trieStore.backend, root))
+    // Below the pruning floor the state has been deleted (in part or whole), whether or not the block is kept.
+    if pruneOldState && blockHeight(headerHash).exists(_ < pruneFloorHeight) then None
+    else blockRoot(headerHash).map(root => StateTrie.at(trieStore.backend, root))
 
   /** A read view over the posterior state of stored block `headerHash`. */
   def stateViewAt(headerHash: Hash): Option[TrieBackedJamState] =

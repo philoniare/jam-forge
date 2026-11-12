@@ -601,13 +601,27 @@ final class JamnpNode(
       .build()
 
     val result = new CompletableFuture[JamnpConnection]()
-    val channel = new Bootstrap()
-      .group(group)
-      .channel(classOf[NioDatagramChannel])
-      .handler(codec)
-      .bind(0)
-      .sync()
-      .channel()
+    // The socket is of the peer's address family. Left to the default it is a dual-stack IPv6 socket, and the
+    // port the system picks for one ignores the ports IPv4 sockets hold (on macOS it lands on a held port as
+    // often as chance allows). Replies from an IPv4 peer then go to the IPv4 socket, ours never sees
+    // them, and the handshake waits out its timeout. An IPv4 socket is never given a port another one holds.
+    val family = remote.getAddress match
+      case _: java.net.Inet4Address => io.netty.channel.socket.InternetProtocolFamily.IPv4
+      case _: java.net.Inet6Address => io.netty.channel.socket.InternetProtocolFamily.IPv6
+      case _                        => null
+    val channel =
+      try
+        new Bootstrap()
+          .group(group)
+          .channelFactory(() => if family == null then new NioDatagramChannel() else new NioDatagramChannel(family))
+          .handler(codec)
+          .bind(0)
+          .sync()
+          .channel()
+      catch
+        case e: Exception =>
+          result.completeExceptionally(e)
+          return result
 
     QuicChannel
       .newBootstrap(channel)
