@@ -112,6 +112,23 @@ final class GrandpaVoter(
   private val futureVotes = mutable.ListBuffer.empty[VoteMessage]
   private val futureCommits = mutable.TreeMap.empty[Long, (Long, Commit, List[Array[Byte]])]
 
+  /** Keep a commit of a later set, whose keys we do not know yet, so it cannot be checked: the latest round per set,
+    * for the [[GrandpaVoter.MaxFutureCommitSets]] sets nearest ours. False when it was not kept.
+    */
+  private def keepFutureCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]]): Boolean =
+    if futureCommits.get(setId).exists(_._1 >= round) then false
+    else if futureCommits.contains(setId) || futureCommits.size < GrandpaVoter.MaxFutureCommitSets then
+      futureCommits.put(setId, (round, c, ancestries))
+      true
+    else if setId < futureCommits.lastKey then
+      futureCommits.remove(futureCommits.lastKey)
+      futureCommits.put(setId, (round, c, ancestries))
+      true
+    else false
+
+  /** Sets we hold an unchecked commit for. */
+  private[node] def futureCommitSets: List[Long] = futureCommits.keys.toList
+
   def voterSet: VoterSet = set
   def round: Long = current.round
   def roundState(r: Long): Option[RoundState] = rounds.get(r)
@@ -466,8 +483,8 @@ final class GrandpaVoter(
   /** CE 150 or a fetched justification. Returns the block to fetch when the target is not stored yet. */
   def onCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]] = Nil): Either[String, Option[Hash]] =
     if setId > set.setId then
-      if futureCommits.get(setId).forall(_._1 < round) then futureCommits.put(setId, (round, c, ancestries))
-      Left(s"set $setId, expected ${set.setId}; kept for later")
+      val kept = keepFutureCommit(round, setId, c, ancestries)
+      Left(s"set $setId, expected ${set.setId}; ${if kept then "kept for later" else "not kept"}")
     else if c.target.slot <= chain.finalized.slot then
       // Already finalized (e.g. by following peers), but the commit still says the round is over.
       if setId == set.setId && round >= current.round && chain.slotOf(c.target.hash).isDefined then
@@ -529,6 +546,15 @@ object GrandpaVoter:
 
   /** Votes kept for sets we have not reached yet. */
   val MaxFutureVotes: Int = 1024
+
+  /** Sets ahead of ours whose latest commit is kept. A set's keys are in the epoch marker that ends the set before
+    * it, so these commits are held unverified and any peer can send one for any set id. An honest commit runs ahead
+    * of us by the set change we are about to finalize, or by the few we cross at once when adopting a finalized chain;
+    * a voter further behind is brought forward by warp sync (CE 153), one verified justification per set, and gets
+    * the next commit when it arrives. The nearest sets are kept, so far-future ids cannot displace a commit we
+    * are about to need.
+    */
+  val MaxFutureCommitSets: Int = 4
 
   /** Hash, parent and slot of an encoded header. */
   final case class HeaderLink(hash: Hash, parent: Hash, slot: Long)

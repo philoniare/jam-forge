@@ -67,7 +67,9 @@ final case class JamnpConfig(
       * silent peer cannot hold stream credit forever. UP streams are exempt
       * (they stay open and may be quiet). 0 disables the timeout.
       */
-    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
+    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
+    /** Limits on bytes queued for a peer that is not taking them. */
+    outbound: OutboundLimits = OutboundLimits()
 ):
   private def baseAlpn: String = s"jamnp-s/${JamnpConfig.ProtocolVersion}/$genesisHashPrefix"
 
@@ -93,13 +95,115 @@ object JamnpConfig:
 
   def isBuilderAlpn(alpn: String): Boolean = alpn != null && alpn.endsWith("/builder")
 
+/** Limits on outbound bytes waiting in memory for a peer that is slow to take them, or has stopped.
+  *
+  * A write to a QUIC stream is queued on the heap until QUIC flow control and the congestion window let it out, and
+  * that queue has no bound of its own (Netty's write-buffer water marks do not apply to QUIC stream channels: their
+  * writability only says whether the stream has send credit). So every send is counted until its write completes,
+  * per stream and per connection, and [[JamnpStream.send]] keeps both counts under these limits. A send to a peer
+  * that keeps up never reaches them, and its bytes on the wire are the same.
+  *
+  * @param maxStreamPendingBytes most bytes waiting on one CE stream. A message is always accepted on a stream with
+  *   nothing waiting, so one message of any legal size can be sent.
+  * @param maxConnectionPendingBytes most bytes waiting on all streams of one connection (the default equals the
+  *   connection flow-control window this node grants its peers)
+  * @param sendWaitMillis how long a send from an ordinary thread waits for room before its stream is reset. A send
+  *   from a network event loop cannot wait (the loop is what drains the queue): its stream is reset at once, which
+  *   JAMNP-S reads as the request having failed.
+  * @param upHighWaterBytes most bytes waiting on a UP stream; further messages are dropped until it drains (a later
+  *   block announcement supersedes the ones dropped)
+  * @param stallMillis a connection with bytes waiting of which the peer has taken none for this long is closed
+  */
+final case class OutboundLimits(
+    maxStreamPendingBytes: Long = 40L * 1024 * 1024,
+    maxConnectionPendingBytes: Long = 64L * 1024 * 1024,
+    sendWaitMillis: Long = 5000,
+    upHighWaterBytes: Long = 1024 * 1024,
+    stallMillis: Long = 30000
+)
+
+/** Outbound bytes waiting on one connection. */
+private[network] final class OutboundFlow(val limits: OutboundLimits):
+  val pending = new java.util.concurrent.atomic.AtomicLong()
+  val waiters = new java.util.concurrent.atomic.AtomicInteger()
+  val dropped = new java.util.concurrent.atomic.AtomicLong()
+  @volatile var lastProgressNanos: Long = System.nanoTime()
+
+  /** A write of `n` bytes finished (or failed with its stream): the peer took them, or they are gone. */
+  def completed(n: Long): Unit =
+    pending.addAndGet(-n)
+    lastProgressNanos = System.nanoTime()
+    if waiters.get() > 0 then synchronized(notifyAll())
+
+  /** Bytes are waiting and none has left for `stallMillis`. */
+  def stalled: Boolean =
+    pending.get() > 0 && System.nanoTime() - lastProgressNanos > limits.stallMillis * 1000000L
+
 /** A single message-framed JAMNP stream. Messages are framed as a 32-bit
   * little-endian content length followed by the content.
   */
 final class JamnpStream private[network] (
     private[network] val channel: QuicStreamChannel,
-    val kind: Byte
+    val kind: Byte,
+    flow: OutboundFlow = new OutboundFlow(OutboundLimits())
 ):
+  private val pendingOut = new java.util.concurrent.atomic.AtomicLong()
+
+  /** Bytes sent on this stream whose write has not completed: what a slow peer keeps in this node's memory. */
+  def pendingOutboundBytes: Long = pendingOut.get()
+
+  private def fits(size: Long): Boolean =
+    val limits = flow.limits
+    val onStream = pendingOut.get()
+    val onConnection = flow.pending.get()
+    val streamLimit = if StreamKind.isUp(kind) then limits.upHighWaterBytes else limits.maxStreamPendingBytes
+    (onStream == 0 || onStream + size <= streamLimit) &&
+    (onConnection == 0 || onConnection + size <= limits.maxConnectionPendingBytes)
+
+  /** Count `size` bytes as waiting if they fit. Caller holds `flow`'s monitor. */
+  private def take(size: Long): Boolean =
+    if !fits(size) then false
+    else
+      pendingOut.addAndGet(size)
+      if flow.pending.getAndAdd(size) == 0 then flow.lastProgressNanos = System.nanoTime()
+      true
+
+  /** Whether `size` more bytes may be queued on this stream now; see [[OutboundLimits]] for what happens when not. */
+  private def admit(size: Long): Boolean =
+    if flow.stalled then
+      // The peer has taken nothing for the stall limit: stop queueing for it altogether.
+      channel.parent().close()
+      return false
+    if flow.synchronized(take(size)) then return true
+    if StreamKind.isUp(kind) then
+      flow.dropped.incrementAndGet()
+      false
+    else if JamnpNode.onNetworkThread(channel) then
+      reset()
+      false
+    else
+      val deadline = System.nanoTime() + flow.limits.sendWaitMillis * 1000000L
+      flow.waiters.incrementAndGet()
+      val admitted =
+        try
+          flow.synchronized {
+            var ok = take(size)
+            var left = deadline - System.nanoTime()
+            while !ok && left > 0 && channel.isActive && !flow.stalled do
+              flow.wait(math.max(1L, math.min(left / 1000000L, 100L)))
+              ok = take(size)
+              left = deadline - System.nanoTime()
+            ok
+          }
+        finally flow.waiters.decrementAndGet()
+      if !admitted then reset()
+      admitted
+
+  private def sent(bytes: Long): io.netty.channel.ChannelFutureListener =
+    (_: io.netty.channel.ChannelFuture) =>
+      pendingOut.addAndGet(-bytes)
+      flow.completed(bytes)
+
   private var receiver: Array[Byte] => Unit = null
   // Messages that arrive before a receiver is registered (the peer can reply
   // as soon as `openStream` returns), or while `onMessage` replays them.
@@ -182,18 +286,28 @@ final class JamnpStream private[network] (
   /** Send one framed message. A large frame is handed to the channel in
     * slices (the bytes on the wire are the same), so each slice that gets
     * through counts as progress for the stream idle timeout.
+    *
+    * The message is not sent when the peer is not taking what was sent
+    * before and the outbound limits are reached ([[OutboundLimits]]): on a
+    * CE stream the send first waits for room when the calling thread may
+    * wait, and the stream is reset if there is still none; on a UP stream the
+    * message is dropped. Either way the caller sees a stream that closed or
+    * a peer that did not answer, as with any other failed exchange.
     */
   def send(message: Array[Byte]): Unit =
+    val size = 4L + message.length
+    if !admit(size) then return
     val buf = channel.alloc().buffer(4 + message.length)
     buf.writeIntLE(message.length)
     buf.writeBytes(message)
-    if buf.readableBytes() <= JamnpStream.SendSliceBytes then channel.writeAndFlush(buf)
+    if buf.readableBytes() <= JamnpStream.SendSliceBytes then channel.writeAndFlush(buf).addListener(sent(size))
     else
       // On the event loop in one go, so slices of concurrent sends cannot
       // interleave; writes queued after this one stay behind it.
       val writeSlices: Runnable = () =>
         while buf.isReadable do
-          channel.write(buf.readRetainedSlice(math.min(JamnpStream.SendSliceBytes, buf.readableBytes())))
+          val n = math.min(JamnpStream.SendSliceBytes, buf.readableBytes())
+          channel.write(buf.readRetainedSlice(n)).addListener(sent(n.toLong))
         buf.release()
         channel.flush()
         ()
@@ -263,8 +377,17 @@ object JamnpStream:
 final class JamnpConnection private[network] (
     private[network] val quic: QuicChannel,
     val initiator: Boolean,
-    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
+    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
+    outbound: OutboundLimits = OutboundLimits()
 ):
+  private val flow = JamnpNode.outboundFlow(quic, outbound)
+
+  /** Bytes sent on this connection's streams whose write has not completed. */
+  def pendingOutboundBytes: Long = flow.pending.get()
+
+  /** UP messages dropped because the peer was not taking earlier ones. */
+  def droppedOutboundMessages: Long = flow.dropped.get()
+
   /** The peer's raw Ed25519 public key, from its TLS certificate. */
   lazy val peerKey: Array[Byte] =
     val certs = quic.sslEngine().getSession.getPeerCertificates
@@ -293,7 +416,7 @@ final class JamnpConnection private[network] (
             else
               val ch = f.getNow
               JamnpNode.trackStream(ch)
-              val stream = new JamnpStream(ch, kind)
+              val stream = new JamnpStream(ch, kind, flow)
               if StreamKind.isCe(kind) then JamnpNode.addIdleTimeout(ch, streamIdleTimeoutMillis)
               ch.pipeline()
                 .addLast(new JamnpNode.FrameDecoder(JamnpNode.DefaultMaxFrame))
@@ -370,7 +493,12 @@ final class JamnpNode(
   private final class ConnectionTracker extends ChannelInboundHandlerAdapter:
     override def channelActive(ctx: ChannelHandlerContext): Unit =
       val conn =
-        new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false, config.streamIdleTimeoutMillis)
+        new JamnpConnection(
+          ctx.channel().asInstanceOf[QuicChannel],
+          initiator = false,
+          config.streamIdleTimeoutMillis,
+          config.outbound
+        )
       if !admitInbound(conn) then
         ctx.close()
         return
@@ -439,7 +567,7 @@ final class JamnpNode(
           // kind byte must not hold it either.
           addIdleTimeout(ch, config.streamIdleTimeoutMillis)
           ch.pipeline().addLast(
-            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis)
+            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis, config.outbound)
           )
       })
       .build()
@@ -491,7 +619,7 @@ final class JamnpNode(
           // kind byte must not hold it either.
           addIdleTimeout(ch, config.streamIdleTimeoutMillis)
           ch.pipeline().addLast(
-            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis)
+            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis, config.outbound)
           )
       })
       .remoteAddress(remote)
@@ -508,7 +636,7 @@ final class JamnpNode(
               channel.close()
             else
               val quic = f.getNow
-              val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis)
+              val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis, config.outbound)
               quic.attr(ConnectionKey).set(conn)
               connections.add(conn)
               fireConnectionChange(conn, true)
@@ -552,6 +680,23 @@ object JamnpNode:
     else
       attr.setIfAbsent(new java.util.concurrent.atomic.AtomicInteger())
       attr.get()
+
+  private val OutboundFlowKey = io.netty.util.AttributeKey.valueOf[OutboundFlow]("jamnp-outbound-flow")
+
+  /** The outbound byte count of a connection, shared by all its streams. */
+  private[network] def outboundFlow(quic: QuicChannel, limits: OutboundLimits): OutboundFlow =
+    val attr = quic.attr(OutboundFlowKey)
+    val existing = attr.get()
+    if existing != null then existing
+    else
+      attr.setIfAbsent(new OutboundFlow(limits))
+      attr.get()
+
+  /** True on a thread that must not wait for a write to drain: the stream's own event loop, which does the
+    * draining, or any other Netty event loop, which other connections depend on.
+    */
+  private[network] def onNetworkThread(ch: QuicStreamChannel): Boolean =
+    ch.eventLoop().inEventLoop() || Thread.currentThread().isInstanceOf[io.netty.util.concurrent.FastThreadLocalThread]
 
   /** Count a stream channel against its connection until it closes. */
   private[network] def trackStream(ch: QuicStreamChannel): Unit =
@@ -683,7 +828,8 @@ object JamnpNode:
   private[network] final class IncomingStreamHandler(
       handlers: ConcurrentHashMap[Byte, StreamHandler],
       maxFrame: Int,
-      streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
+      streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
+      outbound: OutboundLimits = OutboundLimits()
   ) extends ByteToMessageDecoder:
     // Set once the kind is refused: bytes still in flight are not a new kind byte.
     private var rejected = false
@@ -719,10 +865,10 @@ object JamnpNode:
       val quicParent = ch.parent()
       var conn = quicParent.attr(ConnectionKey).get()
       if conn == null then
-        conn = new JamnpConnection(quicParent, initiator = false, streamIdleTimeoutMillis)
+        conn = new JamnpConnection(quicParent, initiator = false, streamIdleTimeoutMillis, outbound)
         quicParent.attr(ConnectionKey).set(conn)
 
-      val stream = new JamnpStream(ch, kind)
+      val stream = new JamnpStream(ch, kind, outboundFlow(quicParent, outbound))
       val pipeline = ctx.pipeline()
       pipeline.addAfter(
         ctx.name(),

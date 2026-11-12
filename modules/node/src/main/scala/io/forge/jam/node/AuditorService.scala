@@ -73,11 +73,30 @@ final class AuditorService(
   private val workers = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
     val t = new Thread(r, "jam-audit-exec"); t.setDaemon(true); t
   }
+
+  /** Peers' announcements and judgments waiting for the audit thread are bounded; the thread's own ticks, import
+    * callbacks and audit results are not counted and never dropped.
+    */
+  private val intake = new WorkGate("auditor intake", AuditorService.MaxQueuedMessages, AuditorService.MaxQueuedBytes)
+
+  /** Peer messages waiting for the audit thread. */
+  private[node] def queuedMessages: Int = intake.queued
   private val tracked = mutable.LinkedHashMap.empty[Hash, Tracked]
   private val positive = mutable.Map.empty[Hash, mutable.Set[Int]]
   private val negative = mutable.Map.empty[Hash, mutable.Set[Int]]
   private val inFlight = mutable.Set.empty[Hash]
-  private val pendingAnnouncements = mutable.Map.empty[Hash, mutable.ListBuffer[(Array[Byte], Array[Byte], Array[Byte])]]
+
+  /** Announcements for blocks we do not track yet, per announcing peer and by (block, tranche), oldest first: at
+    * most [[AuditorService.PendingAnnouncementsPerPeer]] per validator of the sets around the head.
+    */
+  private val pendingAnnouncements =
+    mutable.Map.empty[Ed25519PublicKey, mutable.LinkedHashMap[(Hash, Int), (Array[Byte], Array[Byte])]]
+
+  /** Genuine judgments on reports no tracked block holds yet, per validator index and by (report, validity), oldest
+    * first: at most [[AuditorService.PendingJudgmentsPerValidator]] per validator. `positive` and `negative` hold
+    * tracked reports only, so they are bounded by validators × reports awaiting audit.
+    */
+  private val pendingJudgments = mutable.Map.empty[Int, mutable.LinkedHashMap[(Hash, Boolean), Array[Byte]]]
 
   /** Readable from any thread: whether each tracked block is audited. Blocks we never tracked count as audited. */
   private val auditedBlocks = new ConcurrentHashMap[Hash, java.lang.Boolean]()
@@ -135,7 +154,10 @@ final class AuditorService(
           exec.execute(() =>
             guarded {
               tracked.put(t.hash, t)
-              pendingAnnouncements.remove(t.hash).foreach(_.foreach((p, h, e) => applyAnnouncement(p, h, e)))
+              takePendingAnnouncements(t.hash).foreach((p, h, e) => applyAnnouncement(p, h, e))
+              takePendingJudgments(t.available.map(_._3).toSet).foreach((h, v, valid, sig) =>
+                recordJudgment(h, v, valid, sig)
+              )
               tick()
             }
           )
@@ -294,9 +316,11 @@ final class AuditorService(
       done.foreach { t =>
         if !isAudited(t.hash) then logger.debug(s"block ${t.hash.toHex.take(18)} finalized before we saw it audited")
         auditedBlocks.remove(t.hash)
-        t.available.map(_._3).filterNot(live.contains).foreach { h =>
+        val gone = t.available.map(_._3).filterNot(live.contains)
+        gone.foreach { h =>
           positive.remove(h); negative.remove(h); verdicts.remove(h); announcementCounts.remove(h)
         }
+        pools.removeJudgments(gone)
       }
 
   /** Publish our judgment on `reportHash` for every key of ours that announced it in `t`. */
@@ -404,23 +428,77 @@ final class AuditorService(
     (conn: JamnpConnection, stream: JamnpStream) =>
       val parts = mutable.ListBuffer.empty[Array[Byte]]
       stream.onMessage { msg =>
-        parts += msg
-        if parts.size == 2 then
-          val peer = conn.peerKey
-          val (head, evidence) = (parts(0), parts(1))
-          exec.execute(() =>
-            guarded {
-              decodeHead(head) match
-                case Left(err) => logger.debug(s"CE144 from ${JamNode.hex(peer).take(16)}: $err")
-                case Right((headerHash, _, _)) =>
-                  if tracked.contains(headerHash) then applyAnnouncement(peer, head, evidence)
-                  else if pendingAnnouncements.size < 256 then
-                    pendingAnnouncements.getOrElseUpdate(headerHash, mutable.ListBuffer.empty) +=
-                      ((peer, head, evidence))
-            }
-          )
-          stream.finish()
+        // Two messages make an announcement; anything the peer sends after them is not kept.
+        if parts.size < 2 then
+          parts += msg
+          if parts.size == 2 then
+            // Reset: the audit thread has too much waiting to take it.
+            if receiveAnnouncement(conn.peerKey, parts(0), parts(1), conn) then stream.finish() else stream.reset()
       }
+
+  /** An announcement from the peer with Ed25519 key `peer`: checked now when its block is tracked, kept for the
+    * block's import otherwise. False when the audit thread has too many peer messages waiting (from the connection
+    * `source`, or in all) and the announcement was not taken.
+    */
+  private[node] def receiveAnnouncement(
+      peer: Array[Byte],
+      head: Array[Byte],
+      evidence: Array[Byte],
+      source: AnyRef = null
+  ): Boolean =
+    intake.tryExecute(exec, head.length.toLong + evidence.length, source) {
+      guarded {
+        decodeHead(head) match
+          case Left(err) => logger.debug(s"CE144 from ${JamNode.hex(peer).take(16)}: $err")
+          case Right((headerHash, n, _)) =>
+            if tracked.contains(headerHash) then applyAnnouncement(peer, head, evidence)
+            else keepAnnouncement(Ed25519PublicKey(peer), headerHash, n, head, evidence)
+      }
+    }
+
+  /** Keep an announcement for a block we have not imported, which cannot be checked without the block. Only a
+    * validator can be an announcer, each announces once per block and tranche, and the wait is for an import a few
+    * seconds away: a validator's oldest announcement goes when it has more than a few waiting.
+    */
+  private def keepAnnouncement(
+      peer: Ed25519PublicKey,
+      headerHash: Hash,
+      tranche: Int,
+      head: Array[Byte],
+      evidence: Array[Byte]
+  ): Unit =
+    if head.length + evidence.length <= AuditorService.MaxPendingAnnouncementBytes && isValidator(peer) then
+      val mine = pendingAnnouncements.getOrElseUpdate(peer, mutable.LinkedHashMap.empty)
+      if !mine.contains((headerHash, tranche)) then
+        mine.put((headerHash, tranche), (head, evidence))
+        while mine.size > AuditorService.PendingAnnouncementsPerPeer do mine.remove(mine.head._1)
+
+  /** In the validator sets a block near our head can be audited by: its prior set is the head's current or, across
+    * an epoch change, its next or previous one.
+    */
+  private def isValidator(peer: Ed25519PublicKey): Boolean =
+    val best = chain.best.hash
+    if validatorsAt._1 != best then
+      val v = chain.stateView().validators
+      validatorsAt = (best, (v.current ++ v.nextEpoch ++ v.previous).map(_.ed25519).toSet)
+    validatorsAt._2.contains(peer)
+
+  /** The validator keys of [[isValidator]] at a best head, read once per head rather than per announcement. */
+  private var validatorsAt: (Hash, Set[Ed25519PublicKey]) = (Hash.zero, Set.empty)
+
+  private def takePendingAnnouncements(headerHash: Hash): Seq[(Array[Byte], Array[Byte], Array[Byte])] =
+    val out = pendingAnnouncements.toSeq.flatMap { (peer, mine) =>
+      mine.keys.filter(_._1 == headerHash).toList.flatMap(k => mine.remove(k)).map((h, e) => (peer.bytes.toArray, h, e))
+    }
+    pendingAnnouncements.filterInPlace((_, mine) => mine.nonEmpty)
+    out
+
+  private def takePendingJudgments(reports: Set[Hash]): Seq[(Hash, Int, Boolean, Array[Byte])] =
+    val out = pendingJudgments.toSeq.flatMap { (v, mine) =>
+      mine.keys.filter(k => reports.contains(k._1)).toList.flatMap(k => mine.remove(k).map(sig => (k._1, v, k._2, sig)))
+    }
+    pendingJudgments.filterInPlace((_, mine) => mine.nonEmpty)
+    out
 
   /** Verify an announcement against the block it names (Ed25519 signature, VRF evidence, and that the VRF selects
     * the announced reports) and record it in A_n.
@@ -485,36 +563,79 @@ final class AuditorService(
     if !valid then pools.addJudgment(reportHash, v, valid, signature)
 
   def judgmentHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
-        if msg.length == 4 + 2 + 1 + 32 + 64 then
-          val idx = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)
-          val valid = msg(6) == 1
-          val reportHash = Hash(java.util.Arrays.copyOfRange(msg, 7, 39))
-          val signature = java.util.Arrays.copyOfRange(msg, 39, 103)
-          val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
-          val signer = chain.stateView().validators.current.lift(idx)
-          val genuine = signer.exists(vk =>
-            Ed25519.verify(
-              vk.ed25519.bytes.toArray,
-              context ++ reportHash.bytes,
-              signature
-            )
-          )
-          if genuine then
-            exec.execute(() =>
-              guarded {
-                recordJudgment(reportHash, idx, valid, signature)
-                tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(t =>
-                  updateAudited(t, t.lastTranche)
-                )
-              }
-            )
-            logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
-          else logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
-        else logger.warn(s"bad CE145 length ${msg.length}")
+        receiveJudgment(msg, conn)
         stream.finish()
       }
+
+  /** A CE 145 message: the signature is checked first, then the judgment is recorded when a tracked block holds
+    * its report and kept for that block's import otherwise.
+    */
+  private[node] def receiveJudgment(msg: Array[Byte]): Unit = receiveJudgment(msg, null)
+
+  /** As above, counted against the connection `source` it came on (null: not counted per source). */
+  private[node] def receiveJudgment(msg: Array[Byte], source: AnyRef): Unit =
+    if msg.length == 4 + 2 + 1 + 32 + 64 then
+      val idx = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)
+      val valid = msg(6) == 1
+      val reportHash = Hash(java.util.Arrays.copyOfRange(msg, 7, 39))
+      val signature = java.util.Arrays.copyOfRange(msg, 39, 103)
+      val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
+      val signer = chain.stateView().validators.current.lift(idx)
+      val genuine = signer.exists(vk =>
+        Ed25519.verify(
+          vk.ed25519.bytes.toArray,
+          context ++ reportHash.bytes,
+          signature
+        )
+      )
+      if genuine then
+        intake.tryExecute(exec, msg.length.toLong, source) {
+          guarded {
+            val holders = tracked.values.filter(_.reportHashes.contains(Some(reportHash))).toList
+            if holders.nonEmpty then
+              recordJudgment(reportHash, idx, valid, signature)
+              holders.foreach(t => updateAudited(t, t.lastTranche))
+            else keepJudgment(reportHash, idx, valid, signature)
+          }
+        }
+        logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
+      else logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
+    else logger.warn(s"bad CE145 length ${msg.length}")
+
+  /** Keep a genuine judgment whose report no tracked block holds: the block that makes the report available may
+    * not be imported yet, and judgments are not resent. Anyone can replay a validator's old judgments and a
+    * validator can sign any hash, so each validator's oldest goes when it has more than a few waiting.
+    */
+  private def keepJudgment(reportHash: Hash, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
+    val mine = pendingJudgments.getOrElseUpdate(v, mutable.LinkedHashMap.empty)
+    if !mine.contains((reportHash, valid)) then
+      mine.put((reportHash, valid), signature)
+      while mine.size > AuditorService.PendingJudgmentsPerValidator do mine.remove(mine.head._1)
+
+  /** Sizes of the peer-fed audit state: (reports with a recorded judgment, recorded judgments, judgments waiting
+    * for a block, announcements waiting for a block).
+    */
+  private[node] def bufferSizes: (Int, Int, Int, Int) =
+    exec
+      .submit(() =>
+        (
+          (positive.keySet ++ negative.keySet).size,
+          positive.valuesIterator.map(_.size).sum + negative.valuesIterator.map(_.size).sum,
+          pendingJudgments.valuesIterator.map(_.size).sum,
+          pendingAnnouncements.valuesIterator.map(_.size).sum
+        )
+      )
+      .get(30, TimeUnit.SECONDS)
+
+  /** Validators recorded as judging `reportHash` valid and invalid. */
+  private[node] def judgesOf(reportHash: Hash): (Set[Int], Set[Int]) =
+    exec
+      .submit(() =>
+        (positive.getOrElse(reportHash, Set.empty).toSet, negative.getOrElse(reportHash, Set.empty).toSet)
+      )
+      .get(30, TimeUnit.SECONDS)
 
   // =========================================================================
   // helpers
@@ -560,6 +681,29 @@ final class AuditorService(
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
 
 object AuditorService extends LazyLogging:
+  /** CE 144 announcements and CE 145 judgments that may wait for the audit thread, and the bytes they may hold. */
+  val MaxQueuedMessages: Int = 4096
+  val MaxQueuedBytes: Long = 32L * 1024 * 1024
+
+
+  /** Announcements kept per validator for blocks not imported yet. A validator announces once per block and
+    * tranche, a tranche lasts eight seconds and an announced block is at most an import away, so an honest validator
+    * has one or two waiting (tranche 0 of the last block or two).
+    */
+  val PendingAnnouncementsPerPeer: Int = 4
+
+  /** Largest announcement (head and evidence) kept for a block not imported yet. Tranche 0, the one that can outrun
+    * an import, is under 600 bytes with all ten cores drawn (34 per report, a 64-byte signature, a 96-byte VRF proof);
+    * this leaves room for a later tranche carrying a few dozen no-shows. With the per-validator count it bounds the
+    * buffer at 16 KiB per validator.
+    */
+  val MaxPendingAnnouncementBytes: Int = 4096
+
+  /** Judgments kept per validator for reports no tracked block holds yet. A validator draws at most
+    * [[AuditSelection.InitialCores]] reports of a block in tranche 0; twice that leaves room for a second block
+    * still being imported or for later-tranche picks.
+    */
+  val PendingJudgmentsPerValidator: Int = 2 * AuditSelection.InitialCores
 
   /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. */
   private[node] def fetchBundleDirect(

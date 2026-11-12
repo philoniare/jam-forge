@@ -80,6 +80,10 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       // The verdict waits below rely on an unaudited report reading as None.
       auditorA.verdictFor(Hash.zero) shouldBe None
 
+      // Before anything is audited, A is flooded with CE 144/145 messages for blocks and reports it does not hold:
+      // none may pile up, and the honest announcements and judgments below must still get through.
+      AuditFlood.run(auditorA, nodeA.pools, devKeys)
+
       val connAtoB =
         nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
 
@@ -135,6 +139,8 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       val report = block.extrinsic.guarantees.head.report
       val reportHash = Hashing.blake2b256(report.encode.toArray)
       auditorA.verdictFor(reportHash) shouldBe None // included, not yet available
+      // A judgment that outruns the block making its report available is kept for that block.
+      auditorA.receiveJudgment(AuditFlood.judgment(3, devKeys(3), reportHash, valid = true))
 
       val assuranceDeadline = System.currentTimeMillis() + 30000
       while nodeA.pools.assuranceCount < 5 && System.currentTimeMillis() < assuranceDeadline do Thread.sleep(50)
@@ -163,6 +169,8 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       do Thread.sleep(100)
       auditorA.isAudited(available.hash) shouldBe true
       auditorB.isAudited(available.hash) shouldBe true
+      auditorA.judgesOf(reportHash)._1 should contain allOf (0, 1, 3)
+      auditorA.bufferSizes._1 shouldBe 1 // judgments are recorded for the one report being audited
 
       // Validator 2 announces the report in tranche 0 but never judges it: a no-show, so A no longer counts the
       // block as audited (A_0 = {0, 1, 2} is not within J⊤ = {0, 1}).

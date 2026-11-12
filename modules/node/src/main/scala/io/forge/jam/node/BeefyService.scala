@@ -71,17 +71,22 @@ final class BeefyService(
     network.registerHandler(StreamKind, handler)
     ()
 
+  /** Peers' commitments waiting for the BEEFY thread are bounded; one over the limit is dropped (commitments are
+    * gossiped again). The thread's own timer is not counted.
+    */
+  private val intake = new WorkGate("beefy intake", 4096, 16L * 1024 * 1024)
+
   def handler: StreamHandler = (conn, stream) =>
     stream.onMessage { msg =>
       stream.finish()
       decode(msg) match
         case Right(c) =>
-          exec.execute(() =>
+          intake.tryExecute(exec, msg.length.toLong, conn) {
             guarded {
               speaks(conn.peerPublicKey) = true
               onCommitment(c)
             }
-          )
+          }
         case Left(err) => logger.warn(s"bad BEEFY payload: $err")
     }
 

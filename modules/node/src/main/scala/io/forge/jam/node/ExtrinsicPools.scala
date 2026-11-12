@@ -15,11 +15,21 @@ import scala.jdk.CollectionConverters.*
   * Validation here is best-effort dedup/anchoring — the block import pipeline
   * remains the gate.
   */
-final class ExtrinsicPools:
+final class ExtrinsicPools(
+    maxGuaranteesPerCore: Int = ExtrinsicPools.MaxGuaranteesPerCore,
+    maxGuarantees: Int = ExtrinsicPools.MaxGuarantees
+):
 
-  /** Guarantees keyed by work-report hash. */
+  /** Guarantees keyed by work-report hash: at most `maxGuaranteesPerCore` per core and `maxGuarantees` in all,
+    * the oldest making room for a new one.
+    */
   private val guarantees =
     new java.util.concurrent.ConcurrentHashMap[Hash, GuaranteeExtrinsic]()
+
+  /** Arrival order of the pooled guarantees, for eviction. Guarded by `guaranteeLock`, as is every insert. */
+  private val guaranteeArrival = new java.util.HashMap[Hash, java.lang.Long]()
+  private var guaranteeSeq = 0L
+  private val guaranteeLock = new Object
 
   /** Assurances keyed by (validator index, anchor). */
   private val assurances =
@@ -44,9 +54,32 @@ final class ExtrinsicPools:
   private val judgments =
     new java.util.concurrent.ConcurrentHashMap[(Hash, Int), (Boolean, Array[Byte])]()
 
+  private def reportHashOf(g: GuaranteeExtrinsic): Hash = Hashing.blake2b256(g.report.encode.toArray)
+
+  /** Whether a guarantee of the same work report is pooled. */
+  def hasGuarantee(g: GuaranteeExtrinsic): Boolean = guarantees.containsKey(reportHashOf(g))
+
+  /** Pool a guarantee unless its report is pooled already. When its core, or the pool, is full the oldest
+    * guarantee (of that core, or of the pool) is evicted first.
+    */
   def addGuarantee(g: GuaranteeExtrinsic): Unit =
-    val reportHash = Hashing.blake2b256(g.report.encode.toArray)
-    guarantees.putIfAbsent(reportHash, g)
+    val reportHash = reportHashOf(g)
+    guaranteeLock.synchronized {
+      if !guarantees.containsKey(reportHash) then
+        val core = g.report.coreIndex.toInt
+        def oldest(of: GuaranteeExtrinsic => Boolean): Option[Hash] =
+          guarantees.entrySet.asScala.iterator
+            .filter(e => of(e.getValue))
+            .map(_.getKey)
+            .minByOption(h => Option(guaranteeArrival.get(h)).fold(Long.MinValue)(_.longValue))
+        if guarantees.values.asScala.count(_.report.coreIndex.toInt == core) >= maxGuaranteesPerCore then
+          oldest(_.report.coreIndex.toInt == core).foreach(guarantees.remove)
+        if guarantees.size >= maxGuarantees then oldest(_ => true).foreach(guarantees.remove)
+        guaranteeArrival.keySet.retainAll(guarantees.keySet)
+        guaranteeSeq += 1
+        guaranteeArrival.put(reportHash, guaranteeSeq)
+        guarantees.put(reportHash, g)
+    }
 
   def addAssurance(a: AssuranceExtrinsic): Unit =
     assurances.putIfAbsent((a.validatorIndex.toInt, a.anchor), a)
@@ -67,6 +100,13 @@ final class ExtrinsicPools:
     judgments.asScala.collect {
       case ((h, idx), (valid, _)) if h == reportHash => idx -> valid
     }.toMap
+
+  /** Drop the judgments on reports whose audit is over. The auditor adds judgments only for reports of blocks it is
+    * auditing and calls this when it stops, so the pool holds at most validators × reports awaiting audit.
+    */
+  def removeJudgments(reportHashes: Iterable[Hash]): Unit =
+    val gone = reportHashes.toSet
+    if gone.nonEmpty then judgments.keySet.removeIf(k => gone.contains(k._1)): Unit
 
   def judgmentCount: Int = judgments.size
 
@@ -163,6 +203,13 @@ final class ExtrinsicPools:
 
   def clearGuarantees(): Unit = guarantees.clear()
 
+  /** Drop guarantees made before `slot`: with `slot` the first slot of the rotation before the best block's, they
+    * can go in no later block (their rotation is neither that block's nor the one before it).
+    */
+  def pruneGuaranteesBefore(slot: Long): Unit =
+    guarantees.values.removeIf(_.slot.toLong < slot)
+    ()
+
   def pendingGuarantees: List[GuaranteeExtrinsic] = guarantees.values.asScala.toList
 
   def pendingPreimages: List[Preimage] = preimages.values.asScala.toList
@@ -180,3 +227,12 @@ final class ExtrinsicPools:
 
   def guaranteeCount: Int = guarantees.size
   def assuranceCount: Int = assurances.size
+
+object ExtrinsicPools:
+  /** A core takes one report at a time, so more than a few pending for one core are a guarantor signing several
+    * reports for a slot.
+    */
+  val MaxGuaranteesPerCore: Int = 4
+
+  /** Above `MaxGuaranteesPerCore` times the 341 cores of the full configuration. */
+  val MaxGuarantees: Int = 2048

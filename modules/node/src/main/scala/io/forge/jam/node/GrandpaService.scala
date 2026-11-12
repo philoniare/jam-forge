@@ -2,6 +2,8 @@ package io.forge.jam.node
 
 import java.util.concurrent.{ConcurrentHashMap, Executors, LinkedBlockingQueue, ScheduledExecutorService, TimeUnit}
 
+import scala.collection.mutable
+
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.LittleEndian
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
@@ -26,6 +28,15 @@ final class GrandpaService(
   private val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
     val t = new Thread(r, "jam-grandpa"); t.setDaemon(true); t
   }
+
+  /** Peers' votes, commits, state and catch-up requests waiting for the voter thread are bounded; a message over
+    * the limit is dropped (votes are resent every gossip period, and a commit can be had again by catch-up). The
+    * thread's own timers and import callbacks are not counted.
+    */
+  private val intake = new WorkGate("grandpa intake", GrandpaService.MaxQueuedMessages, GrandpaService.MaxQueuedBytes)
+
+  /** Peer messages waiting for the voter thread. */
+  private[node] def queuedMessages: Int = intake.queued
 
   private val adapter = new GrandpaChain:
     def finalized: Vote = toVote(chain.finalized)
@@ -99,9 +110,16 @@ final class GrandpaService(
         votes.foreach(v => send(c, StreamKind.GrandpaVote, encodeVoteMessage(v)))
       }
 
-  /** Commits whose target block we are still fetching, by target. */
-  private val pendingCommits = new ConcurrentHashMap[Hash, (Long, Long, Commit, List[Array[Byte]])]()
-  private val requestedJustifications = ConcurrentHashMap.newKeySet[Hash]()
+  /** Commits whose target block we are still fetching, by target. Touched on the voter thread only. */
+  private val pendingCommits = new PendingCommits(GrandpaService.MaxPendingCommits)
+
+  /** How long a request that brought nothing is remembered before it may be made again: the stalled-round cadence
+    * above, and at the default T no shorter than the 30 s a request may take in [[request]].
+    */
+  private val retryMillis = 30 * gossipMillis
+
+  /** (block, slot) of the peer finality we asked a justification for (CE 130). Touched on the voter thread only. */
+  private val justificationRequests = new RequestTracker[(Hash, Long)](retryMillis)
 
   /** Start voting from the persisted voter set, or set 0 at genesis with the genesis validators. */
   def start(genesis: Hash, genesisKeys: IndexedSeq[Array[Byte]]): Unit =
@@ -165,29 +183,37 @@ final class GrandpaService(
       chain.putMeta("grandpa:set", LittleEndian.encode(j.setId + 1, 8) ++ target.hash.bytes.toArray)
 
   private def retryPending(imported: Hash): Unit =
-    Option(pendingCommits.remove(imported)).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None))
+    pendingCommits.take(imported).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None): Unit)
 
+  /** True when the voter took the commit. */
   private def applyCommit(
       round: Long,
       setId: Long,
       c: Commit,
       ancestries: List[Array[Byte]],
       from: Option[JamnpConnection]
-  ): Unit =
+  ): Boolean =
     voter.onCommit(round, setId, c, ancestries) match
       case Right(Some(missing)) =>
         logger.debug(s"GRANDPA commit for ${c.target.short} waits for the block")
-        pendingCommits.put(missing, (round, setId, c, ancestries))
+        pendingCommits.prune(chain.finalized.slot, voter.voterSet.setId)
+        pendingCommits.put(missing, round, setId, c, ancestries)
         from.foreach(sync.fetchBlock(_, missing))
-      case Right(None) => ()
-      case Left(err)   => logger.debug(s"GRANDPA commit for ${c.target.short} rejected: $err")
+        true
+      case Right(None) => true
+      case Left(err) =>
+        logger.debug(s"GRANDPA commit for ${c.target.short} rejected: $err")
+        false
 
   /** Ask a voter whose UP 0 finality is ahead of ours for its justification (CE 130). */
   private def followPeers(): Unit =
     val ours = chain.finalized.slot
+    pendingCommits.prune(ours, voter.voterSet.setId)
+    justificationRequests.retain((_, slot) => slot > ours)
     voterPeers.foreach { conn =>
       sync.peerFinal(conn).filter(f => f.slot > ours + 1).foreach { f =>
-        if requestedJustifications.add(f.hash) then requestJustification(conn, f.hash)
+        if justificationRequests.tryStart((f.hash, f.slot), conn.peerPublicKey) then
+          requestJustification(conn, f.hash, f.slot)
       }
     }
 
@@ -198,30 +224,36 @@ final class GrandpaService(
   private def onSingleMessage(f: (JamnpConnection, JamnpStream, Array[Byte]) => Unit): StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) => stream.onMessage(msg => f(conn, stream, msg))
 
-  /** Set ids and (set, round) pairs we already asked a peer to bring us up to. */
-  private val requestedWarps = ConcurrentHashMap.newKeySet[Long]()
-  private val requestedCatchUps = ConcurrentHashMap.newKeySet[(Long, Long)]()
+  /** The set we asked a warp sync from (ours at the time: the request is the same whatever later set the peer names),
+    * and the (set, round) pairs we asked a catch-up to. Touched on the voter thread only.
+    */
+  private val warpRequests = new RequestTracker[Long](retryMillis)
+  private val catchUpRequests = new RequestTracker[(Long, Long)](retryMillis)
 
   /** A peer in a later set or round than ours: ask it for warp sync (CE 153) or a catch-up (CE 152) once, since some
     * peers never send CE 151 state.
     */
   private def catchUpWith(conn: JamnpConnection, round: Long, setId: Long): Unit =
-    if setId > voter.voterSet.setId then
-      if requestedWarps.add(setId) then requestWarpSync(conn, voter.voterSet.setId)
-    else if voter.wantsCatchUp(round, setId) && requestedCatchUps.add((setId, round)) then
-      requestCatchUp(conn, round - 1, setId)
+    val ourSet = voter.voterSet.setId
+    if setId > ourSet then
+      warpRequests.retain(_ >= ourSet)
+      if warpRequests.tryStart(ourSet, conn.peerPublicKey) then requestWarpSync(conn, ourSet)
+    else if voter.wantsCatchUp(round, setId) then
+      catchUpRequests.retain((s, r) => s == ourSet && r > voter.round + 1)
+      if catchUpRequests.tryStart((setId, round), conn.peerPublicKey) then
+        requestCatchUp(conn, round - 1, setId, () => catchUpRequests.succeeded((setId, round)))
 
   /** CE 149. */
   def voteHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeVoteMessage(msg) match
       case Right(m) =>
-        exec.execute(() =>
+        intake.tryExecute(exec, msg.length.toLong, conn) {
           guarded {
             catchUpWith(conn, m.round, m.setId)
             voter.onVote(m)
           }
-        )
+        }
       case Left(err) => logger.warn(s"bad CE149 payload: $err")
   }
 
@@ -230,12 +262,12 @@ final class GrandpaService(
     stream.finish()
     decodeCommitMessage(msg) match
       case Right((round, setId, c)) =>
-        exec.execute(() =>
+        intake.tryExecute(exec, msg.length.toLong, conn) {
           guarded {
             catchUpWith(conn, round + 1, setId)
             applyCommit(round, setId, c, Nil, Some(conn))
           }
-        )
+        }
       case Left(err)                => logger.warn(s"bad CE150 payload: $err")
   }
 
@@ -244,21 +276,22 @@ final class GrandpaService(
     stream.finish()
     decodeState(msg) match
       case Right((round, setId, _)) =>
-        exec.execute(() =>
+        intake.tryExecute(exec, msg.length.toLong, conn) {
           guarded(catchUpWith(conn, round, setId))
-        )
+        }
       case Left(err) => logger.warn(s"bad CE151 payload: $err")
   }
 
   /** CE 152. */
-  def catchUpHandler: StreamHandler = onSingleMessage { (_, stream, msg) =>
+  def catchUpHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
     decodeCatchUpRequest(msg) match
       case Right((round, setId)) =>
-        exec.execute(() =>
+        val admitted = intake.tryExecute(exec, msg.length.toLong, conn) {
           voter.catchUpFor(round, setId) match
             case Some(c) => stream.send(encodeCatchUp(c)); stream.finish()
             case None    => stream.reset()
-        )
+        }
+        if !admitted then stream.reset()
       case Left(_) => stream.reset()
   }
 
@@ -310,9 +343,10 @@ final class GrandpaService(
   private def request(conn: JamnpConnection, kind: Byte, payload: Array[Byte])(f: Array[Byte] => Unit): Unit =
     distribution.submitRequest { () =>
       val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
-      val received = new LinkedBlockingQueue[Array[Byte]]()
+      // One response message is expected; whatever else the peer sends on the stream is not kept.
+      val received = new LinkedBlockingQueue[Array[Byte]](1)
       val done = new LinkedBlockingQueue[java.lang.Boolean]()
-      stream.onMessage(received.offer(_))
+      stream.onMessage(received.offer(_): Unit)
       stream.onClosed(() => done.offer(true))
       try
         stream.send(payload)
@@ -326,27 +360,88 @@ final class GrandpaService(
           throw e
     }
 
-  private def requestJustification(conn: JamnpConnection, hash: Hash): Unit =
+  private def requestJustification(conn: JamnpConnection, hash: Hash, slot: Long): Unit =
     request(conn, StreamKind.GrandpaJustificationRequest, hash.bytes.toArray) { bytes =>
       decodeJustification(bytes, chain.headerCodec) match
         case Right(j) if j.commit.target.hash == hash =>
-          applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn))
+          if applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn)) then
+            justificationRequests.succeeded((hash, slot))
         case Right(_)  => logger.warn("CE130 justification for another block")
         case Left(err) => logger.warn(s"bad CE130 response: $err")
     }
 
-  private def requestCatchUp(conn: JamnpConnection, round: Long, setId: Long): Unit =
+  private def requestCatchUp(conn: JamnpConnection, round: Long, setId: Long, onApplied: () => Unit = () => ()): Unit =
     request(conn, StreamKind.GrandpaCatchUp, encodeCatchUpRequest(round, setId)) { bytes =>
-      decodeCatchUp(bytes).flatMap(voter.onCatchUp(setId, _)).left.foreach(e => logger.debug(s"catch-up: $e"))
+      decodeCatchUp(bytes).flatMap(voter.onCatchUp(setId, _)) match
+        case Right(()) => onApplied()
+        case Left(e)   => logger.debug(s"catch-up: $e")
     }
 
   private def requestWarpSync(conn: JamnpConnection, fromSet: Long): Unit =
     request(conn, StreamKind.WarpSyncRequest, LittleEndian.encode(fromSet, 4)) { bytes =>
       decodeWarpFragments(bytes, chain.headerCodec) match
         case Right(fragments) =>
-          fragments.foreach { f =>
+          val applied = fragments.map { f =>
             val j = f.justification
             applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn))
           }
+          if applied.contains(true) then warpRequests.succeeded(fromSet)
         case Left(err) => logger.warn(s"bad CE153 response: $err")
     }
+
+object GrandpaService:
+
+  /** Commits kept while their target block is fetched. Each one carries a supermajority of valid precommits of the
+    * current set (checked before it is kept) for a block above our finalized one, so honest voters produce at most
+    * one target per round, and finalizing the highest target finalizes the rest: when more than this many wait, the
+    * lowest targets are the ones dropped.
+    */
+  val MaxPendingCommits: Int = 64
+
+  /** CE 149-152 messages from peers that may wait for the voter thread, and the bytes they may hold. */
+  val MaxQueuedMessages: Int = 4096
+  val MaxQueuedBytes: Long = 32L * 1024 * 1024
+
+/** Verified commits waiting for their target block, at most `max`: the highest targets are kept. Not thread safe. */
+private[node] final class PendingCommits(max: Int):
+  private val byTarget = mutable.HashMap.empty[Hash, (Long, Long, Commit, List[Array[Byte]])]
+
+  def size: Int = byTarget.size
+
+  def put(target: Hash, round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]]): Unit =
+    byTarget.put(target, (round, setId, c, ancestries))
+    while byTarget.size > max do byTarget.remove(byTarget.minBy(_._2._3.target.slot)._1)
+
+  def take(target: Hash): Option[(Long, Long, Commit, List[Array[Byte]])] = byTarget.remove(target)
+
+  /** Drop commits that can no longer finalize anything: at or below the finalized slot, or of another set. */
+  def prune(finalizedSlot: Long, setId: Long): Unit =
+    byTarget.filterInPlace((_, v) => v._3.target.slot > finalizedSlot && v._2 == setId)
+
+/** Requests made to peers, so that each is made once and none is remembered for good. A request is forgotten
+  * `retryMillis` after it was made, which covers one that failed, was answered with something useless or timed
+  * out (the wait is the back-off before asking again), or earlier through [[retain]] once the state it was to bring
+  * is there. While a request is unanswered its peer gets no other of this kind, so the entries are at most one per
+  * peer plus the answered ones, and an answer counts only when it was valid ([[succeeded]]). Not thread safe.
+  */
+private[node] final class RequestTracker[K](retryMillis: Long, clock: () => Long = () => System.currentTimeMillis()):
+  private final class Entry(val peer: Ed25519PublicKey, val expires: Long, var answered: Boolean)
+  private val entries = mutable.LinkedHashMap.empty[K, Entry]
+
+  def size: Int = entries.size
+
+  /** True when `key` should be requested from `peer` now; the request is then tracked. */
+  def tryStart(key: K, peer: Ed25519PublicKey): Boolean =
+    val now = clock()
+    // Entries are in request order and live equally long, so the expired ones lead.
+    while entries.headOption.exists(_._2.expires <= now) do entries.remove(entries.head._1)
+    if entries.contains(key) || entries.valuesIterator.exists(e => !e.answered && e.peer == peer) then false
+    else
+      entries.put(key, new Entry(peer, now + retryMillis, false))
+      true
+
+  /** The peer answered `key` with something valid: it may be asked for something else. */
+  def succeeded(key: K): Unit = entries.get(key).foreach(_.answered = true)
+
+  /** Forget the requests whose key no longer needs asking. */
+  def retain(keep: K => Boolean): Unit = entries.filterInPlace((k, _) => keep(k))

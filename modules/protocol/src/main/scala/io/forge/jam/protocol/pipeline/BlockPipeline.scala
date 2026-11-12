@@ -25,6 +25,37 @@ final case class BlockPipelineResult(
 
 object BlockPipeline:
 
+  /**
+   * The header checks of [[execute]] that run before any extrinsic is processed, on their own: the extrinsic hash,
+   * Safrole's epoch step (slot after the state's, then the validator keys, entropy and sealing sequence for the
+   * block's slot), then the seal and the entropy VRF signature under the author key that state implies. These are the
+   * same steps `execute` runs, so a block refused here is refused by `execute` on the same state. `view` is advanced
+   * by the epoch step and must be a throwaway.
+   *
+   * With `parentState` the view is the block's parent's posterior state and the epoch and winning-tickets markers
+   * are checked too. Without it the view is an earlier ancestor's state that fixes the same author key, seal entropy
+   * and sealing sequence for the block's slot (the caller's claim); the markers depend on the parent itself and are
+   * left out.
+   */
+  def verifyHeader(block: Block, view: TrieBackedJamState, parentState: Boolean): Either[PipelineError, Unit] =
+    val initialContext = PipelineContext.from(block, view.config, view)
+    val markers: StfStep =
+      if parentState then validateEpochMark.flatMap(_ => validateTicketsMark)
+      else inspect((_, _) => ())
+    val steps: StfStep = for {
+      _ <- validateExtrinsicHash
+      _ <- setPosteriorOffenders
+      safroleOut <- safroleEpoch
+      _ <- storeSafroleOutput(safroleOut)
+      _ <- markers
+      _ <- validateBlockSeal
+      _ <- validateEntropyVrf
+    } yield ()
+    val pending = initialContext.pendingChecks
+    steps.run((view, initialContext)) match
+      case Left(err) => Left(pending.firstFailure().getOrElse(err))
+      case Right(_)  => pending.firstFailure().toLeft(())
+
   def execute(
       block: Block,
       view: TrieBackedJamState,

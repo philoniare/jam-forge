@@ -21,8 +21,14 @@ enum ChainError:
   case NotOnBestChain
   case NoParent
   case AlreadyFinalized(parent: Hash)
+  /** A side-branch block failed a check that needs no execution (slot order, clock, seal); it was not stored. */
+  case SideBranchRefused(detail: String)
+  /** A side-branch block whose seal cannot be checked yet, refused because the `scope` (node or peer) cap is full. */
+  case UnverifiedLimit(scope: String)
 
   def message: String = this match
+    case SideBranchRefused(detail) => s"side-branch block refused: $detail"
+    case UnverifiedLimit(scope)    => s"too many unverified side-branch blocks ($scope limit)"
     case Undecodable(detail)  => detail
     case AlreadyImported      => "block already imported"
     case PreviouslyInvalid    => "block failed validation before"

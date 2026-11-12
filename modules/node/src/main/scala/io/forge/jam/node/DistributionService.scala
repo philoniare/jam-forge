@@ -26,24 +26,41 @@ import scala.jdk.CollectionConverters.*
   *
   * @param assurerKeys the Ed25519 keys assurances are checked against (the
   *   active set κ, by validator index)
+  * @param admitGuarantee the receipt-time check of a CE 135 guarantee (see [[GuaranteeAdmission]]); a guarantee it
+  *   refuses is never pooled. Without one, every received guarantee is refused.
   */
 final class DistributionService(
     pools: ExtrinsicPools,
     coresCount: Int,
     egress: ExecutorService,
-    assurerKeys: () => Seq[Array[Byte]] = () => Nil
+    assurerKeys: () => Seq[Array[Byte]] = () => Nil,
+    admitGuarantee: GuaranteeExtrinsic => Either[String, Unit] = _ => Left("no guarantee verifier configured")
 ) extends LazyLogging:
 
+  // Open connections only: a connection leaves on its connection-down callback ([[untrackConnection]]), so the set
+  // is bounded by the transport's connection limit however often peers reconnect.
   private val connections =
     java.util.concurrent.ConcurrentHashMap.newKeySet[JamnpConnection]()
 
-  /** Track a peer connection for outgoing distribution. */
+  /** Track an open peer connection for outgoing distribution. A connection that already closed is not kept: its
+    * connection-down callback has fired, so nothing would remove it.
+    */
   def trackConnection(conn: JamnpConnection): Unit =
-    connections.add(conn)
+    if conn.isOpen then
+      connections.add(conn)
+      // Closed between the check and the add: the down callback may have run before the add.
+      if !conn.isOpen then connections.remove(conn): Unit
+
+  /** Forget a connection that closed. */
+  def untrackConnection(conn: JamnpConnection): Unit =
+    connections.remove(conn): Unit
 
   /** Currently tracked open peer connections. */
   def peers: List[JamnpConnection] =
     connections.asScala.filter(_.isOpen).toList
+
+  /** Connections held, open or not: equals the open ones once the close callbacks have run. */
+  private[node] def trackedConnectionCount: Int = connections.size
 
   /** Distinct peers: one reached over two connections counts once. */
   def peerCount: Int = peers.map(c => JamBytes(c.peerKey)).distinct.size
@@ -57,13 +74,27 @@ final class DistributionService(
       stream.onMessage { msg =>
         decodeItem[GuaranteeExtrinsic](msg) match
           case Right(g) =>
-            logger.debug(s"pooled guarantee for core ${g.report.coreIndex.toInt}")
-            pools.addGuarantee(g)
-            recordReport(g.report)
-            stream.finish()
+            receiveGuarantee(g) match
+              case Right(_) => stream.finish()
+              case Left(why) =>
+                logger.debug(s"CE135: guarantee for core ${g.report.coreIndex.toInt} refused: $why")
+                stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE135 payload: $err")
             stream.reset()
+      }
+
+  /** Pool a guarantee received from a peer. A report already pooled is kept as it is and costs no signature check;
+    * anything else must pass `admitGuarantee` first. Right(true) when it was newly pooled.
+    */
+  private[node] def receiveGuarantee(g: GuaranteeExtrinsic): Either[String, Boolean] =
+    if pools.hasGuarantee(g) then Right(false)
+    else
+      admitGuarantee(g).map { _ =>
+        logger.debug(s"pooled guarantee for core ${g.report.coreIndex.toInt}")
+        pools.addGuarantee(g)
+        recordReport(g.report)
+        true
       }
 
   /** Send a signed guarantee to a peer (typically the upcoming author). */

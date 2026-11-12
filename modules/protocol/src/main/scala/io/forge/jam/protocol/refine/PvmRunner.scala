@@ -3,6 +3,7 @@ package io.forge.jam.protocol.refine
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
+import io.forge.jam.pvm.memory.InstanceMemoryBudget
 import io.forge.jam.protocol.accumulation.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, PvmInstance}
@@ -45,13 +46,40 @@ object PvmRunner:
       entryPc: Int,
       hostCalls: HostCallDispatcher,
       executionMode: ExecutionMode = ExecutionMode.default,
-      preDispatch: Option[() => Unit] = None
+      preDispatch: Option[() => Unit] = None,
+      memoryBudget: InstanceMemoryBudget = InstanceMemoryBudget.global
+  ): (PvmExit, Long, Array[Byte]) =
+    // Reserved before the instance's memory is allocated and held until the run is over, so the instances running
+    // at once (services of one accumulation batch, refine, is-authorized) stay within the process-wide budget.
+    val reservation = memoryBudget.reserve(instanceBytes(module, inputData.length, executionMode))
+    try runReserved(module, inputData, gasLimit, entryPc, hostCalls, executionMode, preDispatch, reservation)
+    finally reservation.close()
+
+  /** Bytes a new instance of `module` allocates up front: the read-write region with the declared heap, the stack
+    * and the argument pages. The recompiler works on copies of them (region slices, the packed backing array and
+    * the native buffer).
+    */
+  def instanceBytes(module: InterpretedModule, inputLength: Int, executionMode: ExecutionMode): Long =
+    val map = module.memoryMap
+    val interpreted = map.rwDataSize.toLong + map.stackSize.toLong + inputLength.toLong
+    if executionMode == ExecutionMode.Recompiled then interpreted * 4 else interpreted
+
+  private def runReserved(
+      module: InterpretedModule,
+      inputData: Array[Byte],
+      gasLimit: Long,
+      entryPc: Int,
+      hostCalls: HostCallDispatcher,
+      executionMode: ExecutionMode,
+      preDispatch: Option[() => Unit],
+      reservation: InstanceMemoryBudget.Reservation
   ): (PvmExit, Long, Array[Byte]) =
     val instance = InterpretedInstance.fromModule(
       module,
       inputData,
       forceStepTracing = false
     )
+    instance.basicMemory.setReservation(reservation)
 
     val pvmWrapper = new InterpretedInstanceWrapper(instance)
 

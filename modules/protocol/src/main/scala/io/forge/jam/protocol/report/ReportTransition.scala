@@ -199,23 +199,9 @@ object ReportTransition:
       val m = scala.collection.mutable.HashMap.empty[Long, ServiceAccount]
       preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a))
       m.toMap
-    val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
     val ancestorIndex = new AncestorIndex(ancestry)
-
-    def cacheFor(ctx: RotationContext): RotationCache =
-      val key = (ctx.reportRotation.toLong << 1) | (if ctx.isCurrent then 1L else 0L)
-      rotationCache.getOrElseUpdate(key, {
-        val validators = selectValidatorSet(ctx, preState.currValidators, preState.prevValidators)
-        val randomness =
-          if ctx.isCurrent then preState.entropy(2)
-          else if ctx.isEpochChanging then preState.entropy(3)
-          else preState.entropy(2)
-        val slot =
-          if ctx.isCurrent then input.slot
-          else math.max(0, input.slot - config.rotationPeriod)
-        val assignments = calculateCoreAssignmentsArr(randomness, slot, validators.size, config)
-        RotationCache(validators, validators.toArray, assignments)
-      })
+    val cacheFor =
+      rotationCaches(preState.currValidators, preState.prevValidators, preState.entropy, input.slot, config)
 
     val batchPackages = input.guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
     val historyReported: Map[Hash, Hash] =
@@ -248,6 +234,64 @@ object ReportTransition:
         guarantee.signatures.map(sig => Hash(cache.validatorsArr(sig.validatorIndex.toInt).ed25519.bytes))
       }
       (packages, guarantors)
+
+  /**
+   * The guarantor keys and core assignments of a rotation, as a block at `currentSlot` resolves them from its
+   * post-Safrole current and previous validator sets and entropy, computed once per rotation.
+   */
+  private def rotationCaches(
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey],
+    entropy: List[Hash],
+    currentSlot: Long,
+    config: ChainConfig
+  ): RotationContext => RotationCache =
+    val rotationCache = scala.collection.mutable.HashMap.empty[Long, RotationCache]
+    ctx =>
+      val key = (ctx.reportRotation.toLong << 1) | (if ctx.isCurrent then 1L else 0L)
+      rotationCache.getOrElseUpdate(key, {
+        val validators = selectValidatorSet(ctx, currValidators, prevValidators)
+        val randomness =
+          if ctx.isCurrent then entropy(2)
+          else if ctx.isEpochChanging then entropy(3)
+          else entropy(2)
+        val slot =
+          if ctx.isCurrent then currentSlot
+          else math.max(0, currentSlot - config.rotationPeriod)
+        val assignments = calculateCoreAssignmentsArr(randomness, slot, validators.size, config)
+        RotationCache(validators, validators.toArray, assignments)
+      })
+
+  /**
+   * The checks of one guarantee that need only the validator sets, entropy and offenders a block at `slot` sees
+   * after Safrole: its slot is not after `slot` and its rotation is that block's or the one before, its core exists,
+   * it has two or three distinct guarantors in order, each assigned to the report's core in that rotation and none an
+   * offender, and every signature verifies. This is the key resolution of the Reports STF itself, so a guarantee
+   * that fails here fails in any block at `slot` with that state. The report's anchor, authorizer, dependencies and
+   * the core's availability are not looked at: they need more of the state.
+   */
+  def verifyGuaranteeCredentials(
+    guarantee: GuaranteeExtrinsic,
+    slot: Long,
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey],
+    entropy: List[Hash],
+    offenders: Set[Hash],
+    config: ChainConfig
+  ): Either[ReportErrorCode, Unit] =
+    val cacheFor = rotationCaches(currValidators, prevValidators, entropy, slot, config)
+    val batch = new SignatureBatch
+    val coreIndex = guarantee.report.coreIndex.toInt
+    for
+      _ <- ensure(guarantee.slot.toLong <= slot, ReportErrorCode.FutureReportSlot)
+      _ <- ensure(
+        coreIndex < config.coresCount && coreIndex < currValidators.size / 3,
+        ReportErrorCode.BadCoreIndex
+      )
+      _ <- validateGuarantors(guarantee, slot, cacheFor, batch, config)
+      _ <- validateAssignment(guarantee, slot, offenders, cacheFor, config)
+      _ <- ensure(batch.verify(), ReportErrorCode.BadSignature)
+    yield ()
 
   private def validateGuarantors(
     guarantee: GuaranteeExtrinsic,

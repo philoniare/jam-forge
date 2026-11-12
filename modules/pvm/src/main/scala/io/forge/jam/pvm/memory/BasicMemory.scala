@@ -498,6 +498,11 @@ final class BasicMemory private (
   private var dirtyFrom: Int = 0
   private var dirtyTo: Int = 0
 
+  /** What this memory holds of the instance memory budget; a heap buffer that grows is reserved through it. */
+  private var reservation: InstanceMemoryBudget.Reservation = null
+
+  def setReservation(r: InstanceMemoryBudget.Reservation): Unit = reservation = r
+
   private def zeroDirty(upTo: Int): Unit =
     if upTo > dirtyFrom && dirtyTo > dirtyFrom then
       val end = math.min(upTo, dirtyTo)
@@ -536,14 +541,18 @@ final class BasicMemory private (
     if requiredBufferSize > rwData.length then
       val pooled = BasicMemory.takeSpare(requiredBufferSize)
       val oldLength = rwData.length
-      val newBuffer =
-        if pooled != null then pooled.buffer
+      val newLength =
+        if pooled != null then pooled.buffer.length
         else
           val cap = math.min(memoryMap.maxHeapSize.toLong, BasicMemory.MaxBufferSize.toLong)
           val grown = math.min(oldLength.toLong * 3 / 2, cap).toInt
-          new Array[Byte](math.max(requiredBufferSize, grown))
+          math.max(requiredBufferSize, grown)
+      // Both buffers are live during the copy; this may wait for other runs to finish.
+      if reservation != null then reservation.grow(newLength.toLong)
+      val newBuffer = if pooled != null then pooled.buffer else new Array[Byte](newLength)
       System.arraycopy(rwData, 0, newBuffer, 0, oldLength)
       rwData = newBuffer
+      if reservation != null then reservation.shrink(oldLength.toLong)
       // The previous owner's bytes past the copy are zeroed as the heap reaches them, not all up front.
       if pooled != null && pooled.dirtyEnd > oldLength then
         dirtyFrom = oldLength

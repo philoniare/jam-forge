@@ -201,6 +201,15 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   def fetchBlock(conn: JamnpConnection, hash: Hash): Unit =
     if fetching.add(hash) then requestAndImport(conn, hash, () => fetching.remove(hash))
 
+  /** Drop what is held for a connection that closed. Its UP 0 stream's close listener normally does this; a message
+    * handled while the stream closes can put an entry back, which nothing else would remove.
+    */
+  def forgetConnection(conn: JamnpConnection): Unit =
+    upStreams.remove(conn)
+    peerFinals.remove(conn)
+    peerBestHeads.remove(conn)
+    ()
+
   private def notePeerBest(conn: JamnpConnection, head: HashSlot): Unit =
     peerBestHeads.merge(conn, head, (old, nu) => if nu.slot >= old.slot then nu else old)
     ()
@@ -371,17 +380,75 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     * and import them oldest-first. Runs on the import executor.
     */
   private def requestAndImport(conn: JamnpConnection, from: Hash, onDone: () => Unit = () => ()): Unit =
-    importExecutor.submit(new Runnable {
-      override def run(): Unit =
-        try fetch()
-        finally onDone()
+    val request = new FetchRequest(conn, from, onDone)
+    // A peer can announce faster than we fetch (each fetch waits on it for up to 30 s), so the waiting fetches
+    // are bounded: one per (peer, block), a few per peer, and when over a limit the oldest gives way. A fetch
+    // walks back from its block, so the newest one covers what an older one for the same chain would have brought.
+    val dropped = pendingFetches.synchronized {
+      val it = pendingFetches.iterator()
+      var samePeer = 0
+      var duplicate = false
+      while it.hasNext do
+        val p = it.next()
+        if p.conn eq conn then
+          samePeer += 1
+          if p.from == from then duplicate = true
+      if duplicate then List(request)
+      else
+        pendingFetches.addLast(request)
+        val out = List.newBuilder[FetchRequest]
+        if samePeer + 1 > SyncService.MaxPendingFetchesPerPeer then
+          val oldest = pendingFetches.iterator()
+          var removed = false
+          while !removed && oldest.hasNext do
+            val p = oldest.next()
+            if p.conn eq conn then
+              oldest.remove()
+              out += p
+              removed = true
+        if pendingFetches.size > SyncService.MaxPendingFetches then out += pendingFetches.pollFirst()
+        out.result()
+    }
+    dropped.foreach(_.onDone())
+    if dropped.forall(_ ne request) && fetchLoopScheduled.compareAndSet(false, true) then
+      try importExecutor.execute(() => fetchLoop())
+      catch
+        case _: java.util.concurrent.RejectedExecutionException =>
+          fetchLoopScheduled.set(false) // shutting down
 
-      private def fetch(): Unit =
+  private final class FetchRequest(val conn: JamnpConnection, val from: Hash, val onDone: () => Unit)
+
+  /** Fetches waiting for the import thread, oldest first. Guarded by itself. */
+  private val pendingFetches = new java.util.ArrayDeque[FetchRequest]()
+  private val fetchLoopScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** Fetches waiting for the import thread. */
+  private[node] def pendingFetchCount: Int = pendingFetches.synchronized(pendingFetches.size)
+
+  /** Runs the waiting fetches in order on the import thread until none is left. */
+  private def fetchLoop(): Unit =
+    var continue = true
+    while continue do
+      val next = pendingFetches.synchronized(pendingFetches.pollFirst())
+      if next != null && !importExecutor.isShutdown then
+        // Nothing a fetch throws may end the loop: no later fetch would ever run.
+        try
+          try fetch(next.conn, next.from)
+          finally next.onDone()
+        catch case e: Throwable => logger.error("block sync failed", e)
+      else
+        fetchLoopScheduled.set(false)
+        // A request added after the poll saw the loop as still scheduled: pick it up.
+        continue = !importExecutor.isShutdown && pendingFetches.synchronized(!pendingFetches.isEmpty) &&
+          fetchLoopScheduled.compareAndSet(false, true)
+
+  private def fetch(conn: JamnpConnection, from: Hash): Unit =
         try
           val stream = conn
             .openStream(StreamKind.BlockRequest)
             .get(10, TimeUnit.SECONDS)
-          val received = new LinkedBlockingQueue[Array[Byte]]()
+          // The response is one message; a peer that keeps sending is not buffered without limit.
+          val received = new LinkedBlockingQueue[Array[Byte]](SyncService.MaxResponseMessages)
           val done = new LinkedBlockingQueue[java.lang.Boolean]()
           stream.onMessage(received.offer(_))
           stream.onClosed(() => done.offer(true))
@@ -402,7 +469,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             // Oldest first; skip blocks until one extends our best head.
             var imported = 0
             blocks.reverse.foreach { blockBytes =>
-              chain.importBlock(blockBytes) match
+              chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
                 case Right(_) =>
                   imported += 1
                   chain.decodeBlock(blockBytes).foreach { b =>
@@ -416,8 +483,6 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         catch
           case e: Exception =>
             logger.warn(s"block sync failed: ${e.getMessage}")
-    })
-    ()
 
   // =========================================================================
   // CE 129 — state request (trie range)
@@ -446,3 +511,11 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             logger.warn(s"CE129 handler failed: ${e.getMessage}")
             stream.reset()
       }
+
+object SyncService:
+  /** Block fetches that may wait for the import thread: per peer (the newest are kept) and in total. */
+  val MaxPendingFetchesPerPeer: Int = 8
+  val MaxPendingFetches: Int = 2048
+
+  /** Messages kept from one CE 128 response (the protocol sends one). */
+  val MaxResponseMessages: Int = 4

@@ -61,6 +61,15 @@ final class PreimageService(
       }
     )
 
+  /** CE 143 fetches are started by peers' announcements and each waits on a peer for up to 20 s: a bounded number
+    * may wait, and a preimage is fetched once at a time however many peers announce it.
+    */
+  private val fetchGate = new WorkGate("preimage fetch", PreimageService.MaxQueuedFetches)
+  private val fetchingHashes = java.util.concurrent.ConcurrentHashMap.newKeySet[Hash]()
+
+  /** Fetches waiting for a fetch thread. */
+  private[node] def queuedFetches: Int = fetchGate.queued
+
   def announceHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
@@ -152,13 +161,12 @@ final class PreimageService(
       hash: Hash,
       expectedLength: Long
   ): Unit =
-    try
-      fetchExecutor.submit(new Runnable {
-        def run(): Unit =
+    if !fetchingHashes.add(hash) then return
+    val admitted = fetchGate.tryExecute(fetchExecutor) {
           try
             val stream = conn.openStream(StreamKind.PreimageRequest).get(10, TimeUnit.SECONDS)
-            val collected = new LinkedBlockingQueue[Array[Byte]]()
-            stream.onMessage(collected.put)
+            val collected = new LinkedBlockingQueue[Array[Byte]](1)
+            stream.onMessage(collected.offer(_))
             stream.send(hash.bytes)
             stream.finish()
             val blob = collected.poll(10, TimeUnit.SECONDS)
@@ -174,10 +182,11 @@ final class PreimageService(
               announce(serviceId, blob, gossipTargets().filterNot(_ eq conn))
             else logger.warn(s"CE143 response invalid for ${hash.toHex.take(18)}")
           catch case e: Exception => logger.warn(s"CE143 fetch failed: ${e.getMessage}")
-      })
-    catch
-      case _: java.util.concurrent.RejectedExecutionException =>
-        logger.warn(s"preimage-fetch executor rejected CE143 fetch for ${hash.toHex.take(18)} (shutting down)")
+          finally fetchingHashes.remove(hash)
+    }
+    if !admitted then
+      fetchingHashes.remove(hash)
+      logger.debug(s"CE143 fetch for ${hash.toHex.take(18)} not queued (fetch queue full or shutting down)")
 
   def shutdown(): Unit =
     fetchExecutor.shutdown()
@@ -204,4 +213,6 @@ final class PreimageService(
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
 
 object PreimageService:
+  /** CE 143 fetches that may wait for one of the four fetch threads. */
+  val MaxQueuedFetches: Int = 256
   val DefaultAnnouncedMetaCap: Int = 4096

@@ -39,6 +39,12 @@ final class TicketService(
     */
   private val pendingForwards = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope)]()
 
+  /** Ids of the tickets we took as proxy (CE 131), with their contest epoch: each is queued for CE 132 once, however
+    * often it is sent to us. A ticket id is the VRF output for a ring member and attempt, so an epoch has at most
+    * validators × attempts of them.
+    */
+  private val proxied = new ConcurrentHashMap[Hash, java.lang.Long]()
+
   /** Our tickets: id bytes → (keys, attempt), consulted when sealing a
     * ticketed slot.
     */
@@ -186,38 +192,61 @@ final class TicketService(
   def ticketHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        val accepted =
-          try
-            TicketCodec.decode(msg) match
-              case Left(err) =>
-                logger.warn(s"${StreamKind.name(stream.kind)}: $err")
-                false
-              case Right((epoch, env)) =>
-                val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
-                val asProxy = stream.kind == StreamKind.TicketDistributionStep1
-                if epoch == currentEpoch then accept(epoch, env, asProxy, peerLabel(connection))
-                else if epoch == currentEpoch + 1 then
-                  // The sender's head reached the new epoch before ours: its
-                  // proof is against the next epoch's η_2/γ_z, which our state
-                  // will hold once we import that epoch's first block.
-                  deferred.add((epoch, env, asProxy, peerLabel(connection)))
-                  true
-                else
-                  // JAMNP-S CE 131/132: reset when the state needed to verify
-                  // the ticket is not known.
-                  logger.debug(s"ticket from ${peerLabel(connection)} for epoch $epoch, current $currentEpoch — rejected")
-                  false
-          catch
-            case e: Exception =>
-              logger.warn(s"ticket handler failed: ${e.getMessage}")
-              false
-        if accepted then stream.finish() else stream.reset()
+        val asProxy = stream.kind == StreamKind.TicketDistributionStep1
+        if receive(msg, asProxy, peerLabel(connection)) then stream.finish() else stream.reset()
       }
 
+  /** A CE 131 (`asProxy`) or CE 132 message from the peer `from`; false when the ticket was not taken. */
+  private[node] def receive(msg: Array[Byte], asProxy: Boolean, from: String): Boolean =
+    try
+      TicketCodec.decode(msg) match
+        case Left(err) =>
+          logger.warn(s"CE131/132: $err")
+          false
+        case Right((epoch, env)) =>
+          val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
+          if epoch == currentEpoch then accept(epoch, env, asProxy, from)
+          else if epoch == currentEpoch + 1 then
+            // The sender's head reached the new epoch before ours: its
+            // proof is against the next epoch's η_2/γ_z, which our state
+            // will hold once we import that epoch's first block.
+            defer(epoch, env, asProxy, from)
+          else
+            // JAMNP-S CE 131/132: reset when the state needed to verify
+            // the ticket is not known.
+            logger.debug(s"ticket from $from for epoch $epoch, current $currentEpoch — rejected")
+            false
+    catch
+      case e: Exception =>
+        logger.warn(s"ticket handler failed: ${e.getMessage}")
+        false
+
   /** Tickets received for the epoch after our head's, checked once our head
-    * enters that epoch.
+    * enters that epoch: each distinct ticket once, with whether a copy came on CE 131 and who sent it.
     */
-  private val deferred = new java.util.concurrent.ConcurrentLinkedQueue[(Long, TicketEnvelope, Boolean, String)]()
+  private val deferred = new ConcurrentHashMap[(Long, TicketEnvelope), (Boolean, String)]()
+
+  /** The most tickets kept for the next epoch. They cannot be verified before our head is in that epoch, and a
+    * contest has at most validators × attempts valid tickets (one id per ring member and attempt), so no more than
+    * that many unverified ones are worth holding.
+    */
+  private val maxDeferred: Int = chain.config.validatorCount * chain.config.ticketsPerValidator
+
+  /** Keep a ticket of the next epoch for when our head gets there; false when the buffer is full. */
+  private def defer(epoch: Long, env: TicketEnvelope, asProxy: Boolean, from: String): Boolean =
+    val key = (epoch, env)
+    deferred.synchronized {
+      // Dropping entries of epochs our head has passed happens in processDeferred; these are all `epoch` or older.
+      if deferred.containsKey(key) || deferred.size < maxDeferred then
+        deferred.merge(key, (asProxy, from), (old, nu) => (old._1 || nu._1, old._2))
+        true
+      else
+        logger.debug(s"ticket from $from for epoch $epoch not kept: $maxDeferred already wait for that epoch")
+        false
+    }
+
+  private[node] def deferredCount: Int = deferred.size
+  private[node] def pendingForwardCount: Int = pendingForwards.size
 
   /** Verify and pool deferred tickets whose epoch our head has reached;
     * drop those that are now stale. Called after every import.
@@ -225,9 +254,11 @@ final class TicketService(
   def processDeferred(): Unit =
     if deferred.isEmpty then return
     val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
-    val it = deferred.iterator()
+    val it = deferred.entrySet().iterator()
     while it.hasNext do
-      val (epoch, env, asProxy, from) = it.next()
+      val entry = it.next()
+      val (epoch, env) = entry.getKey
+      val (asProxy, from) = entry.getValue
       if epoch <= currentEpoch then
         it.remove()
         if epoch == currentEpoch && !accept(epoch, env, asProxy, from) then
@@ -264,7 +295,10 @@ final class TicketService(
           false
         else
           pools.addTicket(id, env, epoch, entropy)
-          if asProxy then pendingForwards.add((epoch, env))
+          // Forward a ticket once: a replayed one is already queued or was already sent to every validator.
+          if asProxy && proxied.putIfAbsent(id, epoch) == null then
+            proxied.values.removeIf(_ < epoch)
+            pendingForwards.add((epoch, env))
           true
 
   /** True when we hold the Ed25519 key of `id`'s proxy in γ_k. */

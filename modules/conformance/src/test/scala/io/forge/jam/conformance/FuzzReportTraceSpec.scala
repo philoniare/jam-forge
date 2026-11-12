@@ -38,15 +38,30 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
   private val requireCorpus = sys.props.get("jam.fuzz.requireCorpus").exists(_.toBoolean)
   private val compareKeyvals = sys.props.get("jam.fuzz.compareKeyvals").exists(_.toBoolean)
+  private def missingCorpus(msg: String): Nothing =
+    if requireCorpus then fail(s"$msg (jam.fuzz.requireCorpus=true → treating missing corpus as failure)")
+    else
+      println(msg)
+      cancel(msg)
+
   private def requireCorpusPath(path: java.nio.file.Path, label: String): Boolean =
     if Files.exists(path) then true
-    else
-      val msg = s"[FUZZ-CORPUS MISSING] $label not found, skipping (1 suite skipped): $path"
-      if requireCorpus then
-        fail(s"$msg (jam.fuzz.requireCorpus=true → treating missing corpus as failure)")
-      else
-        println(msg)
-        cancel(msg)
+    else missingCorpus(s"[FUZZ-CORPUS MISSING] $label not found, skipping (1 suite skipped): $path")
+
+  /** Trace directories under `dir`, sorted by name; a directory with none (empty or unreadable) is a missing corpus. */
+  private def requireTraceDirs(dir: java.nio.file.Path, label: String): List[java.io.File] =
+    val dirs =
+      Option(dir.toFile.listFiles()).getOrElse(Array.empty[java.io.File]).filter(_.isDirectory).sortBy(_.getName)
+    if dirs.isEmpty then
+      missingCorpus(s"[FUZZ-CORPUS MISSING] $label has no trace directories, skipping (1 suite skipped): $dir")
+    dirs.toList
+
+  /** Step files of a trace directory, as [[JsonTraceRunner.runTraceDirectory]] selects them. */
+  private def stepFiles(traceDir: java.io.File): List[java.io.File] =
+    Option(traceDir.listFiles()).getOrElse(Array.empty[java.io.File])
+      .filter(f => f.isFile && f.getName.endsWith(".json") && f.getName != "genesis.json" && f.getName != "report.json")
+      .sortBy(_.getName)
+      .toList
 
   describe("v0.8.0 Fuzz Report Traces"):
 
@@ -57,14 +72,21 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = true, compareKeyvals = compareKeyvals)
 
-        val defaultTarget = "1789474628_8353/00000212.json"
-        val target = sys.props.getOrElse("jam.fuzz.target", defaultTarget)
-        val (targetTraceId, targetFileName) = target.split("/", 2) match
-          case Array(t, f) if t.nonEmpty && f.nonEmpty => (t, f)
-          case _ => fail(s"Invalid -Djam.fuzz.target='$target' — expected <traceId>/<fileName>")
-
-        val targetFile = tracesDir.resolve(targetTraceId).resolve(targetFileName)
-        requireCorpusPath(targetFile, s"Target trace file $targetTraceId/$targetFileName")
+        // A debugging aid: -Djam.fuzz.target=<traceId>/<fileName> names the step to replay, and that file is then
+        // required. Without it, replay the first step of the first trace directory in the corpus.
+        val targetFile = sys.props.get("jam.fuzz.target") match
+          case Some(target) =>
+            val (targetTraceId, targetFileName) = target.split("/", 2) match
+              case Array(t, f) if t.nonEmpty && f.nonEmpty => (t, f)
+              case _ => fail(s"Invalid -Djam.fuzz.target='$target' — expected <traceId>/<fileName>")
+            val file = tracesDir.resolve(targetTraceId).resolve(targetFileName)
+            requireCorpusPath(file, s"Target trace file $targetTraceId/$targetFileName (-Djam.fuzz.target)")
+            file
+          case None =>
+            requireTraceDirs(tracesDir, "TINY traces directory").flatMap(stepFiles).headOption.map(_.toPath).getOrElse(
+              missingCorpus(s"[FUZZ-CORPUS MISSING] no trace step files found, skipping (1 suite skipped): $tracesDir")
+            )
+        info(s"target: ${tracesDir.relativize(targetFile)}")
 
         val result = runner.runSingleTrace(targetFile)
 
@@ -85,19 +107,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = false, compareKeyvals = compareKeyvals)
 
-        // Get first trace directory
-        val firstTraceDir = Option(tracesDir.toFile.listFiles())
-          .getOrElse(Array.empty[java.io.File])
-          .filter(_.isDirectory)
-          .sortBy(_.getName)
-          .headOption
-
-        if firstTraceDir.isEmpty then
-          val msg = s"[FUZZ-CORPUS MISSING] no trace directories found, skipping (1 suite skipped): $tracesDir"
-          if requireCorpus then fail(s"$msg (jam.fuzz.requireCorpus=true → treating missing corpus as failure)")
-          else
-            println(msg)
-            cancel(msg)
+        val firstTraceDir = requireTraceDirs(tracesDir, "TINY traces directory").headOption
 
         val results = runner.runTraceDirectory(firstTraceDir.get.toPath)
 
@@ -127,6 +137,7 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
 
       it("should pass all v0.8.0 fuzz report traces"):
         requireCorpusPath(tracesDir, "TINY traces directory")
+        requireTraceDirs(tracesDir, "TINY traces directory")
 
         val runner = new JsonTraceRunner(ChainConfig.TINY, verbose = false, compareKeyvals = compareKeyvals)
         val results = runner.runAllTraces(tracesDir)
@@ -193,7 +204,16 @@ class FuzzReportTraceSpec extends AnyFunSpec with Matchers with BeforeAndAfterAl
     describe("FULL config traces validation"):
 
       it("should pass all FULL-config (1023-validator) fuzz report traces"):
-        requireCorpusPath(fullTracesDir, "FULL traces directory")
+        // jam-conformance publishes no FULL-config corpus for 0.8.0 (no fuzz-reports/0.8.0/full-traces), so its
+        // absence from a present 0.8.0 corpus is not a missing corpus. The submodule not being
+        // checked out, or a full-traces directory without traces, still is.
+        requireCorpusPath(fullTracesDir.getParent, "fuzz-reports/0.8.0 directory")
+        if !Files.exists(fullTracesDir) then
+          cancel(
+            s"no FULL corpus published for 0.8.0: jam-conformance has no ${fullTracesDir.getFileName} directory " +
+              s"(not a missing corpus; add traces at $fullTracesDir to run this test)"
+          )
+        requireTraceDirs(fullTracesDir, "FULL traces directory")
 
         val runner = new JsonTraceRunner(ChainConfig.FULL, verbose = false, compareKeyvals = compareKeyvals)
         val results = runner.runAllTraces(fullTracesDir)

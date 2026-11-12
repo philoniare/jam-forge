@@ -69,9 +69,17 @@ final class JamNode(
   private val blockStore: BlockStore = stores._2
   val shardStore: ShardStore = stores._3
 
-  private val egress: java.util.concurrent.ExecutorService =
-    java.util.concurrent.Executors.newSingleThreadExecutor(r =>
-      val t = new Thread(r, "jam-egress"); t.setDaemon(true); t
+  /** Outbound one-shot sends and request exchanges. Each waits on a peer (a stream open, up to 10 s), so a slow
+    * peer backs the queue up: it is bounded, and when full the oldest send is dropped, since what it carries
+    * (assurances, tickets, votes, announcements) goes stale first.
+    */
+  private val egress: WorkLimits.DropOldestExecutor =
+    WorkLimits.dropOldestExecutor(
+      "jam-egress",
+      threads = 1,
+      capacity = WorkLimits.EgressQueueCapacity,
+      r =>
+        val t = new Thread(r, "jam-egress"); t.setDaemon(true); t
     )
 
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
@@ -81,7 +89,8 @@ final class JamNode(
     pools,
     spec.config.coresCount,
     egress,
-    assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray)
+    assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray),
+    admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check
   )
   val shards = new ShardService(shardStore, spec.config)
   val segments = new SegmentPool()
@@ -103,6 +112,9 @@ final class JamNode(
     eraStartSeconds = nodeConfig.eraStartSeconds,
     slotSeconds = spec.config.slotDuration
   )
+
+  // Slots are wall-clock only while the node ticks; a node driven slot by slot (tests) has no clock to bound by.
+  if nodeConfig.slotTicking then chain.useWallClock(() => slotClock.currentSlot)
 
   private val network = new JamnpNode(
     identity,
@@ -380,14 +392,17 @@ final class JamNode(
     chain.onImported((head, block) => preimages.onImported(head, block))
     chain.onImported((head, block) => pruneTickets(head, block))
     // Peers' blocks consume pooled extrinsics too, not only our own.
-    chain.onImported((_, block) =>
+    chain.onImported { (head, block) =>
       pools.pruneAfterImport(
         block.extrinsic.guarantees,
         block.extrinsic.assurances,
         block.extrinsic.preimages,
         chain.best.hash
       )
-    )
+      // A later block takes guarantees of its own rotation or the one before, so older ones are dead.
+      val rotation = chain.config.rotationPeriod
+      pools.pruneGuaranteesBefore((head.slot / rotation - 1) * rotation)
+    }
     telemetry.foreach(_ => chain.onImported((_, _) => reportHeads()))
 
     network.onConnectionChange { (conn, up) =>
@@ -402,6 +417,8 @@ final class JamNode(
         dropDuplicateConnections(conn)
       else
         logger.info(s"peer disconnected ($side) $peer$where")
+        distribution.untrackConnection(conn)
+        sync.forgetConnection(conn)
         telemetry.foreach(t =>
           try t.disconnected(conn.peerKey, "connection closed")
           catch case _: Exception => ()

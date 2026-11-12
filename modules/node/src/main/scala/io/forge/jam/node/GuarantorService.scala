@@ -69,6 +69,28 @@ object StateHistoricalLookup:
       case List(x, y, z) => (x <= t && t < y) || z <= t
       case _             => false
 
+/** The messages of one inbound stream, kept up to a count and a byte total, so that what a peer can make us hold
+  * per stream is fixed however much it sends. Not thread safe: a stream's messages arrive in order on its event loop.
+  */
+private[node] final class StreamIntake(maxMessages: Int, maxBytes: Long):
+  private val kept = mutable.ListBuffer.empty[Array[Byte]]
+  private var total = 0L
+  private var over = false
+
+  /** Keep `msg`. False once the stream has sent more than it may, and from then on: nothing further is kept. */
+  def offer(msg: Array[Byte]): Boolean =
+    if over || kept.size >= maxMessages || total + msg.length > maxBytes then
+      over = true
+      false
+    else
+      kept += msg
+      total += msg.length
+      true
+
+  def size: Int = kept.size
+  def bytes: Long = total
+  def messages: List[Array[Byte]] = kept.toList
+
 /** Guarantor role: accepts work-package submissions (CE 133), computes the
   * work report via the in-core pipeline (is-authorized + refine), signs it
   * with this node's assigned validator keys, tops the credentials up to the
@@ -101,6 +123,15 @@ final class GuarantorService(
     t.setDaemon(true)
     t
   )
+
+  /** Refine takes seconds and each queued submission holds its messages (up to 48 MiB for CE 146, 32 MiB for a
+    * CE 134 bundle), so only a few may wait; one over the limit is rejected by resetting its stream.
+    */
+  private val admission =
+    new WorkGate("guarantor intake", GuarantorService.MaxQueuedSubmissions, GuarantorService.MaxQueuedSubmissionBytes)
+
+  /** Submissions waiting for the guarantor thread. */
+  private[node] def queuedSubmissions: Int = admission.queued
 
   /** Bounded (cap 64) insertion-evicting cache of full work-package bundles
     * this node holds — either its own refine output or a bundle re-executed
@@ -212,23 +243,27 @@ final class GuarantorService(
     * message 2 = concatenated extrinsic blobs, then FIN.
     */
   def workPackageSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
-      val messages = mutable.ListBuffer.empty[Array[Byte]]
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      // CE 133 is two messages; a stream sending more, or more bytes than a submission may hold, is dropped.
+      val intake = new StreamIntake(2, maxSubmissionBytes)
       var rejected = false
       stream.onMessage { msg =>
         if !rejected then
           // JAMNP-S CE 133: `Core Index ++ Work-Package` is at most 2 + 200 KiB,
           // so a guarantor never downloads a huge package before authorizing it.
-          if messages.isEmpty && msg.length > 2 + GuarantorService.MaxWorkPackageBytes then
+          if intake.size == 0 && msg.length > 2 + GuarantorService.MaxWorkPackageBytes then
             rejected = true
             logger.warn(s"CE133: work-package message of ${msg.length} bytes exceeds the limit")
             stream.reset()
-          else messages += msg
+          else if !intake.offer(msg) then
+            rejected = true
+            logger.warn("CE133: more than two messages or over the submission size cap; rejecting")
+            stream.reset()
       }
       stream.onClosed { () =>
         if !rejected then
-          stream.finish() // `<-- FIN`: the submission was received in full
-          executor.submit { (() =>
+          val messages = intake.messages
+          val admitted = admission.tryExecute(executor, intake.bytes, conn) {
             try
               if messages.nonEmpty then
                 val first = messages.head
@@ -241,7 +276,9 @@ final class GuarantorService(
                     val extrinsicBlob = messages.drop(1).headOption.getOrElse(Array.emptyByteArray)
                     onWorkPackage(coreIndex, wp, extrinsicBlob)
             catch case e: Exception => logger.error("CE133 handling failed", e)
-          ): Runnable }
+          }
+          // `<-- FIN`: the submission was received in full. Reset: we are too busy to take it.
+          if admitted then stream.finish() else stream.reset()
       }
 
   /** CE 146 handler: the multi-message sibling of CE 133, for builders that
@@ -277,7 +314,7 @@ final class GuarantorService(
     * scope here — ledgered as a node-level follow-up.
     */
   def bundleSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       var dispatched = false
       var totalBytes = 0L
@@ -286,7 +323,7 @@ final class GuarantorService(
         if !dispatched then
           dispatched = true
           val snapshot = messages.toIndexedSeq
-          executor.submit { (() =>
+          val admitted = admission.tryExecute(executor, totalBytes, conn) {
             try
               decodeBundleSubmission(snapshot) match
                 case Left(err) =>
@@ -295,7 +332,8 @@ final class GuarantorService(
                   guaranteeWorkPackage(coreIndex, wp, extrinsicData, importSegments, justifications, lookup)
             catch case e: Exception => logger.error("CE146 handling failed", e)
             finally stream.finish()
-          ): Runnable }
+          }
+          if !admitted then stream.reset()
 
       stream.onMessage { msg =>
         if !dispatched then
@@ -529,19 +567,30 @@ final class GuarantorService(
     * cannot be co-signed are rejected by resetting the stream.
     */
   def workPackageSharingHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
-      val messages = mutable.ListBuffer.empty[Array[Byte]]
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      // CE 134 is a header and a bundle. Only those two are kept: a peer that goes on sending, or sends more than
+      // a submission may hold, gets a reset and nothing more of its stream is buffered.
+      val intake = new StreamIntake(2, maxSubmissionBytes)
+      var rejected = false
       stream.onMessage { msg =>
-        messages += msg
-        if messages.size == 2 then
-          val Seq(header, bundle) = messages.toSeq: @unchecked
-          executor.submit { (() =>
-            try respondCoSign(stream, header, bundle)
-            catch
-              case e: Exception =>
-                logger.error("CE134 handling failed", e)
-                stream.reset()
-          ): Runnable }
+        if intake.offer(msg) then
+          if intake.size == 2 then
+            val Seq(header, bundle) = intake.messages: @unchecked
+            val admitted = admission.tryExecute(executor, intake.bytes, conn) {
+              try respondCoSign(stream, header, bundle)
+              catch
+                case e: Exception =>
+                  logger.error("CE134 handling failed", e)
+                  stream.reset()
+            }
+            // Too many submissions waiting for the guarantor thread: rejected, once.
+            if !admitted then
+              rejected = true
+              stream.reset()
+        else if !rejected then
+          rejected = true
+          logger.warn("CE134: more than two messages or over the submission size cap; rejecting")
+          stream.reset()
       }
 
   private def respondCoSign(stream: JamnpStream, header: Array[Byte], bundleBytes: Array[Byte]): Unit =
@@ -699,6 +748,12 @@ final class GuarantorService(
     signed
 
 object GuarantorService:
+  /** CE 133/134/146 submissions that may wait for the guarantor thread, and the message bytes they may hold
+    * (two of the largest CE 146 submissions).
+    */
+  val MaxQueuedSubmissions: Int = 32
+  val MaxQueuedSubmissionBytes: Long = 96L * 1024 * 1024
+
   /** CE 146's cumulative-across-messages byte cap (see `bundleSubmissionHandler`).
     * 48 MiB comfortably covers a legitimate submission (a realistic work
     * package + extrinsics + a handful of `Csegmentsize` import segments +

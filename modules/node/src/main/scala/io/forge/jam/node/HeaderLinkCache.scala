@@ -80,10 +80,13 @@ private[node] final class HeaderLinkCache(window: Long, load: Hash => Option[Arr
     links.put(h, link)
     if links.size > highWater then sweep()
 
-  /** Drop entries more than `window` slots behind the eviction horizon. */
+  /** Drop entries more than `window` slots behind the eviction horizon, and those more than `window` slots ahead
+    * of it: a stored header that claims a far-future slot would otherwise never leave (a later lookup reloads it).
+    */
   private[node] def sweep(): Unit =
     val newest = newestSlot.get
     if newest != Long.MinValue then
       val cutoff = newest - window
-      links.values().removeIf(_.slot < cutoff)
+      val ahead = newest + window
+      links.values().removeIf(l => l.slot < cutoff || l.slot > ahead)
     highWater = math.max(minHighWater, 2L * links.size)

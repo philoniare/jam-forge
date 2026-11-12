@@ -2,30 +2,52 @@ package io.forge.jam.node
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.core.trie.{StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
+import io.forge.jam.protocol.pipeline.BlockPipeline
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
 
 import scala.collection.mutable
 import scala.util.boundary, boundary.break
+import scala.util.control.NonFatal
 import scala.jdk.CollectionConverters.*
+
+object ChainManager:
+  /** Side-branch blocks stored without a seal check, in all. They are an honest fork's blocks only when the fork
+    * is more than an epoch deep and not finalized, which a node can then still follow for this many blocks past the
+    * point where seals stop being checkable.
+    */
+  val MaxUnverifiedBlocks: Int = 1024
+
+  /** Of those, from one peer: a quarter, so one peer cannot use up the node's allowance. */
+  val MaxUnverifiedPerPeer: Int = 256
+
+  /** Their total encoded size: the disk an attacker can make the node hold until finality passes. */
+  val MaxUnverifiedBytes: Long = 1L << 30
+
+  /** Slots a side-branch block may be ahead of the wall clock (clock skew between author and this node). */
+  val FutureSlotTolerance: Long = 1L
 
 /** Owns the canonical chain: the persistent state trie, block storage and the
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
   *
-  * Forks: blocks with a known non-best parent are stored unvalidated on a
-  * side branch; when a branch becomes strictly heavier than the best chain
+  * Forks: blocks with a known non-best parent are stored unexecuted on a
+  * side branch, after the header checks that need no execution (see
+  * "Side-branch admission"); when a branch becomes strictly heavier than the best chain
   * and contains no equivocation, it is adopted by rewinding to the common
   * ancestor and replaying.
   */
 final class ChainManager(
     val config: ChainConfig,
     trieBackend: RocksDbTrieBackend,
-    val blockStore: BlockStore
+    val blockStore: BlockStore,
+    maxUnverifiedBlocks: Int = ChainManager.MaxUnverifiedBlocks,
+    maxUnverifiedPerPeer: Int = ChainManager.MaxUnverifiedPerPeer,
+    maxUnverifiedBytes: Long = ChainManager.MaxUnverifiedBytes
 ) extends LazyLogging:
 
   require(
@@ -109,6 +131,7 @@ final class ChainManager(
             while it.hasNext do
               val e = it.next()
               if blockHeight(e.getKey).getOrElse(0L) <= finalizedHeight then it.remove()
+            pruneUnverified(slot, finalizedHeight)
             logger.info(s"finalized ${hash.toHex.take(18)} slot=$slot")
             Right(Head(hash, slot, root))
     }
@@ -360,6 +383,11 @@ final class ChainManager(
       val h = stack.removeHead()
       if !visited.contains(h) then
         visited += h
+        // Blocks stored unverified by the previous run count against the caps again (their peers are not known).
+        metaLong(s"unverified:${h.toHex}").foreach { size =>
+          if blockRoot(h).isEmpty then
+            parentOf(h).foreach(p => trackUnverified(h, slotOfHeader(h), p, size, None))
+        }
         blockStore.children(h) match
           case Nil =>
             if blockHeight(h).getOrElse(0L) > finalizedHeight then leafMap.put(h, headOf(h))
@@ -456,11 +484,137 @@ final class ChainManager(
   def headerHashOf(block: Block): Hash =
     Hashing.blake2b256(headerCodec.encode(block.header))
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // Side-branch admission. A block that does not extend the best head is stored without being executed, so before
+  // it is stored it must pass every check that needs no execution:
+  //   - its slot is after its parent's and, when a wall clock is set, not ahead of it by more than
+  //     `FutureSlotTolerance`;
+  //   - its extrinsic hash, seal and entropy VRF signature verify (BlockPipeline.verifyHeader, the import pipeline's
+  //     own steps) against the posterior state of its nearest validated ancestor A. That state is the parent's when
+  //     A is the parent, and then the epoch and winning-tickets markers are checked as well. When A is further back
+  //     it still fixes the author key, the seal entropy and the sealing sequence of the block's slot in two cases:
+  //     the block is in A's epoch (none of them changes within an epoch), or it is in the next epoch and A is at or
+  //     past the ticket submission cutoff (the next epoch's validator keys and entropy are already fixed, and the
+  //     ticket accumulator no longer changes after the cutoff, so the ticket or fallback sequence is fixed too).
+  // Beyond that horizon the sealing keys depend on blocks of the branch that were never executed (tickets
+  // accumulated before the cutoff, or a whole epoch of entropy), so the seal cannot be checked. Such a block is stored
+  // "unverified" (only its slot order and clock bound were checked) under caps: `maxUnverifiedBlocks` and
+  // `maxUnverifiedBytes` in all, `maxUnverifiedPerPeer` per sending peer. Unverified blocks leave the caps when a
+  // reorg validates them, and are deleted once finality reaches their slot, with their descendants.
+  // ---------------------------------------------------------------------------------------------------------------
+
+  private final case class Unverified(slot: Long, parent: Hash, size: Long, peer: Option[Ed25519PublicKey])
+
+  // Guarded by `this`, like every import.
+  private val unverified = mutable.LinkedHashMap.empty[Hash, Unverified]
+  private val unverifiedPerPeer = mutable.HashMap.empty[Ed25519PublicKey, Int]
+  private var unverifiedBytes = 0L
+
+  @volatile private var wallClockSlot: Option[() => Long] = None
+
+  /** Refuse side-branch blocks whose slot is more than [[ChainManager.FutureSlotTolerance]] ahead of `now()`. */
+  def useWallClock(now: () => Long): Unit = wallClockSlot = Some(now)
+
+  /** Side-branch blocks stored without a seal check. */
+  def unverifiedCount: Int = synchronized(unverified.size)
+
+  /** Right(true) when the block may be stored but its seal could not be checked, Right(false) when it verified. */
+  private def admitSideBlock(
+      block: Block,
+      size: Int,
+      source: Option[Ed25519PublicKey]
+  ): Either[ChainError, Boolean] =
+    val parent = block.header.parent
+    val slot = block.header.slot.toLong
+    val parentSlot = slotOfHeader(parent)
+    if slot <= parentSlot then
+      Left(ChainError.SideBranchRefused(s"slot $slot is not after its parent's slot $parentSlot"))
+    else if wallClockSlot.exists(now => slot > now() + ChainManager.FutureSlotTolerance) then
+      Left(ChainError.SideBranchRefused(s"slot $slot is in the future"))
+    else
+      // Nearest validated ancestor: the first block back from the parent that is on the best chain.
+      var ancestor = parent
+      var root = blockRoot(ancestor)
+      while root.isEmpty && ancestor != Hash.zero do
+        ancestor = parentOf(ancestor).getOrElse(Hash.zero)
+        root = blockRoot(ancestor)
+      root match
+        case None => Left(ChainError.SideBranchRefused("its branch does not reach a validated block"))
+        case Some(ancestorRoot) =>
+          val ancestorSlot = slotOfHeader(ancestor)
+          val epochs = slot / config.epochLength - ancestorSlot / config.epochLength
+          val sealKeysKnown =
+            ancestor == parent || epochs == 0 ||
+              (epochs == 1 && ancestorSlot % config.epochLength >= config.ticketCutoff)
+          if sealKeysKnown then
+            val trie = StateTrie.at(trieStore.backend, ancestorRoot)
+            val view = new TrieBackedJamState(trie, config, new ServiceStorageView(trie), None)
+            val checked =
+              try BlockPipeline.verifyHeader(block, view, parentState = ancestor == parent).left.map(_.toString)
+              catch case NonFatal(e) => Left(s"header check failed: ${e.getMessage}")
+            checked.left.map(ChainError.SideBranchRefused(_)).map(_ => false)
+          else if unverified.size >= maxUnverifiedBlocks || unverifiedBytes + size > maxUnverifiedBytes then
+            Left(ChainError.UnverifiedLimit("node"))
+          else if source.exists(p => unverifiedPerPeer.getOrElse(p, 0) >= maxUnverifiedPerPeer) then
+            Left(ChainError.UnverifiedLimit("peer"))
+          else Right(true)
+
+  private def trackUnverified(hash: Hash, slot: Long, parent: Hash, size: Long, peer: Option[Ed25519PublicKey]): Unit =
+    if !unverified.contains(hash) then
+      unverified(hash) = Unverified(slot, parent, size, peer)
+      unverifiedBytes += size
+      peer.foreach(p => unverifiedPerPeer(p) = unverifiedPerPeer.getOrElse(p, 0) + 1)
+      // Persisted (with the size) so a restart can count and prune it again.
+      putMetaLong(s"unverified:${hash.toHex}", size)
+
+  private def untrackUnverified(hash: Hash): Unit =
+    unverified.remove(hash).foreach { u =>
+      unverifiedBytes -= u.size
+      u.peer.foreach { p =>
+        val left = unverifiedPerPeer.getOrElse(p, 1) - 1
+        if left <= 0 then unverifiedPerPeer.remove(p) else unverifiedPerPeer(p) = left
+      }
+      blockStore.deleteMeta(s"unverified:${hash.toHex}")
+    }
+
+  /** Delete the unverified blocks at or below the finalized slot, and the unverified blocks built on them: none is
+    * on the finalized block's chain (its ancestors are validated), so none can be adopted any more.
+    */
+  private def pruneUnverified(finalizedSlot: Long, finalizedHeight: Long): Unit =
+    if unverified.nonEmpty then
+      val doomed = mutable.LinkedHashSet.empty[Hash]
+      // Insertion order has parents before children, so one pass closes over descendants.
+      unverified.foreach { (h, u) =>
+        if u.slot <= finalizedSlot || doomed.contains(u.parent) then doomed += h
+      }
+      doomed.foreach { h =>
+        val u = unverified(h)
+        untrackUnverified(h)
+        if blockRoot(h).isEmpty then
+          header(h).foreach { hd =>
+            val key = s"slotauthor:${hd.slot.toLong}:${hd.authorIndex.toInt}"
+            if blockStore.getMeta(key).exists(java.util.Arrays.equals(_, h.bytes.toArray)) then
+              blockStore.deleteMeta(key)
+          }
+          blockStore.deleteBlock(h, u.parent)
+          headerLinks.invalidate(h)
+          leafMap.remove(h)
+          List("height", "ticketed", "marked", "weight").foreach(k => blockStore.deleteMeta(s"$k:${h.toHex}"))
+          // Its parent is a leaf again when nothing else builds on it, as a restart's rebuild would find.
+          if !doomed.contains(u.parent) && blockStore.hasBlock(u.parent) && blockStore.children(u.parent).isEmpty &&
+            blockHeight(u.parent).getOrElse(0L) > finalizedHeight
+          then leafMap.put(u.parent, headOf(u.parent))
+      }
+      if doomed.nonEmpty then
+        logger.info(s"pruned ${doomed.size} unverified side-branch block(s) at or below finalized slot $finalizedSlot")
+
   /** Import a block: extends the best head directly, or is stored as a side
     * branch and adopted via reorg when its branch becomes strictly heavier
-    * (ticket-sealed count, then height) and holds no equivocation
+    * (ticket-sealed count, then height) and holds no equivocation. A side-branch
+    * block is stored only after the checks described above; `source` is the peer
+    * it came from, for the per-peer cap on blocks whose seal cannot be checked.
     */
-  def importBlock(blockBytes: Array[Byte]): Either[ChainError, Head] =
+  def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
     val result = synchronized {
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
@@ -472,21 +626,28 @@ final class ChainManager(
         else
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
-              // Known parent on some branch: store and evaluate.
-              storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
-              val height = parentHeight + 1
-              putBlockHeight(hash, height)
-              recordForkChoiceMeta(hash, block)
-              leafMap.remove(parent)
-              if blockStore.children(hash).isEmpty then
-                leafMap.put(hash, Head(hash, block.header.slot.toLong, Hash.zero))
-              else leafMap.remove(hash)
-              val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
-              val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
-              val heavier = weight > bestWeight || (weight == bestWeight && height > bestHeight)
-              if heavier && !branchEquivocates(hash) && !branchInvalid(hash) then reorgTo(hash, events)
-              else
-                Left(ChainError.StoredOnSideBranch(weight, height, bestWeight, bestHeight))
+              // Known parent on some branch: check what can be checked without executing it, store and evaluate.
+              // A block already stored on a side branch was admitted when it was stored.
+              val stored = blockHeight(hash).isDefined && blockStore.hasBlock(hash)
+              val admitted =
+                if stored then Right(false) else admitSideBlock(block, blockBytes.length, source)
+              admitted.flatMap { unverifiable =>
+                storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
+                if unverifiable then trackUnverified(hash, block.header.slot.toLong, parent, blockBytes.length, source)
+                val height = parentHeight + 1
+                putBlockHeight(hash, height)
+                recordForkChoiceMeta(hash, block)
+                leafMap.remove(parent)
+                if blockStore.children(hash).isEmpty then
+                  leafMap.put(hash, Head(hash, block.header.slot.toLong, Hash.zero))
+                else leafMap.remove(hash)
+                val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
+                val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
+                val heavier = weight > bestWeight || (weight == bestWeight && height > bestHeight)
+                if heavier && !branchEquivocates(hash) && !branchInvalid(hash) then reorgTo(hash, events)
+                else
+                  Left(ChainError.StoredOnSideBranch(weight, height, bestWeight, bestHeight))
+              }
             case _ =>
               Left(ChainError.UnknownParent(parent))
       }
@@ -510,6 +671,7 @@ final class ChainManager(
         val hash = headerHashOf(block)
         val slot = block.header.slot.toLong
         storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
+        if unverified.nonEmpty then untrackUnverified(hash) // validated now (a reorg replayed it)
         headerLinks.advance(slot)
         recordForkChoiceMeta(hash, block)
         blockStore.setHead(BlockStore.BestHead, hash)
