@@ -1,17 +1,20 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.Paths
+import java.nio.file.{Files, Path, Paths}
+import java.nio.file.attribute.PosixFilePermissions
+import java.security.SecureRandom
 
+import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 
 /** CLI entry point:
   * {{{
   * jam-node --spec <chain-spec.json> --data <data-dir> [--port N]
-  *          [--seed <64-hex Ed25519 seed>] [--era-start <unix-seconds>]
+  *          [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...] [--author <validator-index>]
   *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
-  *          [--finality-peers N]
+  *          [--finality-peers N] [--prune-history]
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -20,8 +23,11 @@ import io.forge.jam.core.JamBytes
   * libraries are looked up under `-Djam.base.dir` (default: the working
   * directory); a missing one stops the node before it joins the network.
   * `--submit-port N` opens the loopback preimage endpoint (`POST /preimage/<service-id>`).
+  * `--seed-file` keeps the network identity across restarts: the seed is read from the file, or generated and
+  * written there (owner-only) when the file does not exist. `--prune-history` deletes finalized blocks once they
+  * are more than a lookup-anchor age behind finality.
   */
-object Main:
+object Main extends LazyLogging:
 
   def main(args: Array[String]): Unit =
     try run(args)
@@ -33,7 +39,7 @@ object Main:
 
   private def run(args: Array[String]): Unit =
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--beefy").contains(a))
+    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--beefy", "--prune-history").contains(a))
     val opts = parseArgs(rest, Map.empty)
 
     val specPath = opts.getOrElse("spec", fail("--spec <chain-spec.json> is required"))
@@ -58,6 +64,7 @@ object Main:
       ed25519Seed = opts
         .get("seed")
         .map(s => JamBytes.fromHexUnsafe(s).toArray)
+        .orElse(opts.get("seed-file").map(p => loadOrCreateSeed(Paths.get(p))))
         .orElse(authorKeys.map(_.ed25519Secret)),
       eraStartSeconds = opts
         .get("era-start")
@@ -65,6 +72,7 @@ object Main:
         .getOrElse(SlotClock.JamCommonEraSeconds),
       reusePort = flags.contains("--reuse-port"),
       grandpa = flags.contains("--grandpa"),
+      pruneFinalizedHistory = flags.contains("--prune-history"),
       finalityPeers = opts.get("finality-peers").map(_.toInt),
       telemetry = opts.get("telemetry").map(parseHostPort),
       submitPort = opts.get("submit-port").map(_.toInt)
@@ -82,7 +90,7 @@ object Main:
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized
-      println(
+      logger.info(
         s"slot $slot best=${best.slot} ${best.hash.toHex} finalized=${fin.slot} " +
           s"peers=${node.distribution.peerCount}"
       )
@@ -90,6 +98,22 @@ object Main:
 
     Runtime.getRuntime.addShutdownHook(new Thread(() => node.shutdown()))
     Thread.currentThread().join()
+
+  /** The 32-byte seed in `path` (hex), or a new random one written there, readable by the owner only. */
+  private def loadOrCreateSeed(path: Path): Array[Byte] =
+    if Files.exists(path) then
+      val seed = JamBytes.fromHexUnsafe(Files.readString(path).trim).toArray
+      if seed.length != 32 then fail(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
+      seed
+    else
+      val seed = new Array[Byte](32)
+      new SecureRandom().nextBytes(seed)
+      Option(path.toAbsolutePath.getParent).foreach(Files.createDirectories(_))
+      val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
+      try Files.createFile(path, ownerOnly)
+      catch case _: UnsupportedOperationException => Files.createFile(path)
+      Files.writeString(path, JamBytes(seed).toHex + "\n")
+      seed
 
   private def parseHostPort(s: String): InetSocketAddress =
     val colon = s.lastIndexOf(':')

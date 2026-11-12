@@ -1,0 +1,97 @@
+name: Deploy testnet node
+
+# After "Run Tests" passes on main: build the node image, push it to GHCR and roll it out to the Azure VM made by
+# deploy/azure/setup.sh. Run by hand with an existing image tag to redeploy or roll back.
+on:
+    workflow_run:
+        workflows: [ 'Run Tests' ]
+        types: [ completed ]
+        branches: [ main ]
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Image tag to deploy (a commit SHA); empty builds the current main'
+                required: false
+                default: ''
+
+concurrency:
+    group: deploy-testnet
+    cancel-in-progress: false
+
+env:
+    IMAGE: ghcr.io/${{ github.repository_owner }}/jam-forge-node
+
+jobs:
+    build:
+        if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        permissions:
+            contents: read
+            packages: write
+        outputs:
+            image: ${{ steps.ref.outputs.image }}
+        steps:
+            -   name: Pick the image
+                id: ref
+                run: |
+                    if [ -n "${{ inputs.tag }}" ]; then
+                      echo "image=$IMAGE:${{ inputs.tag }}" >> "$GITHUB_OUTPUT"; echo "build=false" >> "$GITHUB_OUTPUT"
+                    else
+                      sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+                      echo "image=$IMAGE:$sha" >> "$GITHUB_OUTPUT"; echo "build=true" >> "$GITHUB_OUTPUT"
+                      echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                    fi
+            -   uses: actions/checkout@v7
+                if: steps.ref.outputs.build == 'true'
+                with:
+                    ref: ${{ steps.ref.outputs.sha }}
+                    submodules: recursive
+            -   uses: docker/setup-buildx-action@v3
+                if: steps.ref.outputs.build == 'true'
+            -   uses: docker/login-action@v3
+                if: steps.ref.outputs.build == 'true'
+                with:
+                    registry: ghcr.io
+                    username: ${{ github.actor }}
+                    password: ${{ secrets.GITHUB_TOKEN }}
+            -   name: Build and push
+                if: steps.ref.outputs.build == 'true'
+                uses: docker/build-push-action@v6
+                with:
+                    context: .
+                    target: node
+                    push: true
+                    tags: |
+                        ${{ steps.ref.outputs.image }}
+                        ${{ env.IMAGE }}:testnet
+                    cache-from: type=gha,scope=jam-node
+                    cache-to: type=gha,scope=jam-node,mode=max
+
+    deploy:
+        needs: build
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            id-token: write
+            packages: read
+        steps:
+            -   uses: actions/checkout@v7
+                with:
+                    sparse-checkout: deploy/azure
+            -   uses: azure/login@v2
+                with:
+                    client-id: ${{ secrets.AZURE_CLIENT_ID }}
+                    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+                    subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            -   name: Roll out to the VM
+                env:
+                    TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                run: |
+                    # The GHCR token is passed for the pull only; it expires when this job ends.
+                    out=$(az vm run-command invoke -g "${{ vars.AZURE_RG }}" -n "${{ vars.AZURE_VM }}" \
+                      --command-id RunShellScript --scripts @deploy/azure/deploy.sh \
+                      --parameters "${{ needs.build.outputs.image }}" "${{ github.actor }}" "$TOKEN" \
+                      --query 'value[0].message' -o tsv)
+                    echo "$out"
+                    grep -q "^deployed ${{ needs.build.outputs.image }}" <<<"$out"

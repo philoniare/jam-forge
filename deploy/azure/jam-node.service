@@ -1,0 +1,26 @@
+[Unit]
+Description=jam-forge testnet node
+Requires=docker.service
+After=docker.service network-online.target var-lib-jam.mount
+Wants=network-online.target
+
+[Service]
+# JAM_IMAGE, SPEC_URL and JAM_ARGS; JAM_IMAGE is rewritten by deploy.sh on every deploy.
+EnvironmentFile=/etc/jam-node/env
+ExecStartPre=-/usr/bin/docker rm -f jam-node
+# Refresh the chain spec; keep the last good one if the download fails.
+ExecStartPre=/bin/sh -c 'curl -fsSL -o /var/lib/jam/spec.json.new "$SPEC_URL" && mv /var/lib/jam/spec.json.new /var/lib/jam/spec.json || test -s /var/lib/jam/spec.json'
+ExecStart=/bin/sh -c 'exec /usr/bin/docker run --rm --name jam-node --network host \
+  -v /var/lib/jam:/data \
+  -v /var/log/jam-node:/logs \
+  -v /etc/jam-node/logback.xml:/etc/jam-node/logback.xml:ro \
+  -e JAVA_TOOL_OPTIONS="-Dlogback.configurationFile=/etc/jam-node/logback.xml -XX:MaxRAMPercentage=50 -XX:+ExitOnOutOfMemoryError" \
+  "$JAM_IMAGE" \
+  --spec /data/spec.json --data /data/db --port 40000 --seed-file /data/node.seed $JAM_ARGS'
+ExecStop=/usr/bin/docker stop -t 30 jam-node
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
