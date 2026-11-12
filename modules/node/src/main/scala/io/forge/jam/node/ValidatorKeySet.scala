@@ -57,5 +57,14 @@ object ValidatorKeySet:
 
     ValidatorKeySet(bsSecret, bsPublic, ed25519Seed, edPublic, blsSeed, Bls.publicFromSeed(blsSeed))
 
+  /** `keys` with its Bandersnatch key replaced by the one from `secretSeed`: the 32-byte Bandersnatch secret seed
+    * (JIP-5 `bandersnatch_secret_seed`, the input of ark-vrf `Secret::from_seed`).
+    */
+  def withBandersnatchSeed(keys: ValidatorKeySet, secretSeed: Array[Byte]): ValidatorKeySet =
+    require(secretSeed.length == 32, "Bandersnatch secret seed must be 32 bytes")
+    BandersnatchWrapper.ensureLibraryLoaded()
+    val secret = BandersnatchWrapper.secretFromSeed(secretSeed)
+    keys.copy(bandersnatchSecret = secret, bandersnatchPublic = BandersnatchWrapper.publicFromSecret(secret))
+
   /** Dev validator `index` (JIP-5 trivial seed). */
   def dev(index: Int): ValidatorKeySet = fromSeed(trivialSeed(index))

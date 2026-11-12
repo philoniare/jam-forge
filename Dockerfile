@@ -67,7 +67,11 @@ COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure
 COPY --from=node-builder /build/modules/node/target/scala-3.3.7/jam-node.jar /app/
 
 ENV LD_LIBRARY_PATH=/app/lib
-ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/jam-node.jar"]
+# Node data (chain, keys, downloaded spec) lives in /data; a later --data overrides it.
+VOLUME ["/data"]
+# JAMNP-S (QUIC); publish with -p 40000:40000/udp or run with --network host.
+EXPOSE 40000/udp
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/jam-node.jar", "--data", "/data"]
 
 # Stage 3: Runtime image (default target: the conformance fuzz target)
 FROM azul/zulu-openjdk:24.0.2-24.32-jdk-crac

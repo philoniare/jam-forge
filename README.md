@@ -104,6 +104,25 @@ sbt benchmark
 
 ---
 
+## 🖧 Running a Node
+
+The node image is `ghcr.io/philoniare/jam-forge-node`. To run a validator with an existing Bandersnatch key:
+
+```bash
+docker run -d --name jam-forge --network host -v jam-forge-data:/data \
+  ghcr.io/philoniare/jam-forge-node:testnet --bandersnatch-key 0x<32-byte bandersnatch secret seed>
+```
+
+- `--spec` takes a file or an http(s) URL (default: the public jamtoaster testnet,
+  `https://jamtoaster.network/chainspec/public.json`); a URL is downloaded at each start, and the last copy is used
+  if that fails.
+- `--bandersnatch-key` is the 32-byte Bandersnatch secret seed (JIP-5 `bandersnatch_secret_seed`), as hex or as a file
+  path. The node's Ed25519 and BLS keys are generated on first start and kept in `/data/validator.seed`.
+- Add `--print-keys` to print the public keys and exit. A node with validator keys votes in GRANDPA.
+- QUIC on UDP 40000 (`--port` to change). Leave out `--bandersnatch-key` to only follow the chain.
+
+---
+
 ## 🧪 Testing
 
 ### Test Vectors
