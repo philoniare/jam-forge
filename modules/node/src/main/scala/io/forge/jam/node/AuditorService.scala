@@ -391,46 +391,7 @@ final class AuditorService(
       totalBudgetMs: Long = 15000,
       maxPeers: Int = 3
   ): Option[Array[Byte]] =
-    val deadline = System.currentTimeMillis() + totalBudgetMs
-    val candidates = peers.iterator.filter(_.isOpen).take(maxPeers)
-    var result: Option[Array[Byte]] = None
-    while result.isEmpty && candidates.hasNext && System.currentTimeMillis() < deadline do
-      result = fetchBundleFrom(candidates.next(), erasureRoot, deadline)
-    result
-
-  /** One CE 147 request/response attempt against `conn`, bounded by the
-    * shared absolute `deadline` (not a fixed per-call duration) so a peer
-    * that stalls on `openStream` doesn't get a fresh full timeout budget for
-    * the response wait too. On any failure — including a timeout — the
-    * stream is fully closed (not just locally `finish()`ed) so it doesn't
-    * linger registered on the connection pipeline until an idle-out that a
-    * busy connection may never trigger.
-    */
-  private def fetchBundleFrom(
-      conn: JamnpConnection,
-      erasureRoot: Hash,
-      deadline: Long
-  ): Option[Array[Byte]] =
-    var stream: JamnpStream = null
-    try
-      val openTimeout = deadline - System.currentTimeMillis()
-      if openTimeout <= 0 then return None
-      stream = conn.openStream(StreamKind.BundleRequest).get(openTimeout, TimeUnit.MILLISECONDS)
-      val response = new CompletableFuture[Array[Byte]]()
-      stream.onMessage(response.complete(_))
-      stream.onClosed(() => response.complete(null)) // peer holds nothing / declined
-      stream.send(erasureRoot.bytes.toArray)
-      stream.finish()
-      val respTimeout = deadline - System.currentTimeMillis()
-      if respTimeout <= 0 then
-        stream.close()
-        None
-      else Option(response.get(respTimeout, TimeUnit.MILLISECONDS))
-    catch
-      case e: Exception =>
-        logger.debug(s"CE147 direct bundle fetch failed: ${e.getMessage}")
-        if stream != null then stream.close()
-        None
+    AuditorService.fetchBundleDirect(erasureRoot, peers, totalBudgetMs, maxPeers)
 
   // =========================================================================
   // CE 144 — audit announcements
@@ -597,3 +558,48 @@ final class AuditorService(
     catch
       case _: java.util.concurrent.RejectedExecutionException =>
         logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+
+object AuditorService extends LazyLogging:
+
+  /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. */
+  private[node] def fetchBundleDirect(
+      erasureRoot: Hash,
+      peers: Iterable[JamnpConnection],
+      totalBudgetMs: Long = 15000,
+      maxPeers: Int = 3
+  ): Option[Array[Byte]] =
+    val deadline = System.currentTimeMillis() + totalBudgetMs
+    val candidates = peers.iterator.filter(_.isOpen).take(maxPeers)
+    var result: Option[Array[Byte]] = None
+    while result.isEmpty && candidates.hasNext && System.currentTimeMillis() < deadline do
+      result = fetchBundleFrom(candidates.next(), erasureRoot, deadline)
+    result
+
+  /** One CE 147 request/response attempt against `conn`, bounded by the
+    * shared absolute `deadline` (not a fixed per-call duration) so a peer
+    * that stalls on `openStream` doesn't get a fresh full timeout budget for
+    * the response wait too. Every exit without a bundle (the peer closed
+    * with nothing, a timeout, an error) resets the stream, so neither side
+    * keeps it; with a bundle in hand only the peer's FIN is outstanding.
+    */
+  private[node] def fetchBundleFrom(
+      conn: JamnpConnection,
+      erasureRoot: Hash,
+      deadline: Long
+  ): Option[Array[Byte]] =
+    var stream: JamnpStream = null
+    var bundle: Option[Array[Byte]] = None
+    try
+      val openTimeout = deadline - System.currentTimeMillis()
+      if openTimeout > 0 then
+        stream = conn.openStream(StreamKind.BundleRequest).get(openTimeout, TimeUnit.MILLISECONDS)
+        val response = new CompletableFuture[Array[Byte]]()
+        stream.onMessage(response.complete(_))
+        stream.onClosed(() => response.complete(null)) // peer holds nothing / declined
+        stream.send(erasureRoot.bytes.toArray)
+        stream.finish()
+        val respTimeout = deadline - System.currentTimeMillis()
+        if respTimeout > 0 then bundle = Option(response.get(respTimeout, TimeUnit.MILLISECONDS))
+    catch case e: Exception => logger.debug(s"CE147 direct bundle fetch failed: ${e.getMessage}")
+    finally if stream != null && bundle.isEmpty then stream.reset()
+    bundle

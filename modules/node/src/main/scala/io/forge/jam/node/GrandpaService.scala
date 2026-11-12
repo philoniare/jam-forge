@@ -314,10 +314,16 @@ final class GrandpaService(
       val done = new LinkedBlockingQueue[java.lang.Boolean]()
       stream.onMessage(received.offer(_))
       stream.onClosed(() => done.offer(true))
-      stream.send(payload)
-      stream.finish()
-      if done.poll(20, TimeUnit.SECONDS) != null then
-        Option(received.poll()).foreach(bytes => exec.execute(() => guarded(f(bytes))))
+      try
+        stream.send(payload)
+        stream.finish()
+        if done.poll(20, TimeUnit.SECONDS) != null then
+          Option(received.poll()).foreach(bytes => exec.execute(() => guarded(f(bytes))))
+        else stream.reset() // timed out: give the stream up on both sides
+      catch
+        case e: Exception =>
+          stream.reset()
+          throw e
     }
 
   private def requestJustification(conn: JamnpConnection, hash: Hash): Unit =

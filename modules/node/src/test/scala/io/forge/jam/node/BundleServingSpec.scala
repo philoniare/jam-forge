@@ -302,6 +302,99 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
   }
 
   // ===========================================================================
+  // CE 147 — the requester releases its stream (a stream left open holds one
+  // of the connection's 256 QUIC stream credits; once they are used up every
+  // later stream fails with STREAM_LIMIT_ERROR)
+  // ===========================================================================
+
+  private def eventually(what: String, seconds: Int = 15)(cond: => Boolean): Unit =
+    val deadline = System.currentTimeMillis() + seconds * 1000L
+    while !cond && System.currentTimeMillis() < deadline do Thread.sleep(20)
+    if !cond then fail(s"timed out waiting for: $what")
+
+  /** Runs `fetches` CE 147 fetches of a bundle the server will not produce,
+    * then checks the connection still serves a recorded bundle and that no
+    * stream is left open on either side.
+    */
+  private def fetchesLeaveConnectionUsable(
+      fetches: Int,
+      budgetMs: Long,
+      serverConfig: JamnpConfig,
+      serve: (JamnpNode, GuarantorService) => Unit
+  ): Unit =
+    val (guarantor, _, dir) = newGuarantor()
+    val held = Hashing.blake2b256(Array.fill[Byte](4)(0x07))
+    val heldBytes = Array.tabulate[Byte](2048)(i => (i * 5).toByte)
+    guarantor.recordBundle(held, heldBytes)
+
+    val serverNode = new JamnpNode(NodeIdentity.generate(), serverConfig)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config)
+    val accepted = new LinkedBlockingQueue[io.forge.jam.network.JamnpConnection]()
+    serverNode.onConnectionChange((c, up) => if up then accepted.offer(c))
+    // The same responder on a second kind the server always serves, to probe
+    // the connection with afterwards.
+    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.bundleRequestHandler)
+    serve(serverNode, guarantor)
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = clientNode
+        .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
+        .get(10, TimeUnit.SECONDS)
+      val serverSide = await(accepted)
+      def open = s"open streams: client ${conn.openStreamCount}, server ${serverSide.openStreamCount}"
+
+      val missing = Hash.zero // never recorded
+      for i <- 1 to fetches do
+        withClue(s"fetch $i ($open): ") {
+          AuditorService.fetchBundleDirect(missing, Seq(conn), totalBudgetMs = budgetMs) shouldBe None
+        }
+
+      // A normal request on the same connection still gets through.
+      val responses = new LinkedBlockingQueue[Array[Byte]]()
+      val probe =
+        try conn.openStream(StreamKind.SegmentRequest).get(10, TimeUnit.SECONDS)
+        catch case e: Exception => fail(s"connection unusable after $fetches fetches ($open): $e")
+      probe.onMessage(responses.offer(_))
+      probe.send(held.bytes.toArray)
+      probe.finish()
+      java.util.Arrays.equals(await(responses), heldBytes) shouldBe true
+
+      eventually("client streams to close")(conn.openStreamCount == 0)
+      eventually("server streams to close")(serverSide.openStreamCount == 0)
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+      cleanup(dir)
+
+  test("CE147 client: 700 fetches a peer answers with nothing leave the connection usable") {
+    fetchesLeaveConnectionUsable(
+      fetches = 700,
+      budgetMs = 10000,
+      serverConfig = config,
+      serve = (node, guarantor) =>
+        node.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+        ()
+    )
+  }
+
+  test("CE147 client: 700 fetches from a peer that does not serve CE 147 leave the connection usable") {
+    fetchesLeaveConnectionUsable(fetches = 700, budgetMs = 10000, serverConfig = config, serve = (_, _) => ())
+  }
+
+  test("CE147 client: 300 fetches that time out leave the connection usable") {
+    fetchesLeaveConnectionUsable(
+      fetches = 300,
+      budgetMs = 30,
+      // The responder's side of a timed-out request goes on its idle timeout.
+      serverConfig = config.copy(streamIdleTimeoutMillis = 500),
+      serve = (node, _) =>
+        // Accepts the request and never answers.
+        node.registerHandler(StreamKind.BundleRequest, (_, stream) => { stream.onMessage(_ => ()); () })
+        ()
+    )
+  }
+
+  // ===========================================================================
   // CE 148 — segment request
   // ===========================================================================
 

@@ -12,8 +12,8 @@ import io.forge.jam.pvm.program.{InstructionDecoder, Program, ProgramBlob}
  * The InterpretedModule contains the read-only program data that can be
  * shared across multiple instances. This includes:
  * - Read-only data section (roData)
- * - Read-write data section template (rwData)
- * - Number of empty heap pages to allocate
+ * - Read-write data section template (rwData): only the initialised bytes, never the zero-filled heap
+ * - Number of empty heap pages each instance allocates
  * - Program blob for instruction decoding
  *
  * @param roData Read-only data section, sized to match memory map
@@ -170,6 +170,19 @@ final class InterpretedModule private (
         origin
     }
 
+  /** Estimate of the heap bytes this module keeps alive: its data sections, code, per-pc tables and the blocks
+    * compiled so far. It grows as more of the program is compiled, so a cache must re-read it. Instance memory (the
+    * declared heap and stack) is not part of the module and is not counted.
+    */
+  def retainedBytes: Long =
+    val data = roData.length.toLong + rwData.length +
+      (if blob.roData eq roData then 0 else blob.roData.length) +
+      (if blob.rwData eq rwData then 0 else blob.rwData.length)
+    val program = blob.code.length.toLong + blob.bitmask.length + blob.jumpTable.blob.length
+    val tables = offsetForPc.length.toLong * 4 + jumpTargetValidity.length
+    val compiledBytes = _compiled.instructions.length.toLong * InterpretedModule.BytesPerCompiledInstruction
+    data + program + tables + compiledBytes + blockGasCosts.size().toLong * InterpretedModule.BytesPerGasCostEntry
+
   override def equals(other: Any): Boolean = other match
     case that: InterpretedModule =>
       java.util.Arrays.equals(roData, that.roData) &&
@@ -195,6 +208,12 @@ final class CompiledCode(val instructions: Array[CompiledInstruction], val count
 
 object InterpretedModule:
   private[engine] final val Absent = -1
+
+  /** Rough heap cost of one compiled-instruction slot: the CompiledInstruction, its decoded Instruction and the array
+    * reference.
+    */
+  private final val BytesPerCompiledInstruction = 112L
+  private final val BytesPerGasCostEntry = 64L
   private[engine] val Slots: VarHandle = MethodHandles.arrayElementVarHandle(classOf[Array[Int]])
 
   private[engine] def packTarget(offset: Int, isJumpTargetValid: Boolean): Int =
@@ -258,7 +277,9 @@ object InterpretedModule:
           val effectiveHeapPagesUInt = if blob.heapPages > 0 then UInt(blob.heapPages) else heapPages
           Right(new InterpretedModule(
             roData = roData,
-            rwData = blob.rwData.clone(),
+            // Shared with the blob, not copied: neither is written after this, and every instance copies the
+            // bytes into its own memory.
+            rwData = blob.rwData,
             heapEmptyPages = effectiveHeapPagesUInt,
             blob = blob,
             memoryMap = memoryMap,

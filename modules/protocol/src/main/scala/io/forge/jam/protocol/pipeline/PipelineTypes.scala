@@ -17,7 +17,8 @@ import scala.collection.mutable
 /**
  * Signature checks that decide only whether the block is valid, started on the shared pool so the state transition
  * runs while they verify. No posterior state component depends on whether the seal or entropy signature verifies
- * nor on whether a ticket's ring proof does: the ticket identifier is the proof's output
+ * nor on whether a ticket's ring proof does: the ticket identifier is the proof's output. Nor on whether the
+ * assurance and guarantee signatures do: their batch is started in the Reports step, once every key is resolved.
  *
  * A block import awaits them all before it succeeds. Checks are reported in the order they were started, and a failed
  * check wins over any error raised by a later pipeline step, so the error is the one a sequential check would give.

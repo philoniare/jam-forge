@@ -162,6 +162,8 @@ final class PreimageService(
             stream.send(hash.bytes)
             stream.finish()
             val blob = collected.poll(10, TimeUnit.SECONDS)
+            // No response in time: give the stream up on both sides.
+            if blob == null then stream.reset()
             if blob != null && blob.length.toLong == expectedLength
               && Hashing.blake2b256(blob) == hash
             then

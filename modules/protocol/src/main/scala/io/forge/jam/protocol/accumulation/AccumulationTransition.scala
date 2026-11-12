@@ -770,9 +770,9 @@ object AccumulationTransition:
   /**
    * Runs ∆1 for every service of one batch. Each runs against the same initial partial state (GP 0.8.0 eq. (12.18)),
    * so each service gets its own fork of the storage view, and their writes are applied in service order afterwards.
-   * With [[AccumulationExecutor.parallelServices]] the services run concurrently; services sharing a code blob then
-   * run one after another on the same task, since an interpreted module's compiled-block buffers are not safe to share
-   * between concurrent runs.
+   * With [[AccumulationExecutor.parallelServices]] the services run concurrently, including services sharing a code
+   * blob: an interpreted module is safe to share between concurrent runs, and each run has its own instance and
+   * memory. Results are collected in service order, so nothing depends on which thread ran which service.
    */
   private def accumulateAll(
       sortedServices: List[Long],
@@ -783,16 +783,7 @@ object AccumulationTransition:
     val forks = sortedServices.map(s => s -> executor.storageView.map(_.fork(shareReadCache = !parallel))).toMap
     val results =
       if !parallel then sortedServices.map(s => accumulateOne(s, forks(s)))
-      else
-        val groups = sortedServices
-          .groupBy(s => initialState.accounts.get(s).map(a => JamBytes(a.info.codeHash.bytes.toArray)))
-          .values
-          .toList
-        val byService = Parallel
-          .map(groups)(group => group.map(s => s -> accumulateOne(s, forks(s))))
-          .flatten
-          .toMap
-        sortedServices.map(byService)
+      else Parallel.map(sortedServices)(s => accumulateOne(s, forks(s)))
     for
       (s, result) <- sortedServices.zip(results)
       parent      <- executor.storageView

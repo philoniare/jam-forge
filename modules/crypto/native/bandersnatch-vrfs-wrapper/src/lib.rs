@@ -1,7 +1,9 @@
+use ark_ec_vrfs::reexports::ark_ec::{AdditiveGroup, AffineRepr, CurveGroup};
+use ark_ec_vrfs::reexports::ark_ff::{BigInteger, PrimeField, Zero};
 use ark_ec_vrfs::reexports::ark_serialize;
 use ark_ec_vrfs::ring::RingProofParams;
 use ark_ec_vrfs::suites::bandersnatch::BandersnatchSha512Ell2;
-use ark_ec_vrfs::{Input, Output, Public, Secret};
+use ark_ec_vrfs::{Input, Output, Public, Secret, Suite};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 // Type aliases for IETF VRF
@@ -486,6 +488,96 @@ struct IetfVrfSignature {
     proof: IetfProof,
 }
 
+type BanderAffine = ark_ec_vrfs::AffinePoint<BandersnatchSha512Ell2>;
+type BanderProjective = <BanderAffine as AffineRepr>::Group;
+type BanderScalar = ark_ec_vrfs::ScalarField<BandersnatchSha512Ell2>;
+
+/// wNAF window for the generator, whose table is built once, and for the points that differ per signature.
+const GENERATOR_WINDOW: usize = 8;
+const POINT_WINDOW: usize = 5;
+
+/// The odd multiples `P, 3P, .., (2^(window-1) - 1)P`: one entry per non-zero digit magnitude of a width-`window` NAF.
+fn odd_multiples(point: &BanderAffine, window: usize) -> Vec<BanderProjective> {
+    let twice = point.into_group().double();
+    let mut multiple = point.into_group();
+    let mut table = Vec::with_capacity(1 << (window - 2));
+    table.push(multiple);
+    for _ in 1..(1usize << (window - 2)) {
+        multiple += twice;
+        table.push(multiple);
+    }
+    table
+}
+
+fn generator_multiples() -> &'static [BanderProjective] {
+    static TABLE: OnceLock<Vec<BanderProjective>> = OnceLock::new();
+    TABLE.get_or_init(|| odd_multiples(&BandersnatchSha512Ell2::generator(), GENERATOR_WINDOW))
+}
+
+fn wnaf_digits(scalar: &BanderScalar, window: usize) -> Vec<i64> {
+    // `find_wnaf` is None only for a window outside 2..64.
+    scalar.into_bigint().find_wnaf(window).unwrap_or_default()
+}
+
+fn add_digit(acc: &mut BanderProjective, table: &[BanderProjective], digit: i64) {
+    if digit > 0 {
+        *acc += &table[(digit as usize) >> 1];
+    } else if digit < 0 {
+        *acc -= &table[(digit.unsigned_abs() as usize) >> 1];
+    }
+}
+
+/// `a*P + b*Q` with one shared run of doublings (Straus), given the odd multiples of `P` and `Q` for their windows.
+/// Not constant time: for verification only, where every input is public.
+fn double_scalar_mul(
+    p_multiples: &[BanderProjective],
+    p_window: usize,
+    a: &BanderScalar,
+    q_multiples: &[BanderProjective],
+    q_window: usize,
+    b: &BanderScalar,
+) -> BanderProjective {
+    let a_digits = wnaf_digits(a, p_window);
+    let b_digits = wnaf_digits(b, q_window);
+    let mut acc = BanderProjective::zero();
+    for i in (0..a_digits.len().max(b_digits.len())).rev() {
+        acc.double_in_place();
+        if let Some(&digit) = a_digits.get(i) {
+            add_digit(&mut acc, p_multiples, digit);
+        }
+        if let Some(&digit) = b_digits.get(i) {
+            add_digit(&mut acc, q_multiples, digit);
+        }
+    }
+    acc
+}
+
+/// IETF VRF verification (RFC 9381 section 5.3 with additional data), the same check as ark-vrf's
+/// `ietf::Verifier::verify`: recompute `u = s*G - c*Y` and `v = s*I - c*O` and compare the challenge. ark-vrf
+/// computes the four products one by one, which is most of a verification; here each pair shares its doublings.
+fn ietf_verify(public: &BanderPublic, input: BanderInput, output: BanderOutput, aux: &[u8], proof: &IetfProof) -> bool {
+    let minus_c = -proof.c;
+    let u = double_scalar_mul(
+        generator_multiples(),
+        GENERATOR_WINDOW,
+        &proof.s,
+        &odd_multiples(&public.0, POINT_WINDOW),
+        POINT_WINDOW,
+        &minus_c,
+    );
+    let v = double_scalar_mul(
+        &odd_multiples(&input.0, POINT_WINDOW),
+        POINT_WINDOW,
+        &proof.s,
+        &odd_multiples(&output.0, POINT_WINDOW),
+        POINT_WINDOW,
+        &minus_c,
+    );
+    let norms = BanderProjective::normalize_batch(&[u, v]);
+    let expected = BandersnatchSha512Ell2::challenge(&[&public.0, &input.0, &output.0, &norms[0], &norms[1]], aux);
+    expected == proof.c
+}
+
 /// Create a secret key from a 32-byte seed
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_secretFromSeed(
@@ -632,8 +724,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
     signature: JByteArray,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
-    use ark_ec_vrfs::ietf::Verifier as _;
-
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         match env.byte_array_from_slice(&ERROR_RESULT) {
@@ -675,7 +765,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
     let input = vrf_input_point(&vrf_input_data);
     let output = sig.output;
 
-    if public.verify(input, output, &aux, &sig.proof).is_err() {
+    if !ietf_verify(&public, input, output, &aux, &sig.proof) {
         return return_error_local(&mut env, "IETF VRF verification failed");
     }
 
@@ -848,6 +938,76 @@ mod tests {
             expected,
             "Padding point should match spec"
         );
+    }
+
+    fn test_scalar(rng: &mut rand_chacha::ChaCha20Rng) -> BanderScalar {
+        use ark_ec_vrfs::reexports::ark_std::UniformRand;
+        BanderScalar::rand(rng)
+    }
+
+    #[test]
+    fn double_scalar_mul_matches_two_plain_multiplications() {
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([3u8; 32]);
+        let p = BanderSecret::from_seed(&[1u8; 32]).public().0;
+        let q = vrf_input_point(b"some input").0;
+        let one = BanderScalar::from(1u64);
+        let mut scalars = vec![BanderScalar::zero(), one, -one, BanderScalar::from(2u64), BanderScalar::from(15u64), BanderScalar::from(16u64)];
+        scalars.extend((0..40).map(|_| test_scalar(&mut rng)));
+        for (p_window, q_window) in [(GENERATOR_WINDOW, POINT_WINDOW), (POINT_WINDOW, POINT_WINDOW), (2, 3)] {
+            let p_multiples = odd_multiples(&p, p_window);
+            let q_multiples = odd_multiples(&q, q_window);
+            for a in &scalars {
+                for b in &scalars {
+                    let got = double_scalar_mul(&p_multiples, p_window, a, &q_multiples, q_window, b);
+                    assert_eq!(got.into_affine(), (p * a + q * b).into_affine());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ietf_verify_agrees_with_ark_vrf() {
+        use ark_ec_vrfs::ietf::{Prover as _, Verifier as _};
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([5u8; 32]);
+        let one = BanderScalar::from(1u64);
+        let mut accepted = 0;
+        for i in 0..40u8 {
+            let secret = BanderSecret::from_seed(&[i; 32]);
+            let other = BanderSecret::from_seed(&[i.wrapping_add(100); 32]);
+            let input = vrf_input_point(&[b"jam_fallback_seal".as_slice(), &[i; 32]].concat());
+            let other_input = vrf_input_point(&[b"jam_entropy".as_slice(), &[i; 32]].concat());
+            let output = secret.output(input);
+            let aux = vec![i; i as usize * 7];
+            let proof = secret.prove(input, output, &aux);
+            let zero = BanderScalar::zero();
+            let proofs = [
+                proof.clone(),
+                IetfProof { c: proof.c + one, s: proof.s },
+                IetfProof { c: proof.c, s: proof.s + one },
+                IetfProof { c: proof.s, s: proof.c },
+                IetfProof { c: zero, s: proof.s },
+                IetfProof { c: proof.c, s: zero },
+                IetfProof { c: zero, s: zero },
+                IetfProof { c: test_scalar(&mut rng), s: test_scalar(&mut rng) },
+            ];
+            let mut longer_aux = aux.clone();
+            longer_aux.push(0);
+            for candidate in &proofs {
+                for public in [secret.public(), other.public()] {
+                    for (inp, out) in [(input, output), (other_input, output), (input, other.output(input))] {
+                        for ad in [&aux, &longer_aux] {
+                            let expected = public.verify(inp, out, ad, candidate).is_ok();
+                            assert_eq!(ietf_verify(&public, inp, out, ad, candidate), expected);
+                            accepted += expected as usize;
+                        }
+                    }
+                }
+            }
+        }
+        // Only the untouched proof under its own key, input, output and additional data verifies.
+        assert_eq!(accepted, 40);
     }
 
     #[test]

@@ -679,8 +679,10 @@ final class GuarantorService(
       header: Array[Byte],
       bundle: Array[Byte]
   ): Option[Array[Byte]] =
+    var stream: JamnpStream = null
+    var signed: Option[Array[Byte]] = None
     try
-      val stream = conn
+      stream = conn
         .openStream(io.forge.jam.network.StreamKind.WorkPackageSharing)
         .get(10, java.util.concurrent.TimeUnit.SECONDS)
       val response = new java.util.concurrent.CompletableFuture[Array[Byte]]()
@@ -689,11 +691,12 @@ final class GuarantorService(
       stream.send(header)
       stream.send(bundle)
       stream.finish()
-      Option(response.get(GuarantorService.CoSignTimeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
-    catch
-      case e: Exception =>
-        logger.debug(s"CE134 round trip failed: ${e.getMessage}")
-        None
+      signed =
+        Option(response.get(GuarantorService.CoSignTimeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
+    catch case e: Exception => logger.debug(s"CE134 round trip failed: ${e.getMessage}")
+    // No response (rejected, timed out, failed): give the stream up on both sides.
+    finally if stream != null && signed.isEmpty then stream.reset()
+    signed
 
 object GuarantorService:
   /** CE 146's cumulative-across-messages byte cap (see `bundleSubmissionHandler`).

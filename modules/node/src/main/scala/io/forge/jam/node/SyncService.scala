@@ -390,6 +390,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
 
           if done.poll(20, TimeUnit.SECONDS) == null then
             logger.warn("block request timed out")
+            stream.reset() // give the stream up on both sides
           else
             val blocks = mutable.ListBuffer.empty[Array[Byte]]
             var next = received.poll()

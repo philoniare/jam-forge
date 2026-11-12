@@ -62,7 +62,12 @@ final case class JamnpConfig(
     /** Inbound slots only work-package builders (ALPN `/builder`) may use
       * (JAMNP-S "Required connectivity": "e.g. 20").
       */
-    builderSlots: Int = 20
+    builderSlots: Int = 20,
+    /** A CE stream with no bytes read or written for this long is reset, so a
+      * silent peer cannot hold stream credit forever. UP streams are exempt
+      * (they stay open and may be quiet). 0 disables the timeout.
+      */
+    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
 ):
   private def baseAlpn: String = s"jamnp-s/${JamnpConfig.ProtocolVersion}/$genesisHashPrefix"
 
@@ -80,6 +85,11 @@ final case class JamnpConfig(
 object JamnpConfig:
   /** JAMNP-S protocol version `V` in the ALPN identifier (jam-np 56ce86c). */
   val ProtocolVersion: Int = 1
+
+  /** Default idle limit for a CE stream. Well above the longest wait a valid
+    * exchange has with nothing on the wire (30 s for a CE 134 co-signature).
+    */
+  val DefaultStreamIdleTimeoutMillis: Long = 120000
 
   def isBuilderAlpn(alpn: String): Boolean = alpn != null && alpn.endsWith("/builder")
 
@@ -100,6 +110,7 @@ final class JamnpStream private[network] (
   private var closed = false
   private var closeDelivered = false
   private var closeListener: () => Unit = null
+  @volatile private var finWritten = false
 
   /** Register the message receiver. Messages received before this call are
     * delivered first, in order, on the caller's thread.
@@ -168,12 +179,26 @@ final class JamnpStream private[network] (
     }
     if listener != null then listener()
 
-  /** Send one framed message. */
+  /** Send one framed message. A large frame is handed to the channel in
+    * slices (the bytes on the wire are the same), so each slice that gets
+    * through counts as progress for the stream idle timeout.
+    */
   def send(message: Array[Byte]): Unit =
     val buf = channel.alloc().buffer(4 + message.length)
     buf.writeIntLE(message.length)
     buf.writeBytes(message)
-    channel.writeAndFlush(buf)
+    if buf.readableBytes() <= JamnpStream.SendSliceBytes then channel.writeAndFlush(buf)
+    else
+      // On the event loop in one go, so slices of concurrent sends cannot
+      // interleave; writes queued after this one stay behind it.
+      val writeSlices: Runnable = () =>
+        while buf.isReadable do
+          channel.write(buf.readRetainedSlice(math.min(JamnpStream.SendSliceBytes, buf.readableBytes())))
+        buf.release()
+        channel.flush()
+        ()
+      if channel.eventLoop().inEventLoop() then writeSlices.run() else channel.eventLoop().execute(writeSlices)
+    ()
 
   /** Half-close the write side (FIN), signalling end of response/request.
     * Ordered after any queued writes via an empty flush so a large in-flight
@@ -182,9 +207,34 @@ final class JamnpStream private[network] (
   def finish(): Unit =
     channel
       .writeAndFlush(Unpooled.EMPTY_BUFFER)
-      .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
+      .addListener(new io.netty.channel.ChannelFutureListener {
+        override def operationComplete(f: io.netty.channel.ChannelFuture): Unit =
+          channel
+            .shutdownOutput()
+            .addListener(new io.netty.channel.ChannelFutureListener {
+              override def operationComplete(g: io.netty.channel.ChannelFuture): Unit =
+                if g.isSuccess then
+                  finWritten = true
+                  closeIfDone()
+            })
+          ()
+      })
+    ()
 
-  /** Fully close (reset if not yet finished). */
+  /** Close the channel once our FIN is written and the peer's has been read.
+    * Netty usually does this itself, but not in every ordering of the two,
+    * and a channel left behind is held until the idle timeout. Runs on the
+    * event loop.
+    */
+  private[network] def closeIfDone(): Unit =
+    if finWritten && channel.isInputShutdown && channel.isOpen then channel.close()
+    ()
+
+  /** Close the channel, sending FIN if the write side is still open. This
+    * does not tell the peer to stop sending: to give up on a stream the peer
+    * may still be writing to (a timeout, a failed request), use [[reset]], or
+    * QUIC keeps the stream, and its share of the stream limit, alive.
+    */
   def close(): Unit =
     channel.close()
 
@@ -192,8 +242,7 @@ final class JamnpStream private[network] (
     * acceptor's reset as rejection or failure of the request and an
     * initiator's as cancellation (JAMNP-S §Protocols and streams).
     */
-  def reset(): Unit =
-    channel.shutdown(JamnpStream.ResetErrorCode).addListener(io.netty.channel.ChannelFutureListener.CLOSE)
+  def reset(): Unit = JamnpNode.resetStream(channel)
 
   def isOpen: Boolean = channel.isActive
 
@@ -204,13 +253,17 @@ object JamnpStream:
   /** Cap on bytes buffered before a receiver is registered; later frames are dropped. */
   val MaxPendingBytes: Long = 4L * 1024 * 1024
 
+  /** Largest piece of a frame written to the channel in one go. */
+  val SendSliceBytes: Int = 256 * 1024
+
   /** Application error code sent with a stream reset. */
   val ResetErrorCode: Int = 0
 
 /** A JAMNP connection to a single peer, wrapping a QUIC channel. */
 final class JamnpConnection private[network] (
     private[network] val quic: QuicChannel,
-    val initiator: Boolean
+    val initiator: Boolean,
+    streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
 ):
   /** The peer's raw Ed25519 public key, from its TLS certificate. */
   lazy val peerKey: Array[Byte] =
@@ -239,7 +292,9 @@ final class JamnpConnection private[network] (
             if !f.isSuccess then result.completeExceptionally(f.cause())
             else
               val ch = f.getNow
+              JamnpNode.trackStream(ch)
               val stream = new JamnpStream(ch, kind)
+              if StreamKind.isCe(kind) then JamnpNode.addIdleTimeout(ch, streamIdleTimeoutMillis)
               ch.pipeline()
                 .addLast(new JamnpNode.FrameDecoder(JamnpNode.DefaultMaxFrame))
                 .addLast(new JamnpNode.StreamDispatchHandler(stream))
@@ -255,6 +310,13 @@ final class JamnpConnection private[network] (
   def close(): Unit = quic.close()
 
   def isOpen: Boolean = quic.isActive
+
+  /** Stream channels currently open on this connection, whoever opened them.
+    * A stream leaves the count when its channel closes. That alone does not
+    * return the peer's QUIC stream credit: the stream must also have been
+    * finished or reset in both directions.
+    */
+  def openStreamCount: Int = JamnpNode.streamCounter(quic).get()
 
   /** The peer's UDP address, when the QUIC path is known. */
   def remoteAddress: Option[java.net.SocketAddress] =
@@ -307,7 +369,8 @@ final class JamnpNode(
   @io.netty.channel.ChannelHandler.Sharable
   private final class ConnectionTracker extends ChannelInboundHandlerAdapter:
     override def channelActive(ctx: ChannelHandlerContext): Unit =
-      val conn = new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false)
+      val conn =
+        new JamnpConnection(ctx.channel().asInstanceOf[QuicChannel], initiator = false, config.streamIdleTimeoutMillis)
       if !admitInbound(conn) then
         ctx.close()
         return
@@ -371,7 +434,13 @@ final class JamnpNode(
       .handler(new ConnectionTracker())
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =
-          ch.pipeline().addLast(new IncomingStreamHandler(handlers, config.maxFrameBytes))
+          trackStream(ch)
+          // From the start: a peer that opens a stream and never sends its
+          // kind byte must not hold it either.
+          addIdleTimeout(ch, config.streamIdleTimeoutMillis)
+          ch.pipeline().addLast(
+            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis)
+          )
       })
       .build()
 
@@ -417,7 +486,13 @@ final class JamnpNode(
       .handler(new ChannelInboundHandlerAdapter())
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =
-          ch.pipeline().addLast(new IncomingStreamHandler(handlers, config.maxFrameBytes))
+          trackStream(ch)
+          // From the start: a peer that opens a stream and never sends its
+          // kind byte must not hold it either.
+          addIdleTimeout(ch, config.streamIdleTimeoutMillis)
+          ch.pipeline().addLast(
+            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis)
+          )
       })
       .remoteAddress(remote)
       .connect()
@@ -433,7 +508,7 @@ final class JamnpNode(
               channel.close()
             else
               val quic = f.getNow
-              val conn = new JamnpConnection(quic, initiator = true)
+              val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis)
               quic.attr(ConnectionKey).set(conn)
               connections.add(conn)
               fireConnectionChange(conn, true)
@@ -466,6 +541,56 @@ object JamnpNode:
 
   private[network] val ConnectionKey =
     io.netty.util.AttributeKey.valueOf[JamnpConnection]("jamnp-connection")
+
+  private val StreamCountKey =
+    io.netty.util.AttributeKey.valueOf[java.util.concurrent.atomic.AtomicInteger]("jamnp-open-streams")
+
+  private[network] def streamCounter(quic: QuicChannel): java.util.concurrent.atomic.AtomicInteger =
+    val attr = quic.attr(StreamCountKey)
+    val existing = attr.get()
+    if existing != null then existing
+    else
+      attr.setIfAbsent(new java.util.concurrent.atomic.AtomicInteger())
+      attr.get()
+
+  /** Count a stream channel against its connection until it closes. */
+  private[network] def trackStream(ch: QuicStreamChannel): Unit =
+    val counter = streamCounter(ch.parent())
+    counter.incrementAndGet()
+    ch.closeFuture()
+      .addListener(new io.netty.channel.ChannelFutureListener {
+        override def operationComplete(f: io.netty.channel.ChannelFuture): Unit =
+          counter.decrementAndGet()
+          ()
+      })
+    ()
+
+  /** Reset both halves of a stream (RESET_STREAM and STOP_SENDING), then
+    * close its channel. Closing alone only sends FIN: QUIC then keeps the
+    * stream until the peer's remaining data has been read, which a closed
+    * channel never does, and the peer never gets the stream credit back.
+    */
+  private[network] def resetStream(ch: QuicStreamChannel): Unit =
+    ch.shutdown(JamnpStream.ResetErrorCode).addListener(io.netty.channel.ChannelFutureListener.CLOSE)
+    ()
+
+  private val IdleHandlerName = "jamnp-idle"
+
+  /** Raise an idle event on `ch` after `millis` with nothing read or written. */
+  private[network] def addIdleTimeout(ch: QuicStreamChannel, millis: Long): Unit =
+    if millis > 0 then
+      ch.pipeline()
+        .addFirst(
+          IdleHandlerName,
+          new io.netty.handler.timeout.IdleStateHandler(0L, 0L, millis, TimeUnit.MILLISECONDS)
+        )
+    ()
+
+  private def removeIdleTimeout(ch: QuicStreamChannel): Unit =
+    if ch.pipeline().get(IdleHandlerName) != null then ch.pipeline().remove(IdleHandlerName)
+    ()
+
+  private def isIdle(evt: Object): Boolean = evt.isInstanceOf[io.netty.handler.timeout.IdleStateEvent]
 
   /** Key manager that always serves the node's Ed25519 identity. */
   private final class IdentityKeyManager(id: NodeIdentity) extends X509ExtendedKeyManager:
@@ -518,7 +643,8 @@ object JamnpNode:
         in.markReaderIndex()
         val len = in.readIntLE()
         if len < 0 || len > maxFrame then
-          ctx.close()
+          // Reset, not close: the rest of the oversized frame is never read.
+          resetStream(ctx.channel().asInstanceOf[QuicStreamChannel])
           return
         if in.readableBytes() < len then
           in.resetReaderIndex()
@@ -539,13 +665,16 @@ object JamnpNode:
       // Remote FIN arrives as a shutdown-input event on QUIC streams.
       if evt.isInstanceOf[io.netty.channel.socket.ChannelInputShutdownEvent] ||
         evt.isInstanceOf[io.netty.channel.socket.ChannelInputShutdownReadComplete]
-      then stream.dispatchClosed()
+      then
+        stream.dispatchClosed()
+        stream.closeIfDone()
+      else if isIdle(evt) then stream.reset()
       ctx.fireUserEventTriggered(evt)
     // A peer's RESET_STREAM surfaces as a read error: the stream is over.
+    // Reset our halves too, so nothing the peer still sends is left unread.
     override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable): Unit =
       stream.dispatchClosed()
-      ctx.close()
-      ()
+      stream.reset()
 
   /** First reads the stream-kind byte of a peer-opened stream, then installs
     * framing and hands the stream to the registered handler. Streams of
@@ -553,25 +682,44 @@ object JamnpNode:
     */
   private[network] final class IncomingStreamHandler(
       handlers: ConcurrentHashMap[Byte, StreamHandler],
-      maxFrame: Int
+      maxFrame: Int,
+      streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis
   ) extends ByteToMessageDecoder:
+    // Set once the kind is refused: bytes still in flight are not a new kind byte.
+    private var rejected = false
+
+    override def userEventTriggered(ctx: ChannelHandlerContext, evt: Object): Unit =
+      // No kind byte within the idle limit.
+      if isIdle(evt) then resetStream(ctx.channel().asInstanceOf[QuicStreamChannel])
+      ctx.fireUserEventTriggered(evt)
+
     override def decode(
         ctx: ChannelHandlerContext,
         in: ByteBuf,
         out: java.util.List[Object]
     ): Unit =
+      if rejected then
+        in.skipBytes(in.readableBytes())
+        return
       if in.readableBytes() < 1 then return
       val kind = in.readByte()
       val handler = handlers.get(kind)
-      if handler == null then
-        ctx.close()
-        return
-
       val ch = ctx.channel().asInstanceOf[QuicStreamChannel]
+      if handler == null then
+        // Reset, not close: closing sends FIN only and leaves whatever the
+        // peer goes on to send unread, so QUIC never retires the stream and
+        // the peer never gets its stream credit back.
+        rejected = true
+        in.skipBytes(in.readableBytes())
+        resetStream(ch)
+        return
+      // UP streams stay open and may be quiet.
+      if StreamKind.isUp(kind) then removeIdleTimeout(ch)
+
       val quicParent = ch.parent()
       var conn = quicParent.attr(ConnectionKey).get()
       if conn == null then
-        conn = new JamnpConnection(quicParent, initiator = false)
+        conn = new JamnpConnection(quicParent, initiator = false, streamIdleTimeoutMillis)
         quicParent.attr(ConnectionKey).set(conn)
 
       val stream = new JamnpStream(ch, kind)

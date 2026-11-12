@@ -78,7 +78,18 @@ object LiftedStfs:
   ): StfStepWith[ReportOutputMarks] =
     liftStandardCtx(
       stf = (input: ReportInput, view, ctx) =>
-        ReportTransition.stfView(input, view, skipAncestryValidation, ancestry, Some(ctx.signatures)),
+        ReportTransition.stfView(
+          input,
+          view,
+          skipAncestryValidation,
+          ancestry,
+          Some(ctx.signatures),
+          // Registered where a sequential import verifies the batch, so it loses to every error raised before this
+          // point and to the checks started before it, and wins over every error raised after it.
+          Some(check =>
+            ctx.pendingChecks.add(check.thenApply(ok => if ok then None else Some(PipelineError.BadSignatureBatch)))
+          )
+        ),
       extractInput = ctx =>
         ReportInput(
           guarantees = ctx.block.extrinsic.guarantees,

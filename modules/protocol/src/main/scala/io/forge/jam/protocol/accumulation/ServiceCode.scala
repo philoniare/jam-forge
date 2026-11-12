@@ -7,10 +7,13 @@ import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
 /** Service-code preimage handling shared by the accumulate and refine executors */
 object ServiceCode:
 
-  private val JAM_PAGE_SIZE = 4096
+  /** Byte budget of the module cache: 256 MiB, or an eighth of the JVM's maximum heap when that is less. */
+  private val ModuleCacheBytes: Long = math.min(256L << 20, Runtime.getRuntime.maxMemory() / 8)
 
-  /** Process-wide module cache shared by the accumulate, refine and is-authorized executors. */
-  private val modules = ModuleCache[JamBytes](256)
+  /** Process-wide module cache shared by the accumulate, refine and is-authorized executors, bounded by entry count
+    * and by the bytes the cached modules retain.
+    */
+  private val modules = ModuleCache[JamBytes](256, ModuleCacheBytes)
 
   /** The compiled module for the code blob `code` (the preimage after its metadata) found under `codeHash`. Built
     * once per process and shared, so a new importer or executor does not recompile it. None when the blob is not a
@@ -84,16 +87,12 @@ object ServiceCode:
     System.arraycopy(data, offset, codeAndJumpTable, 0, codeLen)
     if !Deblob.isExactEncoding(codeAndJumpTable) then return None
 
-    val heapSize = heapPages * JAM_PAGE_SIZE
-    val totalRwSize = rwDataLen + heapSize
-    val minRwSize = Math.max(totalRwSize, 262144)
-    val paddedRwData = new Array[Byte](minRwSize)
-    System.arraycopy(rwData, 0, paddedRwData, 0, rwDataLen)
-
+    // Only the initialised read-write bytes go into the blob. The declared heap (`heapPages`, up to 65,535 pages) is
+    // a size: each instance gets it as fresh zeroed memory (BasicMemory.create), so the cached module does not hold it.
     ProgramBlob.fromCodeAndJumpTable(
       data = codeAndJumpTable,
       roData = roData,
-      rwData = paddedRwData,
+      rwData = rwData,
       stackSize = stackSize,
       is64Bit = true,
       heapPages = heapPages,

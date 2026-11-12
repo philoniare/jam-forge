@@ -15,6 +15,7 @@ import io.forge.jam.protocol.state.TrieBackedJamStateBridges.ReportBridge
 import io.forge.jam.protocol.statistics.StatsAggregation
 import io.forge.jam.protocol.SignatureBatch
 import spire.math.ULong
+import java.util.concurrent.CompletableFuture
 import scala.util.boundary, boundary.break
 
 /**
@@ -37,6 +38,21 @@ object ReportTransition:
   // Helper to check condition and return error if false
   private def ensure(condition: Boolean, error: => ReportErrorCode): ValidationResult =
     if condition then Right(()) else Left(error)
+
+  /**
+   * Takes the batch's verification, already running, in place of the synchronous check. Whoever takes it must report
+   * a failed batch as [[ReportErrorCode.BadSignature]] ahead of every error raised after this point, here or in a
+   * later step, and must not commit the block before the verification has passed.
+   */
+  type DeferredSignatures = CompletableFuture[Boolean] => Unit
+
+  /** The block's signature batch: verified here, or started and handed to `defer` when given. */
+  private def checkSignatures(batch: SignatureBatch, defer: Option[DeferredSignatures]): ValidationResult =
+    defer match
+      case Some(hand) =>
+        hand(batch.verifyAsync())
+        Right(())
+      case None => ensure(batch.verify(), ReportErrorCode.BadSignature)
 
   /**
    * Context for rotation-based validator selection.
@@ -74,6 +90,8 @@ object ReportTransition:
    * @param state The unified JamState
    * @param config The chain configuration
    * @param skipAncestryValidation When true, skip anchor recency validation
+   * @param deferSignatures If given, the signature batch is verified concurrently with the rest of the block and
+   *                        handed to it, at the point where it would otherwise be verified.
    * @return Tuple of (updated JamState, ReportOutput)
    */
   def stfView(
@@ -81,20 +99,30 @@ object ReportTransition:
     view: TrieBackedJamState,
     skipAncestryValidation: Boolean = false,
     ancestry: List[AncestorHeader] = List.empty,
-    signatures: Option[SignatureBatch] = None
+    signatures: Option[SignatureBatch] = None,
+    deferSignatures: Option[DeferredSignatures] = None
   ): ReportOutput =
     if input.guarantees.isEmpty then
       // With no guarantees every check passes, ρ‡ is kept and the guarantee-derived statistics are zero: what
       // stfInternal gives, without assembling its pre-state (service accounts, package-hash sets).
-      if signatures.exists(!_.verify()) then StfResult.error(ReportErrorCode.BadSignature)
-      else
-        view.cores.statistics = StatsAggregation.coreStatsByCore(Nil, view.config.coresCount)
-        view.serviceStatistics = Nil
-        StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
+      signatures.fold[ValidationResult](Right(()))(checkSignatures(_, deferSignatures)) match
+        case Left(err) => StfResult.error(err)
+        case Right(()) =>
+          view.cores.statistics = StatsAggregation.coreStatsByCore(Nil, view.config.coresCount)
+          view.serviceStatistics = Nil
+          StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
     else
       val preState = ReportBridge.extract(view)
       val (postState, output) =
-        stfInternal(input, preState, view.config, skipAncestryValidation, ancestry, signatures = signatures)
+        stfInternal(
+          input,
+          preState,
+          view.config,
+          skipAncestryValidation,
+          ancestry,
+          signatures = signatures,
+          deferSignatures = deferSignatures
+        )
       ReportBridge.apply(view, postState)
       output
 
@@ -113,7 +141,8 @@ object ReportTransition:
     skipAncestryValidation: Boolean = false,
     ancestry: List[AncestorHeader] = List.empty,
     skipAnchorContext: Boolean = false,
-    signatures: Option[SignatureBatch] = None
+    signatures: Option[SignatureBatch] = None,
+    deferSignatures: Option[DeferredSignatures] = None
   ): (ReportState, ReportOutput) =
     val result =
       for
@@ -126,7 +155,8 @@ object ReportTransition:
           ancestry,
           skipAncestryValidation,
           skipAnchorContext,
-          signatures.getOrElse(new SignatureBatch)
+          signatures.getOrElse(new SignatureBatch),
+          deferSignatures
         )
       yield processedGuarantees
 
@@ -161,7 +191,8 @@ object ReportTransition:
     ancestry: List[AncestorHeader],
     skipLookupAnchor: Boolean,
     skipAnchorContext: Boolean,
-    signatures: SignatureBatch
+    signatures: SignatureBatch,
+    deferSignatures: Option[DeferredSignatures]
   ): Either[ReportErrorCode, (List[SegmentRootLookup], List[Hash])] =
     val offendersSet: Set[Hash] = preState.offenders.toSet
     val accountsById: Map[Long, ServiceAccount] =
@@ -192,7 +223,8 @@ object ReportTransition:
 
     for
       _ <- forEach(input.guarantees)(validateGuarantors(_, input.slot, cacheFor, signatures, config))
-      _ <- ensure(signatures.verify(), ReportErrorCode.BadSignature)
+      // Every signature of the block is in the batch by now, with its key already resolved.
+      _ <- checkSignatures(signatures, deferSignatures)
       _ <- forEach(input.guarantees)(guarantee =>
         validateReport(
           guarantee,

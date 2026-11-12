@@ -242,8 +242,9 @@ final class ShardService(
       payload: Array[Byte],
       timeoutMs: Long
   ): Option[List[Array[Byte]]] =
+    var stream: JamnpStream = null
     try
-      val stream = conn.openStream(kind).get(timeoutMs, TimeUnit.MILLISECONDS)
+      stream = conn.openStream(kind).get(timeoutMs, TimeUnit.MILLISECONDS)
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       val done = new CompletableFuture[List[Array[Byte]]]()
       stream.onMessage(m => messages.synchronized(messages += m))
@@ -254,6 +255,8 @@ final class ShardService(
     catch
       case e: Exception =>
         logger.debug(s"shard request on ${StreamKind.name(kind)} failed: ${e.getMessage}")
+        // The peer has not closed the stream (timeout, error): give it up on both sides.
+        if stream != null then stream.reset()
         None
 
 object ShardService:

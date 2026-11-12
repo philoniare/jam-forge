@@ -57,3 +57,29 @@ class AccumulationPathEquivalenceSpec extends AnyFunSuite with Matchers:
       if seq.output.toOption.exists(_.accumulationStats.size > 1) then multiService += 1
     info(s"${names.size} vectors, $multiService accumulate more than one service")
   }
+
+  test("services sharing a code hash accumulate concurrently with the sequential result, run after run") {
+    val names = TestFileLoader.getTestFilenamesFromTestVectors(folder).getOrElse(List.empty)
+    var sharing = 0
+    for name <- names do
+      val testCase = TestFileLoader.loadJsonFromTestVectors[AccumulationCase](folder, name) match
+        case Right(c)  => c
+        case Left(err) => fail(s"$name: $err")
+      val (seq, seqStaged) = runWith(testCase, parallel = false)
+      val accumulated = seq.output.toOption.toList.flatMap(_.accumulationStats.keys)
+      val codeHashes = accumulated.flatMap(s => testCase.preState.accounts.find(_.id == s)).map(_.data.service.codeHash)
+      if codeHashes.distinct.size < codeHashes.size then
+        sharing += 1
+        for run <- 1 to 25 do
+          val (par, parStaged) = runWith(testCase, parallel = true)
+          withClue(s"$name, run $run") {
+            par.output shouldBe seq.output
+            par.state shouldBe seq.state
+            par.stagingSet shouldBe seq.stagingSet
+            par.authQueues shouldBe seq.authQueues
+            parStaged shouldBe seqStaged
+          }
+    info(s"$sharing vectors accumulate two or more services with one code hash")
+    sharing should be > 0
+  }
+
