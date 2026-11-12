@@ -58,45 +58,6 @@ jobs:
                     name: codecov-jam
                     fail_ci_if_error: false
 
-    pvm-recompiler-macos:
-        runs-on: macos-15
-        timeout-minutes: 60
-
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@v7
-                with:
-                    submodules: recursive
-
-            -   name: Set up JDK
-                uses: actions/setup-java@v6
-                with:
-                    distribution: 'temurin'
-                    java-version: '24'
-
-            -   name: Set up sbt
-                uses: sbt/setup-sbt@v1
-
-            -   name: Set up Rust
-                uses: dtolnay/rust-toolchain@stable
-
-            -   name: Cache sbt dependencies
-                uses: actions/cache@v6
-                with:
-                    path: |
-                        ~/.sbt
-                        ~/.ivy2/cache
-                        ~/.cache/coursier
-                    key: ${{ runner.os }}-sbt-${{ hashFiles('**/build.sbt', '**/project/**') }}
-                    restore-keys: |
-                        ${{ runner.os }}-sbt-
-
-            -   name: Require aarch64 runner
-                run: test "$(uname -m)" = "arm64"
-
-            -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
-                run: sbt "pvm/test"
-
     pvm-recompiler-linux-arm:
         runs-on: ubuntu-24.04-arm
         timeout-minutes: 60

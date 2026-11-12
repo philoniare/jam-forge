@@ -66,5 +66,13 @@ object ValidatorKeySet:
     val secret = BandersnatchWrapper.secretFromSeed(secretSeed)
     keys.copy(bandersnatchSecret = secret, bandersnatchPublic = BandersnatchWrapper.publicFromSecret(secret))
 
+  /** `keys` with its Ed25519 key replaced by the one from `secretSeed`: the 32-byte Ed25519 secret key (JIP-5
+    * `ed25519_secret_seed`, the RFC 8032 private key).
+    */
+  def withEd25519Seed(keys: ValidatorKeySet, secretSeed: Array[Byte]): ValidatorKeySet =
+    require(secretSeed.length == 32, "Ed25519 secret key must be 32 bytes")
+    Ed25519ZebraWrapper.ensureLibraryLoaded()
+    keys.copy(ed25519Secret = secretSeed.clone(), ed25519Public = Ed25519ZebraWrapper.publicFromSecret(secretSeed))
+
   /** Dev validator `index` (JIP-5 trivial seed). */
   def dev(index: Int): ValidatorKeySet = fromSeed(trivialSeed(index))

@@ -13,11 +13,12 @@ import io.forge.jam.core.JamBytes
   * jam-node --data <data-dir> [--spec <chain-spec.json or URL>] [--port N (default 40000)]
   *          [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...]
-  *          [--author <validator-index> | --validator-seed <path>] [--bandersnatch-key <hex or path>]
+  *          [--author <validator-index> | --validator-seed <path>]
+  *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
   *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
   *          [--finality-peers N] [--prune-history]
-  * jam-node --data <data-dir> [--author <index> | --validator-seed <path>] [--bandersnatch-key <hex or path>]
-  *          --print-keys
+  * jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
+  *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
   * }}}
   *
   * With `--author i` and no `--seed`, the node's network identity is dev
@@ -35,10 +36,11 @@ import io.forge.jam.core.JamBytes
   * identity, so it cannot be combined with `--seed` or `--seed-file`. `--print-keys` prints the public keys of
   * `--author` or `--validator-seed` as JSON and exits without starting the node.
   *
-  * `--bandersnatch-key` gives the validator's Bandersnatch key: a 32-byte Bandersnatch secret seed (JIP-5
-  * `bandersnatch_secret_seed`), as hex or as the path of a file holding the hex (a file keeps it out of the process
-  * list). It replaces the Bandersnatch key of `--author` or `--validator-seed`; on its own, the Ed25519 and BLS keys
-  * and the network identity come from `<data-dir>/validator.seed`, generated on first start.
+  * `--bandersnatch-key` and `--ed25519-key` give the validator's Bandersnatch and Ed25519 keys: 32-byte secret
+  * seeds (JIP-5 `bandersnatch_secret_seed` and `ed25519_secret_seed`), each as hex or as the path of a file holding
+  * the hex (a file keeps it out of the process list). They replace those keys of `--author` or `--validator-seed`;
+  * without either, the keys not given come from `<data-dir>/validator.seed`, generated on first start. The Ed25519
+  * key is also the node's network identity.
   *
   * A node with validator keys also votes in GRANDPA, as if `--grandpa` were given.
   *
@@ -67,12 +69,13 @@ object Main extends LazyLogging:
 
     // Derive validator keys first: this loads the native Bandersnatch and
     // Ed25519 libraries, so a missing library fails here, not after start.
-    // With only a Bandersnatch key the other validator keys come from a seed kept in the data directory.
+    // With only some keys given, the others come from a seed kept in the data directory.
+    val givenKeys = List("bandersnatch-key", "ed25519-key").filter(opts.contains)
     val validatorSeed = opts.get("validator-seed").orElse {
-      if opts.contains("bandersnatch-key") && !opts.contains("author") then
+      if givenKeys.nonEmpty && !opts.contains("author") then
         if opts.contains("seed") || opts.contains("seed-file") then
-          fail("--bandersnatch-key makes this node a validator, whose network identity is its Ed25519 key: drop --seed/--seed-file")
-        val dir = opts.getOrElse("data", fail("--bandersnatch-key needs --data <dir> to keep the node's other keys in"))
+          fail(s"--${givenKeys.head} makes this node a validator, whose network identity is its Ed25519 key: drop --seed/--seed-file")
+        val dir = opts.getOrElse("data", fail(s"--${givenKeys.head} needs --data <dir> to keep the node's other keys in"))
         Some(Paths.get(dir, "validator.seed").toString)
       else None
     }
@@ -80,12 +83,15 @@ object Main extends LazyLogging:
       .get("author")
       .map(idx => ValidatorKeySet.dev(idx.toInt))
       .orElse(validatorSeed.map(p => ValidatorKeySet.fromSeed(loadOrCreateSeed(Paths.get(p)))))
-      .map(keys => opts.get("bandersnatch-key").fold(keys)(k => ValidatorKeySet.withBandersnatchSeed(keys, readKey(k))))
+      .map(keys =>
+        opts.get("bandersnatch-key").fold(keys)(k => ValidatorKeySet.withBandersnatchSeed(keys, readKey("bandersnatch-key", k)))
+      )
+      .map(keys => opts.get("ed25519-key").fold(keys)(k => ValidatorKeySet.withEd25519Seed(keys, readKey("ed25519-key", k))))
 
     if flags.contains("--print-keys") then
       authorKeys match
         case Some(k) => println(publicKeysJson(k)); return
-        case None    => fail("--print-keys needs --author, --validator-seed or --bandersnatch-key")
+        case None    => fail("--print-keys needs --author, --validator-seed, --bandersnatch-key or --ed25519-key")
 
     val specPath = opts.getOrElse("spec", DefaultSpecUrl)
     val dataDir = opts.getOrElse("data", fail("--data <dir> is required"))
@@ -187,9 +193,9 @@ object Main extends LazyLogging:
   private val DefaultPort = 40000
 
   /** A 32-byte key given as hex, or as the path of a file holding the hex. */
-  private def readKey(hexOrPath: String): Array[Byte] =
+  private def readKey(option: String, hexOrPath: String): Array[Byte] =
     val (hex, from) =
-      if hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then (hexOrPath, "--bandersnatch-key")
+      if hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then (hexOrPath, s"--$option")
       else
         val path = Paths.get(hexOrPath)
         if !Files.exists(path) then fail(s"$path: no such file (expected a 32-byte hex key or the path of one)")
