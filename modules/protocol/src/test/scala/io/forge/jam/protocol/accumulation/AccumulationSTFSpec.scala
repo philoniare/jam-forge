@@ -49,7 +49,7 @@ class AccumulationSTFSpec extends AnyFunSuite with Matchers with ScalaCheckPrope
     val state = PartialState(
       accounts = Map(serviceId -> account),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

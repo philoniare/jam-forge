@@ -155,15 +155,14 @@ object TrieBackedJamStateBridges:
   final case class AccumulationPreState(
       state: AccumulationState,
       initStagingSet: List[JamBytes],
-      initAuthQueues: List[List[JamBytes]]
+      initAuthQueues: List[List[Hash]]
   )
 
   object AccumulationBridge:
     def extract(view: TrieBackedJamState): AccumulationPreState =
       val initStagingSet: List[JamBytes] =
         view.validators.queue.map(_.toJamBytes).toList
-      val initAuthQueues: List[List[JamBytes]] =
-        view.authQueues.map(_.map(h => JamBytes(h.bytes)))
+      val initAuthQueues: List[List[Hash]] = view.authQueues
 
       val rawData = mutable.Map.empty[JamBytes, JamBytes]
       val accounts = view.accumulation.serviceAccounts
@@ -196,8 +195,8 @@ object TrieBackedJamStateBridges:
         postState: AccumulationState,
         postStagingSet: List[JamBytes],
         initStagingSet: List[JamBytes],
-        postAuthQueues: List[List[JamBytes]],
-        initAuthQueues: List[List[JamBytes]]
+        postAuthQueues: List[List[Hash]],
+        initAuthQueues: List[List[Hash]]
     ): Unit =
       val stagingChanged =
         !(postStagingSet eq initStagingSet) && postStagingSet != initStagingSet
@@ -208,10 +207,7 @@ object TrieBackedJamStateBridges:
 
       val authChanged =
         !(postAuthQueues eq initAuthQueues) && postAuthQueues != initAuthQueues
-      if authChanged then
-        val newAuthQueues: List[List[Hash]] =
-          postAuthQueues.map(_.map(jb => Hash(jb.toArray)))
-        view.authQueues = newAuthQueues
+      if authChanged then view.authQueues = postAuthQueues
 
       view.accumulation.readyQueue = postState.readyQueue
       view.accumulation.accumulated = postState.accumulated

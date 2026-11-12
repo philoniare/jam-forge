@@ -80,7 +80,7 @@ class FetchHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map(100L -> createTestAccount(100000L)),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

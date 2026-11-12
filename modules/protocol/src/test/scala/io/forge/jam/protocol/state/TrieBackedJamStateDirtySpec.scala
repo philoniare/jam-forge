@@ -62,3 +62,23 @@ class TrieBackedJamStateDirtySpec extends AnyFunSuite with Matchers:
     reread.timeslot = view.timeslot // same value, but this view never loaded it
     reread.dirtyComponents shouldBe 1
   }
+
+  test("auth queues: an unchanged encoded value reuses the decoded queues; a changed one is decoded afresh") {
+    val (view, store) = freshView()
+    val before = view.authQueues
+    // A second view of the same root reads the same bytes and gets the same immutable lists.
+    assert(TrieBackedJamState.at(store, store.currentRoot, config).authQueues eq before)
+
+    val marker = io.forge.jam.core.primitives.Hash(Array.fill[Byte](32)(0x5a.toByte))
+    val changed = before.updated(1, before(1).updated(3, marker))
+    view.authQueues = changed
+    view.dirtyComponents shouldBe 1
+    val trie = store.at(store.currentRoot)
+    view.commit(trie)
+
+    val reread = new TrieBackedJamState(trie, config, new ServiceStorageView(trie)).authQueues
+    reread shouldBe changed
+    reread should not be before
+    // The old root still decodes to the old queues, not to the ones read last.
+    TrieBackedJamState.at(store, store.currentRoot, config).authQueues shouldBe before
+  }

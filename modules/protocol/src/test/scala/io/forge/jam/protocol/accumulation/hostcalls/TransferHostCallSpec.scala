@@ -29,7 +29,7 @@ class TransferHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,
@@ -99,7 +99,7 @@ class TransferHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,
@@ -156,7 +156,7 @@ class TransferHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,
@@ -206,7 +206,7 @@ class TransferHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map(sourceId -> sourceAccount, destId -> destAccount),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

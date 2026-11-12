@@ -188,7 +188,9 @@ object ServiceAccount:
   * @param stagingSet
   *   Validator keys for staging
   * @param authQueue
-  *   Per-core authorization queues
+  *   Per-core authorization queues. Immutable and shared between copies of the
+  *   state (and between concurrently running services); a write replaces the
+  *   vector with one that differs in the written core only.
   * @param manager
   *   Manager service ID
   * @param assigners
@@ -207,7 +209,7 @@ object ServiceAccount:
 final case class PartialState(
     var accounts: Map[Long, ServiceAccount],
     stagingSet: mutable.ListBuffer[JamBytes],
-    authQueue: mutable.ListBuffer[mutable.ListBuffer[JamBytes]],
+    var authQueue: Vector[List[Hash]],
     var manager: Long,
     assigners: mutable.ListBuffer[Long],
     var delegator: Long,
@@ -223,9 +225,7 @@ final case class PartialState(
       accounts = accounts,
       stagingSet =
         mutable.ListBuffer.from(stagingSet),
-      authQueue = mutable.ListBuffer.from(
-        authQueue.map(q => mutable.ListBuffer.from(q))
-      ),
+      authQueue = authQueue, // immutable: shared, ASSIGN replaces one core's entry
       manager = manager,
       assigners = mutable.ListBuffer.from(assigners),
       delegator = delegator,
@@ -261,7 +261,7 @@ object PartialState:
     PartialState(
       accounts = Map.empty,
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

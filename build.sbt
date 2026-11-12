@@ -65,7 +65,9 @@ def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[Str
     s"-Djava.library.path=$baseDir/modules/crypto/native/build/$osDirName:$baseDir/modules/crypto/src/main/resources",
     s"-Djam.base.dir=$baseDir",
     "--enable-native-access=ALL-UNNAMED"
-  ) ++ sys.props.get("jam.pvm.executionMode").map(v => s"-Djam.pvm.executionMode=$v").toSeq ++ extra
+  ) ++ sys.props.get("jam.pvm.executionMode").map(v => s"-Djam.pvm.executionMode=$v").toSeq ++
+    // Tests fork, so -Djam.fuzz.* given to sbt must be passed on or FuzzReportTraceSpec never sees it.
+    sys.props.toSeq.collect { case (k, v) if k.startsWith("jam.fuzz.") => s"-D$k=$v" }.sorted ++ extra
 
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
@@ -87,6 +89,10 @@ addCommandAlias("benchSignatures", "crypto/Test/runMain io.forge.jam.crypto.benc
 addCommandAlias("benchErasureCoding", "crypto/Test/runMain io.forge.jam.crypto.benchmark.ErasureCodingBench")
 addCommandAlias("benchComponents", ";benchTrieDb ;benchSignatures ;benchErasureCoding")
 addCommandAlias("benchGrowHeap", "pvm/Test/runMain io.forge.jam.pvm.benchmark.GrowHeapBench")
+// Block-import bench and heap soak over binary traces; see BENCHMARKS.md. Not part of `sbt test`.
+addCommandAlias("benchImport", "conformance/Test/runMain io.forge.jam.conformance.bench.ImportBench")
+addCommandAlias("benchGenTrace", "protocol/Test/runMain io.forge.jam.protocol.benchmark.FuzzSpecTraceGen")
+addCommandAlias("soakNodes", "node/Test/runMain io.forge.jam.node.bench.NodeSoak")
 
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)
@@ -297,6 +303,7 @@ lazy val node = (project in file("modules/node"))
       (ThisBuild / baseDirectory).value,
       recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     ),
+    Test / javaOptions ++= sys.props.get("jam.bench.jvmOpts").toSeq.flatMap(_.trim.split("\\s+")).filter(_.nonEmpty),
     assembly / mainClass := Some("io.forge.jam.node.Main"),
     assembly / assemblyJarName := "jam-node.jar",
     assembly / assemblyMergeStrategy := {
@@ -335,6 +342,8 @@ lazy val conformance = (project in file("modules/conformance"))
       (ThisBuild / baseDirectory).value,
       recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     ),
+    // Extra flags for the forked JVM, e.g. sbt -Djam.bench.jvmOpts="-XX:+UseZGC -Xms4g -Xmx4g" benchImport
+    Test / javaOptions ++= sys.props.get("jam.bench.jvmOpts").toSeq.flatMap(_.trim.split("\\s+")).filter(_.nonEmpty),
     // Assembly settings for creating fat JAR
     assembly / mainClass := Some("io.forge.jam.conformance.ConformanceServerApp"),
     assembly / assemblyJarName := "jam-conformance.jar",

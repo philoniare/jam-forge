@@ -40,7 +40,7 @@ class UpgradeHostCallSpec extends HostCallTestBase:
     val state = PartialState(
       accounts = Map.empty, // No accounts!
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

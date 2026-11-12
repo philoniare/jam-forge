@@ -425,7 +425,7 @@ object StfGenerators:
     yield PartialState(
       accounts = accountList.toMap,
       stagingSet = mutable.ListBuffer.from(stagingSet),
-      authQueue = mutable.ListBuffer.from(authQueue.map(q => mutable.ListBuffer.from(q))),
+      authQueue = authQueue.map(_.map(jb => Hash(jb.toArray))).toVector,
       manager = manager,
       assigners = mutable.ListBuffer.from(assigners),
       delegator = delegator,

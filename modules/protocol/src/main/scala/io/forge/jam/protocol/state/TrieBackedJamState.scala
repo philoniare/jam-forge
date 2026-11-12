@@ -485,11 +485,18 @@ object TrieBackedJamState:
           List.fill(config.authQueueSize)(Hash.zero)
         )
       case Some(v) =>
-        FullJamStateCodecs.decodeAuthQueues(
-          v.toArray,
-          config.coresCount,
-          config.authQueueSize
-        )
+        val last = lastAuthQueues.get()
+        if last != null && last.coresCount == config.coresCount && last.queueSize == config.authQueueSize &&
+          last.encoded == v
+        then last.queues
+        else
+          val queues = FullJamStateCodecs.decodeAuthQueues(v.toArrayUnsafe, config.coresCount, config.authQueueSize)
+          lastAuthQueues.set(DecodedAuthQueues(v, config.coresCount, config.authQueueSize, queues))
+          queues
+
+  /** The auth queues last decoded, with the encoded value and the sizes they were decoded from. */
+  private final case class DecodedAuthQueues(encoded: JamBytes, coresCount: Int, queueSize: Int, queues: List[List[Hash]])
+  private val lastAuthQueues = new java.util.concurrent.atomic.AtomicReference[DecodedAuthQueues](null)
 
   private def readPsi(trie: StateTrie): Psi =
     trie.read(StateKeys.simpleKey(StateKeys.JUDGEMENTS)) match

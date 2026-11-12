@@ -12,7 +12,7 @@ import scala.collection.mutable
 final case class AccumulationStfResult(
     state: AccumulationState,
     stagingSet: List[JamBytes],
-    authQueues: List[List[JamBytes]],
+    authQueues: List[List[Hash]],
     output: AccumulationOutput
 )
 
@@ -88,7 +88,7 @@ object AccumulationTransition:
       input: AccumulationInput,
       preState: AccumulationState,
       initStagingSet: List[JamBytes],
-      initAuthQueues: List[List[JamBytes]],
+      initAuthQueues: List[List[Hash]],
       config: ChainConfig,
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor] = None
@@ -149,7 +149,7 @@ object AccumulationTransition:
     val postStagingSet = outerResult.postState.stagingSet.toList
 
     // Auth queues: use the posterior state's auth queues
-    val postAuthQueues = outerResult.postState.authQueue.map(_.toList).toList
+    val postAuthQueues = outerResult.postState.authQueue.toList
 
     AccumulationStfResult(
       assembled.state,
@@ -263,7 +263,7 @@ object AccumulationTransition:
       readyToAccumulate: List[WorkReport],
       preState: AccumulationState,
       initStagingSet: List[JamBytes],
-      initAuthQueues: List[List[JamBytes]],
+      initAuthQueues: List[List[Hash]],
       slot: Long,
       config: ChainConfig,
       sharedExecutor: Option[AccumulationExecutor]
@@ -351,14 +351,14 @@ object AccumulationTransition:
       config: ChainConfig
   ): List[List[JamBytes]] =
     val newAccumulatedList = actuallyAccumulated.toList.sorted
-    (0 until config.epochLength).map { idx =>
-      if idx == config.epochLength - 1 then
-        // New items at last position
-        newAccumulatedList
-      else
-        // Shift left by 1
-        priorAccumulated.lift(idx + 1).getOrElse(List.empty)
-    }.toList
+    val epochLength = config.epochLength
+    if epochLength <= 0 then List.empty
+    else
+      // Shift left by 1 (padding a short history with empty slots), new items at the last position
+      (priorAccumulated.iterator
+        .drop(1)
+        .take(epochLength - 1)
+        .padTo(epochLength - 1, List.empty[JamBytes]) ++ Iterator.single(newAccumulatedList)).toList
 
   /** The posterior state plus the per-service accumulation stats the STF output
     * also reports.
@@ -522,7 +522,7 @@ object AccumulationTransition:
       assigners: List[Long],
       alwaysAccers: Map[Long, Long],
       stagingSet: List[JamBytes] = List.empty,
-      authQueues: List[List[JamBytes]] = List.empty
+      authQueues: Vector[List[Hash]] = Vector.empty
   )
 
   private def mergeBy[K, V](a: Map[K, V], b: Map[K, V])(
@@ -713,10 +713,7 @@ object AccumulationTransition:
       finalState.stagingSet.clear()
       finalState.stagingSet ++= ss
     }
-    finalState.authQueue.clear()
-    finalState.authQueue ++= privileges.authQueues.map(q =>
-      mutable.ListBuffer.from(q)
-    )
+    finalState.authQueue = privileges.authQueues
 
     // Process preimage integrations on the final merged state
     val stateAfterPreimages =
@@ -886,7 +883,7 @@ object AccumulationTransition:
         assigners = execResult.postState.assigners.toList,
         alwaysAccers = execResult.postState.alwaysAccers.toMap,
         stagingSet = execResult.postState.stagingSet.toList,
-        authQueues = execResult.postState.authQueue.map(_.toList).toList
+        authQueues = execResult.postState.authQueue
       )
 
       // Collect yield/commitment if present
@@ -911,17 +908,17 @@ object AccumulationTransition:
       provisions = allProvisions.toSet
     )
 
-  private final case class PrivilegeResolution(
+  private[accumulation] final case class PrivilegeResolution(
       manager: Long,
       delegator: Long,
       registrar: Long,
       assigners: List[Long],
       alwaysAccers: Map[Long, Long],
       stagingSet: Option[List[JamBytes]],
-      authQueues: List[List[JamBytes]]
+      authQueues: Vector[List[Hash]]
   )
 
-  private def reconcilePrivileges(
+  private[accumulation] def reconcilePrivileges(
       prior: PartialState,
       snapshots: Map[Long, PrivilegeSnapshot]
   ): PrivilegeResolution =
@@ -956,28 +953,39 @@ object AccumulationTransition:
     val registrarPostRegistrar =
       registrarSnapshot.map(_.registrar).getOrElse(origRegistrar)
 
+    // Indexed copies, built once: `lift(c)` on a List inside the per-core loop is O(cores^2).
+    val managerPostAssignersIndexed = managerPostAssigners.toVector
+    val snapshotAssignersIndexed = scala.collection.mutable.HashMap.empty[Long, Option[Vector[Long]]]
     val newAssigners = origAssigners.zipWithIndex.map {
       case (origAssigner, c) =>
         val managerPostAssigner =
-          managerPostAssigners.lift(c).getOrElse(origAssigner)
-        val assignerSnapshot = snapshots.get(origAssigner)
-        val assignerPostAssigner =
-          assignerSnapshot.flatMap(_.assigners.lift(c)).getOrElse(origAssigner)
+          managerPostAssignersIndexed.lift(c).getOrElse(origAssigner)
+        val assignerPostAssigner = snapshotAssignersIndexed
+          .getOrElseUpdate(origAssigner, snapshots.get(origAssigner).map(_.assigners.toVector))
+          .flatMap(_.lift(c))
+          .getOrElse(origAssigner)
         r(origAssigner, managerPostAssigner, assignerPostAssigner)
     }
 
     // Update auth queues: for each core c, the new auth queue comes from the original assigner's post-state
-    val newAuthQueues = origAssigners.zipWithIndex.map {
-      case (origAssigner, coreIndex) =>
-        val assignerSnapshot = snapshots.get(origAssigner)
-        // Get the auth queue for this specific core from the assigner's post-state
-        assignerSnapshot.flatMap(_.authQueues.lift(coreIndex)).getOrElse {
-          // If no change, use the original auth queue for this core
-          prior.authQueue
-            .lift(coreIndex)
-            .map(_.toList)
-            .getOrElse(List.empty)
-        }
+    // Starts from the prior queues (one entry per core) and replaces only the cores whose queue the assigner's
+    // post-state changed, so an untouched block keeps the very same vector.
+    val coreCount = origAssigners.length
+    val priorAuthQueues =
+      if prior.authQueue.length == coreCount then prior.authQueue
+      else prior.authQueue.take(coreCount).padTo(coreCount, List.empty[Hash])
+    val snapshotAuthQueues = scala.collection.mutable.HashMap.empty[Long, Option[Vector[List[Hash]]]]
+    var newAuthQueues = priorAuthQueues
+    var coreIndex = 0
+    origAssigners.foreach { origAssigner =>
+      val priorQueue = priorAuthQueues(coreIndex)
+      // Get the auth queue for this specific core from the assigner's post-state; if none, keep the original
+      val queue = snapshotAuthQueues
+        .getOrElseUpdate(origAssigner, snapshots.get(origAssigner).map(_.authQueues))
+        .flatMap(_.lift(coreIndex))
+        .getOrElse(priorQueue)
+      if queue ne priorQueue then newAuthQueues = newAuthQueues.updated(coreIndex, queue)
+      coreIndex += 1
     }
 
     PrivilegeResolution(

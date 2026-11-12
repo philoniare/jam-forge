@@ -130,17 +130,17 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
       return
 
     // Parse authorization queue (list of 32-byte hashes)
-    val authQueueList = mutable.ListBuffer.empty[JamBytes]
+    val authQueueList = List.newBuilder[Hash]
     var i = 0
     while i < config.authQueueSize do
-      val hash = queueBuffer.slice(i * 32, (i + 1) * 32)
-      authQueueList += JamBytes(hash)
+      authQueueList += Hash.wrapUnchecked(queueBuffer.slice(i * 32, (i + 1) * 32))
       i += 1
 
-    // Update authorization queue for this core
-    while context.x.authQueue.size <= targetCoreIndex do
-      context.x.authQueue += mutable.ListBuffer.empty[JamBytes]
-    context.x.authQueue(targetCoreIndex) = authQueueList
+    // Update authorization queue for this core. The queues are immutable and shared with the checkpoint and with
+    // other services' states, so this replaces the vector (sharing every other core's queue), never edits in place.
+    context.x.authQueue = context.x.authQueue
+      .padTo(targetCoreIndex + 1, List.empty[Hash])
+      .updated(targetCoreIndex, authQueueList.result())
 
     // Update assigner for this core
     while context.x.assigners.size <= targetCoreIndex do

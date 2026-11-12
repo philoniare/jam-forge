@@ -54,7 +54,7 @@ trait HostCallTestBase extends AnyFunSuite with Matchers with ScalaCheckProperty
     val state = PartialState(
       accounts = Map(serviceIndex -> account),
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

@@ -74,18 +74,22 @@ object AssuranceTransition:
    * Validate that assurance bitfields only reference engaged cores.
    */
   private def validateCoreEngagement(assurances: List[AssuranceExtrinsic], state: AssuranceState): Boolean =
-    val coresCount = state.availAssignments.size
+    // One pass over the cores per block; each assurance then visits only the set bits of its bitfield.
+    val engaged = state.availAssignments.iterator.map(_.isDefined).toArray
+    val coresCount = engaged.length
     assurances.forall { assurance =>
       val bitfieldBytes = assurance.bitfield.toArray
-      val noPaddingBitsSet =
-        (coresCount until (bitfieldBytes.length * 8)).forall(pos => !isBitSet(bitfieldBytes, pos))
-      noPaddingBitsSet && state.availAssignments.zipWithIndex.forall {
-        case (assignment, coreIndex) =>
-          val isSet = isBitSet(bitfieldBytes, coreIndex)
-          val isEngaged = assignment.isDefined
-          // If bit is set, core must be engaged
-          !isSet || isEngaged
-      }
+      var ok = true
+      var byteIndex = 0
+      while ok && byteIndex < bitfieldBytes.length do
+        var bits = bitfieldBytes(byteIndex) & 0xff
+        while ok && bits != 0 do
+          val position = byteIndex * 8 + Integer.numberOfTrailingZeros(bits)
+          // A set bit must be a real core (no padding bits) and that core must be engaged
+          ok = position < coresCount && engaged(position)
+          bits &= bits - 1
+        byteIndex += 1
+      ok
     }
 
   private def validateNonSig(

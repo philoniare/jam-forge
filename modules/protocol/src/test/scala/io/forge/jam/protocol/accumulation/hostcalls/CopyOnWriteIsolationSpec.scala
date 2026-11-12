@@ -13,7 +13,7 @@ class CopyOnWriteIsolationSpec extends HostCallTestBase:
     PartialState(
       accounts = accounts,
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,

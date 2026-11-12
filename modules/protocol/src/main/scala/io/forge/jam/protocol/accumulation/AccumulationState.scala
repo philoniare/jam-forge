@@ -390,7 +390,7 @@ final case class AccumulationState(
     */
   def toPartialState(
       initStagingSet: List[JamBytes] = List.empty,
-      initAuthQueues: List[List[JamBytes]] = List.empty
+      initAuthQueues: List[List[Hash]] = List.empty
   ): PartialState =
     PartialState(
       accounts = accounts.map { item =>
@@ -419,9 +419,7 @@ final case class AccumulationState(
         )
       }.toMap,
       stagingSet = mutable.ListBuffer.from(initStagingSet),
-      authQueue = mutable.ListBuffer.from(
-        initAuthQueues.map(q => mutable.ListBuffer.from(q))
-      ),
+      authQueue = initAuthQueues.toVector,
       manager = privileges.bless,
       assigners = mutable.ListBuffer.from(privileges.assign),
       delegator = privileges.designate,

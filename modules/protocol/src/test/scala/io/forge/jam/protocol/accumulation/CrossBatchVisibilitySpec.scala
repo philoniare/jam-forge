@@ -128,7 +128,7 @@ class CrossBatchVisibilitySpec extends AnyFunSuite with Matchers:
     val state = PartialState(
       accounts = Seq(A, B, C, D).map(id => id -> account(id)).toMap,
       stagingSet = mutable.ListBuffer.empty,
-      authQueue = mutable.ListBuffer.empty,
+      authQueue = Vector.empty,
       manager = 0L,
       assigners = mutable.ListBuffer.empty,
       delegator = 0L,
