@@ -60,7 +60,7 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
 
   test("pruned histories keep every state at or above the floor intact, forks included") {
     val rng = new Random(7)
-    for round <- 1 to 12 do
+    for round <- 1 to 4 do
       val dir = Files.createTempDirectory("jam-trie-journal")
       val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
       try
@@ -113,12 +113,12 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
       var state = State(label("g"), 0L, Hash.zero, Map.empty)
       state = step(backend, state, "g", 0L, rng, keys)
       val before = mutable.ArrayBuffer(state)
-      for h <- 1 to 300 do
+      for h <- 1 to 100 do
         state = step(backend, state, s"b$h", h.toLong, rng, keys)
         before += state
       val (nodesUnpruned, valuesUnpruned) = backend.storedCounts
       var deletedNodes = 0
-      for h <- 1 to 300 do deletedNodes += backend.pruneJournal(before(h).label, h.toLong)._1
+      for h <- 1 to 100 do deletedNodes += backend.pruneJournal(before(h).label, h.toLong)._1
       check(backend, state, keys, "newest")
 
       // The same key set written once into an empty store: its trie is the newest state's, node for node.

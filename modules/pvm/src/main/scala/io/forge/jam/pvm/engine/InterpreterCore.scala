@@ -150,7 +150,10 @@ abstract class InterpreterCore protected (
       finished()
     else
       module.blob.jumpTable.getByAddress(address) match
-        case Some(targetInt) => resolveJump(ProgramCounter(targetInt))
+        // GP djump: a jump-table hit on a non-block-start target panics at the djump itself, not the target.
+        case Some(targetInt) =>
+          val r = resolveJump(ProgramCounter(targetInt))
+          if r < 0 then panic(pc) else r
         case None => panic(pc)
 
   override def branch(condition: Boolean, pc: ProgramCounter, target: Int, nextPc: ProgramCounter): Int =

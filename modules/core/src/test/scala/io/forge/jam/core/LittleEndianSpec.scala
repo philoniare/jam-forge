@@ -7,17 +7,6 @@ class LittleEndianSpec extends AnyFunSuite with Matchers:
 
   private val values = List(0L, 1L, 0x7fL, 0x80L, 0xffL, 0x0102030405060708L, -1L)
 
-  test("put/get round-trip all sizes, including high-bit values") {
-    for
-      size <- 1 to 8
-      value <- values
-    do
-      val buf = new Array[Byte](8)
-      LittleEndian.put(buf, 0, value, size)
-      val mask = if size == 8 then -1L else (1L << (size * 8)) - 1
-      LittleEndian.get(buf, 0, size) shouldBe (value & mask)
-  }
-
   test("byte layout is little-endian") {
     val buf = new Array[Byte](4)
     LittleEndian.put(buf, 0, 0x01020304L, 4)
@@ -29,14 +18,6 @@ class LittleEndianSpec extends AnyFunSuite with Matchers:
     LittleEndian.put(buf, 2, 0xaabbL, 2)
     buf shouldBe Array[Byte](0x7f, 0x7f, 0xbb.toByte, 0xaa.toByte, 0x7f, 0x7f, 0x7f, 0x7f)
     LittleEndian.get(buf, 2, 2) shouldBe 0xaabbL
-  }
-
-  test("get assembles unsigned — never sign-extends") {
-    val buf = Array.fill[Byte](8)(0xff.toByte)
-    LittleEndian.get(buf, 0, 1) shouldBe 0xffL
-    LittleEndian.get(buf, 0, 2) shouldBe 0xffffL
-    LittleEndian.get(buf, 0, 4) shouldBe 0xffffffffL
-    LittleEndian.get(buf, 0, 8) shouldBe -1L // all 64 bits set
   }
 
   test("size 0 is a no-op for put and yields 0 for get") {
@@ -74,7 +55,7 @@ class LittleEndianSpec extends AnyFunSuite with Matchers:
       }
   }
 
-  test("get is the exact inverse of put for every offset in an 8-byte window") {
+  test("get is the exact inverse of put for every offset in an 8-byte window, never sign-extending") {
     for
       size <- 1 to 8
       offset <- 0 to (8 - size)

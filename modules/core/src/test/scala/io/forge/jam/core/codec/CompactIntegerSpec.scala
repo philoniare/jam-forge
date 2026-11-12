@@ -17,12 +17,6 @@ class CompactIntegerSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  it should "use the minimal byte length on encode at class boundaries" in {
-    JamCodecs.encodeCompactInteger(0L).length shouldBe 1
-    JamCodecs.encodeCompactInteger(127L).length shouldBe 1   // top of the l=0 class
-    JamCodecs.encodeCompactInteger(128L).length shouldBe 2   // first l=1 value (2^7)
-  }
-
   it should "reject a non-minimal encoding (SER-09)" in {
     // [0x80, 0x05] encodes value 5 in the l=1 (2-byte) class; 5 fits the 1-byte
     // class, so this is non-minimal and must be rejected.
@@ -33,6 +27,10 @@ class CompactIntegerSpec extends AnyFlatSpec with Matchers:
 
   it should "encode GP eq. (C.6) byte patterns" in {
     compactInteger.encode(0L) shouldBe Array[Byte](0)
+    compactInteger.encode(127L) shouldBe Array[Byte](0x7f)   // top of the l=0 class
+    JamCodecs.encodeCompactInteger(0L) shouldBe Array[Byte](0)
+    JamCodecs.encodeCompactInteger(127L) shouldBe Array[Byte](0x7f)
+    JamCodecs.encodeCompactInteger(128L).length shouldBe 2   // first l=1 value (2^7)
     compactInteger.encode(128L) shouldBe Array[Byte](0x80.toByte, 0x80.toByte)
     compactInteger.encode(16384L) shouldBe Array[Byte](0xc0.toByte, 0x00, 0x40)
     compactInteger.encode(-1L) shouldBe (0xff.toByte +: Array.fill[Byte](8)(0xff.toByte))

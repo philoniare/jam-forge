@@ -7,13 +7,7 @@ import primitives.*
 
 class PrimitivesSpec extends AnyFlatSpec with Matchers:
 
-  "Hash" should "be exactly 32 bytes" in {
-    val bytes = Array.fill[Byte](32)(0x42)
-    val hash = Hash(bytes)
-    hash.size shouldBe 32
-  }
-
-  it should "reject wrong size" in {
+  "Hash" should "reject wrong size" in {
     an[IllegalArgumentException] should be thrownBy {
       Hash(Array[Byte](1, 2, 3))
     }
@@ -30,20 +24,6 @@ class PrimitivesSpec extends AnyFlatSpec with Matchers:
     val sid = ServiceId(42)
     sid.value shouldBe UInt(42)
     sid.toInt shouldBe 42
-  }
-
-  "Gas" should "support arithmetic" in {
-    val g1 = Gas(1000L)
-    val g2 = Gas(400L)
-    (g1 - g2).toLong shouldBe 600L
-    (g1 + g2).toLong shouldBe 1400L
-    (g1 >= g2) shouldBe true
-  }
-
-  "Timeslot" should "support arithmetic" in {
-    val ts = Timeslot(100)
-    (ts + 5).value shouldBe UInt(105)
-    (ts - 10).value shouldBe UInt(90)
   }
 
   "Hash.zero" should "create zero hash" in {
@@ -66,139 +46,45 @@ class PrimitivesSpec extends AnyFlatSpec with Matchers:
     h1.hashCode shouldBe h2.hashCode
   }
 
-  "Ed25519PublicKey" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](32)(0x42)
-    val key = Ed25519PublicKey(bytes)
-    key.bytes.toArray shouldBe bytes
+  private final case class FixedCase[T](companion: FixedBytes[T], bytesOf: T => Array[Byte])
+
+  private val fixedCases: List[FixedCase[?]] = List(
+    FixedCase(Ed25519PublicKey, (k: Ed25519PublicKey) => k.bytes),
+    FixedCase(Ed25519Signature, (s: Ed25519Signature) => s.bytes),
+    FixedCase(BandersnatchPublicKey, (k: BandersnatchPublicKey) => k.bytes),
+    FixedCase(BandersnatchSignature, (s: BandersnatchSignature) => s.bytes),
+    FixedCase(BlsPublicKey, (k: BlsPublicKey) => k.bytes),
+    FixedCase(BlsSignature, (s: BlsSignature) => s.bytes)
+  )
+
+  "Fixed-size key and signature types" should "create from bytes, create zero, and compare/hash by content" in {
+    def check[T](c: FixedCase[T]): Unit =
+      val n = c.companion.Size
+      val bytes = Array.fill[Byte](n)(0x42)
+      c.bytesOf(c.companion(bytes)) shouldBe bytes
+      c.bytesOf(c.companion.zero).forall(_ == 0) shouldBe true
+      val a = c.companion(Array.fill[Byte](n)(1))
+      val b = c.companion(Array.fill[Byte](n)(1))
+      val other = c.companion(Array.fill[Byte](n)(2))
+      a shouldBe b
+      a should not be other
+      a.hashCode shouldBe b.hashCode
+    for c <- fixedCases do withClue(s"size=${c.companion.Size}: ")(check(c))
   }
 
-  "Ed25519PublicKey.equals" should "compare by content" in {
-    val k1 = Ed25519PublicKey(Array.fill[Byte](32)(1))
-    val k2 = Ed25519PublicKey(Array.fill[Byte](32)(1))
-    val k3 = Ed25519PublicKey(Array.fill[Byte](32)(2))
-    k1 shouldBe k2
-    k1 should not be k3
-  }
-
-  "Ed25519PublicKey.hashCode" should "be consistent with equals" in {
-    val k1 = Ed25519PublicKey(Array.fill[Byte](32)(0x42))
-    val k2 = Ed25519PublicKey(Array.fill[Byte](32)(0x42))
-    k1.hashCode shouldBe k2.hashCode
-  }
-
-  "Ed25519Signature" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](64)(0x42)
-    val sig = Ed25519Signature(bytes)
-    sig.bytes.toArray shouldBe bytes
-  }
-
-  "Ed25519Signature.equals" should "compare by content" in {
-    val s1 = Ed25519Signature(Array.fill[Byte](64)(1))
-    val s2 = Ed25519Signature(Array.fill[Byte](64)(1))
-    val s3 = Ed25519Signature(Array.fill[Byte](64)(2))
-    s1 shouldBe s2
-    s1 should not be s3
-  }
-
-  "Ed25519Signature.hashCode" should "be consistent with equals" in {
-    val s1 = Ed25519Signature(Array.fill[Byte](64)(0x42))
-    val s2 = Ed25519Signature(Array.fill[Byte](64)(0x42))
-    s1.hashCode shouldBe s2.hashCode
-  }
-
-  "BandersnatchPublicKey" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](32)(0x42)
-    val key = BandersnatchPublicKey(bytes)
-    key.bytes.toArray shouldBe bytes
-  }
-
-  it should "create zero" in {
-    val key = BandersnatchPublicKey.zero
-    key.bytes.toArray.forall(_ == 0) shouldBe true
-  }
-
-  "BandersnatchPublicKey.equals" should "compare by content" in {
-    val k1 = BandersnatchPublicKey(Array.fill[Byte](32)(1))
-    val k2 = BandersnatchPublicKey(Array.fill[Byte](32)(1))
-    val k3 = BandersnatchPublicKey(Array.fill[Byte](32)(2))
-    k1 shouldBe k2
-    k1 should not be k3
-  }
-
-  "BandersnatchPublicKey.hashCode" should "be consistent with equals" in {
-    val k1 = BandersnatchPublicKey(Array.fill[Byte](32)(0x42))
-    val k2 = BandersnatchPublicKey(Array.fill[Byte](32)(0x42))
-    k1.hashCode shouldBe k2.hashCode
-  }
-
-  "BandersnatchSignature" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](96)(0x42)
-    val sig = BandersnatchSignature(bytes)
-    sig.bytes.toArray shouldBe bytes
-  }
-
-  "BandersnatchSignature.equals" should "compare by content" in {
-    val s1 = BandersnatchSignature(Array.fill[Byte](96)(1))
-    val s2 = BandersnatchSignature(Array.fill[Byte](96)(1))
-    val s3 = BandersnatchSignature(Array.fill[Byte](96)(2))
-    s1 shouldBe s2
-    s1 should not be s3
-  }
-
-  "BandersnatchSignature.hashCode" should "be consistent with equals" in {
-    val s1 = BandersnatchSignature(Array.fill[Byte](96)(0x42))
-    val s2 = BandersnatchSignature(Array.fill[Byte](96)(0x42))
-    s1.hashCode shouldBe s2.hashCode
-  }
-
-  "BlsPublicKey" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](144)(0x42)
-    val key = BlsPublicKey(bytes)
-    key.bytes.toArray shouldBe bytes
-  }
-
-  "BlsPublicKey.equals" should "compare by content" in {
-    val k1 = BlsPublicKey(Array.fill[Byte](144)(1))
-    val k2 = BlsPublicKey(Array.fill[Byte](144)(1))
-    val k3 = BlsPublicKey(Array.fill[Byte](144)(2))
-    k1 shouldBe k2
-    k1 should not be k3
-  }
-
-  "BlsPublicKey.hashCode" should "be consistent with equals" in {
-    val k1 = BlsPublicKey(Array.fill[Byte](144)(0x42))
-    val k2 = BlsPublicKey(Array.fill[Byte](144)(0x42))
-    k1.hashCode shouldBe k2.hashCode
-  }
-
-  "BlsSignature" should "create from Array[Byte]" in {
-    val bytes = Array.fill[Byte](48)(0x42)
-    val sig = BlsSignature(bytes)
-    sig.bytes.toArray shouldBe bytes
-  }
-
-  "BlsSignature.equals" should "compare by content" in {
-    val s1 = BlsSignature(Array.fill[Byte](48)(1))
-    val s2 = BlsSignature(Array.fill[Byte](48)(1))
-    val s3 = BlsSignature(Array.fill[Byte](48)(2))
-    s1 shouldBe s2
-    s1 should not be s3
-  }
-
-  "BlsSignature.hashCode" should "be consistent with equals" in {
-    val s1 = BlsSignature(Array.fill[Byte](48)(0x42))
-    val s2 = BlsSignature(Array.fill[Byte](48)(0x42))
-    s1.hashCode shouldBe s2.hashCode
-  }
-
-  "Timeslot" should "keep 32-bit unsigned semantics over its Long" in {
+  "Timeslot" should "support arithmetic and keep 32-bit unsigned semantics over its Long" in {
+    (Timeslot(100) + 5).value shouldBe UInt(105)
+    (Timeslot(100) - 10).value shouldBe UInt(90)
     Timeslot(-1).toLong shouldBe 0xffffffffL
     Timeslot(-1).value shouldBe UInt(-1)
     (Timeslot(-1) + 1) shouldBe Timeslot.Zero
     (Timeslot.Zero - 1).toLong shouldBe 0xffffffffL
   }
 
-  "Gas" should "compare unsigned, as ULong did" in {
+  "Gas" should "support arithmetic and compare unsigned, as ULong did" in {
+    (Gas(1000L) - Gas(400L)).toLong shouldBe 600L
+    (Gas(1000L) + Gas(400L)).toLong shouldBe 1400L
+    (Gas(1000L) >= Gas(400L)) shouldBe true
     (Gas.Max >= Gas(1L)) shouldBe true
     (Gas(1L) < Gas.Max) shouldBe true
     (Gas(5L) < Gas(4L)) shouldBe false

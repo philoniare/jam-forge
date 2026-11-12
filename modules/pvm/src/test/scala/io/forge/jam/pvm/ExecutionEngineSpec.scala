@@ -12,16 +12,12 @@ import io.forge.jam.pvm.program.{ProgramBlob, JumpTable}
  *
  * These tests verify:
  * 1. Register file read/write (13 registers)
- * 2. Program counter management and jumps
- * 3. Gas metering deduction
- * 4. Basic block compilation and caching
- * 5. Interrupt handling (Panic, Segfault, OutOfGas)
- * 6. Simple instruction execution (add, load_imm)
+ * 2. Program counter and gas accessors
+ * 3. load_imm_jump register write and panic pc on an invalid jump
  */
 class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
 
-  // Test 1: Register file read/write (13 registers)
-  "InterpretedInstance" should "support read/write of all 13 registers" in {
+  "InterpretedInstance" should "read/write all 13 registers, with 32-bit truncation and sign extension" in {
     val instance = createTestInstance()
 
     // Verify we have 13 registers
@@ -41,77 +37,41 @@ class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
     // Test negative values (sign extension)
     instance.setReg(1, -42L)
     instance.reg(1) shouldBe (-42L & 0xFFFFFFFFL)
+
+    // setReg32 sign-extends: UInt(0x80000000) is -2^31 as signed 32-bit, so the
+    // raw 64-bit register holds 0xFFFFFFFF_80000000L.
+    instance.setReg32(0, UInt(0x80000000))
+    instance.regs(0) shouldBe -2147483648L
+    // In 32-bit mode, reg() masks to lower 32 bits
+    instance.reg(0) shouldBe 0x80000000L
+
+    // setReg32 with a positive value; getReg returns the full 64-bit value
+    instance.setReg32(1, UInt(0x12345678))
+    instance.reg(1) shouldBe 0x12345678L
+    instance.getReg(1) shouldBe 0x12345678L
+
+    // setReg64 in 32-bit mode: masked to 32 bits (0x9ABCDEF0) then sign-extended
+    instance.setReg64(2, 0x123456789ABCDEF0L)
+    instance.regs(2) shouldBe 0xFFFFFFFF9ABCDEF0L
   }
 
-  // Test 2: Program counter management and jumps
-  it should "correctly manage program counter and jumps" in {
+  it should "keep programCounter unset until run, and store nextProgramCounter and gas as given" in {
     val instance = createTestInstance()
 
-    // Initially, program counter should not be valid
     instance.programCounter shouldBe None
-
-    // Set next program counter
     instance.setNextProgramCounter(ProgramCounter(100))
     instance.nextProgramCounter shouldBe Some(ProgramCounter(100))
-
-    // After setting, programCounter is still invalid until run
     instance.programCounter shouldBe None
-
-    // Set to a different value
     instance.setNextProgramCounter(ProgramCounter(200))
     instance.nextProgramCounter shouldBe Some(ProgramCounter(200))
-  }
 
-  // Test 3: Gas metering deduction
-  it should "correctly track and deduct gas" in {
-    val instance = createTestInstance()
-
-    // Set initial gas
     instance.setGas(1000L)
     instance.gas shouldBe 1000L
-
-    // Simulate gas deduction
-    instance.setGas(instance.gas - 50)
-    instance.gas shouldBe 950L
-
-    // Gas can go negative (indicates exhaustion)
     instance.setGas(-10L)
     instance.gas shouldBe -10L
-    instance.gas < 0 shouldBe true
   }
 
-  // Test 5: Interrupt handling (Panic, Segfault, OutOfGas)
-  it should "correctly handle interrupts" in {
-    // Test with a simple panic program (opcode 0)
-    val code = Array[Byte](0) // Panic opcode
-    val bitmask = Array[Byte](1) // First instruction boundary
-
-    val instance = createTestInstanceWithCode(code, bitmask)
-
-    // Set entry point and gas
-    instance.setNextProgramCounter(ProgramCounter(0))
-    instance.setGas(100L)
-
-    // Run should return Panic interrupt
-    instance.run() match
-      case Right(interrupt) =>
-        interrupt shouldBe InterruptKind.Panic
-      case Left(err) =>
-        fail(s"Unexpected error: $err")
-
-    // Test OutOfGas interrupt by setting zero gas
-    val instance2 = createTestInstanceWithCode(code, bitmask)
-    instance2.setNextProgramCounter(ProgramCounter(0))
-    instance2.setGas(0L) // No gas - should trigger OutOfGas during chargeGas
-
-    instance2.run() match
-      case Right(interrupt) =>
-        // Should get OutOfGas since we charge gas before panic
-        interrupt shouldBe InterruptKind.OutOfGas
-      case Left(err) =>
-        fail(s"Unexpected error: $err")
-  }
-  it should "load_imm_jump writes its register even when the jump panics (PVM-3)" in {
+  it should "write load_imm_jump's register even when the jump panics, and panic at the jump's pc (PVM-3)" in {
     // load_imm_jump: reg7 = 1234 (0x04D2), target = 99 (not a valid block start).
     // Encoding mirrors inst_load_imm_and_jump.json: opcode 80, operand byte 39
     // (reg_A=7, imm length 2), imm bytes 0xD2 0x04, then the 1-byte jump target.
@@ -127,87 +87,8 @@ class ExecutionEngineSpec extends AnyFlatSpec with Matchers:
 
     // The destination register MUST hold immX despite the panicking jump.
     instance.reg(7) shouldBe 1234L
-  }
-
-  it should "panic at the jump instruction's pc, not the target, on an invalid static jump" in {
-    // Same load_imm_jump-to-invalid-target program as the PVM-3 test: the single
-    // instruction sits at pc 0 and jumps to 99 (not a valid block start).
-    val code = Array[Byte](80.toByte, 39.toByte, 210.toByte, 4.toByte, 99.toByte)
-    val bitmask = Array[Byte](0x01.toByte)
-    val instance = createTestInstanceWithCode(code, bitmask)
-    instance.setNextProgramCounter(ProgramCounter(0))
-    instance.setGas(10000L)
-
-    instance.run() match
-      case Right(interrupt) => interrupt shouldBe InterruptKind.Panic
-      case Left(err)        => fail(s"Unexpected error: $err")
-
     // The panic pc is the jump instruction (0), not the invalid target (99).
     instance.programCounter.map(_.value.toInt) shouldBe Some(0)
-  }
-
-  // Test 6: Simple instruction execution (add, load_imm)
-  it should "correctly execute simple instructions" in {
-    // Test LoadImm instruction
-    // Opcode 51 (LoadImm) with register 0 and immediate value 42
-    val loadImmCode = Array[Byte](
-      51.toByte,  // LoadImm opcode
-      0.toByte,   // Register 0
-      42.toByte,  // Immediate value
-      0.toByte    // Panic to terminate
-    )
-    val loadImmBitmask = Array[Byte](0x09) // Instructions at offsets 0 and 3
-
-    val instance = createTestInstanceWithCode(loadImmCode, loadImmBitmask)
-    instance.setNextProgramCounter(ProgramCounter(0))
-    instance.setGas(100L)
-
-    // Before execution, register 0 should be 0
-    instance.reg(0) shouldBe 0L
-
-    // Run should execute LoadImm and then Panic
-    instance.run() match
-      case Right(interrupt) =>
-        // Execution should terminate with Panic after LoadImm
-        interrupt shouldBe InterruptKind.Panic
-        // Register 0 should now have the loaded value
-        instance.reg(0) shouldBe 42L
-      case Left(err) =>
-        fail(s"Unexpected error: $err")
-
-    // Verify gas was deducted (2 instructions: LoadImm + Panic)
-    instance.gas should be < 100L
-  }
-
-  // Additional test: ExecutionContext register operations
-  "ExecutionContext" should "correctly perform register operations" in {
-    val instance = createTestInstance()
-
-    // Test setReg32 with sign extension
-    // UInt(0x80000000) is 2147483648 as unsigned, but when treated as signed 32-bit it's negative
-    // After sign extension to 64-bit, it becomes -2147483648 = 0xFFFFFFFF_80000000L
-    instance.setReg32(0, UInt(0x80000000))
-    // The raw value in regs is sign-extended
-    val rawValue = instance.regs(0)
-    rawValue shouldBe -2147483648L  // -2^31
-
-    // In 32-bit mode, reg() masks to lower 32 bits
-    val value = instance.reg(0)
-    // 0x80000000 masked to 32-bit unsigned is 2147483648
-    value shouldBe 0x80000000L
-
-    // Test setReg32 with positive value
-    instance.setReg32(1, UInt(0x12345678))
-    instance.reg(1) shouldBe 0x12345678L
-
-    // Test getReg (returns full 64-bit value)
-    instance.getReg(1) shouldBe 0x12345678L
-
-    // Test setReg64 - in 32-bit mode, values are masked to lower 32 bits and sign-extended
-    // 0x123456789ABCDEF0L masked to 32 bits: 0x9ABCDEF0
-    // Sign-extended (bit 31 is 1): 0xFFFFFFFF_9ABCDEF0L = -1698898192L
-    instance.setReg64(2, 0x123456789ABCDEF0L)
-    instance.regs(2) shouldBe 0xFFFFFFFF9ABCDEF0L
   }
 
   // Helper: Create a minimal test instance

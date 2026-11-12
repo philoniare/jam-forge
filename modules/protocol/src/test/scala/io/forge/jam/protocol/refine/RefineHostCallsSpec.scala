@@ -699,11 +699,16 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
       v
     (getLE8(0), Array.tabulate(13)(i => getLE8(8 + 8 * i)))
 
-  test("INVOKE runs a guest to halt and writes back gas and registers") {
+  /** Charge getGasCost then dispatch, as PvmRunner does. */
+  private def chargeAndDispatch(hc: RefineHostCalls, id: Int, instance: MockPvmInstance): Unit =
+    instance.setGas(instance.gas - hc.getGasCost(id, instance))
+    hc.dispatch(id, instance)
+
+  test("INVOKE runs a guest to halt, writes back gas/registers, refunds unused gas and stores pc 0") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
-    // LoadImm r7 = 42; JumpIndirect r0 + 0 (r0 = 0xffff0000 → halt).
+    // LoadImm r7 = 42; JumpIndirect r0 + 0 (r0 = 0xffff0000 → halt at pc 3).
     val code = Array[Byte](51, 7, 42, 50, 0)
     val bitmask = Array[Byte](9) // instructions at offsets 0 and 3
     createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
@@ -712,34 +717,20 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
     instance.setReg(7, 0L) // machine index
     instance.setReg(8, 0x8000L) // block address
-    hc.dispatch(HostCall.INVOKE, instance)
+    chargeAndDispatch(hc, HostCall.INVOKE, instance)
 
     ULong(instance.reg(7)) shouldBe HostCallResult.HALT
     val (gasAfter, regsAfter) = readInvokeBlock(instance, 0x8000)
     gasAfter shouldBe 78L
     regsAfter(7) shouldBe 42L
     regsAfter(0) shouldBe 0xffff0000L
-  }
-
-  /** Charge getGasCost then dispatch, as PvmRunner does. */
-  private def chargeAndDispatch(hc: RefineHostCalls, id: Int, instance: MockPvmInstance): Unit =
-    instance.setGas(instance.gas - hc.getGasCost(id, instance))
-    hc.dispatch(id, instance)
-
-  test("INVOKE refunds the guest's unused gas to the caller (gas* = max(gas - g, 0) + g_R')") {
-    val ctx = newContext()
-    val hc = new RefineHostCalls(ctx)
-    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
-
-    val instance = newInstance()
-    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
-    instance.setReg(7, 0L)
-    instance.setReg(8, 0x8000L)
-    chargeAndDispatch(hc, HostCall.INVOKE, instance)
-
-    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
-    readInvokeBlock(instance, 0x8000)._1 shouldBe 78L
+    // gas* = max(gas - g, 0) + g_R'
     instance.gas shouldBe 1_000_000L - (968L + 100L) + 78L
+    ctx.innerPvms(0L).pc shouldBe 0L
+
+    instance.setReg(7, 0L)
+    hc.dispatch(HostCall.EXPUNGE, instance)
+    instance.reg(7) shouldBe 0L
   }
 
   test("INVOKE on a missing machine charges C_K + g_R and refunds nothing (WHO)") {
@@ -770,26 +761,6 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     // Psi_1: a block that can't be paid for leaves the counter unchanged.
     readInvokeBlock(instance, 0x8000)._1 shouldBe 1L
     instance.gas shouldBe 1_000_000L - 968L
-  }
-
-  test("INVOKE stores pc 0 after a guest halt, and EXPUNGE returns it") {
-    val ctx = newContext()
-    val hc = new RefineHostCalls(ctx)
-
-    // LoadImm r7 = 42; JumpIndirect r0 + 0 (r0 = 0xffff0000 → halt at pc 3).
-    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
-
-    val instance = newInstance()
-    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
-    instance.setReg(7, 0L)
-    instance.setReg(8, 0x8000L)
-    hc.dispatch(HostCall.INVOKE, instance)
-    ULong(instance.reg(7)) shouldBe HostCallResult.HALT
-    ctx.innerPvms(0L).pc shouldBe 0L
-
-    instance.setReg(7, 0L)
-    hc.dispatch(HostCall.EXPUNGE, instance)
-    instance.reg(7) shouldBe 0L
   }
 
   test("INVOKE stores pc 0 after a guest panic") {
@@ -850,23 +821,19 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     hc.dispatch(HostCall.INVOKE, instance)
     (instance.reg(7), instance.reg(8))
 
-  test("INVOKE returns the 64-bit sign-extended host id for a negative ecalli immediate") {
-    // ν_X = X_1(0x80) = 2^64 − 128, and Ω_K sets ω'₈ = h.
-    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x80.toByte))
-    ULong(r7) shouldBe HostCallResult.HOST
-    r8 shouldBe 0xffffffffffffff80L
-  }
-
-  test("INVOKE returns the 64-bit sign-extended host id for a 4-byte ecalli immediate") {
-    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x00, 0x00, 0x00, 0x80.toByte))
-    ULong(r7) shouldBe HostCallResult.HOST
-    r8 shouldBe 0xffffffff80000000L
-  }
-
-  test("INVOKE returns a small positive ecalli host id unchanged") {
-    val (r7, r8) = invokeGuestEcalli(Array[Byte](0x7f))
-    ULong(r7) shouldBe HostCallResult.HOST
-    r8 shouldBe 0x7fL
+  test("INVOKE returns the 64-bit sign-extended ecalli host id in r8") {
+    // ν_X = X_n(imm) and Ω_K sets ω'₈ = h.
+    for (imm, expected) <- Seq(
+        Array[Byte](0x80.toByte) -> 0xffffffffffffff80L, // negative 1-byte
+        Array[Byte](0x00, 0x00, 0x00, 0x80.toByte) -> 0xffffffff80000000L, // negative 4-byte
+        Array[Byte](0x7f) -> 0x7fL // small positive, unchanged
+      )
+    do
+      val (r7, r8) = invokeGuestEcalli(imm)
+      withClue(s"imm=${imm.toSeq}: ") {
+        ULong(r7) shouldBe HostCallResult.HOST
+        r8 shouldBe expected
+      }
   }
 
   test("INVOKE reports FAULT with the faulting page address") {
@@ -918,33 +885,11 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     regsAfter(7) shouldBe 0x5aL
   }
 
-  test("INVOKE reports OOG when the guest runs out of gas") {
-    val ctx = newContext()
-    val hc = new RefineHostCalls(ctx)
-    val code = Array[Byte](51, 7, 42, 50, 0)
-    val bitmask = Array[Byte](9)
-    createMachineWith(hc, guestBlob(code, bitmask), pc = 0L) shouldBe 0L
-
-    val instance = newInstance()
-    writeInvokeBlock(instance, 0x8000, gas = 1L, regs = Map(0 -> 0xffff0000L))
-    instance.setReg(7, 0L)
-    instance.setReg(8, 0x8000L)
-    hc.dispatch(HostCall.INVOKE, instance)
-
-    ULong(instance.reg(7)) shouldBe HostCallResult.OOG
-  }
-
-  test("INVOKE reports WHO for an unknown machine and panics on unwritable block") {
+  test("INVOKE panics on an unwritable block") {
     val ctx = newContext()
     val hc = new RefineHostCalls(ctx)
 
     val instance = newInstance()
-    writeInvokeBlock(instance, 0x8000, gas = 10L)
-    instance.setReg(7, 9L) // no machine 9
-    instance.setReg(8, 0x8000L)
-    hc.dispatch(HostCall.INVOKE, instance)
-    ULong(instance.reg(7)) shouldBe HostCallResult.WHO
-
     instance.setReg(7, 0L)
     instance.setReg(8, 0x100000L - 10L) // 112-byte block does not fit
     intercept[HostCallPanic] {

@@ -36,15 +36,28 @@ class RestartAuthoringSpec extends AnyFunSuite with Matchers:
       n.enableAuthoring(keys)
       n
     try
+      val epochLen = spec.config.epochLength // 12 (TINY)
       node = open()
-      for slot <- 1 to 20 do withClue(s"slot $slot: ") { node.authorSlot(slot.toLong).isDefined shouldBe true }
+      // Epoch 0: the tickets generated (18 candidates, at most 3 per block) fill the 12-entry accumulator before
+      // the cutoff at phase 10.
+      var ticketsIncluded = 0
+      for slot <- 1 to 20 do
+        withClue(s"slot $slot: ") { node.authorSlot(slot.toLong).isDefined shouldBe true }
+        if slot < epochLen then
+          val block = node.chain.decodeBlock(node.chain.blockStore.getBlock(node.chain.best.hash).get).toOption.get
+          ticketsIncluded += block.extrinsic.tickets.size
+      ticketsIncluded should be >= epochLen
       // The epoch now running is sealed by tickets made before the restart.
       node.chain.stateView().gamma.st shouldBe a[TicketsOrKeys.Tickets]
+      // So is the next one: its accumulator is already full of tickets made before the restart.
+      node.chain.stateView().gamma.a.size shouldBe epochLen
       node.shutdownStorageOnly()
 
       node = open()
-      for slot <- 21 to 40 do withClue(s"slot $slot after the restart: ") { node.authorSlot(slot.toLong).isDefined shouldBe true }
-      node.chain.best.slot shouldBe 40L
+      // The rest of epoch 1, then all of epoch 2.
+      for slot <- 21 to 35 do withClue(s"slot $slot after the restart: ") { node.authorSlot(slot.toLong).isDefined shouldBe true }
+      node.chain.stateView().gamma.st shouldBe a[TicketsOrKeys.Tickets]
+      node.chain.best.slot shouldBe 35L
     finally
       if node != null then node.shutdownStorageOnly()
       cleanup(dir)

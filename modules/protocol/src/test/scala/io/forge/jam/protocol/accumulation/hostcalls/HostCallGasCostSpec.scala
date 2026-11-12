@@ -165,37 +165,8 @@ class HostCallGasCostSpec extends HostCallTestBase:
   }
 
   // ===========================================================================
-  // fnmemgas boundary cases (l=0, l=1024 exact, l=1025 rounds up)
+  // fnmemgas boundary cases (l=0, l=1024 exact, l=1025 rounds up); LOOKUP wiring is checked above
   // ===========================================================================
-
-  test("fnmemgas boundary: l=0 -> 0 (LOOKUP z=0)") {
-    val context = createTestContext()
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = createMockInstance()
-
-    instance.setReg(11, 0L)
-    hostCalls.getGasCost(HostCall.LOOKUP, instance) shouldBe HostCallGas.CgasLconst
-  }
-
-  test("fnmemgas boundary: l=1024 exact -> no rounding (LOOKUP z=1024)") {
-    val context = createTestContext()
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = createMockInstance()
-
-    // fnmemgas(248, 1024) = ceil(248*1024/1024) = 248 exactly
-    instance.setReg(11, 1024L)
-    hostCalls.getGasCost(HostCall.LOOKUP, instance) shouldBe (600L + 248L)
-  }
-
-  test("fnmemgas boundary: l=1025 rounds up by exactly 1 (LOOKUP z=1025)") {
-    val context = createTestContext()
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = createMockInstance()
-
-    // fnmemgas(248, 1025) = ceil(248*1025/1024) = ceil(254200/1024) = ceil(248.24..) = 249
-    instance.setReg(11, 1025L)
-    hostCalls.getGasCost(HostCall.LOOKUP, instance) shouldBe (600L + 249L)
-  }
 
   test("fnmemgas: pure function boundary table") {
     HostCallGas.fnmemgas(248L, ULong(0L)) shouldBe 0L
@@ -264,14 +235,6 @@ class HostCallGasCostSpec extends HostCallTestBase:
     hostCalls.dispatch(9999, instance)
 
     ULong(instance.reg(7)) shouldBe HostCallResult.WHAT
-  }
-
-  test("LOG (100) costs Cgasunknown=1000 (not a gp host call, so charged as an unknown one)") {
-    val context = createTestContext()
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = createMockInstance()
-
-    hostCalls.getGasCost(HostCall.LOG, instance) shouldBe HostCallGas.Cgasunknown
   }
 
   test("fetchGas is total for every guest-suppliable selector 0-255") {

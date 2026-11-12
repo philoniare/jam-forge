@@ -123,8 +123,11 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
           )
         )
       )
+      // Builder (node A) submits via CE 133: core index (2 LE) ++ package, then the (empty) extrinsic-data
+      // message, then FIN. B refines it for real (NULL Authorizer is-authorized, service 0's refine in the PVM).
       val stream = connAtoB.openStream(StreamKind.WorkPackageSubmission).get(10, TimeUnit.SECONDS)
       stream.send(Array[Byte](0, 0) ++ wp.encode.toArray)
+      stream.send(Array.emptyByteArray)
       stream.finish()
 
       val poolDeadline = System.currentTimeMillis() + 30000
@@ -136,7 +139,14 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       nodeA.authorSlot(3).isDefined shouldBe true
       val block =
         nodeA.chain.decodeBlock(nodeA.chain.blockStore.getBlock(nodeA.chain.best.hash).get).toOption.get
+      block.extrinsic.guarantees.size shouldBe 1
       val report = block.extrinsic.guarantees.head.report
+      report.packageSpec.hash shouldBe Hashing.blake2b256(wp.encode.toArray)
+      report.coreIndex.toInt shouldBe 0
+      // The availability commitments were computed by the guarantor.
+      report.packageSpec.erasureRoot.bytes.toArray should not be new Array[Byte](32)
+      // The report is pending on core 0 (awaiting assurances).
+      nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
       val reportHash = Hashing.blake2b256(report.encode.toArray)
       auditorA.verdictFor(reportHash) shouldBe None // included, not yet available
       // A judgment that outruns the block making its report available is kept for that block.
@@ -144,8 +154,15 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
 
       val assuranceDeadline = System.currentTimeMillis() + 30000
       while nodeA.pools.assuranceCount < 5 && System.currentTimeMillis() < assuranceDeadline do Thread.sleep(50)
+      nodeA.pools.assuranceCount should be >= 5 // A's assurer reacted to the inclusion on its own
       val available = nodeA.authorSlot(4).getOrElse(fail("slot 4 not authored"))
+      // Slot 4: assurances on-chain -> report available -> accumulated, and the core is free again.
+      val block4 =
+        nodeA.chain.decodeBlock(nodeA.chain.blockStore.getBlock(available.hash).get).toOption.get
+      block4.extrinsic.assurances.size should be >= 5
+      nodeA.chain.stateView().cores.reports(0).isDefined shouldBe false
       awaitSync(nodeA, nodeB)
+      nodeB.chain.best.stateRoot shouldBe nodeA.chain.best.stateRoot
 
       val verdictDeadlineA = System.currentTimeMillis() + 30000
       while auditorA.verdictFor(reportHash).isEmpty && System.currentTimeMillis() < verdictDeadlineA do

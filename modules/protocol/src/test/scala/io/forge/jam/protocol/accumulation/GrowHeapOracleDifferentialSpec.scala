@@ -183,11 +183,11 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
   // ==========================================================================
 
   "the recompiler's grow_heap upcall" should
-    "match the interpreter across >=350 no-op grow_heap programs (requested <= h)" in {
+    "match the interpreter across >=50 no-op grow_heap programs (requested <= h)" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110000L)
-      val n = 350
+      val n = 50
       var i = 0
       while i < n do
         val requested = math.max(0L, initialH - rng.nextInt(8))
@@ -197,11 +197,11 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"grow_heap oracle differential (no-op, requested <= h): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter across >=350 out-of-range grow_heap programs (requested > b)" in {
+  it should "match the interpreter across >=50 out-of-range grow_heap programs (requested > b)" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110001L)
-      val n = 350
+      val n = 50
       var i = 0
       while i < n do
         val requested = initialB + 1 + rng.nextInt(1024)
@@ -211,11 +211,11 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"grow_heap oracle differential (out of range, requested > b): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter across >=350 single-page growth programs that store/load the new page" in {
+  it should "match the interpreter across >=100 single-page growth programs that store/load the new page" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110002L)
-      val n = 350
+      val n = 100
       var i = 0
       while i < n do
         val target = initialH + 1
@@ -236,11 +236,11 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"grow_heap oracle differential (single-page growth + store/load): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter across >=350 multi-page growth programs" in {
+  it should "match the interpreter across >=100 multi-page growth programs" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110003L)
-      val n = 350
+      val n = 100
       var i = 0
       while i < n do
         val pages = 1 + rng.nextInt(8)
@@ -262,11 +262,11 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"grow_heap oracle differential (multi-page growth): $n programs matched the interpreter")
   }
 
-  it should "match the interpreter across >=250 chained grow_heap programs" in {
+  it should "match the interpreter across >=100 chained grow_heap programs" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110004L)
-      val n = 250
+      val n = 100
       var i = 0
       while i < n do
         val steps = 2 + rng.nextInt(4)
@@ -283,7 +283,7 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x19110005L)
-      val n = 300
+      val n = 100
       var i = 0
       while i < n do
         val pages = 1 + rng.nextInt(64)

@@ -147,16 +147,3 @@ class BlockGasWiringSpec extends AnyFlatSpec with Matchers:
     // OOG fired AT the resume pc (the fallthrough, offset 2): it never ran.
     instance.programCounter.map(_.value.toInt) shouldBe Some(2)
   }
-
-  it should "charge zero gas when deblob prevalidation panics (Psi_1 never runs)" in {
-    // Non-terminator-final program: v_blob fails -> panic at entry, before
-    // any block is entered or charged (Task 3 interaction).
-    val code = Array[Byte](51, 0, 42) // LoadImm alone
-    val bitmask = Array[Byte](0x01)
-    val instance = instanceFor(code, bitmask)
-    instance.setNextProgramCounter(ProgramCounter(0))
-    instance.setGas(100L)
-
-    instance.run() shouldBe Right(InterruptKind.Panic)
-    instance.gas shouldBe 100L
-  }

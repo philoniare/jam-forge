@@ -45,11 +45,12 @@ class LiveDevnetSpec extends AnyFunSuite with Matchers:
       bootnodes = Nil
     )
 
-    // Align the era so the wall clock sits a little past the genesis slot:
-    // the next tick authors genesisSlot + 1.
+    // Align the era so the wall clock sits late in the genesis slot: the
+    // first boundary comes 1-2 s after start-up (genesisSlot + 1, or the
+    // one after it if start-up outlasts that), the next a slot later.
     val genesisSlot = genesis.header.slot.toLong
     val eraStart =
-      System.currentTimeMillis() / 1000 - genesisSlot * spec.config.slotDuration - 1
+      System.currentTimeMillis() / 1000 - genesisSlot * spec.config.slotDuration - (spec.config.slotDuration - 2)
 
     val dirA = tempDir("jam-live-a")
     val dirB = tempDir("jam-live-b")
@@ -68,8 +69,8 @@ class LiveDevnetSpec extends AnyFunSuite with Matchers:
 
       nodeB.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeA.listenPort))
 
-      // Let three slot boundaries pass (6 s slots).
-      val target = genesisSlot + 3
+      // Let two slot boundaries pass (6 s slots).
+      val target = genesisSlot + 2
       val deadline = System.currentTimeMillis() + 45000
       while nodeA.chain.best.slot < target && System.currentTimeMillis() < deadline do
         Thread.sleep(250)

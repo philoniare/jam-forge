@@ -55,9 +55,9 @@ class QueryHostCallSpec extends HostCallTestBase:
 
     hostCalls.dispatch(HostCall.QUERY, instance)
 
-    // Should return packed value (not NONE)
-    val result = ULong(instance.reg(7))
-    result should not be HostCallResult.NONE
+    // [500, 600] packs as r7 = 2 + 500·2^32, r8 = 600
+    ULong(instance.reg(7)) shouldBe (ULong(2) + (ULong(500) << 32))
+    ULong(instance.reg(8)) shouldBe ULong(600)
   }
 
   test("QUERY: returns WHO when current service account not found") {

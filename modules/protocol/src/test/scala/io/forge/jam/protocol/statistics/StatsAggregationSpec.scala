@@ -33,10 +33,6 @@ class StatsAggregationSpec extends AnyFunSuite with Matchers:
   private val guarantees: List[GuaranteeExtrinsic] =
     (1L to 5L).map(guaranteeFromSeed).toList
 
-  test("coreStatsByCore returns exactly one record per core") {
-    StatsAggregation.coreStatsByCore(guarantees, cores).length shouldBe cores
-  }
-
   test("coreStatsByCore with no guarantees is all-zero records") {
     StatsAggregation.coreStatsByCore(Nil, cores) shouldBe List.fill(cores)(CoreStatisticsRecord())
   }
@@ -45,10 +41,13 @@ class StatsAggregationSpec extends AnyFunSuite with Matchers:
     StatsAggregation.serviceStatsFromGuarantees(Nil) shouldBe Nil
   }
 
-  test("a single guarantee's record lands at its core index") {
+  test("coreStatsByCore returns one record per core, a single guarantee's record at its core index") {
+    StatsAggregation.coreStatsByCore(guarantees, cores).length shouldBe cores
+
     val guarantee = guaranteeFromSeed(42L)
     val coreIdx = guarantee.report.coreIndex.toInt
     val byCore = StatsAggregation.coreStatsByCore(List(guarantee), cores)
+    byCore.length shouldBe cores
 
     byCore(coreIdx) shouldBe StatsAggregation.coreStatsFromGuarantee(guarantee)
     // Every other core is untouched.

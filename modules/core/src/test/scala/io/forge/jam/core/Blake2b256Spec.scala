@@ -25,11 +25,6 @@ class Blake2b256Spec extends AnyFunSuite with Matchers:
       "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
   }
 
-  test("BLAKE2b-256 of the 64-byte zero trie preimage") {
-    hex(Hashing.blake2b256(new Array[Byte](64)).bytes) shouldBe
-      hex(bouncyCastle(new Array[Byte](64), 0, 64))
-  }
-
   test("matches Bouncy Castle for every length 0..1100 at random offsets, across block boundaries") {
     val rnd = new scala.util.Random(7693)
     for
@@ -40,7 +35,9 @@ class Blake2b256Spec extends AnyFunSuite with Matchers:
       rnd.nextBytes(data)
       val offset = rnd.nextInt(10)
       withClue(s"len=$len offset=$offset: ") {
-        hex(Blake2b256.hash(data, offset, len)) shouldBe hex(bouncyCastle(data, offset, len))
+        val expected = hex(bouncyCastle(data, offset, len))
+        hex(Blake2b256.hash(data, offset, len)) shouldBe expected
+        hex(Hashing.blake2b256(data, offset, len).bytes) shouldBe expected
       }
   }
 

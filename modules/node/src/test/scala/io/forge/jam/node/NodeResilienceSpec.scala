@@ -129,8 +129,10 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers:
     try
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
       node.chain.initializeOrRestore(spec)
-      node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
-      node.authorSlot(1).isDefined shouldBe true
+      // A bare author: ticket generation plays no part in whether the spec's genesis can be built on.
+      val block = new BlockAuthor(node.chain, (0 until 6).map(ValidatorKeySet.dev)).tryAuthor(1)
+        .getOrElse(fail("author slot 1"))
+      node.chain.importBlock(node.chain.encodeBlock(block)).isRight shouldBe true
     finally
       if node != null then node.shutdownStorageOnly()
       cleanup(dir)

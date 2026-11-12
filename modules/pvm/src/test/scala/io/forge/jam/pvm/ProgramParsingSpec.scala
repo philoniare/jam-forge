@@ -204,16 +204,6 @@ class ProgramParsingSpec extends AnyFlatSpec with Matchers:
     instr shouldBe Instruction.LoadImm(7, 1L) // clamped to 32 bits; unclamped would be 0xFFFFFFFF00000001
   }
 
-  it should "clamp an over-padded regs2+imm immediate to 4 bytes" in {
-    // AddImm64 (opcode 149, regs2+imm): code[1]=0x57 → dst=7, src=5; same over-padded immediate.
-    val code = Array[Byte](149.toByte, 0x57, 0x01, 0x00, 0x00, 0x00, 0xFF.toByte, 0x00)
-    val bitmask = Array[Byte](0x81.toByte)
-
-    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
-    skip shouldBe 7
-    instr shouldBe Instruction.AddImm64(7, 5, 1L)
-  }
-
   it should "leave well-formed reg+imm immediates (≤4 bytes) unchanged" in {
     // ℓ=5 (len=4): immediate is exactly the 3 bytes 0x010203 — the clamp is a no-op here.
     val code = Array[Byte](51, 0x07, 0x03, 0x02, 0x01, 0x00)

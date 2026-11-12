@@ -10,11 +10,10 @@ import io.forge.jam.pvm.memory.*
  *
  * These tests verify:
  * 1. PageMap page permission tracking (R/W flags)
- * 2. BasicMemory read/write within bounds
- * 3. Memory segfault on invalid access
- * 4. Heap growth via sbrk
- * 5. Page alignment calculations
- * 6. Memory region validation (roData, rwData, stack, heap, aux)
+ * 2. Page alignment calculations
+ * 3. Memory region validation (roData, rwData, stack, heap, aux), including
+ *    segfaults on invalid access
+ * Heap growth via sbrk is covered by memory/BasicMemoryHeapGrowthSpec.
  */
 class MemorySpec extends AnyFlatSpec with Matchers:
 
@@ -64,76 +63,6 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     pageMap.isWritablePages(page0, -1)._1 shouldBe false
   }
 
-  // Test 2: BasicMemory read/write within bounds
-  "BasicMemory" should "support read/write operations within bounds" in {
-    val memoryMap = createTestMemoryMap()
-    val memory = BasicMemory.create(memoryMap)
-
-    // Write to RW data region
-    val rwAddress = memoryMap.rwDataAddress
-    memory.storeU8(rwAddress, UByte(0x42))
-    memory.loadU8(rwAddress) shouldBe MemoryResult.Success(UByte(0x42))
-
-    // Write 32-bit value
-    memory.storeU32(rwAddress + UInt(4), UInt(0xDEADBEEF))
-    memory.loadU32(rwAddress + UInt(4)) shouldBe MemoryResult.Success(UInt(0xDEADBEEF))
-
-    // Write to stack region
-    val stackAddress = memoryMap.stackAddressHigh - UInt(100)
-    memory.storeU8(stackAddress, UByte(0xFF))
-    memory.loadU8(stackAddress) shouldBe MemoryResult.Success(UByte(0xFF))
-  }
-
-  // Test 3: Memory segfault on invalid access
-  it should "return segfault on invalid memory access" in {
-    val memoryMap = createTestMemoryMap()
-    val memory = BasicMemory.create(memoryMap)
-
-    // Access to unmapped address should segfault
-    val invalidAddress = UInt(0x1000) // In null page region
-    val result = memory.loadU8(invalidAddress)
-    result match
-      case MemoryResult.Segfault(addr, _) =>
-        // Segfault should report the address
-        addr shouldBe invalidAddress
-      case other =>
-        fail(s"Expected Segfault but got $other")
-
-    // Write to read-only region should segfault
-    val roAddress = memoryMap.roDataAddress
-    memory.storeU8(roAddress, UByte(0x00)) match
-      case MemoryResult.Segfault(_, _) => succeed
-      case other => fail(s"Expected Segfault for RO write but got $other")
-  }
-
-  // Test 4: Heap growth via sbrk
-  it should "support heap growth via sbrk" in {
-    val memoryMap = createTestMemoryMap()
-    val memory = BasicMemory.create(memoryMap)
-
-    // Get initial heap end
-    val initialHeapEnd = memory.heapEnd
-    initialHeapEnd shouldBe memoryMap.heapBase
-
-    // Grow heap by one page
-    val growSize = DefaultPageSize
-    val prevEnd = memory.sbrk(growSize)
-
-    prevEnd match
-      case Some(addr) =>
-        addr shouldBe initialHeapEnd
-        memory.heapEnd shouldBe (initialHeapEnd + growSize)
-
-        // New heap memory should be writable
-        memory.storeU8(addr, UByte(0xAB))
-        memory.loadU8(addr) shouldBe MemoryResult.Success(UByte(0xAB))
-      case None =>
-        fail("sbrk should succeed")
-
-    // sbrk(0) should return current heap end
-    memory.sbrk(UInt(0)) shouldBe Some(memory.heapEnd)
-  }
-
   // Test 5: Page alignment calculations
   "PageMap" should "correctly calculate page alignment" in {
     val pageMap = new PageMap(DefaultPageSize)
@@ -177,6 +106,8 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     val rwAddr = memoryMap.rwDataAddress
     memory.storeU8(rwAddr, UByte(0x12))
     memory.loadU8(rwAddr) shouldBe MemoryResult.Success(UByte(0x12))
+    memory.storeU32(rwAddr + UInt(4), UInt(0xDEADBEEF))
+    memory.loadU32(rwAddr + UInt(4)) shouldBe MemoryResult.Success(UInt(0xDEADBEEF))
 
     // Stack region should be readable and writable
     val stackAddr = memoryMap.stackAddressHigh - UInt(8)
@@ -204,6 +135,12 @@ class MemorySpec extends AnyFlatSpec with Matchers:
     memory.loadU8(UInt(0)) match
       case MemoryResult.Segfault(_, _) => succeed
       case other => fail(s"Null page should be inaccessible, got $other")
+
+    // A segfault reports the faulting address
+    val invalidAddress = UInt(0x1000) // In null page region
+    memory.loadU8(invalidAddress) match
+      case MemoryResult.Segfault(addr, _) => addr shouldBe invalidAddress
+      case other => fail(s"Expected Segfault but got $other")
 
     // Access just before RO data should fail
     val beforeRoData = memoryMap.roDataAddress - UInt(1)

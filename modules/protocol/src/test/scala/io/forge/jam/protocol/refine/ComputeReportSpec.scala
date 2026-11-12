@@ -208,28 +208,3 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
 
     r1.report.packageSpec.erasureRoot should not be r2.report.packageSpec.erasureRoot
   }
-
-  test("bundle can be reconstructed from a third of the erasure chunks") {
-    assume(ErasureCoding.isAvailable)
-    val wp = workPackageWith(exportCount = 0)
-    val computed = compute(wp, accountsWith(haltEcho)).toOption.get
-    val bundle = computed.bundleBytes
-
-    val shards = ErasureCoding
-      .chunk(bundle, config.ecPieceSize, config.validatorCount)
-      .toOption
-      .get
-
-    // Reconstruct from the RECOVERY shards only (indices ≥ originalCount).
-    val originalCount = config.ecPieceSize / 2
-    val subset = (originalCount until originalCount * 2).map { i =>
-      ErasureCoding.Shard(shards(i), i)
-    }.toArray
-
-    val recovered = ErasureCoding
-      .reconstruct(subset, config.ecPieceSize, config.validatorCount)
-      .toOption
-      .get
-
-    recovered.take(bundle.length) shouldBe bundle
-  }

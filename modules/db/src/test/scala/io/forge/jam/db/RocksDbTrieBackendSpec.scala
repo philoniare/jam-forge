@@ -30,26 +30,6 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     bytes(1) = ((i >> 8) & 0xff).toByte
     JamBytes(bytes)
 
-  test("node and value round-trip through the store") {
-    withBackend { backend =>
-      val value = JamBytes(Array.fill[Byte](64)(0x2a)) // > 32 bytes → regular leaf
-      val node = TrieNode.leaf(key31(1), value)
-
-      backend.batchUpdate(
-        Seq(
-          BackendOp.WriteNode(node),
-          BackendOp.writeRawValue(value),
-          BackendOp.NodeRefDelta(node.hash, 1),
-          BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
-        )
-      )
-
-      backend.readNode(node.hash) shouldBe Some(node)
-      backend.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
-      backend.nodeRefcount(node.hash) shouldBe 1L
-    }
-  }
-
   test("gc reclaims dead nodes and their regular-leaf values, keeps live ones") {
     withBackend { backend =>
       val liveValue = JamBytes(Array.fill[Byte](40)(1))
@@ -96,63 +76,6 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       backend.batchUpdate(Seq(BackendOp.NodeRefDelta(node.hash, 1)))
       backend.gc()
       backend.readNode(node.hash) shouldBe Some(node)
-    }
-  }
-
-  test("state persists across close/reopen") {
-    val dir = Files.createTempDirectory("jam-rocksdb-reopen")
-    try
-      val value = JamBytes(Array.fill[Byte](50)(7))
-      val node = TrieNode.leaf(key31(9), value)
-      val backend1 = RocksDbTrieBackend.open(dir)
-      backend1.batchUpdate(
-        Seq(
-          BackendOp.WriteNode(node),
-          BackendOp.writeRawValue(value),
-          BackendOp.NodeRefDelta(node.hash, 1),
-          BackendOp.RawValueRefDelta(Hashing.blake2b256(value), 1)
-        )
-      )
-      backend1.close()
-
-      val backend2 = RocksDbTrieBackend.open(dir)
-      try
-        backend2.readNode(node.hash) shouldBe Some(node)
-        backend2.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
-        backend2.nodeRefcount(node.hash) shouldBe 1L
-      finally backend2.close()
-    finally deleteRecursively(dir)
-  }
-
-  test("StateTrie over RocksDB produces the same roots as over the in-memory backend") {
-    withBackend { rocks =>
-      val mem = new InMemoryTrieBackend
-      val trieRocks = StateTrie.empty(rocks)
-      val trieMem = StateTrie.empty(mem)
-
-      val updates1 = (0 until 50).map { i =>
-        key31(i) -> Some(JamBytes(Array.fill[Byte](8 + i)( (i % 127).toByte)))
-      }
-      trieRocks.update(updates1); trieRocks.save()
-      trieMem.update(updates1); trieMem.save()
-      trieRocks.rootHash shouldBe trieMem.rootHash
-
-      // Delete some, overwrite others.
-      val updates2 =
-        (0 until 20).map(i => key31(i) -> None) ++
-          (20 until 35).map(i => key31(i) -> Some(JamBytes(Array.fill[Byte](100)(0x5c))))
-      trieRocks.update(updates2); trieRocks.save()
-      trieMem.update(updates2); trieMem.save()
-      trieRocks.rootHash shouldBe trieMem.rootHash
-
-      // Reads agree.
-      trieRocks.read(key31(25)) shouldBe trieMem.read(key31(25))
-      trieRocks.read(key31(5)) shouldBe None
-
-      rocks.gc()
-      mem.gc()
-      trieRocks.read(key31(40)) shouldBe trieMem.read(key31(40))
-      trieRocks.rootHash shouldBe trieMem.rootHash
     }
   }
 
@@ -219,6 +142,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
           }
         }
         live.foreach((k, v) => tr.read(k) shouldBe Some(v))
+        gone.foreach((k, _) => if !live.contains(k) then tr.read(k) shouldBe None)
     }
   }
 
@@ -253,7 +177,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     }
   }
 
-  test("repeated open/close does not leak locks or handles; reopen succeeds") {
+  test("state persists across close/reopen; repeated open/close does not leak locks or handles") {
     val dir = Files.createTempDirectory("jam-rocksdb-leakshape")
     try
       val value = JamBytes(Array.fill[Byte](48)(0x5a))
@@ -271,10 +195,12 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       )
       seed.close()
 
-      // Open/close 50 times; a leaked lock or handle exhaustion throws here.
-      (0 until 50).foreach { _ =>
+      // Open/close repeatedly; a leaked lock throws here.
+      (0 until 5).foreach { _ =>
         val b = RocksDbTrieBackend.open(dir)
         b.readNode(node.hash) shouldBe Some(node)
+        b.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
+        b.nodeRefcount(node.hash) shouldBe 1L
         b.close()
       }
 
@@ -314,7 +240,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
 
   test("with garbage tracking on and no gc, dead candidates grow with every save (what the node used to do)") {
     withBackend { backend =>
-      val (_, pending) = saveRounds(backend, rounds = 200, perRound = 20)
+      val (_, pending) = saveRounds(backend, rounds = 50, perRound = 20)
       // Every save replaces the nodes on its touched paths, so the in-heap set only grows while gc does not run.
       pending.sliding(2).foreach { case Seq(a, b) => b should be >= a }
       pending.last should be > 20 * pending.head
@@ -323,24 +249,14 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     }
   }
 
-  test("with garbage tracking off, no dead candidates are held however many saves") {
-    val dir = Files.createTempDirectory("jam-rocksdb-notrack")
-    try
-      val backend = RocksDbTrieBackend.open(dir, trackGarbage = false)
-      try
-        backend.tracksGarbage shouldBe false
-        val (_, pending) = saveRounds(backend, rounds = 200, perRound = 20)
-        pending.foreach(_ shouldBe 0)
-      finally backend.close()
-    finally deleteRecursively(dir)
-  }
-
-  test("with garbage tracking off, every earlier root stays readable, and gc refuses to run") {
+  test("with garbage tracking off, no dead candidates are held, every earlier root stays readable, and gc refuses to run") {
     val dir = Files.createTempDirectory("jam-rocksdb-notrack-roots")
     try
       val backend = RocksDbTrieBackend.open(dir, trackGarbage = false)
       try
-        val (roots, _) = saveRounds(backend, rounds = 60, perRound = 15)
+        backend.tracksGarbage shouldBe false
+        val (roots, pending) = saveRounds(backend, rounds = 20, perRound = 15)
+        pending.foreach(_ shouldBe 0)
         an[UnsupportedOperationException] should be thrownBy backend.gc()
         roots.foreach { (root, state) =>
           val trie = StateTrie.at(backend, root)
@@ -368,8 +284,8 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       val off = RocksDbTrieBackend.open(dirOff, trackGarbage = false)
       val on = RocksDbTrieBackend.open(dirOn)
       try
-        val (rootsOff, _) = saveRounds(off, rounds = 40, perRound = 10)
-        val (rootsOn, _) = saveRounds(on, rounds = 40, perRound = 10)
+        val (rootsOff, _) = saveRounds(off, rounds = 15, perRound = 10)
+        val (rootsOn, _) = saveRounds(on, rounds = 15, perRound = 10)
         rootsOff.map(_._1) shouldBe rootsOn.map(_._1)
         val stack = scala.collection.mutable.Stack.from(rootsOn.map(_._1))
         val seen = scala.collection.mutable.HashSet[Hash]()

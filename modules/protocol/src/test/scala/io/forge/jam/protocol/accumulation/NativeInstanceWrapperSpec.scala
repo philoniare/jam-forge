@@ -87,26 +87,6 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
         finally rc.close()
   }
 
-  it should "have wrapper post-run register reads match the native ExecResult (LoadImm64)" in {
-    libPath match
-      case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
-      case Some(lib) =>
-        val rc = new PvmRecompiler(lib)
-        try
-          val (code, bitmask) = loadImmThenTrap(3, 0x1122334455667788L)
-          val regs = Array.fill(13)(0L)
-          val (out, wrapper, live, blk) =
-            compileAndRunLive(rc, code, bitmask, regs, 100L, new Array[PvmRecompiler.Region](0), new Array[Byte](0))
-          try
-            out.exit shouldBe PvmRecompiler.EXIT_PANIC // program ends in Trap
-            wrapper.reg(3) shouldBe 0x1122334455667788L
-            wrapper.gas shouldBe out.gasRemaining
-          finally
-            live.close()
-            blk.close()
-        finally rc.close()
-  }
-
   it should "have wrapper post-run reads see a native WRITE to memory (store-then-load round trip)" in {
     libPath match
       case None => cancel("recompiler dylib not found (set -Djam.pvm.recompiler.lib); skipping")
@@ -153,9 +133,11 @@ class NativeInstanceWrapperSpec extends AnyFlatSpec with Matchers:
             val liveOut = live.run()
             val wrapper = new NativeInstanceWrapper(live)
 
+            liveOut.exit shouldBe PvmRecompiler.EXIT_PANIC // program ends in Trap
             liveOut.exit shouldBe copyOut.exit
             liveOut.gasRemaining shouldBe copyOut.gasRemaining
             liveOut.pc shouldBe copyOut.pc
+            wrapper.reg(7) shouldBe 0x0102030405060708L
             wrapper.reg(7) shouldBe copyRegs(7)
             wrapper.gas shouldBe copyOut.gasRemaining
           finally

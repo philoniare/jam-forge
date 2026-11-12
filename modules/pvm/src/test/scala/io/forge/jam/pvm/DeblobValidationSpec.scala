@@ -77,36 +77,6 @@ class DeblobValidationSpec extends AnyFlatSpec with Matchers:
     instance.programCounter.map(_.value.toInt) shouldBe Some(100)
   }
 
-  it should "execute a structurally-valid program normally (regression guard)" in {
-    val code = Array[Byte](51, 0, 42, 0) // LoadImm reg0=42; Panic
-    val bitmask = Array[Byte](0x09)
-    val instance = instanceFor(code, bitmask)
-    instance.setNextProgramCounter(ProgramCounter(0))
-    instance.setGas(100L)
-
-    instance.run() match
-      case Right(interrupt) => interrupt shouldBe InterruptKind.Panic
-      case Left(err)         => fail(s"Unexpected error: $err")
-
-    // Both instructions actually ran this time.
-    instance.reg(0) shouldBe 42L
-    instance.gas should be < 100L
-  }
-
-  "Program.isValidBlob" should "accept a program ending in a terminator and reject one that doesn't" in {
-    Program.isValidBlob(Array[Byte](0), Array[Byte](0x01)) shouldBe true // Panic (trap) alone
-    Program.isValidBlob(Array[Byte](51, 0, 42), Array[Byte](0x01)) shouldBe false // LoadImm alone, not a terminator
-  }
-
-  "Program.isValidInstructionBoundary" should "hold only at a set bitmask bit with a defined opcode" in {
-    val code = Array[Byte](51, 0, 42, 0)
-    val bitmask = Array[Byte](0x09)
-    Program.isValidInstructionBoundary(code, bitmask, 0) shouldBe true
-    Program.isValidInstructionBoundary(code, bitmask, 3) shouldBe true
-    Program.isValidInstructionBoundary(code, bitmask, 1) shouldBe false // mid-instruction
-    Program.isValidInstructionBoundary(code, bitmask, 100) shouldBe false // out of range
-  }
-
   // ==========================================================================
   // Part B: branch(b, C) both-target validation + sjump
   // ==========================================================================

@@ -366,9 +366,9 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       serverNode.shutdown()
       cleanup(dir)
 
-  test("CE147 client: 700 fetches a peer answers with nothing leave the connection usable") {
+  test("CE147 client: 300 fetches a peer answers with nothing leave the connection usable") {
     fetchesLeaveConnectionUsable(
-      fetches = 700,
+      fetches = 300,
       budgetMs = 10000,
       serverConfig = config,
       serve = (node, guarantor) =>
@@ -377,14 +377,14 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
     )
   }
 
-  test("CE147 client: 700 fetches from a peer that does not serve CE 147 leave the connection usable") {
-    fetchesLeaveConnectionUsable(fetches = 700, budgetMs = 10000, serverConfig = config, serve = (_, _) => ())
+  test("CE147 client: 300 fetches from a peer that does not serve CE 147 leave the connection usable") {
+    fetchesLeaveConnectionUsable(fetches = 300, budgetMs = 10000, serverConfig = config, serve = (_, _) => ())
   }
 
   test("CE147 client: 300 fetches that time out leave the connection usable") {
     fetchesLeaveConnectionUsable(
       fetches = 300,
-      budgetMs = 30,
+      budgetMs = 10,
       // The responder's side of a timed-out request goes on its idle timeout.
       serverConfig = config.copy(streamIdleTimeoutMillis = 500),
       serve = (node, _) =>

@@ -9,20 +9,33 @@ class BasicMemoryHeapGrowthSpec extends AnyFunSuite:
 
   private val PageSize = UInt(4096)
 
-  private def memory(): BasicMemory =
-    val map = MemoryMap.builder(PageSize).withRoDataSize(PageSize).withRwDataSize(PageSize)
+  private def memoryMap(): MemoryMap =
+    MemoryMap.builder(PageSize).withRoDataSize(PageSize).withRwDataSize(PageSize)
       .withStackSize(UInt(65536)).withAuxDataSize(PageSize).build().fold(e => fail(e), identity)
-    BasicMemory.create(map)
+
+  private def memory(): BasicMemory = BasicMemory.create(memoryMap())
 
   test("grow_heap makes exactly the requested pages writable, however the buffer grows"):
-    val mem = memory()
+    val map = memoryMap()
+    val mem = BasicMemory.create(map)
+    // The heap starts empty at heapBase, and sbrk returns the previous heap end.
+    assert(mem.heapEnd == map.heapBase)
+    var expectedPrev = map.heapBase
     for _ <- 1 to 50 do
-      val end = mem.sbrk(UInt(2 * 4096)).get + UInt(2 * 4096)
+      val prev = mem.sbrk(UInt(2 * 4096)).get
+      assert(prev == expectedPrev)
+      val end = prev + UInt(2 * 4096)
       assert(mem.heapEnd == end)
+      expectedPrev = end
       // The last new byte is writable; the first byte past the heap end faults on load and store.
       assert(mem.storeU8(end - UInt(1), UByte(7)) == MemoryResult.Success(()))
+      assert(mem.loadU8(end - UInt(1)) == MemoryResult.Success(UByte(7)))
       assert(mem.loadU8(end) match { case MemoryResult.Segfault(_, _) => true; case _ => false })
       assert(mem.storeU8(end, UByte(7)) match { case MemoryResult.Segfault(_, _) => true; case _ => false })
+    // sbrk(0) returns the current heap end without growing it.
+    val endBefore = mem.heapEnd
+    assert(mem.sbrk(UInt(0)) == Some(endBefore))
+    assert(mem.heapEnd == endBefore)
 
   test("newly writable heap pages read as zero and earlier heap bytes survive growth"):
     val mem = memory()

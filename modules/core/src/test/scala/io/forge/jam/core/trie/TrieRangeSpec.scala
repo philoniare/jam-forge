@@ -54,11 +54,18 @@ class TrieRangeSpec extends AnyFlatSpec with Matchers:
     pairs shouldBe (1 to 10).map(i => (key(i), value(i, ValueLen))).toList
   }
 
-  it should "return exactly the keys contained in a sub-range whose endpoints exist as leaves" in {
+  it should "return exactly the keys contained in a sub-range whose endpoints exist as leaves, with a boundary chained from the root" in {
     val trie = buildTrie()
-    val (_, pairs) = trie.range(key(3), key(7), maxSize = Int.MaxValue)
+    val (boundary, pairs) = trie.range(key(3), key(7), maxSize = Int.MaxValue)
     pairs.map(_._1) shouldBe (3 to 7).map(key).toList
     pairs shouldBe (3 to 7).map(i => (key(i), value(i, ValueLen))).toList
+
+    assertBoundaryChain(trie, boundary)
+    val allLinks = boundary.flatMap(childHashes).toSet
+    val (firstKey, firstValue) = pairs.head
+    val (lastKey, lastValue) = pairs.last
+    allLinks.contains(TrieNode.leaf(firstKey, firstValue).hash) shouldBe true
+    allLinks.contains(TrieNode.leaf(lastKey, lastValue).hash) shouldBe true
   }
 
   it should "return exactly the contained keys when start and end fall strictly between stored keys" in {
@@ -92,19 +99,6 @@ class TrieRangeSpec extends AnyFlatSpec with Matchers:
     val trie = buildTrie()
     val (_, pairs) = trie.range(rawKey(200), rawKey(250), maxSize = Int.MaxValue)
     pairs shouldBe empty
-  }
-
-  it should "produce boundary nodes that chain from the root hash down to the start key" in {
-    val trie = buildTrie()
-    val (boundary, pairs) = trie.range(key(3), key(7), maxSize = Int.MaxValue)
-    pairs should not be empty
-    assertBoundaryChain(trie, boundary)
-
-    val allLinks = boundary.flatMap(childHashes).toSet
-    val (firstKey, firstValue) = pairs.head
-    val (lastKey, lastValue) = pairs.last
-    allLinks.contains(TrieNode.leaf(firstKey, firstValue).hash) shouldBe true
-    allLinks.contains(TrieNode.leaf(lastKey, lastValue).hash) shouldBe true
   }
 
   it should "end the path to the start key at the leaf it reaches (JAMNP-S CE 129)" in {

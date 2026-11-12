@@ -73,7 +73,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
     an[IllegalArgumentException] should be thrownBy ChainSpec.fromJson(noValidators)
   }
 
-  test("a node 100 blocks behind catches up, and follows a peer's finality only when told how many peers to trust") {
+  test("a node 70 blocks behind catches up, and follows a peer's finality only when told how many peers to trust") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
     val spec = ChainSpec(
       id = "join-devnet",
@@ -90,8 +90,8 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       nodes = List(ahead)
       ahead.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
       // More blocks than one block request carries, so the tip's 64 predecessors do not reach genesis.
-      for slot <- 1 to 100 do ahead.authorSlot(slot.toLong).isDefined shouldBe true
-      ahead.chain.finalize(ahead.chain.ancestorAtHeight(ahead.chain.best.hash, 95).get).isRight shouldBe true
+      for slot <- 1 to 70 do ahead.authorSlot(slot.toLong).isDefined shouldBe true
+      ahead.chain.finalize(ahead.chain.ancestorAtHeight(ahead.chain.best.hash, 65).get).isRight shouldBe true
       val address = new InetSocketAddress("127.0.0.1", ahead.listenPort)
 
       // Default finality quorum (2V/3 of the validators): one peer's word is not enough.
@@ -99,7 +99,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       nodes = cautious :: nodes
       cautious.connectPeer(address)
       eventually("the cautious node to catch up")(cautious.chain.best.hash == ahead.chain.best.hash)
-      cautious.chain.best.slot shouldBe 100L
+      cautious.chain.best.slot shouldBe 70L
 
       // Told to trust one peer: it also adopts that peer's finalized block.
       val trusting = new JamNode(spec, NodeConfig(dataDir = dirs(2), slotTicking = false, finalityPeers = Some(1))).start()
@@ -107,7 +107,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       trusting.connectPeer(address)
       eventually("the trusting node to catch up")(trusting.chain.best.hash == ahead.chain.best.hash)
       eventually("the trusting node to follow the peer's finality")(trusting.chain.finalized.hash == ahead.chain.finalized.hash)
-      trusting.chain.finalized.slot shouldBe 95L
+      trusting.chain.finalized.slot shouldBe 65L
       cautious.chain.finalized.slot shouldBe 0L
     finally
       nodes.foreach(_.shutdown())

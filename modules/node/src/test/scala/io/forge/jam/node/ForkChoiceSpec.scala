@@ -62,6 +62,9 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       nodeA.chain.initializeOrRestore(spec)
       nodeB.chain.initializeOrRestore(spec)
 
+      // Before any block is imported, genesis is the sole leaf.
+      nodeA.chain.leaves.map(_.hash) shouldBe List(nodeA.chain.best.hash)
+
       // A authors with tickets; B authors bare (no ticket service) so the
       // branches diverge in content and therefore in hash.
       nodeA.enableAuthoring(devKeys)
@@ -77,6 +80,8 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       // A's own block 2 (with tickets → different from B's).
       nodeA.authorSlot(2).isDefined shouldBe true
       val headA2 = nodeA.chain.best
+      // Block 1 is no longer a leaf.
+      nodeA.chain.leaves.map(_.hash) shouldBe List(headA2.hash)
 
       // B's competing chain: 3' and 4' (no block at slot 2, so the branches
       // do not equivocate).
@@ -105,6 +110,11 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       sideResult.isLeft shouldBe true
       sideResult.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       nodeA.chain.best.hash shouldBe headA2.hash
+      // Both tips are leaves, best (A's) first.
+      val block2bHash = nodeB.chain.headerHashOf(block2b)
+      val leavesAfterFork = nodeA.chain.leaves
+      leavesAfterFork.head.hash shouldBe headA2.hash
+      leavesAfterFork.map(_.hash).toSet shouldBe Set(headA2.hash, block2bHash)
 
       // ...and 4' makes the branch longer → reorg onto B's chain.
       val reorged = nodeA.chain.importBlock(block3bBytes)
@@ -114,6 +124,11 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       nodeA.chain.best.hash shouldBe nodeB.chain.best.hash
       nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
       nodeA.chain.best.slot shouldBe 4L
+      // After the reorg the new best leads the leaves; 3' has a child and is no leaf; A's 2 still is.
+      val leavesAfterReorg = nodeA.chain.leaves
+      leavesAfterReorg.head.hash shouldBe nodeB.chain.headerHashOf(block3b)
+      leavesAfterReorg.map(_.hash).toSet shouldBe Set(nodeB.chain.headerHashOf(block3b), headA2.hash)
+      leavesAfterReorg.map(_.hash) should not contain block2bHash
 
       // The abandoned block is still stored but no longer canonical; the new
       // chain keeps extending.
@@ -201,41 +216,6 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
-  test("depth finality advances the finalized head and blocks reorgs below it") {
-    val genesis = loadGenesis().getOrElse(
-      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
-    )
-    val spec = ChainSpec(
-      id = "finality-devnet",
-      config = ChainConfig.TINY,
-      genesisHeaderBytes = Some(genesis.header.encode.toArray),
-      explicitGenesisHash = None,
-      genesisState = genesis.state.keyvals,
-      bootnodes = Nil
-    )
-    val dir = tempDir("jam-finality")
-    var node: JamNode = null
-    try
-      node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
-      node.chain.initializeOrRestore(spec)
-      node.enableAuthoring(devKeys)
-      node.chain.onImported((_, _) => node.chain.finalizeAtDepth(2))
-
-      for slot <- 1L to 5L do node.authorSlot(slot).isDefined shouldBe true
-
-      val finalityDeadline = System.currentTimeMillis() + 30000
-      while node.chain.finalized.slot != 3L && System.currentTimeMillis() < finalityDeadline do
-        Thread.sleep(50)
-      node.chain.finalized.slot shouldBe 3L
-
-      // Finalizing below the finalized head is rejected.
-      val genesisHash = spec.genesisHeaderHash
-      node.chain.finalize(genesisHash).isLeft shouldBe true
-    finally
-      if node != null then node.shutdownStorageOnly()
-      cleanup(dir)
-  }
-
   private def devSpec(id: String, genesis: io.forge.jam.protocol.traces.Genesis): ChainSpec =
     ChainSpec(
       id = id,
@@ -288,7 +268,7 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
-  test("depth finality waits for a quorum of peers holding the target") {
+  test("depth finality waits for a quorum of peers holding the target, advances the finalized head and blocks reorgs below it") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
     )
@@ -298,8 +278,11 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
     try
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
       node.chain.initializeOrRestore(spec)
-      node.enableAuthoring(devKeys)
-      for slot <- 1L to 4L do node.authorSlot(slot).isDefined shouldBe true
+      // Bare authoring: tickets play no part in depth finality.
+      def author(slot: Long): Unit =
+        val block = new BlockAuthor(node.chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author $slot"))
+        node.chain.importBlock(node.chain.encodeBlock(block)).isRight shouldBe true
+      for slot <- 1L to 4L do author(slot)
       val best = node.chain.best
       val genesisHash = spec.genesisHeaderHash
 
@@ -314,6 +297,17 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
         .getOrElse(fail("not finalized"))
       fin.slot shouldBe 2L
       node.chain.ancestorAtHeight(best.hash, 2L) shouldBe Some(fin.hash)
+
+      // Finalizing at depth on every import advances the finalized head with the chain.
+      node.chain.onImported((_, _) => node.chain.finalizeAtDepth(2))
+      author(5L)
+      val finalityDeadline = System.currentTimeMillis() + 30000
+      while node.chain.finalized.slot != 3L && System.currentTimeMillis() < finalityDeadline do
+        Thread.sleep(50)
+      node.chain.finalized.slot shouldBe 3L
+
+      // Finalizing below the finalized head is rejected.
+      node.chain.finalize(genesisHash).isLeft shouldBe true
     finally
       if node != null then node.shutdownStorageOnly()
       cleanup(dir)

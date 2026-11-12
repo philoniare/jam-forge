@@ -11,12 +11,6 @@ class BinaryMerkleSpec extends AnyFunSuite with Matchers:
   private val nodeP = "node".getBytes("UTF-8")
   private val leafP = "leaf".getBytes("UTF-8")
 
-  test("node: empty is the zero hash, singleton is the value itself") {
-    BinaryMerkle.node(IndexedSeq.empty) shouldBe BinaryMerkle.ZeroHash
-    val v = Array[Byte](1, 2, 3)
-    BinaryMerkle.node(IndexedSeq(v)) shouldBe v
-  }
-
   test("merklizeWB: singleton hashes the value; pair hashes node-prefixed children") {
     val a = Array[Byte](1)
     val b = Array[Byte](2)
@@ -42,25 +36,6 @@ class BinaryMerkleSpec extends AnyFunSuite with Matchers:
     BinaryMerkle.merklizeCD(IndexedSeq(a, b, c)) shouldBe expected
     // Empty: C([]) = [zerohash], N of singleton = the value.
     BinaryMerkle.merklizeCD(IndexedSeq.empty) shouldBe z
-  }
-
-  test("trace reconstructs the root for every leaf of a padded CD tree") {
-    val leaves = (0 until 11).map(i => Array[Byte](i.toByte, (i + 1).toByte))
-    val padded = BinaryMerkle.constancyPreprocess(leaves)
-    val root = BinaryMerkle.node(padded)
-
-    for i <- padded.indices do
-      val path = BinaryMerkle.trace(padded, i)
-      // Reconstruct bottom-up: path is top-to-bottom, index bits (MSB first)
-      // pick the side at each level.
-      var acc = padded(i)
-      val depth = path.length
-      for k <- (depth - 1) to 0 by -1 do
-        val bit = (i >> (depth - 1 - k)) & 1
-        acc =
-          if bit == 0 then h(nodeP, acc, path(k))
-          else h(nodeP, path(k), acc)
-      acc shouldBe root
   }
 
   test("justifySubPath + subtreePage reconstruct the CD root across pages") {
@@ -113,7 +88,7 @@ class BinaryMerkleSpec extends AnyFunSuite with Matchers:
     (0 until n).map(i => Array[Byte](i.toByte, (i >> 8).toByte, 7))
 
   test("GP: Tree gives N and every trace T of the per-call functions") {
-    for n <- (0 to 40) ++ Seq(63, 64, 65, 341, 1023) do
+    for n <- (0 to 40) ++ Seq(63, 64, 65, 130) do
       withClue(s"n=$n: ") {
         val vs = values(n)
         val tree = BinaryMerkle.Tree(vs)

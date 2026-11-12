@@ -51,10 +51,17 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
     node.chain.initializeOrRestore(spec)
     node
 
+  /** Author `slot` on `node` with a bare [[BlockAuthor]] and import it. No ticket service, so no ring-VRF ticket
+    * generation each epoch: the chain is key-sealed throughout, which is all pruning needs.
+    */
+  private def authorOn(node: JamNode, slot: Long): ChainManager#Head =
+    val block = new BlockAuthor(node.chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+    node.chain.importBlock(node.chain.encodeBlock(block)).fold(e => fail(s"import of slot $slot: $e"), identity)
+
   /** Author `slots` on `node`, finalizing two blocks behind the head as it goes; returns (slot, hash) per block. */
   private def grow(node: JamNode, slots: Range): List[(Long, Hash)] =
     slots.toList.map { slot =>
-      val head = node.authorSlot(slot.toLong).getOrElse(fail(s"author slot $slot"))
+      val head = authorOn(node, slot.toLong)
       node.chain.finalizeAtDepth(2)
       slot.toLong -> head.hash
     }
@@ -62,22 +69,40 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
   private def stored(node: JamNode, h: Hash): Boolean =
     node.chain.hasBlock(h) || node.chain.headerBytes(h).isDefined || node.chain.meta(s"height:${h.toHex}").isDefined
 
-  test("blocks more than maxLookupAnchorAge slots behind finality are deleted; the rest, genesis and the chain's progress are kept") {
+  test("blocks more than maxLookupAnchorAge slots behind finality are deleted with the side branches off them; the rest, genesis and the chain's progress are kept") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
     val sp = spec("prune-devnet", genesis)
-    val dir = tempDir("jam-prune")
+    val dirA = tempDir("jam-prune")
+    val dirB = tempDir("jam-prune-fork-b")
     var node: JamNode = null
+    var nodeB: JamNode = null
     try
-      node = newNode(sp, dir)
-      node.enableAuthoring(devKeys)
-      val blocks = grow(node, 1 to 70)
+      node = newNode(sp, dirA)
+      nodeB = newNode(sp, dirB)
+      val block1 = new BlockAuthor(node.chain, devKeys).tryAuthor(1).getOrElse(fail("author block 1"))
+      val block1Bytes = node.chain.encodeBlock(block1)
+      val head1 = node.chain.importBlock(block1Bytes).fold(e => fail(s"import of block 1: $e"), identity)
+      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
+
+      // A's own block 2; B's competing 3' is parked on A as a side branch off block 1.
+      val head2 = authorOn(node, 2)
+      val side = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(3).getOrElse(fail("author 3'"))
+      val sideHash = nodeB.chain.headerHashOf(side)
+      node.chain.importBlock(nodeB.chain.encodeBlock(side)).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      node.chain.hasBlock(sideHash) shouldBe true
+
+      // While block 1 is inside the window the side branch stays.
+      val early = List(1L -> head1.hash, 2L -> head2.hash) ++ grow(node, 3 to 20)
+      node.chain.hasBlock(sideHash) shouldBe true
+
+      val blocks = early ++ grow(node, 21 to 40)
       val fin = node.chain.finalized
-      fin.slot shouldBe 68L
+      fin.slot shouldBe 38L
       val cutoff = fin.slot - window
 
       // Outside the window: body, header and metadata are gone. The one block just below the cutoff is the floor.
       val (old, kept) = blocks.partition(_._1 < cutoff)
-      old.size should be > 30
+      old.size should be > 10
       old.init.foreach((slot, h) => withClue(s"slot $slot: ") { stored(node, h) shouldBe false })
       node.chain.pruneFloorHeight shouldBe old.last._1 // one block per slot, so height == slot
       // Inside it: every block, with its header for the ancestor set.
@@ -92,15 +117,20 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       // The finalized-chain index holds only the kept range.
       node.chain.meta(f"fin:${5L}%016x") shouldBe None
       node.chain.meta(f"fin:${fin.slot}%016x").map(Hash(_)) shouldBe Some(fin.hash)
+      // Block 1 is pruned, so the side branch off it went with it.
+      stored(node, sideHash) shouldBe false
+      node.chain.leaves.map(_.hash) shouldBe List(node.chain.best.hash)
 
       // The chain goes on, and a block request for pruned history gets what is left rather than failing.
-      grow(node, 71 to 80)
-      node.chain.best.slot shouldBe 80L
+      grow(node, 41 to 45)
+      node.chain.best.slot shouldBe 45L
       node.chain.blocksDescending(node.chain.best.hash, 64).size should be <= (window + 4).toInt
       node.chain.blocksDescending(node.chain.best.hash, 8).size shouldBe 8
     finally
       if node != null then node.shutdownStorageOnly()
-      cleanup(dir)
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
   }
 
   test("a pruned node restarts with its head, finality and leaves, and keeps importing") {
@@ -113,20 +143,19 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
     try
       // Another node authors the chain (and keeps all of it); the node under test imports it block by block.
       author = newNode(sp, dirAuthor, prune = false)
-      author.enableAuthoring(devKeys)
       node = newNode(sp, dir)
       def follow(slots: Range): Unit =
         slots.foreach { slot =>
-          val head = author.authorSlot(slot.toLong).getOrElse(fail(s"author slot $slot"))
+          val head = authorOn(author, slot.toLong)
           val bytes = author.chain.blocksDescending(head.hash, 1).head
           withClue(s"import of slot $slot: ") { node.chain.importBlock(bytes).isRight shouldBe true }
           node.chain.finalizeAtDepth(2)
         }
-      follow(1 to 60)
+      follow(1 to 40)
       val best = node.chain.best
       val fin = node.chain.finalized
       val floor = node.chain.pruneFloorHeight
-      floor should be > 20L
+      floor should be > 10L
       node.shutdownStorageOnly()
 
       node = newNode(sp, dir)
@@ -134,8 +163,8 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       node.chain.finalized.hash shouldBe fin.hash
       node.chain.pruneFloorHeight shouldBe floor
       node.chain.leaves.map(_.hash) shouldBe List(best.hash)
-      follow(61 to 75)
-      node.chain.best.slot shouldBe 75L
+      follow(41 to 48)
+      node.chain.best.slot shouldBe 48L
       node.chain.best.hash shouldBe author.chain.best.hash
       node.chain.pruneFloorHeight should be > floor
     finally
@@ -145,48 +174,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       cleanup(dirAuthor)
   }
 
-  test("a side branch is deleted once the block it forks from leaves the window") {
-    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
-    val sp = spec("prune-forks", genesis)
-    val dirA = tempDir("jam-prune-fork-a")
-    val dirB = tempDir("jam-prune-fork-b")
-    var nodeA: JamNode = null
-    var nodeB: JamNode = null
-    try
-      nodeA = newNode(sp, dirA)
-      nodeB = newNode(sp, dirB)
-      nodeA.enableAuthoring(devKeys)
-      val bare = new BlockAuthor(nodeA.chain, devKeys)
-      val block1 = bare.tryAuthor(1).getOrElse(fail("author block 1"))
-      val block1Bytes = nodeA.chain.encodeBlock(block1)
-      nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
-      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
-
-      // A's own block 2; B's competing 3' is parked on A as a side branch off block 1.
-      nodeA.authorSlot(2).isDefined shouldBe true
-      val authorB = new BlockAuthor(nodeB.chain, devKeys)
-      val side = authorB.tryAuthor(3).getOrElse(fail("author 3'"))
-      val sideBytes = nodeB.chain.encodeBlock(side)
-      val sideHash = Hashing.blake2b256(nodeB.chain.headerCodec.encode(side.header))
-      nodeA.chain.importBlock(sideBytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
-      nodeA.chain.hasBlock(sideHash) shouldBe true
-
-      // While block 1 is inside the window the side branch stays.
-      grow(nodeA, 3 to 20)
-      nodeA.chain.hasBlock(sideHash) shouldBe true
-      // Once block 1 is pruned the branch goes with it.
-      grow(nodeA, 21 to 60)
-      nodeA.chain.pruneFloorHeight should be > 1L
-      stored(nodeA, sideHash) shouldBe false
-      nodeA.chain.leaves.map(_.hash) shouldBe List(nodeA.chain.best.hash)
-    finally
-      if nodeA != null then nodeA.shutdownStorageOnly()
-      if nodeB != null then nodeB.shutdownStorageOnly()
-      cleanup(dirA)
-      cleanup(dirB)
-  }
-
-  test("old states are deleted, and every kept block's state is whole and equal to an unpruned node's") {
+  test("old states are deleted, every kept block's state is whole and equal to an unpruned node's, and with block pruning off every block stays") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
     val sp = spec("prune-state", genesis)
     val dirFull = tempDir("jam-prune-state-full")
@@ -196,13 +184,12 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
     try
       // One node authors and keeps everything; the other imports the same blocks and prunes.
       full = newNode(sp, dirFull, prune = false, pruneState = false)
-      full.enableAuthoring(devKeys)
       pruned = newNode(sp, dirPruned)
       // A third keeps its blocks (the default) and must prune state just the same.
       val dirKeep = tempDir("jam-prune-state-keep")
       val keep = newNode(sp, dirKeep, prune = false)
-      val blocks = (1 to 90).toList.map { slot =>
-        val head = full.authorSlot(slot.toLong).getOrElse(fail(s"author slot $slot"))
+      val blocks = (1 to 45).toList.map { slot =>
+        val head = authorOn(full, slot.toLong)
         full.chain.finalizeAtDepth(2)
         val bytes = full.chain.blocksDescending(head.hash, 1).head
         withClue(s"import of slot $slot: ") { pruned.chain.importBlock(bytes).isRight shouldBe true }
@@ -212,7 +199,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
         slot.toLong -> head
       }
       pruned.chain.best.stateRoot shouldBe full.chain.best.stateRoot
-      pruned.chain.pruneFloorHeight should be > 50L
+      pruned.chain.pruneFloorHeight should be > 15L
 
       // Every key of every kept block's state, against the node that deleted nothing.
       val lo = io.forge.jam.core.JamBytes(new Array[Byte](31))
@@ -236,39 +223,30 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       valuesPruned should be <= valuesFull
       keep.chain.storedStateCounts shouldBe ((nodesPruned, valuesPruned))
       keep.chain.best.stateRoot shouldBe full.chain.best.stateRoot
-      blocks.foreach((_, head) => keep.chain.hasBlock(head.hash) shouldBe true)
+
+      // With block pruning off every block stays, with its header; the state floor still follows finality:
+      // states below it are gone, those above are readable.
+      blocks.foreach { (slot, head) =>
+        withClue(s"kept block of slot $slot: ") {
+          keep.chain.hasBlock(head.hash) shouldBe true
+          keep.chain.headerBytes(head.hash).isDefined shouldBe true
+        }
+      }
+      val keepFloor = keep.chain.pruneFloorHeight
+      keepFloor shouldBe pruned.chain.pruneFloorHeight
+      keep.chain.stateAt(blocks(4)._2.hash) shouldBe None
+      blocks.filter(_._1 >= keepFloor).foreach((slot, head) =>
+        withClue(s"state of kept slot $slot: ") { keep.chain.stateAt(head.hash).isDefined shouldBe true }
+      )
+      keep.chain.blocksDescending(keep.chain.best.hash, 64).size shouldBe 45
       keep.shutdownStorageOnly()
       cleanup(dirKeep)
-      info(s"state nodes on disk after 90 blocks: $nodesPruned pruned vs $nodesFull unpruned; values $valuesPruned vs $valuesFull")
+      info(s"state nodes on disk after 45 blocks: $nodesPruned pruned vs $nodesFull unpruned; values $valuesPruned vs $valuesFull")
     finally
       if full != null then full.shutdownStorageOnly()
       if pruned != null then pruned.shutdownStorageOnly()
       cleanup(dirFull)
       cleanup(dirPruned)
-  }
-
-  test("with block pruning off every block stays, and old state is still deleted") {
-    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
-    val sp = spec("prune-off", genesis)
-    val dir = tempDir("jam-prune-off")
-    var node: JamNode = null
-    try
-      node = newNode(sp, dir, prune = false)
-      node.enableAuthoring(devKeys)
-      val blocks = grow(node, 1 to 60)
-      blocks.foreach { (_, h) =>
-        node.chain.hasBlock(h) shouldBe true
-        node.chain.headerBytes(h).isDefined shouldBe true
-      }
-      // The state floor still follows finality: states below it are gone, those above are readable.
-      val floor = node.chain.pruneFloorHeight
-      floor should be > 20L
-      node.chain.stateAt(blocks(4)._2) shouldBe None
-      blocks.filter(_._1 >= floor).foreach((slot, h) => withClue(s"slot $slot: ") { node.chain.stateAt(h).isDefined shouldBe true })
-      node.chain.blocksDescending(node.chain.best.hash, 64).size shouldBe 60
-    finally
-      if node != null then node.shutdownStorageOnly()
-      cleanup(dir)
   }
 
   test("shard custody units expire by when their erasure-root was last stored") {

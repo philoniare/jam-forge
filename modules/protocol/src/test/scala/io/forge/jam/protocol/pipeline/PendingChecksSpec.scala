@@ -116,10 +116,6 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
       case ImportResult.Failure(_, message, _) => message shouldBe expected.message
       case other                            => fail(s"expected ${expected.message}, got $other")
 
-  test("the untampered block imports") {
-    importResult(fixture.block) shouldBe a[ImportResult.Success]
-  }
-
   test("GP: a bad seal is reported as BadSealSignature (eq. 6.16)") {
     val h = fixture.block.header
     failsWith(fixture.block.copy(header = h.copy(seal = corrupt(h.seal))), badSeal)
@@ -140,14 +136,10 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
     )
   }
 
-  test("GP: a bad seal wins over a malformed entropy source, as the seal is checked first") {
-    val h = fixture.block.header.copy(entropySource = malformedEntropySource)
-    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), badSeal)
-  }
-
-  test("GP: a bad seal wins over a bad entropy source, as the seal is checked first") {
-    val h = fixture.block.header.copy(entropySource = wrongEntropySource)
-    failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), badSeal)
+  test("GP: a bad seal wins over a malformed or bad entropy source, as the seal is checked first") {
+    for entropySource <- List(malformedEntropySource, wrongEntropySource) do
+      val h = fixture.block.header.copy(entropySource = entropySource)
+      failsWith(fixture.block.copy(header = h.copy(seal = corrupt(resealed(h).header.seal))), badSeal)
   }
 
   test("GP: a bad ticket proof under a valid header is reported as BadTicketProof (eq. 6.30)") {

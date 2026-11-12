@@ -1,17 +1,31 @@
 package io.forge.jam.core.codec
 
 import io.forge.jam.core.JamBytes
-import io.forge.jam.core.primitives.{Ed25519Signature, Timeslot, ValidatorIndex}
+import io.forge.jam.core.primitives.{Timeslot, ValidatorIndex}
+import io.forge.jam.core.types.tickets.{RingVrfSignatureSize, TicketEnvelope, TicketMark}
+import spire.math.UByte
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 class PrimitiveCodecsSpec extends AnyFunSuite with Matchers:
 
-  test("ed25519Signature round-trips and is 64 bytes on the wire") {
-    val sig = Ed25519Signature(Array.tabulate[Byte](64)(_.toByte))
-    val bytes = PrimitiveCodecs.ed25519Signature.encode(sig)
-    bytes.length shouldBe 64
-    PrimitiveCodecs.ed25519Signature.decodeExact(bytes) shouldBe Right(sig)
+  test("ticket attempt is a fixed one-octet E_1, also for attempt >= 128") {
+    // The codec vectors only carry attempts 0..2; a compact encoding would differ from 128 up.
+    val envelope = TicketEnvelope(UByte(255), JamBytes.fill(RingVrfSignatureSize)(0x00.toByte))
+    val envBytes = Codec[TicketEnvelope].encode(envelope)
+    envBytes.length shouldBe TicketEnvelope.Size
+    envBytes(0) shouldBe 0xff.toByte
+    val decodedEnv = Codec[TicketEnvelope].decodeExact(envBytes).toOption.get
+    decodedEnv.attempt shouldBe UByte(255)
+    decodedEnv.signature shouldBe envelope.signature
+
+    val mark = TicketMark(JamBytes.fill(32)(0xAB.toByte), UByte(255))
+    val markBytes = Codec[TicketMark].encode(mark)
+    markBytes.length shouldBe TicketMark.Size
+    markBytes(32) shouldBe 0xff.toByte
+    val decodedMark = Codec[TicketMark].decodeExact(markBytes).toOption.get
+    decodedMark.attempt shouldBe UByte(255)
+    decodedMark.id shouldBe mark.id
   }
 
   test("timeslot encodes as u32 little-endian") {

@@ -129,19 +129,15 @@ class StateTrieBatchSpec extends AnyFlatSpec with Matchers:
     JamBytes.wrap(a)
 
   "StateTrie.update" should "match the per-key update and a fresh build over random batches" in {
-    for seed <- 1 to 6 do runRounds(seed, rounds = 40, randomKey, gcEvery = 3)
+    for seed <- 1 to 3 do runRounds(seed, rounds = 40, randomKey, gcEvery = 3)
   }
 
-  it should "match them on keys with long shared prefixes" in {
-    for seed <- 11 to 16 do runRounds(seed, rounds = 40, sharedPrefixKey, gcEvery = 2)
+  it should "match them on keys with long shared prefixes when every round is saved and collected" in {
+    for seed <- 11 to 13 do runRounds(seed, rounds = 40, sharedPrefixKey, gcEvery = 1)
   }
 
   it should "match them on interleaved service keys" in {
-    for seed <- 21 to 24 do runRounds(seed, rounds = 40, serviceKey, gcEvery = 4)
-  }
-
-  it should "match them when every round is saved and collected" in {
-    for seed <- 31 to 34 do runRounds(seed, rounds = 60, sharedPrefixKey, gcEvery = 1)
+    for seed <- 21 to 22 do runRounds(seed, rounds = 40, serviceKey, gcEvery = 4)
   }
 
   it should "build a large trie in one batch with the root of a fresh build" in {

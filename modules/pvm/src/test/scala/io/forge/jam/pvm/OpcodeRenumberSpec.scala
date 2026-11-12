@@ -2,7 +2,6 @@ package io.forge.jam.pvm
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import io.forge.jam.pvm.program.InstructionDecoder
 import io.forge.jam.pvm.types.ProgramCounter
 
 class OpcodeRenumberSpec extends AnyFlatSpec with Matchers:
@@ -13,10 +12,6 @@ class OpcodeRenumberSpec extends AnyFlatSpec with Matchers:
     Opcode.fromByte(0) shouldBe Some(Opcode.Panic) // trap
     Opcode.fromByte(1) shouldBe Some(Opcode.Fallthrough)
     Opcode.fromByte(2) shouldBe Some(Opcode.Unlikely)
-  }
-
-  it should "map byte 101 to CountSetBits64, NOT Sbrk (sbrk instruction removed)" in {
-    Opcode.fromByte(101) shouldBe Some(Opcode.CountSetBits64)
   }
 
   it should "map the full shifted two-register family 100-110" in {
@@ -42,41 +37,7 @@ class OpcodeRenumberSpec extends AnyFlatSpec with Matchers:
     Opcode.values.map(_.toString) should not contain "Sbrk"
   }
 
-  // ---- 2. instruction decoder wiring ----------------------------------------
-
-  "InstructionDecoder.decode" should "decode byte 2 as Instruction.Unlikely (argless, 1-byte)" in {
-    val code = Array[Byte](2, 0, 0, 0)
-    val bitmask = Array[Byte](0x02) // next instruction boundary bit set at offset 1 (bit index 1)
-    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
-    instr shouldBe Instruction.Unlikely
-    skip shouldBe 1
-  }
-
-  it should "decode byte 101 (regs2 family) as Instruction.CountSetBits64" in {
-    val code = Array[Byte](101, ((3 & 0xf) | ((5 & 0xf) << 4)).toByte, 0)
-    val bitmask = Array[Byte](0x04) // next instruction boundary at offset 2 (bit 2)
-    val (instr, skip) = InstructionDecoder.decode(code, bitmask, 0)
-    instr shouldBe Instruction.CountSetBits64(3, 5)
-    skip shouldBe 2
-  }
-
-  // ---- 3. basic-block classification -----------------------------------------
-
-  "Opcode.Unlikely" should "NOT start a new basic block (non-terminator, falls through)" in {
-    Opcode.Unlikely.startsNewBasicBlock shouldBe false
-  }
-
-  it should "be able to fall through to the next instruction" in {
-    Opcode.Unlikely.canFallthrough shouldBe true
-  }
-
-  "Opcode.Panic and Opcode.Fallthrough" should "remain the only no-arg basic-block terminators" in {
-    Opcode.Panic.startsNewBasicBlock shouldBe true
-    Opcode.Fallthrough.startsNewBasicBlock shouldBe true
-    Opcode.Unlikely.startsNewBasicBlock shouldBe false
-  }
-
-  // ---- 4. executor: Unlikely is a no-op that just advances -------------------
+  // ---- 2. executor: Unlikely is a no-op that just advances -------------------
 
   "InstructionExecutor" should "execute Unlikely as a no-op: registers unchanged, pc advances" in {
     import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}

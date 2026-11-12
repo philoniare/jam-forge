@@ -20,7 +20,7 @@ class OutboundBackpressureSpec extends AnyFunSuite with Matchers:
     maxConnectionPendingBytes = 8L * MiB,
     sendWaitMillis = 300,
     upHighWaterBytes = 256 * 1024,
-    stallMillis = 2000
+    stallMillis = 1000
   )
   private val clientConfig = JamnpConfig(genesisHashPrefix = "deadbeef")
   private val serverConfig = clientConfig.copy(outbound = limits)
@@ -28,9 +28,9 @@ class OutboundBackpressureSpec extends AnyFunSuite with Matchers:
   /** Each response message is 1 MiB; a CE 128 request asks for `n` of them (its first byte). */
   private val Chunk = MiB
 
-  private def eventually(what: String, seconds: Int = 20)(cond: => Boolean): Unit =
+  private def eventually(what: String, seconds: Int = 20, pollMillis: Long = 20)(cond: => Boolean): Unit =
     val deadline = System.currentTimeMillis() + seconds * 1000L
-    while !cond && System.currentTimeMillis() < deadline do Thread.sleep(20)
+    while !cond && System.currentTimeMillis() < deadline do Thread.sleep(pollMillis)
     if !cond then fail(s"timed out waiting for: $what")
 
   private def withServer(test: (JamnpNode, LinkedBlockingQueue[JamnpConnection]) => Unit): Unit =
@@ -206,7 +206,8 @@ class OutboundBackpressureSpec extends AnyFunSuite with Matchers:
           toStalled.send(announcement)
           sent += 1
           peak = math.max(peak, stalledServerSide.pendingOutboundBytes)
-          eventually("the healthy peer to take an announcement")(toHealthy.pendingOutboundBytes == 0)
+          // Polled tightly: the loop runs over 500 times, and a coarse poll is most of its time.
+          eventually("the healthy peer to take an announcement", pollMillis = 1)(toHealthy.pendingOutboundBytes == 0)
 
         peak should be <= limits.upHighWaterBytes + announcement.length + 4
         stalledServerSide.droppedOutboundMessages should be > 0L

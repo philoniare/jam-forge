@@ -24,7 +24,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
   // FETCH (1) - OOB Tests
   // ===========================================================================
 
-  test("FETCH: returns OOB when output address is out of bounds") {
+  test("FETCH: PANICs when output address is out of bounds") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createSmallMemoryInstance()
@@ -42,7 +42,7 @@ class MemoryEdgeCaseSpec extends HostCallTestBase:
     exception.getMessage should include("PANIC")
   }
 
-  test("FETCH: returns OOB when output length exceeds memory bounds") {
+  test("FETCH: PANICs when output length exceeds memory bounds") {
     val context = createTestContext()
     val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
     val instance = createSmallMemoryInstance()

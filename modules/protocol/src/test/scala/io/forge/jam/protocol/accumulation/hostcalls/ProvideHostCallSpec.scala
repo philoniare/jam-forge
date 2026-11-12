@@ -286,26 +286,7 @@ class ProvideHostCallSpec extends HostCallTestBase:
     pm.isReadable(UInt(0x10005), -1)._1 shouldBe true
   }
 
-  test("PROVIDE: PANICs (not NegativeArraySizeException) when z = 0xFFFFFFFF") {
-    val targetId = 200L
-    val context = createTestContext()
-    context.x.accounts = context.x.accounts.updated(targetId, createTestAccount(1000L))
-
-    val hostCalls = new AccumulationHostCalls(context, List.empty, testConfig)
-    val instance = new PageMapLikeInstance
-
-    instance.setReg(7, targetId)
-    instance.setReg(8, 0x10000)
-    instance.setReg(9, 0xffffffffL) // passes the `z > 2^32-1` HUH guard; .toInt = -1
-
-    val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
-      hostCalls.dispatch(HostCall.PROVIDE, instance)
-    }
-    ex.getMessage should include("Provide PANIC")
-    context.provisions shouldBe empty
-  }
-
-  test("PROVIDE: PANICs for every z that narrows to a negative Int") {
+  test("PROVIDE: PANICs (not NegativeArraySizeException) for every z that narrows to a negative Int") {
     val targetId = 200L
     for z <- Seq(0x80000000L, 0xc0000000L, 0xfffffffeL, 0xffffffffL) do
       val context = createTestContext()
@@ -318,9 +299,11 @@ class ProvideHostCallSpec extends HostCallTestBase:
       instance.setReg(9, z)
 
       withClue(s"z=0x${z.toHexString}: ") {
-        intercept[io.forge.jam.protocol.HostCallPanic] {
+        val ex = intercept[io.forge.jam.protocol.HostCallPanic] {
           hostCalls.dispatch(HostCall.PROVIDE, instance)
         }
+        ex.getMessage should include("Provide PANIC")
+        context.provisions shouldBe empty
       }
   }
 

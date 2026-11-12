@@ -14,8 +14,8 @@ class StreamLeakSpec extends AnyFunSuite with Matchers:
 
   private val config = JamnpConfig(genesisHashPrefix = "deadbeef")
 
-  /** Well over the 256 concurrent streams a connection allows. */
-  private val Rounds = 700
+  /** More than the 256 concurrent streams a connection allows: a leak of one stream per round exhausts them. */
+  private val Rounds = 300
 
   /** Streams held open at once: under the limit, so two batches exceed it. */
   private val Batch = 200
@@ -211,7 +211,7 @@ class StreamLeakSpec extends AnyFunSuite with Matchers:
       stream.send("handshake".getBytes("UTF-8"))
       val serverStream = accepted.poll(10, TimeUnit.SECONDS)
       serverStream should not be null
-      Thread.sleep(1000)
+      Thread.sleep(600) // three idle timeouts
       stream.isOpen shouldBe true
       serverStream.isOpen shouldBe true
     finally

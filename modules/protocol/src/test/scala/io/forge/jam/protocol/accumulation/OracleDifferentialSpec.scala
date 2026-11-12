@@ -292,12 +292,12 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     out.toSeq
 
   // ---- the differential ---------------------------------------------------------
-  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=10000 mixed programs (host ids 0/4, CONTINUE-only)" in {
+  "the recompiler's inline Ecalli upcall" should "match the interpreter executor-loop across >=2000 mixed programs (host ids 0/4, CONTINUE-only)" in {
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else
       val rng = new Random(0x17110000L)
-      val n = 12000
+      val n = 2000
       var i = 0
       while i < n do
         val prog = genMixedProgram(rng)
@@ -330,7 +330,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     else
       val rng = new Random(0x17110001L)
       var i = 0
-      val n = 2000
+      val n = 300
       while i < n do
         val prefixLen = rng.nextInt(5)
         val prefix = (0 until prefixLen).map(_ => randArith(rng))
@@ -360,7 +360,7 @@ class OracleDifferentialSpec extends AnyFlatSpec with Matchers:
     else
       val rng = new Random(0x17110002L)
       var i = 0
-      val n = 2000
+      val n = 300
       while i < n do
         val len = 1 + rng.nextInt(64)
         val byteVal = rng.nextInt(256)

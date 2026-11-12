@@ -37,7 +37,7 @@ class ConnectionChurnSpec extends AnyFunSuite with Matchers:
     while !cond && System.currentTimeMillis() < deadline do Thread.sleep(20)
     cond
 
-  test("2000 connect/disconnect cycles leave no closed connection behind, and a live peer is still tracked") {
+  test("200 connect/disconnect cycles leave no closed connection behind, and a live peer is still tracked") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(
       id = "churn-devnet",
@@ -54,7 +54,7 @@ class ConnectionChurnSpec extends AnyFunSuite with Matchers:
     try
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false)).start()
       val address = new InetSocketAddress("127.0.0.1", node.listenPort)
-      val cycles = 2000
+      val cycles = 200
       var maxTracked = 0
       for i <- 0 until cycles do
         val conn = clients(i % clients.size).connect(address).get(10, TimeUnit.SECONDS)

@@ -5,18 +5,6 @@ import org.scalatest.matchers.should.Matchers
 
 class JamBytesSpec extends AnyFlatSpec with Matchers:
 
-  "JamBytes.empty" should "create an empty JamBytes" in {
-    val empty = JamBytes.empty
-    empty.length shouldBe 0
-    empty.isEmpty shouldBe true
-  }
-
-  "JamBytes.apply(Array[Byte])" should "create from byte array" in {
-    val bytes = JamBytes(Array[Byte](1, 2, 3))
-    bytes.length shouldBe 3
-    bytes(0) shouldBe 1
-  }
-
   "JamBytes.apply(Byte*)" should "create from varargs" in {
     val bytes = JamBytes(1.toByte, 2.toByte, 3.toByte)
     bytes.length shouldBe 3
@@ -69,6 +57,7 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
   }
 
   "isEmpty and nonEmpty" should "correctly report state" in {
+    JamBytes.empty.length shouldBe 0
     JamBytes.empty.isEmpty shouldBe true
     JamBytes.empty.nonEmpty shouldBe false
     JamBytes(Array[Byte](1)).isEmpty shouldBe false
@@ -89,11 +78,6 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
   "signedAt" should "return signed byte value" in {
     val bytes = JamBytes(Array[Byte](-1))
     bytes.signedAt(0) shouldBe -1
-  }
-
-  "toArray" should "convert to Array[Byte]" in {
-    val bytes = JamBytes(Array[Byte](1, 2, 3))
-    bytes.toArray shouldBe Array[Byte](1, 2, 3)
   }
 
   "toSeq" should "convert to Seq[Byte]" in {
@@ -128,8 +112,15 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
     JamBytes(Array[Byte](1, 2)) should not be JamBytes(Array[Byte](1, 3))
   }
 
-  "ordering" should "compare bytes as unsigned" in {
+  "ordering" should "compare bytes as unsigned and lexicographically, and support sorting" in {
     val ord = summon[Ordering[JamBytes]]
+    val a = JamBytes(Array[Byte](1, 2))
+    val b = JamBytes(Array[Byte](1, 3))
+    ord.compare(a, b) should be < 0
+    ord.compare(b, a) should be > 0
+    ord.compare(a, a) shouldBe 0
+    List(JamBytes(Array[Byte](3)), JamBytes(Array[Byte](1)), JamBytes(Array[Byte](2))).sorted shouldBe
+      List(JamBytes(Array[Byte](1)), JamBytes(Array[Byte](2)), JamBytes(Array[Byte](3)))
     ord.compare(JamBytes(Array[Byte](0x7f)), JamBytes(Array[Byte](0x80.toByte))) should be < 0
     ord.compare(JamBytes(Array[Byte](1)), JamBytes(Array[Byte](1, 0))) should be < 0
   }
@@ -194,15 +185,10 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
     JamBytes.compareUnsigned(Array(1, 2), Array(1, 2)) shouldBe 0
     JamBytes.compareUnsigned(Array(1, 2), Array(1, 3)) should be < 0
     JamBytes.compareUnsigned(Array(1, 3), Array(1, 2)) should be > 0
-  }
-
-  it should "handle different lengths" in {
+    // different lengths: a proper prefix sorts first
     JamBytes.compareUnsigned(Array(1, 2), Array(1, 2, 3)) should be < 0
     JamBytes.compareUnsigned(Array(1, 2, 3), Array(1, 2)) should be > 0
-  }
-
-  it should "use unsigned comparison for high bytes" in {
-    // 0xFF as unsigned is 255, greater than 0x01
+    // unsigned: 0xFF is 255, greater than 0x01
     JamBytes.compareUnsigned(Array(0xff.toByte), Array(0x01.toByte)) should be > 0
   }
 
@@ -230,25 +216,4 @@ class JamBytesSpec extends AnyFlatSpec with Matchers:
     builder.clear()
     builder.size shouldBe 0
     builder.result().isEmpty shouldBe true
-  }
-
-  "Ordering[JamBytes]" should "compare lexicographically" in {
-    val ordering = summon[Ordering[JamBytes]]
-    val a = JamBytes(Array[Byte](1, 2))
-    val b = JamBytes(Array[Byte](1, 3))
-    ordering.compare(a, b) should be < 0
-    ordering.compare(b, a) should be > 0
-    ordering.compare(a, a) shouldBe 0
-  }
-
-  it should "support sorting" in {
-    val list = List(
-      JamBytes(Array[Byte](3)),
-      JamBytes(Array[Byte](1)),
-      JamBytes(Array[Byte](2))
-    )
-    val sorted = list.sorted
-    sorted(0).toArray shouldBe Array[Byte](1)
-    sorted(1).toArray shouldBe Array[Byte](2)
-    sorted(2).toArray shouldBe Array[Byte](3)
   }

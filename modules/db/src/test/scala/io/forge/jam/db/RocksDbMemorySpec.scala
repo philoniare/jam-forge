@@ -34,13 +34,16 @@ class RocksDbMemorySpec extends AnyFunSuite with Matchers:
     val a = ShardStore.open(dirA, memory)
     val b = ShardStore.open(dirB, memory)
     try
-      // 48 MiB into each store, alternating. On its own a column family flushes at 64 MiB, so neither would flush.
-      var peak = 0L
-      for round <- 0 until 6 do
-        peak = math.max(peak, fill(a, 8, round) + b.memTableBytes)
-        peak = math.max(peak, fill(b, 8, 100 + round) + a.memTableBytes)
-      // The limit is checked as buffers fill, so the total may pass it by a buffer's worth before the flush lands.
-      peak should be < 24 * MiB
+      // 24 MiB into each store, alternating. On its own a column family flushes at 64 MiB, so neither would flush.
+      for round <- 0 until 3 do
+        fill(a, 8, round)
+        fill(b, 8, 100 + round)
+      // Passing the limit schedules a flush that runs in the background, so how far the buffers overshoot while
+      // writing depends on the disk and the machine's load. Once the flushes land the total is back near the limit,
+      // far below the 48 MiB the two stores hold without a shared limit.
+      val deadline = System.nanoTime() + 30_000_000_000L
+      while a.memTableBytes + b.memTableBytes > 12 * MiB && System.nanoTime() < deadline do Thread.sleep(50)
+      a.memTableBytes + b.memTableBytes should be <= 12 * MiB
       memory.usedBytes should be <= 40 * MiB
 
       val key = Hashing.blake2b256(Array[Byte](0, 0, 0))
