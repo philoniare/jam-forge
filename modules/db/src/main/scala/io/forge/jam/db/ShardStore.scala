@@ -50,6 +50,9 @@ final class ShardStore private (
       out.result()
     finally it.close()
 
+  /** Bytes held in write buffers not yet flushed to disk. */
+  def memTableBytes: Long = db.getLongProperty(shardsCf, "rocksdb.cur-size-all-mem-tables")
+
   def delete(erasureRoot: Hash, validatorIndex: Int): Unit =
     db.delete(shardsCf, key(erasureRoot, validatorIndex))
 
@@ -60,16 +63,19 @@ final class ShardStore private (
     dbOptions.close()
 
 object ShardStore:
-  def open(path: Path): ShardStore =
+  def open(path: Path, memory: RocksDbMemory = RocksDbMemory.shared): ShardStore =
     RocksDB.loadLibrary()
-    val cfOptions = new ColumnFamilyOptions()
+    // Block cache and write-buffer limit shared with the process's other stores.
+    val cfOptions = new ColumnFamilyOptions().setTableFormatConfig(memory.tableConfig())
     val descriptors = Seq("default", "shards").map(n =>
       new ColumnFamilyDescriptor(n.getBytes("UTF-8"), cfOptions)
     )
     val handles = new java.util.ArrayList[ColumnFamilyHandle]()
-    val options = new DBOptions()
-      .setCreateIfMissing(true)
-      .setCreateMissingColumnFamilies(true)
+    val options = memory(
+      new DBOptions()
+        .setCreateIfMissing(true)
+        .setCreateMissingColumnFamilies(true)
+    )
     val db =
       try RocksDB.open(options, path.toString, descriptors.asJava, handles)
       catch

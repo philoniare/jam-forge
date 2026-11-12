@@ -139,28 +139,62 @@ final class GrandpaVoter(
   // vote graph
   // ---------------------------------------------------------------------------
 
-  /** Blocks from `h` down to (excluding) the slot of `base`, newest first; empty when `h` is not above `base`. */
-  private def pathToBase(h: Hash, base: Vote): List[(Hash, Long)] =
-    val out = mutable.ListBuffer.empty[(Hash, Long)]
-    var cursor: Option[Hash] = Some(h)
-    var reachedBase = false
-    while !reachedBase && cursor.isDefined do
-      val c = cursor.get
-      chain.slotOf(c) match
-        case Some(slot) if slot > base.slot =>
-          out += c -> slot
-          cursor = chain.parentOf(c)
-        case Some(_) => reachedBase = c == base.hash; cursor = None
-        case None    => cursor = None
-    if reachedBase then out.toList else Nil
+  /** Paths to the set base already walked, by block: `pathCache(b)` is `b`'s path, so a block's path is its own
+    * entry in front of its parent's and the lists share their tails (one cell per block). Headers and parent links
+    * never change, so an entry stays right for as long as the base does; it is dropped when the base moves.
+    */
+  private val pathCache = mutable.HashMap.empty[Hash, List[(Hash, Long)]]
+  private var pathCacheBase: Hash = null
 
-  /** Votes supporting each block above the base: a vote supports its target and every ancestor. */
+  /** Blocks from `h` down to (excluding) the slot of `base`, newest first; empty when `h` is not above `base`.
+    * Every round tallies every vote's path on every step, so the walk is remembered: only blocks not seen before
+    * are read from the chain.
+    */
+  private def pathToBase(h: Hash, base: Vote): List[(Hash, Long)] =
+    if pathCacheBase != base.hash || pathCache.size > GrandpaVoter.MaxCachedPaths then
+      pathCache.clear()
+      pathCacheBase = base.hash
+    val pending = mutable.ListBuffer.empty[(Hash, Long)]
+    var cursor: Option[Hash] = Some(h)
+    var tail: List[(Hash, Long)] = null
+    var isTarget = true
+    while tail == null && cursor.isDefined do
+      val c = cursor.get
+      pathCache.get(c) match
+        // A target the chain no longer holds has no path, cached or not (as when it is walked afresh).
+        case Some(t) if !isTarget || chain.slotOf(c).isDefined => tail = t
+        case Some(_)                                           => cursor = None
+        case None =>
+          chain.slotOf(c) match
+            case Some(slot) if slot > base.slot =>
+              pending += c -> slot
+              cursor = chain.parentOf(c)
+            case Some(_) =>
+              if c == base.hash then tail = Nil
+              cursor = None
+            case None => cursor = None
+      isTarget = false
+    if tail == null then Nil
+    else
+      var path = tail
+      pending.reverseIterator.foreach { e =>
+        path = e :: path
+        pathCache.put(e._1, path)
+      }
+      path
+
+  /** Votes supporting each block above the base: a vote supports its target and every ancestor. Votes are counted
+    * per distinct target first (a round has a handful), so a path is added once with its number of votes rather
+    * than once per vote.
+    */
   private def support(votes: Iterable[SignedVote], base: Vote): Map[Hash, (Long, Int)] =
+    val perTarget = mutable.LinkedHashMap.empty[Vote, Int]
+    votes.foreach(v => perTarget.updateWith(v.vote)(n => Some(n.getOrElse(0) + 1)))
     val counts = mutable.HashMap.empty[Hash, (Long, Int)]
-    votes.foreach { v =>
-      if consistentRoot(v.vote) then
-        pathToBase(v.vote.hash, base).foreach { case (h, slot) =>
-          counts.updateWith(h)(c => Some(slot -> (c.map(_._2).getOrElse(0) + 1)))
+    perTarget.foreach { case (vote, n) =>
+      if consistentRoot(vote) then
+        pathToBase(vote.hash, base).foreach { case (h, slot) =>
+          counts.updateWith(h)(c => Some(slot -> (c.map(_._2).getOrElse(0) + n)))
         }
     }
     counts.toMap
@@ -206,9 +240,15 @@ final class GrandpaVoter(
           val counts = support(r.precommits.values, set.base)
           val missing = set.size - r.precommits.size
           r.precommits.size >= set.threshold && !counts.exists { case (h, (slot, n)) =>
-            slot > g.slot && n + missing >= set.threshold && chain.isAncestor(g.hash, h)
+            slot > g.slot && n + missing >= set.threshold && descends(h, g)
           }
       case _ => false
+
+  /** `h`, a block counted by [[support]] (so its path reaches the set base), is `g` or has it as an ancestor. */
+  private def descends(h: Hash, g: Vote): Boolean =
+    if h == g.hash || g.hash == set.base.hash then true
+    else if g.slot > set.base.slot then pathToBase(h, set.base).exists(_._1 == g.hash)
+    else chain.isAncestor(g.hash, h)
 
   /** The estimate a round must build on: the previous round's, else the set base. */
   private def previousEstimate(r: Long): Vote =
@@ -546,6 +586,9 @@ object GrandpaVoter:
 
   /** Votes kept for sets we have not reached yet. */
   val MaxFutureVotes: Int = 1024
+
+  /** Blocks whose path to the set base is remembered: an epoch's blocks with room for forks; cleared when passed. */
+  val MaxCachedPaths: Int = 16384
 
   /** Sets ahead of ours whose latest commit is kept. A set's keys are in the epoch marker that ends the set before
     * it, so these commits are held unverified and any peer can send one for any set id. An honest commit runs ahead

@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{CompletableFuture, ExecutorService, TimeUnit}
+import java.util.concurrent.ExecutorService
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, constants}
@@ -34,7 +34,9 @@ final class DistributionService(
     coresCount: Int,
     egress: ExecutorService,
     assurerKeys: () => Seq[Array[Byte]] = () => Nil,
-    admitGuarantee: GuaranteeExtrinsic => Either[String, Unit] = _ => Left("no guarantee verifier configured")
+    admitGuarantee: GuaranteeExtrinsic => Either[String, Unit] = _ => Left("no guarantee verifier configured"),
+    /** Where received guarantees and assurances are checked (signatures, state reads): off the network threads. */
+    inbound: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   // Open connections only: a connection leaves on its connection-down callback ([[untrackConnection]]), so the set
@@ -70,15 +72,21 @@ final class DistributionService(
   // =========================================================================
 
   def workReportHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
         decodeItem[GuaranteeExtrinsic](msg) match
           case Right(g) =>
-            receiveGuarantee(g) match
-              case Right(_) => stream.finish()
-              case Left(why) =>
-                logger.debug(s"CE135: guarantee for core ${g.report.coreIndex.toInt} refused: $why")
-                stream.reset()
+            val admitted = inbound.submit(conn, msg.length.toLong) {
+              val taken =
+                try receiveGuarantee(g)
+                catch case e: Exception => Left(String.valueOf(e.getMessage))
+              taken match
+                case Right(_) => stream.finish()
+                case Left(why) =>
+                  logger.debug(s"CE135: guarantee for core ${g.report.coreIndex.toInt} refused: $why")
+                  stream.reset()
+            }
+            if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE135 payload: $err")
             stream.reset()
@@ -143,14 +151,20 @@ final class DistributionService(
       stream.onMessage { msg =>
         DistributionService.decodeAssurance(msg, coresCount) match
           case Right((anchor, bitfield, signature)) =>
-            assurerIndex(conn, anchor, bitfield, signature) match
-              case Some(idx) =>
-                logger.debug(s"pooled assurance from validator $idx")
-                pools.addAssurance(AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(idx), signature))
-                stream.finish()
-              case None =>
-                logger.warn("CE141: assurance signed by no active validator")
-                stream.reset()
+            val admitted = inbound.submit(conn, msg.length.toLong) {
+              val signer =
+                try assurerIndex(conn, anchor, bitfield, signature)
+                catch case _: Exception => None
+              signer match
+                case Some(idx) =>
+                  logger.debug(s"pooled assurance from validator $idx")
+                  pools.addAssurance(AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(idx), signature))
+                  stream.finish()
+                case None =>
+                  logger.warn("CE141: assurance signed by no active validator")
+                  stream.reset()
+            }
+            if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE141 payload: $err")
             stream.reset()
@@ -184,27 +198,22 @@ final class DistributionService(
   // =========================================================================
 
   private def sendItem(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
-    submitSend(() => conn.openStream(kind), kind, payload)
+    submitSend(() => conn.openStream(kind), kind, payload, conn)
 
   private[node] def submitSend(
-      open: () => CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
       kind: Byte,
-      payload: Array[Byte]
+      payload: Array[Byte],
+      peer: AnyRef = null
   ): Unit =
-    try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try
-            val stream = open().get(10, TimeUnit.SECONDS)
-            stream.send(payload)
-            stream.finish()
-          catch
-            case e: Exception =>
-              logger.warn(s"distribution on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-      })
-    catch
-      case _: java.util.concurrent.RejectedExecutionException =>
-        logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    OneShotSend.submit(
+      egress,
+      peer,
+      open,
+      List(payload),
+      why => logger.warn(s"distribution on ${StreamKind.name(kind)} failed: $why"),
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    )
 
   /** Run a request/response exchange on the egress pool. */
   private[node] def submitRequest(task: () => Unit): Unit =

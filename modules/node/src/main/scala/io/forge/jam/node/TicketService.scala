@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{CompletableFuture, ExecutorService, TimeUnit}
+import java.util.concurrent.ExecutorService
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{JamBytes, LittleEndian}
@@ -31,7 +31,9 @@ final class TicketService(
     distribution: DistributionService,
     egress: ExecutorService,
     /** CE 132 recipients: the current validators (JAMNP-S CE 131/132). */
-    forwardTargets: () => Iterable[JamnpConnection] = () => Nil
+    forwardTargets: () => Iterable[JamnpConnection] = () => Nil,
+    /** Where received tickets are verified (a ring proof each): off the network threads. */
+    inbound: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   /** Tickets accepted as proxy (or generated for ourselves as proxy) and
@@ -193,7 +195,10 @@ final class TicketService(
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
         val asProxy = stream.kind == StreamKind.TicketDistributionStep1
-        if receive(msg, asProxy, peerLabel(connection)) then stream.finish() else stream.reset()
+        val admitted = inbound.submit(connection, msg.length.toLong) {
+          if receive(msg, asProxy, peerLabel(connection)) then stream.finish() else stream.reset()
+        }
+        if !admitted then stream.reset()
       }
 
   /** A CE 131 (`asProxy`) or CE 132 message from the peer `from`; false when the ticket was not taken. */
@@ -348,7 +353,8 @@ final class TicketService(
       submitSend(
         () => conn.openStream(StreamKind.TicketDistributionStep2),
         StreamKind.TicketDistributionStep2,
-        payload
+        payload,
+        conn
       )
     }
 
@@ -386,7 +392,8 @@ final class TicketService(
           submitSend(
             () => proxyConn.openStream(StreamKind.TicketDistributionStep1),
             StreamKind.TicketDistributionStep1,
-            payload
+            payload,
+        proxyConn
           )
         case None =>
           logger.debug(
@@ -397,30 +404,26 @@ final class TicketService(
             submitSend(
               () => conn.openStream(StreamKind.TicketDistributionStep2),
               StreamKind.TicketDistributionStep2,
-              payload
+              payload,
+        conn
             )
           }
     }
 
   private[node] def submitSend(
-      open: () => CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
       kind: Byte,
-      payload: Array[Byte]
+      payload: Array[Byte],
+      peer: AnyRef = null
   ): Unit =
-    try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try
-            val stream = open().get(10, TimeUnit.SECONDS)
-            stream.send(payload)
-            stream.finish()
-          catch
-            case e: Exception =>
-              logger.warn(s"ticket distribution on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-      })
-    catch
-      case _: java.util.concurrent.RejectedExecutionException =>
-        logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    OneShotSend.submit(
+      egress,
+      peer,
+      open,
+      List(payload),
+      why => logger.warn(s"ticket distribution on ${StreamKind.name(kind)} failed: $why"),
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    )
 
 object TicketService:
   /** η_2 of `view`: the entropy the current epoch's ticket contest uses. */

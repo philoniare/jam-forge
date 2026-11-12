@@ -75,7 +75,7 @@ final class GrandpaService(
     peers.foreach(c => send(c, kind, payload))
 
   private def send(c: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
-    distribution.submitSend(() => c.openStream(kind), kind, payload)
+    distribution.submitSend(() => c.openStream(kind), kind, payload, c)
 
   /** Voters that have our current round's votes. */
   private val votesSentTo = ConcurrentHashMap.newKeySet[Ed25519PublicKey]()
@@ -238,7 +238,9 @@ final class GrandpaService(
     if setId > ourSet then
       warpRequests.retain(_ >= ourSet)
       if warpRequests.tryStart(ourSet, conn.peerPublicKey) then requestWarpSync(conn, ourSet)
-    else if voter.wantsCatchUp(round, setId) then
+    // Within our set only a voter can be ahead of us in a way a catch-up would settle, and its key is the
+    // connection's: anyone else naming a later round would otherwise have us ask them for it.
+    else if voter.voterSet.members.contains(conn.peerPublicKey) && voter.wantsCatchUp(round, setId) then
       catchUpRequests.retain((s, r) => s == ourSet && r > voter.round + 1)
       if catchUpRequests.tryStart((setId, round), conn.peerPublicKey) then
         requestCatchUp(conn, round - 1, setId, () => catchUpRequests.succeeded((setId, round)))

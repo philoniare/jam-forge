@@ -10,7 +10,7 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{BandersnatchVrf, Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
-import io.forge.jam.protocol.refine.{ComputeReport, WorkPackageBundle}
+import io.forge.jam.protocol.refine.{ComputeReport, DaShards, WorkPackageBundle}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
 import scala.collection.mutable
@@ -362,10 +362,20 @@ final class AuditorService(
         logger.debug(s"CE147: fetched bundle directly for ${spec.erasureRoot.toHex.take(18)}")
         Right(bytes)
       case None =>
+        // Each validator holds one shard of the report, set by its index and the report's core: ask each peer for
+        // its own first. The set may have rotated since the report was guaranteed, so both the current and the
+        // previous one are tried.
+        val validators = chain.stateView().validators
+        val sets = List(validators.current, validators.previous)
+        val core = report.coreIndex.toInt
         shards.reconstructBundle(
           spec.erasureRoot,
           spec.length.toLong.toInt,
-          distribution.peers
+          distribution.peers,
+          conn =>
+            val key = conn.peerPublicKey
+            sets.flatMap(_.zipWithIndex.collect { case (vk, v) if vk.ed25519 == key => v })
+              .map(DaShards.shardIndexFor(core, _, chain.config))
         )
     fetched match
       case Left(err) if err.startsWith(ShardService.TooFewShards) =>
@@ -643,42 +653,31 @@ final class AuditorService(
 
   /** Two messages then FIN on a fresh stream (CE 144). */
   private def sendTwo(conn: JamnpConnection, kind: Byte, first: Array[Byte], second: Array[Byte]): Unit =
-    try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try
-            val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
-            stream.send(first)
-            stream.send(second)
-            stream.finish()
-          catch
-            case e: Exception =>
-              logger.debug(s"send on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-      })
-    catch case _: java.util.concurrent.RejectedExecutionException => ()
+    OneShotSend.submit(
+      egress,
+      conn,
+      () => conn.openStream(kind),
+      List(first, second),
+      why => logger.debug(s"send on ${StreamKind.name(kind)} failed: $why")
+    )
 
   private def sendOneShot(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
-    submitSend(() => conn.openStream(kind), kind, payload)
+    submitSend(() => conn.openStream(kind), kind, payload, conn)
 
   private[node] def submitSend(
-      open: () => CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
       kind: Byte,
-      payload: Array[Byte]
+      payload: Array[Byte],
+      peer: AnyRef = null
   ): Unit =
-    try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try
-            val stream = open().get(10, TimeUnit.SECONDS)
-            stream.send(payload)
-            stream.finish()
-          catch
-            case e: Exception =>
-              logger.warn(s"send on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-      })
-    catch
-      case _: java.util.concurrent.RejectedExecutionException =>
-        logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    OneShotSend.submit(
+      egress,
+      peer,
+      open,
+      List(payload),
+      why => logger.warn(s"send on ${StreamKind.name(kind)} failed: $why"),
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    )
 
 object AuditorService extends LazyLogging:
   /** CE 144 announcements and CE 145 judgments that may wait for the audit thread, and the bytes they may hold. */

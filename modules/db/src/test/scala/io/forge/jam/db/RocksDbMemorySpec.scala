@@ -1,0 +1,79 @@
+package io.forge.jam.db
+
+import java.nio.file.{Files, Path}
+
+import io.forge.jam.core.Hashing
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+
+/** Stores opened with one memory budget flush their write buffers at the shared limit and keep what they cache
+  * within the shared cache.
+  */
+class RocksDbMemorySpec extends AnyFunSuite with Matchers:
+
+  private def cleanup(dir: Path): Unit =
+    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
+
+  private val MiB = 1024L * 1024
+
+  /** Write `megabytes` of incompressible shards and return the largest write-buffer size seen on the way. */
+  private def fill(store: ShardStore, megabytes: Int, seed: Int): Long =
+    val rng = new scala.util.Random(seed)
+    var peak = 0L
+    for i <- 0 until megabytes * 4 do
+      val shard = new Array[Byte](256 * 1024)
+      rng.nextBytes(shard)
+      store.put(Hashing.blake2b256(Array[Byte](seed.toByte, (i >> 8).toByte, i.toByte)), i % 1023, shard)
+      peak = math.max(peak, store.memTableBytes)
+    peak
+
+  test("write buffers are flushed at the shared limit, across stores, and what was written reads back") {
+    val memory = new RocksDbMemory(cacheBytes = 32 * MiB, writeBufferBytes = 8 * MiB)
+    val dirA = Files.createTempDirectory("jam-rocks-mem-a")
+    val dirB = Files.createTempDirectory("jam-rocks-mem-b")
+    val a = ShardStore.open(dirA, memory)
+    val b = ShardStore.open(dirB, memory)
+    try
+      // 48 MiB into each store, alternating. On its own a column family flushes at 64 MiB, so neither would flush.
+      var peak = 0L
+      for round <- 0 until 6 do
+        peak = math.max(peak, fill(a, 8, round) + b.memTableBytes)
+        peak = math.max(peak, fill(b, 8, 100 + round) + a.memTableBytes)
+      // The limit is checked as buffers fill, so the total may pass it by a buffer's worth before the flush lands.
+      peak should be < 24 * MiB
+      memory.usedBytes should be <= 40 * MiB
+
+      val key = Hashing.blake2b256(Array[Byte](0, 0, 0))
+      a.get(key, 0).map(_.length) shouldBe Some(256 * 1024)
+      a.heldIndexes(key) shouldBe List(0)
+    finally
+      a.close()
+      b.close()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("without a shared limit the same writes stay in memory") {
+    // The contrast for the test above: a budget too large to matter leaves each store its 64 MiB default.
+    val memory = new RocksDbMemory(cacheBytes = 1024 * MiB, writeBufferBytes = 1024 * MiB)
+    val dir = Files.createTempDirectory("jam-rocks-mem-c")
+    val store = ShardStore.open(dir, memory)
+    try fill(store, 48, 7) should be > 40 * MiB
+    finally
+      store.close()
+      cleanup(dir)
+  }
+
+  test("the trie backend and the block store take the same budget and still work") {
+    val memory = new RocksDbMemory(cacheBytes = 16 * MiB, writeBufferBytes = 4 * MiB)
+    val dir = Files.createTempDirectory("jam-rocks-mem-d")
+    val trie = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false, memory)
+    val blocks = BlockStore.open(dir.resolve("blocks"), memory)
+    try
+      blocks.setMeta("k", Array[Byte](1, 2, 3))
+      blocks.getMeta("k").map(_.toList) shouldBe Some(List[Byte](1, 2, 3))
+    finally
+      blocks.close()
+      trie.close()
+      cleanup(dir)
+  }

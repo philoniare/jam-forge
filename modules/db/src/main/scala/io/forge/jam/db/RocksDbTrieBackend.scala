@@ -6,14 +6,12 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.{BackendOp, StateTrieBackend, TrieNode, TrieNodeType}
 import org.rocksdb.{
-  BlockBasedTableConfig,
   BloomFilter,
   ColumnFamilyDescriptor,
   ColumnFamilyHandle,
   ColumnFamilyOptions,
   CompressionType,
   DBOptions,
-  LRUCache,
   RocksDB,
   UInt64AddOperator,
   WriteBatch,
@@ -188,7 +186,6 @@ object RocksDbTrieBackend:
    */
   private val NodeCacheSlots = 1 << 20
 
-  private val BlockCacheBytes = 64L * 1024 * 1024
 
   /**
    * A direct-mapped cache of decoded nodes. Nodes are content-addressed and immutable, so an entry can only go stale
@@ -222,7 +219,11 @@ object RocksDbTrieBackend:
    * Open (creating if absent) a trie backend at `path`. Pass `trackGarbage = false` when nothing will call `gc()`, as
    * in the node, which keeps replaced roots readable for reorgs; the class comment says what that gives up.
    */
-  def open(path: Path, trackGarbage: Boolean = true): RocksDbTrieBackend =
+  def open(
+      path: Path,
+      trackGarbage: Boolean = true,
+      memory: RocksDbMemory = RocksDbMemory.shared
+  ): RocksDbTrieBackend =
     RocksDB.loadLibrary()
     val resources = mutable.ArrayBuffer[AutoCloseable]()
     def own[A <: AutoCloseable](a: A): A =
@@ -231,12 +232,9 @@ object RocksDbTrieBackend:
     try
       // Keys are uniformly random hashes: a bloom filter lets most misses skip the read, and neither keys nor nodes
       // compress, so only raw values (code, preimages) keep the default compression.
-      val blockCache = own(new LRUCache(BlockCacheBytes))
-      def tableConfig() =
-        new BlockBasedTableConfig()
-          .setBlockCache(blockCache)
-          .setFilterPolicy(own(new BloomFilter(10, false)))
-      val defaultOptions = own(new ColumnFamilyOptions())
+      // The block cache and the write-buffer limit are the process's, shared with the block and shard stores.
+      def tableConfig() = memory.tableConfig().setFilterPolicy(own(new BloomFilter(10, false)))
+      val defaultOptions = own(new ColumnFamilyOptions()).setTableFormatConfig(memory.tableConfig())
       val nodeOptions = own(new ColumnFamilyOptions())
         .setTableFormatConfig(tableConfig())
         .setCompressionType(CompressionType.NO_COMPRESSION)
@@ -254,9 +252,11 @@ object RocksDbTrieBackend:
       ).map((n, o) => new ColumnFamilyDescriptor(n.getBytes("UTF-8"), o))
       val handles = new java.util.ArrayList[ColumnFamilyHandle]()
       val options = own(
-        new DBOptions()
-          .setCreateIfMissing(true)
-          .setCreateMissingColumnFamilies(true)
+        memory(
+          new DBOptions()
+            .setCreateIfMissing(true)
+            .setCreateMissingColumnFamilies(true)
+        )
       )
       val db = RocksDB.open(options, path.toString, descriptors.asJava, handles)
       val hs = handles.asScala.toSeq

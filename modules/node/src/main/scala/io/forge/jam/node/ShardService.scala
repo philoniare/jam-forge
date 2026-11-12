@@ -1,6 +1,7 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{CompletableFuture, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, LinkedBlockingQueue, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, LittleEndian}
@@ -23,6 +24,56 @@ final class ShardService(
   import ShardService.*
 
   private val segmentShardSize = DaShards.segmentShardSize(config)
+
+  /** Threads for shard requests to peers, so several peers are asked at once. Each request waits on its peer for at
+    * most its timeout; the work queued here is this node's own (reports awaiting assurance or audit), not a peer's.
+    */
+  private val fetchPool =
+    val n = new AtomicInteger()
+    val pool = new ThreadPoolExecutor(
+      FetchThreads,
+      FetchThreads,
+      30,
+      TimeUnit.SECONDS,
+      new LinkedBlockingQueue[Runnable](),
+      r =>
+        val t = new Thread(r, s"jam-shard-fetch-${n.incrementAndGet()}"); t.setDaemon(true); t
+    )
+    pool.allowCoreThreadTimeOut(true)
+    pool
+
+  /** Stop the request threads; requests in flight end with their streams. */
+  def shutdown(): Unit =
+    fetchPool.shutdownNow()
+    ()
+
+  /** The first answer from `peers`, asked `width` at a time: a peer without the data refuses at once, so the
+    * holders are reached after about |peers| / width round trips instead of |peers|, and one silent peer costs its
+    * timeout once rather than holding up everyone behind it. None when no peer answers.
+    */
+  private[node] def firstFrom[P, A](peers: List[P], width: Int = PeersAskedAtOnce)(ask: P => Option[A]): Option[A] =
+    val groups = peers.grouped(math.max(1, width))
+    var found: Option[A] = None
+    while found.isEmpty && groups.hasNext do
+      val group = groups.next()
+      val winner = new CompletableFuture[Option[A]]()
+      val left = new AtomicInteger(group.size)
+      group.foreach { conn =>
+        try
+          fetchPool.execute { () =>
+            val answer =
+              try if winner.isDone then None else ask(conn)
+              catch case _: Exception => None
+            if answer.isDefined then winner.complete(answer)
+            if left.decrementAndGet() == 0 then winner.complete(None)
+            ()
+          }
+        catch case _: java.util.concurrent.RejectedExecutionException => winner.complete(None) // shutting down
+      }
+      found =
+        try winner.get()
+        catch case _: Exception => None
+    found
 
   // =========================================================================
   // server side
@@ -196,7 +247,9 @@ final class ShardService(
   def reconstructBundle(
       erasureRoot: Hash,
       bundleLength: Int,
-      peers: Iterable[JamnpConnection]
+      peers: Iterable[JamnpConnection],
+      /** The shard indexes a peer is expected to hold for this report, asked for first; empty when unknown. */
+      holds: JamnpConnection => Seq[Int] = _ => Nil
   ): Either[String, Array[Byte]] =
     val needed = DaShards.recoveryThreshold(config)
     val collected = mutable.Map.empty[Int, Array[Byte]]
@@ -207,18 +260,41 @@ final class ShardService(
       }
     }
 
-    // Sweep each peer for every still-missing index until we have enough.
     // Fetched audit shards are not stored: they lack the segment shards a
     // CE 137 custody unit carries.
     val peerList = peers.filter(_.isOpen).toList
-    var pi = 0
-    while collected.size < needed && pi < peerList.length do
-      val conn = peerList(pi)
-      var idx = 0
-      while collected.size < needed && idx < config.validatorCount do
-        if !collected.contains(idx) then fetchAuditShard(conn, erasureRoot, idx).foreach(collected(idx) = _)
-        idx += 1
-      pi += 1
+    if collected.size < needed && peerList.nonEmpty then
+      val fetched = new ConcurrentHashMap[Int, Array[Byte]]()
+      collected.foreach((i, b) => fetched.put(i, b))
+      def enough: Boolean = fetched.size >= needed
+      def onAllPeers(work: JamnpConnection => Unit): Unit =
+        val done = peerList.map { conn =>
+          try CompletableFuture.runAsync(() => if !enough then work(conn), fetchPool)
+          catch
+            case _: java.util.concurrent.RejectedExecutionException => CompletableFuture.completedFuture[Void](null)
+        }
+        done.foreach { f =>
+          try f.get()
+          catch case _: Exception => ()
+        }
+      // First the shards each peer is assigned, every peer at once: that is where they are when all is well.
+      onAllPeers { conn =>
+        holds(conn).distinct.foreach { idx =>
+          if !enough && idx >= 0 && idx < config.validatorCount && !fetched.containsKey(idx) then
+            fetchAuditShard(conn, erasureRoot, idx).foreach(fetched.putIfAbsent(idx, _))
+        }
+      }
+      // Then every still-missing index on every peer, peers in parallel: a peer may hold shards we cannot map to it
+      // (a node running several validators, or a validator set that has changed since the report).
+      if !enough then
+        onAllPeers { conn =>
+          var idx = 0
+          while !enough && idx < config.validatorCount do
+            if !fetched.containsKey(idx) then
+              fetchAuditShard(conn, erasureRoot, idx).foreach(fetched.putIfAbsent(idx, _))
+            idx += 1
+        }
+      fetched.forEach((i, b) => collected(i) = b)
 
     if collected.size < needed then
       Left(s"${ShardService.TooFewShards}: only ${collected.size}/$needed recoverable")
@@ -260,6 +336,10 @@ final class ShardService(
         None
 
 object ShardService:
+
+  /** Threads making shard requests, and how many peers one lookup asks at a time. */
+  val FetchThreads: Int = 16
+  val PeersAskedAtOnce: Int = 4
 
   /** Prefix of the error when too few peers answered to rebuild a bundle, as opposed to a bundle that fails to decode. */
   val TooFewShards = "too few bundle shards"

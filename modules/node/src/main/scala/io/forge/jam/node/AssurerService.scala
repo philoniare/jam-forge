@@ -33,8 +33,43 @@ final class AssurerService(
   private val ed25519ByPublic: Map[Ed25519PublicKey, ValidatorKeySet] =
     validatorKeys.map(k => k.ed25519Key -> k).toMap
 
-  /** Import listener: acquire custody, then assure held cores. */
+  /** The newest imported head not yet assured. Acquiring custody asks peers and can wait on them, so it runs on
+    * its own thread rather than the one every post-import listener shares; only the newest head matters (an
+    * assurance is anchored at the head), so a head that arrives while an older one is in hand replaces any waiting.
+    */
+  private val latest = new java.util.concurrent.atomic.AtomicReference[ChainManager#Head](null)
+  private val worker = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = new Thread(r, "jam-assurer"); t.setDaemon(true); t
+  }
+
+  /** Custody lookups of one head run side by side on these. */
+  private val custodyPool = java.util.concurrent.Executors.newFixedThreadPool(
+    AssurerService.CustodyLookupsAtOnce,
+    r =>
+      val t = new Thread(r, "jam-assurer-custody"); t.setDaemon(true); t
+  )
+
+  /** Import listener: acquire custody, then assure held cores, off the caller's thread. */
   def onImported(head: ChainManager#Head): Unit =
+    if latest.getAndSet(head) == null then
+      try
+        worker.execute { () =>
+          val h = latest.getAndSet(null)
+          if h != null then
+            try assure(h)
+            catch case e: Exception => logger.error("assuring failed", e)
+        }
+      catch case _: java.util.concurrent.RejectedExecutionException => () // shutting down
+
+  /** Stop assuring and wait for a lookup in flight: must run before the shard store closes. */
+  def shutdown(): Unit =
+    worker.shutdownNow()
+    custodyPool.shutdownNow()
+    worker.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
+    custodyPool.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
+    ()
+
+  private[node] def assure(head: ChainManager#Head): Unit =
     val view = chain.stateView()
     val reports = view.cores.reports
     if !reports.exists(_.isDefined) then return
@@ -45,16 +80,22 @@ final class AssurerService(
     }
     if heldIndexes.isEmpty then return
 
-    // Custody per (core, validator index): local store, else CE 137 pull.
-    val custody: Map[(Int, Int), Boolean] =
-      (for
+    // Custody per (core, validator index): local store, else CE 137 pull. The pulls run side by side, so one
+    // unreachable shard does not use up the time before the assurances are due.
+    val peers = distribution.peers
+    val lookups =
+      for
         (r, core) <- reports.zipWithIndex
         assignment <- r.toList
         (idx, _) <- heldIndexes
       yield
         val root = assignment.report.packageSpec.erasureRoot
-        (core, idx) -> acquireCustody(root, DaShards.shardIndexFor(core, idx, chain.config))
-      ).toMap
+        val shardIndex = DaShards.shardIndexFor(core, idx, chain.config)
+        val held: java.util.concurrent.Future[Boolean] =
+          if shardStore.has(root, shardIndex) then java.util.concurrent.CompletableFuture.completedFuture(true)
+          else custodyPool.submit(() => acquireCustody(root, shardIndex, peers))
+        (core, idx) -> held
+    val custody: Map[(Int, Int), Boolean] = lookups.map((k, f) => k -> f.get()).toMap
 
     val batch = List.newBuilder[AssuranceExtrinsic]
     var produced = 0
@@ -93,20 +134,24 @@ final class AssurerService(
   /** True when verified shards for (erasure-root, shard index) are in
     * custody, pulling them from peers via CE 137 when absent.
     */
-  private def acquireCustody(erasureRoot: Hash, shardIndex: Int): Boolean =
+  private def acquireCustody(erasureRoot: Hash, shardIndex: Int, peers: List[io.forge.jam.network.JamnpConnection]): Boolean =
     if shardStore.has(erasureRoot, shardIndex) then true
     else
-      distribution.peers.exists { conn =>
-        shards
-          .fetchShards(conn, erasureRoot, shardIndex)
-          .map { s =>
-            shardStore.put(erasureRoot, shardIndex, s.encode)
-            true
-          }
-          .getOrElse(false)
-      } || {
-        logger.warn(
-          s"no custody for shard $shardIndex of ${erasureRoot.toHex.take(18)}; withholding assurance"
-        )
-        false
-      }
+      // Several peers at a time: the report's guarantors hold the shard, the rest refuse at once.
+      shards.firstFrom(peers)(shards.fetchShards(_, erasureRoot, shardIndex, AssurerService.CustodyTimeoutMillis)) match
+        case Some(s) =>
+          shardStore.put(erasureRoot, shardIndex, s.encode)
+          true
+        case None =>
+          logger.warn(
+            s"no custody for shard $shardIndex of ${erasureRoot.toHex.take(18)}; withholding assurance"
+          )
+          false
+
+object AssurerService:
+
+  /** Custody lookups (one per pending core and held key) run at once. */
+  val CustodyLookupsAtOnce: Int = 8
+
+  /** How long one peer is waited on for a custody unit: under a slot, so the assurance can still be sent for it. */
+  val CustodyTimeoutMillis: Long = 4000

@@ -120,17 +120,20 @@ object BlockStore:
 
   private val CfNames = Seq("blocks", "headers", "children", "meta")
 
-  def open(path: Path): BlockStore =
+  def open(path: Path, memory: RocksDbMemory = RocksDbMemory.shared): BlockStore =
     RocksDB.loadLibrary()
-    val cfOptions = new ColumnFamilyOptions()
+    // Block cache and write-buffer limit shared with the process's other stores.
+    val cfOptions = new ColumnFamilyOptions().setTableFormatConfig(memory.tableConfig())
     val descriptors =
       (Seq("default") ++ CfNames).map(n =>
         new ColumnFamilyDescriptor(n.getBytes("UTF-8"), cfOptions)
       )
     val handles = new java.util.ArrayList[ColumnFamilyHandle]()
-    val options = new DBOptions()
-      .setCreateIfMissing(true)
-      .setCreateMissingColumnFamilies(true)
+    val options = memory(
+      new DBOptions()
+        .setCreateIfMissing(true)
+        .setCreateMissingColumnFamilies(true)
+    )
     val db =
       try RocksDB.open(options, path.toString, descriptors.asJava, handles)
       catch

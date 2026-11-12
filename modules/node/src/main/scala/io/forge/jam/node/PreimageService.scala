@@ -151,7 +151,8 @@ final class PreimageService(
       submitSend(
         () => conn.openStream(StreamKind.PreimageAnnouncement),
         StreamKind.PreimageAnnouncement,
-        payload
+        payload,
+        conn
       )
     }
 
@@ -195,22 +196,17 @@ final class PreimageService(
   private[node] def submitSend(
       open: () => java.util.concurrent.CompletableFuture[JamnpStream],
       kind: Byte,
-      payload: Array[Byte]
+      payload: Array[Byte],
+      peer: AnyRef = null
   ): Unit =
-    try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try
-            val stream = open().get(10, TimeUnit.SECONDS)
-            stream.send(payload)
-            stream.finish()
-          catch
-            case e: Exception =>
-              logger.warn(s"preimage announcement on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-      })
-    catch
-      case _: java.util.concurrent.RejectedExecutionException =>
-        logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    OneShotSend.submit(
+      egress,
+      peer,
+      open,
+      List(payload),
+      why => logger.warn(s"preimage announcement on ${StreamKind.name(kind)} failed: $why"),
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+    )
 
 object PreimageService:
   /** CE 143 fetches that may wait for one of the four fetch threads. */

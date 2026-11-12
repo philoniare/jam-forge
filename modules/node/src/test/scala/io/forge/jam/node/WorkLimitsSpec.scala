@@ -106,7 +106,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
     try
       val dist = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
       val firstOpened = new CountDownLatch(1)
-      val release = new CompletableFuture[JamnpStream]()
+      val release = new CountDownLatch(1)
       val opened = new ConcurrentLinkedQueue[Integer]()
       val total = 50000
       var maxQueued = 0
@@ -115,8 +115,10 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
           () =>
             opened.add(i)
             firstOpened.countDown()
-            // The first send waits on its peer (as a stream open does); the rest fail at once.
-            if i == 1 then release else CompletableFuture.failedFuture(new RuntimeException("no peer")),
+            // The first send holds the egress thread (a send does not wait there for its stream, so the open
+            // itself is made to block); the rest fail at once.
+            if i == 1 then release.await()
+            CompletableFuture.failedFuture[JamnpStream](new RuntimeException("no peer")),
           StreamKind.AssuranceDistribution,
           Array[Byte](1)
         )
@@ -126,7 +128,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
       maxQueued should be <= capacity
       egress.dropped shouldBe (total - 1 - capacity).toLong
 
-      release.completeExceptionally(new RuntimeException("peer gone"))
+      release.countDown()
       eventually("the kept sends to run")(opened.size == capacity + 1)
       // What ran: the send in flight and the newest `capacity` ones, in order.
       opened.toArray.toList shouldBe (1 +: ((total - capacity + 1) to total)).toList

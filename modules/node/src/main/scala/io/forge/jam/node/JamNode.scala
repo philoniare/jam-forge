@@ -82,6 +82,9 @@ final class JamNode(
         val t = new Thread(r, "jam-egress"); t.setDaemon(true); t
     )
 
+  /** Checks of received guarantees, assurances and tickets, kept off the network event loops. */
+  private val inbound: InboundWork = InboundWork.pooled()
+
   val chain = new ChainManager(spec.config, trieBackend, blockStore)
   val sync = new SyncService(chain)
   val pools = new ExtrinsicPools
@@ -90,7 +93,8 @@ final class JamNode(
     spec.config.coresCount,
     egress,
     assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray),
-    admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check
+    admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check,
+    inbound = inbound
   )
   val shards = new ShardService(shardStore, spec.config)
   val segments = new SegmentPool()
@@ -99,7 +103,8 @@ final class JamNode(
     pools,
     distribution,
     egress,
-    forwardTargets = () => connectivity.map(v => connectionsTo(v.current)).getOrElse(Nil)
+    forwardTargets = () => connectivity.map(v => connectionsTo(v.current)).getOrElse(Nil),
+    inbound = inbound
   )
   val preimages = new PreimageService(
     chain,
@@ -190,6 +195,7 @@ final class JamNode(
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
   @volatile private var auditor: Option[AuditorService] = None
+  @volatile private var assurer: Option[AssurerService] = None
   @volatile private var shuttingDown: Boolean = false
 
   /** Hook invoked at every slot boundary (after any authoring attempt). */
@@ -251,6 +257,7 @@ final class JamNode(
         val t = new Thread(r, "jam-assurance"); t.setDaemon(true); t
       }
     val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances)
+    assurer = Some(a)
     chain.onImported((head, _) => a.onImported(head))
 
   /** Enable the auditor role: reports that become available are audited per the tranche
@@ -764,6 +771,8 @@ final class JamNode(
     grandpaService.foreach(_.shutdown())
     beefyService.foreach(_.shutdown())
     auditor.foreach(_.shutdown())
+    assurer.foreach(_.shutdown()) // before the shard store closes
+    shards.shutdown()
     if redialer != null then redialer.shutdownNow()
     dialer.shutdownNow()
     if assuranceTimer != null then assuranceTimer.shutdownNow()
@@ -771,6 +780,7 @@ final class JamNode(
     if slotTicker != null then slotTicker.close() // waits for in-flight tick
     guarantor.foreach(_.shutdown()) // drains in-flight refine/co-sign work
     network.shutdown()
+    inbound.shutdown() // received messages still being checked read the chain
     sync.shutdown() // waits for an in-flight sync import
     egress.shutdown()
     egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)

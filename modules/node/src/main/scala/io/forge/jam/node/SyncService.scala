@@ -192,14 +192,14 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed) match
       case Left(missing) =>
         if fetching.add(missing) then
-          finals.find(_._2.hash == missing).foreach((conn, _) => requestAndImport(conn, missing, () => fetching.remove(missing)))
+          finals.find(_._2.hash == missing).foreach((conn, _) => requestAndImport(conn, missing, onDone = () => fetching.remove(missing)))
       case Right(_) => ()
 
   private val fetching = ConcurrentHashMap.newKeySet[Hash]()
 
   /** Fetch block `hash` and its missing ancestors from `conn`, once at a time per block. */
   def fetchBlock(conn: JamnpConnection, hash: Hash): Unit =
-    if fetching.add(hash) then requestAndImport(conn, hash, () => fetching.remove(hash))
+    if fetching.add(hash) then requestAndImport(conn, hash, onDone = () => fetching.remove(hash))
 
   /** Drop what is held for a connection that closed. Its UP 0 stream's close listener normally does this; a message
     * handled while the stream closes can put an entry back, which nothing else would remove.
@@ -326,11 +326,16 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     val (headerBytes, peerFinal) = decodeAnnouncement(msg)
     peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
-    if headerBytes.length >= 100 then
-      notePeerBest(conn, HashSlot(headerHash, io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)))
+    val slot =
+      if headerBytes.length >= 100 then Some(io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)) else None
+    slot.foreach(s => notePeerBest(conn, HashSlot(headerHash, s)))
     if !chain.hasBlock(headerHash) then
-      logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting")
-      requestAndImport(conn, headerHash)
+      // The header starts with its parent's hash: when we hold the parent, the announced block is all we lack.
+      val parentKnown = headerBytes.length >= 32 && chain.hasBlock(Hash(java.util.Arrays.copyOfRange(headerBytes, 0, 32)))
+      val wanted = if parentKnown then 1 else blocksWanted(slot)
+      if wanted > 0 then
+        logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting $wanted block(s)")
+        requestAndImport(conn, headerHash, wanted)
 
   private def onPeerLeaves(conn: JamnpConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
     leaves.maxByOption(_.slot).foreach(notePeerBest(conn, _))
@@ -341,8 +346,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
             s"final (slot ${peerFinal.slot}); ignoring"
         )
       else if !chain.hasBlock(leaf.hash) then
-        logger.debug(s"peer leaf ${leaf.hash.toHex.take(18)} unknown; requesting")
-        requestAndImport(conn, leaf.hash)
+        val wanted = blocksWanted(Some(leaf.slot))
+        if wanted > 0 then
+          logger.debug(s"peer leaf ${leaf.hash.toHex.take(18)} unknown; requesting $wanted block(s)")
+          requestAndImport(conn, leaf.hash, wanted)
     }
 
   // =========================================================================
@@ -376,11 +383,26 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
               stream.finish()
       }
 
-  /** Fetch blocks descending (inclusive) from `from` on a fresh CE 128 stream
+  /** How many blocks to ask for, descending from a block at `slot` that we lack: every block we could still use
+    * has a slot above our finalized one, and slots are distinct along a chain, so the gap to our finalized slot is
+    * the most a response can usefully hold. 0 when the block is at or below our finalized slot (it is on our chain
+    * and we have it, or it never can be).
+    */
+  private def blocksWanted(slot: Option[Long]): Int =
+    slot match
+      case Some(s) => math.max(0L, math.min(s - chain.finalized.slot, SyncService.MaxBlocksPerRequest.toLong)).toInt
+      case None    => SyncService.MaxBlocksPerRequest
+
+  /** Fetch up to `maxBlocks` blocks descending (inclusive) from `from` on a fresh CE 128 stream
     * and import them oldest-first. Runs on the import executor.
     */
-  private def requestAndImport(conn: JamnpConnection, from: Hash, onDone: () => Unit = () => ()): Unit =
-    val request = new FetchRequest(conn, from, onDone)
+  private def requestAndImport(
+      conn: JamnpConnection,
+      from: Hash,
+      maxBlocks: Int = SyncService.MaxBlocksPerRequest,
+      onDone: () => Unit = () => ()
+  ): Unit =
+    val request = new FetchRequest(conn, from, maxBlocks, onDone)
     // A peer can announce faster than we fetch (each fetch waits on it for up to 30 s), so the waiting fetches
     // are bounded: one per (peer, block), a few per peer, and when over a limit the oldest gives way. A fetch
     // walks back from its block, so the newest one covers what an older one for the same chain would have brought.
@@ -388,12 +410,20 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
       val it = pendingFetches.iterator()
       var samePeer = 0
       var duplicate = false
+      // The same block wanted from another peer: one fetch brings it, so this peer is only kept as a fallback.
+      var elsewhere = inFlight == from
       while it.hasNext do
         val p = it.next()
-        if p.conn eq conn then
-          samePeer += 1
-          if p.from == from then duplicate = true
+        if p.from == from then
+          if p.conn eq conn then duplicate = true else elsewhere = true
+        if p.conn eq conn then samePeer += 1
       if duplicate then List(request)
+      else if elsewhere then
+        val others = alternates.computeIfAbsent(from, _ => new java.util.ArrayDeque[FetchRequest]())
+        if others.size < SyncService.MaxAlternatePeers && !others.stream().anyMatch(_.conn eq conn) then
+          others.addLast(request)
+          Nil
+        else List(request)
       else
         pendingFetches.addLast(request)
         val out = List.newBuilder[FetchRequest]
@@ -407,7 +437,13 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
               out += p
               removed = true
         if pendingFetches.size > SyncService.MaxPendingFetches then out += pendingFetches.pollFirst()
-        out.result()
+        val gone = out.result()
+        // A fetch that gives way takes its fallbacks with it, unless another fetch for the block still waits.
+        gone.flatMap { p =>
+          val stillWanted = pendingFetches.stream().anyMatch(_.from == p.from) || inFlight == p.from
+          val others = if stillWanted then null else alternates.remove(p.from)
+          if others == null then List(p) else p :: others.asScala.toList
+        }
     }
     dropped.foreach(_.onDone())
     if dropped.forall(_ ne request) && fetchLoopScheduled.compareAndSet(false, true) then
@@ -416,10 +452,23 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         case _: java.util.concurrent.RejectedExecutionException =>
           fetchLoopScheduled.set(false) // shutting down
 
-  private final class FetchRequest(val conn: JamnpConnection, val from: Hash, val onDone: () => Unit)
+  private final class FetchRequest(
+      val conn: JamnpConnection,
+      val from: Hash,
+      val maxBlocks: Int,
+      val onDone: () => Unit
+  )
 
   /** Fetches waiting for the import thread, oldest first. Guarded by itself. */
   private val pendingFetches = new java.util.ArrayDeque[FetchRequest]()
+
+  /** The block the import thread is fetching now, if any. Guarded by `pendingFetches`. */
+  private var inFlight: Hash = null
+
+  /** Other peers that announced a block already waiting or being fetched, tried in turn if that fetch does not
+    * bring the block. Entries exist only while a fetch for the block waits or runs. Guarded by `pendingFetches`.
+    */
+  private val alternates = new java.util.HashMap[Hash, java.util.ArrayDeque[FetchRequest]]()
   private val fetchLoopScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** Fetches waiting for the import thread. */
@@ -429,12 +478,40 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   private def fetchLoop(): Unit =
     var continue = true
     while continue do
-      val next = pendingFetches.synchronized(pendingFetches.pollFirst())
+      val next = pendingFetches.synchronized {
+        val n = pendingFetches.pollFirst()
+        inFlight = if n == null then null else n.from
+        n
+      }
       if next != null && !importExecutor.isShutdown then
         // Nothing a fetch throws may end the loop: no later fetch would ever run.
         try
-          try fetch(next.conn, next.from)
-          finally next.onDone()
+          // An earlier fetch walking back from a descendant may already have brought this block.
+          try if !chain.hasBlock(next.from) then fetch(next.conn, next.from, next.maxBlocks)
+          finally
+            val released = pendingFetches.synchronized {
+              inFlight = null
+              val others = alternates.get(next.from)
+              val have = chain.hasBlock(next.from)
+              val waiting = pendingFetches.stream().anyMatch(_.from == next.from)
+              if others == null then Nil
+              else if have then
+                alternates.remove(next.from)
+                others.asScala.toList
+              else if waiting then Nil
+              else
+                // The fetch did not bring the block: ask the next peer that announced it, ahead of other fetches.
+                var fallback = others.pollFirst()
+                val skipped = List.newBuilder[FetchRequest]
+                while fallback != null && !fallback.conn.isOpen do
+                  skipped += fallback
+                  fallback = others.pollFirst()
+                if fallback == null || others.isEmpty then alternates.remove(next.from)
+                if fallback != null then pendingFetches.addFirst(fallback)
+                skipped.result()
+            }
+            released.foreach(_.onDone())
+            next.onDone()
         catch case e: Throwable => logger.error("block sync failed", e)
       else
         fetchLoopScheduled.set(false)
@@ -442,7 +519,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
         continue = !importExecutor.isShutdown && pendingFetches.synchronized(!pendingFetches.isEmpty) &&
           fetchLoopScheduled.compareAndSet(false, true)
 
-  private def fetch(conn: JamnpConnection, from: Hash): Unit =
+  private def fetch(conn: JamnpConnection, from: Hash, maxBlocks: Int): Unit =
         try
           val stream = conn
             .openStream(StreamKind.BlockRequest)
@@ -452,7 +529,7 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
           val done = new LinkedBlockingQueue[java.lang.Boolean]()
           stream.onMessage(received.offer(_))
           stream.onClosed(() => done.offer(true))
-          stream.send(encodeBlockRequest(from, ascending = false, maxBlocks = 64))
+          stream.send(encodeBlockRequest(from, ascending = false, maxBlocks = maxBlocks.toLong))
           stream.finish()
 
           if done.poll(20, TimeUnit.SECONDS) == null then
@@ -516,6 +593,12 @@ object SyncService:
   /** Block fetches that may wait for the import thread: per peer (the newest are kept) and in total. */
   val MaxPendingFetchesPerPeer: Int = 8
   val MaxPendingFetches: Int = 2048
+
+  /** The most blocks one CE 128 request asks for. */
+  val MaxBlocksPerRequest: Int = 64
+
+  /** Other peers remembered as fallbacks for a block already being fetched. */
+  val MaxAlternatePeers: Int = 3
 
   /** Messages kept from one CE 128 response (the protocol sends one). */
   val MaxResponseMessages: Int = 4

@@ -141,7 +141,7 @@ final class BeefyService(
             val probe = !probes.contains(key)
             if probe then probes(key) = (conn, now)
             probe
-        if send then distribution.submitSend(() => conn.openStream(StreamKind), StreamKind, bytes)
+        if send then distribution.submitSend(() => conn.openStream(StreamKind), StreamKind, bytes, conn)
       }
 
   private def resolveProbes(now: Long): Unit =
