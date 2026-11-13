@@ -81,6 +81,29 @@ PVM Heap Growth:
 | small-steps: 4,096 grows of 2 pages (32 MiB) | 27,556 / 27,452 ms | 2.4 / 2.7 ms |
 | small-on-large: one 32 MiB grow, then 200 grows of 2 pages | 1,772 / 1,748 ms | 1.9 / 2.0 ms |
 
+## The published measurement (fuzz-perf)
+
+`jam-conformance/fuzz-perf` is what implementations are compared on: a fresh target process, the first 100 blocks
+of each of `fallback`, `safrole`, `storage` and `storage_light` sent over the fuzz socket, and the time from each
+ImportBlock to its reply. `scripts/fuzz-perf-local.sh jam-forge` reproduces it with the image's JVM flags and warmup
+corpus and prints mean / p50 / p99 / max per trace. Because the process is fresh, startup warmup counts: check the
+target log (`target/fuzz-perf/jam-forge/<trace>.target.log`) for `Warmup complete: ... 0 replays skipped`.
+
+2026-11-13, Apple M1 Max, OpenJDK 26, ZGC 4 GB, one run, ms per block. "Cold" is the target started without
+warmup; "Reference" is the published 0.7.2 reference figure on W3F's Threadripper 3970X, a different machine, for
+scale only.
+
+| Trace | Cold: mean / max | Warm: mean / p50 / p99 / max | Reference mean | Reference interpreter mean |
+|---|---|---|---|---|
+| fallback | 4.05 / 249 | 0.66 / 0.65 / 0.97 / 1.25 | 0.97 | 0.85 |
+| safrole | 7.34 / 390 | 2.95 / 4.26 / 6.41 / 10.1 | 5.29 | 5.54 |
+| storage | 8.47 / 251 | 3.34 / 2.34 / 10.6 / 11.7 | 1.54 | 4.40 |
+| storage_light | 6.81 / 249 | 2.28 / 2.13 / 5.44 / 5.67 | 1.43 | 2.73 |
+
+Stage breakdown of `storage` (`benchImport --traces=jamtestvectors/traces/storage --stages`): accumulation is 71%
+of import time, and 63% of import time is inside the PVM run of a service (3.3 ms per invocation, about 2.2 M gas at
+0.7 Ggas/s). Host calls are 6% of that PVM time; instance setup is 64 µs. Trie update, save and gc together are 3%.
+
 ## Block import bench and heap soak
 
 For before/after figures in performance and memory PRs. Run the same command on `main` and on the branch, on the
@@ -113,6 +136,13 @@ Options (`--key=value`): `--traces=dir[,dir]` (a trace directory or a directory 
 passes, `--reps=5` timed passes, `--per-trace`. Soak: `--imports=20000`, `--sample-every=1000`, `--mutate` (also
 import a bad-seal sibling and re-import the previous block, as a fuzzer does; unchecked), `--max-growth-mb=2`,
 `--csv=file`.
+
+`--stages` adds a per-stage breakdown over the timed passes: one `RESULT stage <name> calls= total_ms= mean_us=
+share=` line per pipeline stage (`safrole`, `reports`, `accumulation`, ...), the commit stages (`commit-encode`,
+`trie-update`, `trie-save`, `trie-gc`), accumulation's parts (`acc/extract`, `acc/stf`, `acc/service-pvm`, ...) and
+the PVM (`pvm/instance`, `pvm/host-<id>` per host call, and `pvm/gas`, whose `total_ms` column is the gas used).
+`share` is of `total`. The timers are off otherwise (`StageTimers`; `-Djam.stageTimers=true` turns them on in any
+process), and cost one clock read per stage when on.
 
 Output: `RESULT import ALL blocks=<per pass> n=<timed samples> mean= p50= p90= p99= max= ms` is wall time per
 block; `RESULT import-cpu ALL ...` is CPU time of the importing thread per block. The CPU line leaves out work done

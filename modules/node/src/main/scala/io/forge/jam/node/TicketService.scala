@@ -323,6 +323,13 @@ final class TicketService(
     val e = chain.config.epochLength
     val epoch = slot / e
     pendingForwards.removeIf(_._1 < epoch)
+    // A ticket reaching an author at slot index `ticketCutoff - 1` or later misses the lottery: one still queued
+    // then, as on a node that came up late in the epoch, is dropped, not sent.
+    if slot % e >= chain.config.ticketCutoff - 1 then
+      if !pendingForwards.isEmpty then
+        logger.debug(s"dropping ${pendingForwards.size} proxy ticket(s): the lottery of epoch $epoch is over")
+        pendingForwards.clear()
+      return
     val start = appliedSlot + math.max(e / 20, 1)
     if pendingForwards.isEmpty || slot < start then return
     val end = math.max(epoch * e + chain.config.ticketCutoff / 2, start + 1)

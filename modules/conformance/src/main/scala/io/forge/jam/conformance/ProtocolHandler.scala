@@ -7,6 +7,7 @@ import java.io.EOFException
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.channels.{ByteChannel, ClosedChannelException}
 import scala.util.control.NonFatal
+import io.forge.jam.protocol.pipeline.StageTimers
 import scala.compiletime.uninitialized
 
 /** Outcome of a single `readMessage` call.
@@ -68,7 +69,8 @@ class ProtocolHandler(
       readMessage(channel) match
         case ReadResult.Decoded(msg, size) =>
           logger.logInfo(s"Received message of size $size bytes, processing...")
-          sendMessage(channel, handleMessage(msg, size))
+          val reply = StageTimers.time("fuzz/handle")(handleMessage(msg, size))
+          StageTimers.time("fuzz/reply")(sendMessage(channel, reply))
 
         case ReadResult.DecodeFailed(reason, size) =>
           println(s"[JAM-FORGE WARN] Decode failure on $size-byte frame, terminating session: $reason")
@@ -95,7 +97,8 @@ class ProtocolHandler(
       readExactly(channel, body, eofAllowed = false)
       try
         // Decoded in place: nothing else holds the frame array.
-        val (msg, _) = ProtocolMessage.decodeMessage(JamBytes.wrap(body.array()), 0, config)
+        val (msg, _) =
+          StageTimers.time("fuzz/decode")(ProtocolMessage.decodeMessage(JamBytes.wrap(body.array()), 0, config))
         ReadResult.Decoded(msg, length)
       catch
         case NonFatal(e) =>
@@ -178,6 +181,8 @@ class ProtocolHandler(
   /** Handle Initialize message.
     */
   private def handleInitialize(init: Initialize): ProtocolMessage =
+    // Stage timers, when on, cover the session's own imports, not the warmup that ran before it.
+    io.forge.jam.protocol.pipeline.StageTimers.reset()
     blockImporter = new BlockImporter(config, skipAncestryValidation)
 
     val headerHash = Hashing.blake2b256(io.forge.jam.core.types.header.Header.headerCodec(config.epochLength).encode(init.header))

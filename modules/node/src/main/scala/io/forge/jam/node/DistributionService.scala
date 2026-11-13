@@ -215,15 +215,39 @@ final class DistributionService(
       () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
     )
 
-  /** Run a request/response exchange on the egress pool. */
+  /** Request/response exchanges wait on a peer for up to half a minute each (10 s to open, 20 s for the answer).
+    * They run here, a few at a time, and not on the egress thread, where one silent peer would hold up every
+    * assurance, ticket, vote and judgment behind it. When more wait than the queue holds, the oldest gives way: its
+    * caller asks again on its own schedule.
+    */
+  private val requests = new java.util.concurrent.ThreadPoolExecutor(
+    DistributionService.RequestThreads,
+    DistributionService.RequestThreads,
+    30L,
+    java.util.concurrent.TimeUnit.SECONDS,
+    new java.util.concurrent.ArrayBlockingQueue[Runnable](DistributionService.MaxQueuedRequests),
+    { r =>
+      val t = new Thread(r, "jam-request"); t.setDaemon(true); t
+    },
+    new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
+  )
+  requests.allowCoreThreadTimeOut(true)
+
+  /** Requests waiting for a request thread. */
+  private[node] def queuedRequests: Int = requests.getQueue.size
+
+  /** Run a request/response exchange off the egress thread. */
   private[node] def submitRequest(task: () => Unit): Unit =
     try
-      egress.submit(new Runnable {
-        def run(): Unit =
-          try task()
-          catch case e: Exception => logger.warn(s"request failed: ${e.getMessage}")
-      })
+      requests.execute(() =>
+        try task()
+        catch case e: Exception => logger.warn(s"request failed: ${e.getMessage}")
+      )
     catch case _: java.util.concurrent.RejectedExecutionException => ()
+
+  def shutdown(): Unit =
+    requests.shutdownNow()
+    ()
 
   private def decodeItem[A](bytes: Array[Byte])(using codec: Codec[A]): Either[String, A] =
     codec.decodeAt(bytes, 0) match
@@ -232,6 +256,10 @@ final class DistributionService(
       case Left(err)  => Left(err)
 
 object DistributionService:
+
+  /** Request/response exchanges in flight at once, and how many more may wait. */
+  val RequestThreads: Int = 4
+  val MaxQueuedRequests: Int = 64
 
   /** CE 141 message: `Anchor(32) ++ Bitfield(ceil(C/8)) ++ Signature(64)`. */
   def encodeAssurance(a: AssuranceExtrinsic): Array[Byte] =

@@ -149,7 +149,11 @@ object SyncCodec:
   * (block requests), announces our own new blocks, and catches up on
   * announced blocks we don't have.
   */
-final class SyncService(chain: ChainManager) extends LazyLogging:
+final class SyncService(
+    chain: ChainManager,
+    /** Where CE 128 and CE 129 requests are answered: off the network event loops, which only hand them over. */
+    serving: InboundWork = InboundWork.direct
+) extends LazyLogging:
   import SyncCodec.*
 
   /** UP 0 streams by peer connection, for broadcasting announcements. */
@@ -361,26 +365,40 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
     * for an unknown block, or one that can no longer be finalized, is reset.
     */
   def blockRequestHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      var asked = false
       stream.onMessage { msg =>
-        decodeBlockRequest(msg) match
-          case Left(err) =>
-            logger.warn(s"CE128: $err")
-            stream.reset()
-          case Right((from, ascending, maxBlocks)) =>
-            if !chain.hasBlock(from) || !chain.canBeFinalized(from) then stream.reset()
-            else
-              val max = math.min(maxBlocks, MaxBlocksPerResponse).toInt
-              val blocks =
-                if ascending then chain.blocksAscending(from, max)
-                else chain.blocksDescending(from, max)
-              // Keep the one message under the peer's frame cap.
-              val out = new java.io.ByteArrayOutputStream()
-              blocks.iterator
-                .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
-                .foreach(b => out.write(b))
-              stream.send(out.toByteArray)
-              stream.finish()
+        // One request per stream; reading up to 256 blocks from the store is not event-loop work.
+        if asked then stream.reset()
+        else
+          asked = true
+          decodeBlockRequest(msg) match
+            case Left(err) =>
+              logger.warn(s"CE128: $err")
+              stream.reset()
+            case Right((from, ascending, maxBlocks)) =>
+              val taken = serving.submit(conn, msg.length.toLong) {
+                try
+                  if !chain.hasBlock(from) || !chain.canBeFinalized(from) then stream.reset()
+                  else
+                    val max = math.min(maxBlocks, MaxBlocksPerResponse).toInt
+                    val blocks =
+                      if ascending then chain.blocksAscending(from, max)
+                      else chain.blocksDescending(from, max)
+                    // Keep the one message under the peer's frame cap.
+                    val out = new java.io.ByteArrayOutputStream()
+                    blocks.iterator
+                      .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
+                      .foreach(b => out.write(b))
+                    stream.send(out.toByteArray)
+                    stream.finish()
+                catch
+                  case e: Exception =>
+                    logger.warn(s"CE128 handler failed: ${e.getMessage}")
+                    stream.reset()
+              }
+              // Too many requests waiting (from this peer, or in all): refused.
+              if !taken then stream.reset()
       }
 
   /** How many blocks to ask for, descending from a block at `slot` that we lack: every block we could still use
@@ -524,8 +542,13 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   /** Ask `conn` for the blocks after our best head, when its chain is ahead by more than a descending request
     * from its tip can bridge. Repeats (from [[fetch]]) while blocks keep arriving.
     */
-  private def catchUp(conn: JamnpConnection): Unit =
-    if conn.isOpen then requestAndImport(conn, chain.best.hash, SyncService.MaxBlocksPerRequest, ascending = true)
+  private def catchUp(conn: JamnpConnection): Unit = catchUpFrom(conn, chain.best.hash)
+
+  /** Ask `conn` for the blocks after `from`: our best head, the last block of the previous answer, or our finalized
+    * head when the peer has nothing after our best head (see [[fetch]]).
+    */
+  private def catchUpFrom(conn: JamnpConnection, from: Hash): Unit =
+    if conn.isOpen then requestAndImport(conn, from, SyncService.MaxBlocksPerRequest, ascending = true)
 
   private def fetch(conn: JamnpConnection, from: Hash, maxBlocks: Int, ascending: Boolean): Unit =
         try
@@ -553,8 +576,10 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
               next = received.poll()
             // Oldest first; skip blocks until one extends our best head.
             var imported = 0
+            var stored = 0 // new to us, kept on a side branch
             var unknownParent = false
-            (if ascending then blocks.toList else blocks.reverse.toList).foreach { blockBytes =>
+            val ordered = if ascending then blocks.toList else blocks.reverse.toList
+            ordered.foreach { blockBytes =>
               chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
                 case Right(_) =>
                   imported += 1
@@ -563,13 +588,26 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
                   }
                 case Left(err) =>
                   if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
+                  if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
                   logger.debug(s"sync import skipped: $err")
             }
             if imported > 0 then
               logger.info(s"synced $imported block(s); best=${chain.best.slot}")
             // The peer's blocks do not reach back to our head (a descending request), or more may follow (an
             // ascending one that brought some): go on from our head.
-            if (ascending && imported > 0) || (!ascending && imported == 0 && unknownParent) then catchUp(conn)
+            val best = chain.best.hash
+            val finalized = chain.finalized.hash
+            if !ascending && imported == 0 && unknownParent then catchUp(conn)
+            else if ascending && imported + stored > 0 then
+              // More may follow. Go on from the last block of this answer: after our head when it extended our
+              // chain, and along the peer's branch when the blocks are a fork we hold only as a side branch so far.
+              val last = ordered.lastOption.flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf)
+              catchUpFrom(conn, last.filter(chain.hasBlock).getOrElse(best))
+            else if ascending && from == best && best != finalized then
+              // Nothing after our best head: the peer may not have it at all (we are on a fork it never saw, or
+              // one it cannot finalize, which CE 128 must not serve). Every chain shares the finalized block.
+              logger.info("catch-up: the peer has nothing after our head; asking from our finalized block")
+              catchUpFrom(conn, finalized)
             else if ascending && blocks.isEmpty then logger.info("catch-up: the peer returned no block after our head")
         catch
           case e: Exception =>
@@ -579,28 +617,36 @@ final class SyncService(chain: ChainManager) extends LazyLogging:
   // CE 129 — state request (trie range)
   // =========================================================================
   def stateRequestHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      var asked = false
       stream.onMessage { msg =>
-        try
+        // One request per stream; walking up to 16 MiB of the trie is not event-loop work.
+        if asked then stream.reset()
+        else
+          asked = true
           decodeStateRequest(msg) match
             case Left(err) =>
               logger.warn(s"CE129 request decode failed: $err")
               stream.reset()
             case Right((headerHash, start, end, maxSize)) =>
-              chain.stateAt(headerHash) match
-                case None =>
-                  logger.debug(s"CE129: state request for unknown header ${headerHash.toHex.take(18)}")
-                  stream.reset()
-                case Some(trie) =>
-                  val cap = math.min(maxSize, StateRequestMaxSizeCap).toInt
-                  val (boundary, pairs) = trie.range(start, end, cap)
-                  stream.send(encodeBoundaryNodes(boundary))
-                  stream.send(encodeStatePairs(pairs))
-                  stream.finish()
-        catch
-          case e: Exception =>
-            logger.warn(s"CE129 handler failed: ${e.getMessage}")
-            stream.reset()
+              val taken = serving.submit(conn, msg.length.toLong) {
+                try
+                  chain.stateAt(headerHash) match
+                    case None =>
+                      logger.debug(s"CE129: state request for unknown header ${headerHash.toHex.take(18)}")
+                      stream.reset()
+                    case Some(trie) =>
+                      val cap = math.min(maxSize, StateRequestMaxSizeCap).toInt
+                      val (boundary, pairs) = trie.range(start, end, cap)
+                      stream.send(encodeBoundaryNodes(boundary))
+                      stream.send(encodeStatePairs(pairs))
+                      stream.finish()
+                catch
+                  case e: Exception =>
+                    logger.warn(s"CE129 handler failed: ${e.getMessage}")
+                    stream.reset()
+              }
+              if !taken then stream.reset()
       }
 
 object SyncService:

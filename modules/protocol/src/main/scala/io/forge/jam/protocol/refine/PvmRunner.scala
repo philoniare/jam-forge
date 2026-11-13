@@ -1,5 +1,6 @@
 package io.forge.jam.protocol.refine
 
+import io.forge.jam.protocol.pipeline.StageTimers
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
@@ -51,18 +52,17 @@ object PvmRunner:
   ): (PvmExit, Long, Array[Byte]) =
     // Reserved before the instance's memory is allocated and held until the run is over, so the instances running
     // at once (services of one accumulation batch, refine, is-authorized) stay within the process-wide budget.
-    val reservation = memoryBudget.reserve(instanceBytes(module, inputData.length, executionMode))
+    val reservation = memoryBudget.reserve(instanceBytes(module, inputData.length))
     try runReserved(module, inputData, gasLimit, entryPc, hostCalls, executionMode, preDispatch, reservation)
     finally reservation.close()
 
   /** Bytes a new instance of `module` allocates up front: the read-write region with the declared heap, the stack
-    * and the argument pages. The recompiler works on copies of them (region slices, the packed backing array and
-    * the native buffer).
+    * and the argument pages. The same in both modes: a native run keeps one copy of them, in its thread's guest
+    * mapping.
     */
-  def instanceBytes(module: InterpretedModule, inputLength: Int, executionMode: ExecutionMode): Long =
+  def instanceBytes(module: InterpretedModule, inputLength: Int): Long =
     val map = module.memoryMap
-    val interpreted = map.rwDataSize.toLong + map.stackSize.toLong + inputLength.toLong
-    if executionMode == ExecutionMode.Recompiled then interpreted * 4 else interpreted
+    map.rwDataSize.toLong + map.stackSize.toLong + inputLength.toLong
 
   private def runReserved(
       module: InterpretedModule,
@@ -74,10 +74,34 @@ object PvmRunner:
       preDispatch: Option[() => Unit],
       reservation: InstanceMemoryBudget.Reservation
   ): (PvmExit, Long, Array[Byte]) =
-    val instance = InterpretedInstance.fromModule(
-      module,
-      inputData,
-      forceStepTracing = RefineHostCalls.trace
+    // Recompiled: run straight from the module, with no interpreter instance to build, describe and copy back
+    // from. Step tracing needs the interpreter, and a run the native path declines takes the long way below.
+    if executionMode == ExecutionMode.Recompiled && !RefineHostCalls.trace then
+      val regs = new Array[Long](13)
+      regs(0) = RA_INIT
+      regs(1) = SP_INIT
+      regs(7) = INPUT_ADDR
+      regs(8) = inputData.length.toLong
+      NativeRunner.runDirect(module, inputData, regs, gasLimit, entryPc, hostCalls, preDispatch, reservation) match
+        case Some(result) =>
+          val exit = result.outcome match
+            case NativeRunner.RunOutcome.Halt => PvmExit.Halt
+            case NativeRunner.RunOutcome.Panic => PvmExit.Panic
+            case NativeRunner.RunOutcome.OutOfGas => PvmExit.OutOfGas
+            case NativeRunner.RunOutcome.PageFault(_) => PvmExit.PageFault
+          val gasUsed = if result.gasRemaining >= 0 then gasLimit - result.gasRemaining else gasLimit
+          if StageTimers.enabled then StageTimers.count("pvm/gas", gasUsed)
+          return (exit, gasUsed, result.output)
+        case None =>
+          // The long way round holds the instance, its packed description and the native copy at once.
+          reservation.grow(3 * instanceBytes(module, inputData.length))
+
+    val instance = StageTimers.time("pvm/instance")(
+      InterpretedInstance.fromModule(
+        module,
+        inputData,
+        forceStepTracing = RefineHostCalls.trace
+      )
     )
     val recent = new java.util.ArrayDeque[String]()
     instance.basicMemory.setReservation(reservation)
@@ -135,7 +159,10 @@ object PvmRunner:
             continueExecution = false
           else
             preDispatch.foreach(_())
-            try hostCalls.dispatch(hostId.signed, pvmWrapper)
+            try
+              if StageTimers.enabled then
+                StageTimers.time(s"pvm/host-${hostId.signed}")(hostCalls.dispatch(hostId.signed, pvmWrapper))
+              else hostCalls.dispatch(hostId.signed, pvmWrapper)
             catch
               case _: HostCallPanic =>
                 exit = PvmExit.Panic
@@ -160,6 +187,7 @@ object PvmRunner:
       System.err.println(s"[refine] exit $exit pc=${instance.programCounter} regs=${(0 to 12).map(i => f"0x${instance.reg(i)}%x").mkString(",")}")
     val finalGas = instance.gas
     val gasUsed = if finalGas >= 0 then initialGas - finalGas else initialGas
+    if StageTimers.enabled then StageTimers.count("pvm/gas", gasUsed)
 
     val output =
       if exit == PvmExit.Halt then

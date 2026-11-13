@@ -61,9 +61,10 @@ object AccumulationTransition:
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor]
   ): AccumulationOutput =
-    val pre = AccumulationBridge.extract(view)
+    import io.forge.jam.protocol.pipeline.StageTimers
+    val pre = StageTimers.time("acc/extract")(AccumulationBridge.extract(view))
 
-    val result =
+    val result = StageTimers.time("acc/stf")(
       stfInternal(
         input,
         pre.state,
@@ -73,14 +74,17 @@ object AccumulationTransition:
         prevSlot,
         sharedExecutor
       )
+    )
 
-    AccumulationBridge.apply(
-      view,
-      result.state,
-      result.stagingSet,
-      pre.initStagingSet,
-      result.authQueues,
-      pre.initAuthQueues
+    StageTimers.time("acc/apply")(
+      AccumulationBridge.apply(
+        view,
+        result.state,
+        result.stagingSet,
+        pre.initStagingSet,
+        result.authQueues,
+        pre.initAuthQueues
+      )
     )
     result.output
 

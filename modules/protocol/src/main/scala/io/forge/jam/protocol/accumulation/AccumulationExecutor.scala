@@ -1,5 +1,6 @@
 package io.forge.jam.protocol.accumulation
 
+import io.forge.jam.protocol.pipeline.StageTimers
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
@@ -13,12 +14,12 @@ import spire.math.{UInt, UByte}
 /** Orchestrates PVM execution for accumulation.
   *
   * @param parallelServices
-  *   whether the services of one accpar batch run concurrently. The recompiler has not been checked for concurrent
-  *   use, so only the interpreter does by default.
+  *   whether the services of one accpar batch run concurrently. Both engines allow it: compiled code is immutable
+  *   and shared, and everything a native run mutates lives in its thread's own execution context.
   */
 class AccumulationExecutor(
     val config: ChainConfig,
-    val parallelServices: Boolean = ExecutionMode.default == ExecutionMode.Interpreted
+    val parallelServices: Boolean = true
 ):
 
   private var currentStorageView: Option[ServiceStorageView] = None
@@ -57,13 +58,14 @@ class AccumulationExecutor(
     val code = extractCodeBlob(preimage.get.toArrayUnsafe)
     if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
     then return createEmptyResult(partialState, Some(serviceId), operands)
-    val module: Option[InterpretedModule] = getOrCompileModule(code.get, JamBytes(codeHash.bytes.toArray))
+    val module: Option[InterpretedModule] =
+      StageTimers.time("acc/service-module")(getOrCompileModule(code.get, JamBytes(codeHash.bytes.toArray)))
 
     // Apply incoming transfer balances before execution
     val transferBalance = operands.collect {
       case AccumulationOperand.Transfer(t) => t.amount
     }.sum
-    val postTransferState = partialState.deepCopy()
+    val postTransferState = StageTimers.time("acc/service-deepcopy")(partialState.deepCopy())
     val deepCopiedAccount = postTransferState.accounts(serviceId)
     postTransferState.accounts = postTransferState.accounts.updated(
       serviceId,
@@ -100,10 +102,10 @@ class AccumulationExecutor(
     )
 
     // Execute PVM
-    val execResult = executePvm(context, module, gasLimit, operands, executionMode)
+    val execResult = StageTimers.time("acc/service-pvm")(executePvm(context, module, gasLimit, operands, executionMode))
 
     // Collapse state based on exit reason
-    val finalState = context.collapse(execResult.exitReason)
+    val finalState = StageTimers.time("acc/service-collapse")(context.collapse(execResult.exitReason))
 
     // Determine yield based on exit reason
     val yieldHash: Option[JamBytes] = execResult.exitReason match

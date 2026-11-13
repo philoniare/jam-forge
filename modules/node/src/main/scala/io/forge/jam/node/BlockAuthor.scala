@@ -69,7 +69,7 @@ final class BlockAuthor(
     val best = chain.best
     if slot <= best.slot then return None
 
-    val preView = chain.stateView()
+    val preView = chain.stateViewOf(best)
     if slot <= preView.timeslot then return None
 
     // Candidate tickets while the submission window is open: entered for
@@ -97,7 +97,7 @@ final class BlockAuthor(
     // throwaway (never committed). A rejected ticket set falls back to an
     // empty extrinsic rather than stalling authoring.
     def runSafrole(tickets: List[(Hash, TicketEnvelope)]) =
-      val v = chain.stateView()
+      val v = chain.stateViewOf(best)
       SafroleTransition
         .stfView(
           SafroleInput(
@@ -185,7 +185,7 @@ final class BlockAuthor(
     // Assurances and guarantees that pass the pipeline's checks on a throwaway posterior-Safrole view; the rest are
     // left out, and those that cannot pass later leave the pool.
     val plan = AuthoringPlan.plan(
-      runSafrole(includedTickets).fold(_ => chain.stateView(), _._1),
+      runSafrole(includedTickets).fold(_ => chain.stateViewOf(best), _._1),
       priorTau = preView.timeslot,
       priorKappa = preView.validators.current,
       priorLambda = preView.validators.previous,

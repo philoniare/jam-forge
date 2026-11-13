@@ -1,5 +1,9 @@
+// Both emitters build on every host; the one for another ISA is unused there (but for the shared block analysis).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 mod aarch64;
 mod execmem;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+mod x86_64;
 
 use execmem::ExecMem;
 
@@ -569,7 +573,22 @@ fn decode(instrs: &[RawInstr]) -> Option<Vec<Op>> {
     Some(ops)
 }
 
-const NATIVE_BACKEND: bool = cfg!(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")));
+/// Hosts we emit code for: AArch64, and x86-64 with the System V calling convention (so not Windows).
+const NATIVE_BACKEND: bool = cfg!(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    any(target_os = "macos", target_os = "linux")
+));
+
+/// The emitter for the host this library was built for. Both emitters compile on every host (they only assemble
+/// bytes); the other one is simply never run.
+#[cfg(target_arch = "x86_64")]
+fn native_backend() -> impl Backend {
+    x86_64::X86_64Backend
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn native_backend() -> impl Backend {
+    aarch64::Aarch64Backend
+}
 
 /// Compile a pre-decoded single-basic-block program. Returns a heap-owned
 /// `CompiledBlock` pointer, or null if the program contains an unsupported
@@ -603,7 +622,7 @@ pub unsafe extern "C" fn pvm_compile(
         std::slice::from_raw_parts(jump_table, jt_n).to_vec().into_boxed_slice()
     };
     let jt_ptr = jt.as_ptr();
-    let backend = aarch64::Aarch64Backend;
+    let backend = native_backend();
     let (_dry_code, _dry_count, entry_offsets_vec) =
         match backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, std::ptr::null(), code_len) {
             Some(x) => x,
@@ -620,6 +639,11 @@ pub unsafe extern "C" fn pvm_compile(
         Some(m) => m,
         None => return std::ptr::null_mut(),
     };
+    // Profiling aid: PVM_RECOMPILER_DUMP=<dir> writes each program's machine code to <dir>/<load address>.bin, so
+    // sampled addresses (perf) can be matched to disassembly.
+    if let Ok(dir) = std::env::var("PVM_RECOMPILER_DUMP") {
+        let _ = std::fs::write(format!("{dir}/{:x}.bin", mem.as_ptr() as usize), &code);
+    }
     Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt, entry_offsets }))
 }
 pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
@@ -649,6 +673,40 @@ pub unsafe extern "C" fn pvm_execute(
     host_fn: Option<HostFn>,
     host_ctx: *mut std::ffi::c_void,
 ) -> u32 {
+    pvm_execute_flat(
+        block, regs, gas, regions, n_regions, backing, page_shift, entry_index, out, host_fn, host_ctx,
+        std::ptr::null(),
+    )
+}
+
+/// One permission byte per 4 KiB page of the 32-bit guest address space.
+pub const PAGE_PERMS_LEN: usize = 1 << 20;
+/// "No fast path anywhere": what a caller with a packed backing buffer gets.
+static NO_PAGE_PERMS: [u8; PAGE_PERMS_LEN] = [0; PAGE_PERMS_LEN];
+
+/// [`pvm_execute`] for a caller that lays guest memory out flat: every region's bytes are at
+/// `backing + region.base` (so `buf_offset == base`), and `page_perms` has [`PAGE_PERMS_LEN`] bytes, one per
+/// 4 KiB guest page: 1 where the whole page is in a readable region, 2 where it is in a writable one, 0
+/// elsewhere. Accesses to marked pages skip the region scan. A null `page_perms` marks nothing.
+///
+/// # Safety
+/// As [`pvm_execute`]; `page_perms`, when not null, must point to [`PAGE_PERMS_LEN`] bytes that keep the promise
+/// above for the whole call (the host may change them during a host call).
+#[no_mangle]
+pub unsafe extern "C" fn pvm_execute_flat(
+    block: *mut CompiledBlock,
+    regs: *mut u64,
+    gas: *mut i64,
+    regions: *const Region,
+    n_regions: u64,
+    backing: *mut u8,
+    page_shift: u32,
+    entry_index: u32,
+    out: *mut ExecOut,
+    host_fn: Option<HostFn>,
+    host_ctx: *mut std::ffi::c_void,
+    page_perms: *const u8,
+) -> u32 {
     if block.is_null() || regs.is_null() || gas.is_null() || out.is_null() {
         return EXIT_PANIC;
     }
@@ -657,6 +715,7 @@ pub unsafe extern "C" fn pvm_execute(
         *out = ExecOut { pc: 0, fault_page: 0 };
         return EXIT_PANIC;
     }
+    let page_perms = if page_perms.is_null() { NO_PAGE_PERMS.as_ptr() } else { page_perms };
     let base = block.mem.as_ptr();
     let f: extern "C" fn(
         *mut u64,
@@ -669,8 +728,9 @@ pub unsafe extern "C" fn pvm_execute(
         u32,
         Option<HostFn>,
         *mut std::ffi::c_void,
+        *const u8,
     ) -> u32 = std::mem::transmute(base);
-    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx)
+    f(regs, gas, regions, n_regions, backing, page_shift, out, entry_index, host_fn, host_ctx, page_perms)
 }
 
 /// Free a compiled block (unmaps its executable memory).
@@ -3740,6 +3800,9 @@ mod tests {
                         HOST_OOG
                     }
                     4 => {
+                        // Trash every caller-saved scratch register the emitted code uses: it must not rely on
+                        // any of them across a host call.
+                        #[cfg(target_arch = "aarch64")]
                         std::arch::asm!(
                             "mov x8, {p}", "mov x9, {p}", "mov x10, {p}",
                             "mov x13, {p}", "mov x14, {p}", "mov x15, {p}",
@@ -3748,6 +3811,14 @@ mod tests {
                             out("x8") _, out("x9") _, out("x10") _,
                             out("x13") _, out("x14") _, out("x15") _,
                             out("x16") _, out("x17") _,
+                        );
+                        #[cfg(target_arch = "x86_64")]
+                        std::arch::asm!(
+                            "mov rcx, {p}", "mov rdx, {p}", "mov rsi, {p}", "mov rdi, {p}",
+                            "mov r8, {p}", "mov r9, {p}", "mov r10, {p}", "mov r11, {p}",
+                            p = in(reg) 0xDEADBEEFu64,
+                            out("rcx") _, out("rdx") _, out("rsi") _, out("rdi") _,
+                            out("r8") _, out("r9") _, out("r10") _, out("r11") _,
                         );
                         HOST_CONTINUE
                     }

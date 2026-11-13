@@ -73,6 +73,7 @@ public final class PvmRecompiler implements AutoCloseable {
 
     private final MethodHandle compile;
     private final MethodHandle execute;
+    private final MethodHandle executeFlat;
     private final MethodHandle free;
     private final Arena arena;
     private final Linker linker;
@@ -117,6 +118,22 @@ public final class PvmRecompiler implements AutoCloseable {
                         ValueLayout.ADDRESS,   // host_fn (Option<HostFn> — null means None)
                         ValueLayout.ADDRESS    // host_ctx
                 ));
+        this.executeFlat = linker.downcallHandle(
+                lookup.find("pvm_execute_flat").orElseThrow(() -> missing("pvm_execute_flat")),
+                FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS,   // block
+                        ValueLayout.ADDRESS,   // regs
+                        ValueLayout.ADDRESS,   // gas
+                        ValueLayout.ADDRESS,   // regions
+                        ValueLayout.JAVA_LONG, // n_regions
+                        ValueLayout.ADDRESS,   // backing (guest address 0)
+                        ValueLayout.JAVA_INT,  // page_shift
+                        ValueLayout.JAVA_INT,  // entry_index
+                        ValueLayout.ADDRESS,   // out (ExecOut*)
+                        ValueLayout.ADDRESS,   // host_fn
+                        ValueLayout.ADDRESS,   // host_ctx
+                        ValueLayout.ADDRESS    // page_perms
+                ));
         this.free = linker.downcallHandle(
                 lookup.find("pvm_free").orElseThrow(() -> missing("pvm_free")),
                 FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
@@ -131,6 +148,14 @@ public final class PvmRecompiler implements AutoCloseable {
     private static final int MMAP_MAP_PRIVATE = 0x0002;
     private static final int MMAP_MAP_ANON =
             System.getProperty("os.name").toLowerCase().contains("mac") ? 0x1000 : 0x20;
+    // Reserve address space only: the 4 GiB guest mapping is touched where a guest has regions, nowhere else.
+    private static final int MMAP_MAP_NORESERVE =
+            System.getProperty("os.name").toLowerCase().contains("mac") ? 0x0040 : 0x4000;
+    private static final int MMAP_MAP_FIXED = 0x10;
+    /** Ranges of guest memory at least this long are zeroed by mapping them afresh. */
+    private static final long REMAP_MIN = 1L << 20;
+    /** A multiple of every host page size in use (4, 16 and 64 KiB). */
+    private static final long REMAP_ALIGN = 1L << 16;
     private static final MemorySegment MMAP_FAILED = MemorySegment.ofAddress(-1L);
     private static final MethodHandle MMAP_MH;
     private static final MethodHandle MUNMAP_MH;
@@ -198,7 +223,8 @@ public final class PvmRecompiler implements AutoCloseable {
     }
 
     private static final class UpcallState {
-        final HostCallHandler handler;
+        // Not final: a reusable ExecContext points its one stub at each run's handler in turn.
+        HostCallHandler handler;
         Throwable pending;
 
         UpcallState(HostCallHandler handler) {
@@ -409,29 +435,7 @@ public final class PvmRecompiler implements AutoCloseable {
             MemorySegment regionsSeg = regions.length == 0
                     ? MemorySegment.NULL
                     : call.allocate(REGION_SIZE * regions.length);
-            for (int i = 0; i < regions.length; i++) {
-                long off = i * REGION_SIZE;
-                Region r = regions[i];
-                if (r.bufOffset() < 0 || r.bufOffset() > 0xFFFFFFFFL) {
-                    throw new IllegalArgumentException("Region.bufOffset() " + r.bufOffset() + " does not fit in u32 (region base=" + r.base() + ")");
-                }
-                if (r.base() < 0 || r.base() > 0xFFFFFFFFL) {
-                    throw new IllegalArgumentException("Region.base() " + r.base() + " does not fit in u32");
-                }
-                if (r.len() < 0 || r.len() > 0xFFFFFFFFL) {
-                    throw new IllegalArgumentException("Region.len() " + r.len() + " does not fit in u32 (region base=" + r.base() + ")");
-                }
-                if (r.bufOffset() + r.len() > mmapTotalLen) {
-                    throw new IllegalArgumentException("Region[" + i + "] extent (bufOffset=" + r.bufOffset()
-                            + ", len=" + r.len() + ", end=" + (r.bufOffset() + r.len())
-                            + ") exceeds the mmap'd backing segment's total length (" + mmapTotalLen
-                            + " = backing.length=" + backing.length + " + extraBackingSlack=" + extraBackingSlack + ")");
-                }
-                regionsSeg.set(ValueLayout.JAVA_INT, off, (int) r.base());
-                regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) r.len());
-                regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) r.bufOffset());
-                regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
-            }
+            writeRegionTable(regionsSeg, regions, mmapTotalLen, backing.length, extraBackingSlack);
 
             MemorySegment backingSeg = mmapAnonRw(mmapTotalLen, call);
             long compactOff = 0L;
@@ -451,15 +455,314 @@ public final class PvmRecompiler implements AutoCloseable {
 
             return new LiveExecution(call, block, regSeg, gasSeg, regionsSeg, regions.length,
                     backingSeg, pageShift, entryIndex, outSeg, regs, backing, hostFnSeg, hostCtxSeg, stub,
-                    regions);
+                    regions, null);
         } catch (Throwable t) {
             call.close();
             throw new RuntimeException("executeLive setup failed", t);
         }
     }
 
+    /** The whole 32-bit guest address space. */
+    private static final long GUEST_SPACE = 1L << 32;
+    private static final int PERM_PAGE_SHIFT = 12;
+    /** One permission byte per 4 KiB guest page; must equal the native library's PAGE_PERMS_LEN. */
+    private static final long PAGE_PERMS_LEN = GUEST_SPACE >>> PERM_PAGE_SHIFT;
+
+    /**
+     * Everything one execution needs outside the compiled code, kept for reuse by one thread: the register, gas,
+     * exit and region-table cells, the host-call upcall stub, and guest memory. Building these per call (an mmap,
+     * an munmap and a freshly generated upcall stub) costs more than running a small service.
+     *
+     * Guest memory is one sparse 4 GiB mapping in which a region's bytes sit at its guest address, so the host
+     * address of a guest byte is just `mapping + address`. Beside it is a table of one permission byte per page,
+     * which the compiled code consults instead of scanning the region table. Between runs the mapping is all
+     * zero and the table all "no access": each run clears what it used.
+     *
+     * Not thread-safe, and one execution at a time: {@link #tryBegin} returns null while a run is in progress.
+     */
+    public final class ExecContext {
+        private final Arena arena = Arena.ofAuto();
+        private final MemorySegment regSeg = arena.allocate(ValueLayout.JAVA_LONG, REG_COUNT);
+        private final MemorySegment gasSeg = arena.allocate(ValueLayout.JAVA_LONG);
+        private final MemorySegment outSeg = arena.allocate(EXEC_OUT_SIZE);
+        private final MemorySegment permsSeg = arena.allocate(PAGE_PERMS_LEN);
+        private MemorySegment regionsSeg = arena.allocate(REGION_SIZE * 8);
+        private final UpcallState upcallState = new UpcallState(null);
+        private final UpcallStub stub =
+                new UpcallStub(linker.upcallStub(UPCALL_TARGET_MH.bindTo(upcallState), HOST_FN_DESCRIPTOR, arena), upcallState);
+        // Unmapped by `mapping` when the context is disposed of or collected.
+        private final ContextMapping mapping = new ContextMapping();
+        private final MemorySegment guestSeg;
+        private boolean inUse = false;
+
+        private ExecContext() {
+            guestSeg = mapping.map(GUEST_SPACE);
+            // `mapping` holds no reference to this context, so the context stays collectable.
+            CONTEXT_CLEANER.register(this, mapping);
+        }
+
+        /** Give the guest mapping back now (a context made for one nested run). */
+        private void dispose() {
+            mapping.run();
+        }
+
+        /**
+         * Zero guest bytes [base, base+len). A large range is mapped afresh instead of written: that costs the
+         * same however much of it the guest touched, and gives the touched pages back to the system.
+         */
+        private void zeroGuest(long base, long len) {
+            long from = (base + REMAP_ALIGN - 1) & -REMAP_ALIGN;
+            long to = (base + len) & -REMAP_ALIGN;
+            if (len < REMAP_MIN || to <= from) {
+                guestSeg.asSlice(base, len).fill((byte) 0);
+                return;
+            }
+            if (from > base) {
+                guestSeg.asSlice(base, from - base).fill((byte) 0);
+            }
+            if (base + len > to) {
+                guestSeg.asSlice(to, base + len - to).fill((byte) 0);
+            }
+            try {
+                MemorySegment at = MemorySegment.ofAddress(guestSeg.address() + from);
+                MemorySegment got = (MemorySegment) MMAP_MH.invokeExact(
+                        at, to - from, MMAP_PROT_READ | MMAP_PROT_WRITE,
+                        MMAP_MAP_PRIVATE | MMAP_MAP_ANON | MMAP_MAP_NORESERVE | MMAP_MAP_FIXED, -1, 0L);
+                if (got.address() != at.address()) {
+                    throw new RuntimeException("mmap(MAP_FIXED) over guest memory failed");
+                }
+            } catch (Throwable t) {
+                if (t instanceof RuntimeException re) throw re;
+                throw new RuntimeException("mmap(MAP_FIXED) over guest memory failed", t);
+            }
+        }
+
+        /** Mark the pages lying wholly inside [base, base+len) with `perm`. */
+        private void setPerms(long base, long len, byte perm) {
+            long first = (base + (1L << PERM_PAGE_SHIFT) - 1) >>> PERM_PAGE_SHIFT;
+            long end = (base + len) >>> PERM_PAGE_SHIFT;
+            if (end > first) {
+                permsSeg.asSlice(first, end - first).fill(perm);
+            }
+        }
+
+        /**
+         * Start an execution in this context. `regions` are taken by guest address ({@code bufOffset} is not
+         * used); `backing` holds their bytes packed in the order given, as {@link #executeLive} takes them, and
+         * gets the final bytes back on close. Returns null when the context is already running an execution.
+         */
+        public LiveExecution tryBegin(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
+                                      int pageShift, int entryIndex, HostCallHandler hostCallHandler) {
+            if (inUse) {
+                return null;
+            }
+            if (regs.length != REG_COUNT) {
+                throw new IllegalArgumentException("regs must have length " + REG_COUNT);
+            }
+            for (int i = 0; i < REG_COUNT; i++) {
+                regSeg.setAtIndex(ValueLayout.JAVA_LONG, i, regs[i]);
+            }
+            gasSeg.set(ValueLayout.JAVA_LONG, 0, gas);
+            if (REGION_SIZE * regions.length > regionsSeg.byteSize()) {
+                regionsSeg = arena.allocate(REGION_SIZE * regions.length);
+            }
+            long compactOff = 0L;
+            for (int i = 0; i < regions.length; i++) {
+                Region r = regions[i];
+                long base = r.base();
+                long len = r.len();
+                if (base < 0 || len < 0 || base + len > GUEST_SPACE) {
+                    throw new IllegalArgumentException("Region[" + i + "] (base=" + base + ", len=" + len
+                            + ") does not lie in the 32-bit guest address space");
+                }
+                long off = i * REGION_SIZE;
+                regionsSeg.set(ValueLayout.JAVA_INT, off, (int) base);
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) len);
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) base); // host offset = guest address
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
+                if (len > 0) {
+                    MemorySegment.copy(backing, (int) compactOff, guestSeg, ValueLayout.JAVA_BYTE, base, (int) len);
+                    setPerms(base, len, r.writable() ? (byte) 2 : (byte) 1);
+                }
+                compactOff += len;
+            }
+            upcallState.handler = hostCallHandler;
+            upcallState.pending = null;
+            MemorySegment hostFnSeg = hostCallHandler == null ? MemorySegment.NULL : stub.fnPointer();
+            inUse = true;
+            return new LiveExecution(null, block, regSeg, gasSeg, regionsSeg, regions.length,
+                    guestSeg, pageShift, entryIndex, outSeg, regs, backing, hostFnSeg, MemorySegment.NULL,
+                    hostCallHandler == null ? null : stub, regions, this);
+        }
+
+        /**
+         * {@link #tryBegin} without the packed buffer: region {@code i} starts as {@code contents[i]} followed by
+         * zeros ({@code null} is all zeros), copied straight to its guest address, and nothing is copied back on
+         * close: the caller reads what it needs from {@link LiveExecution#backingSegment()} while the execution
+         * is open.
+         */
+        public LiveExecution tryBeginDirect(Block block, long[] regs, long gas, Region[] regions, byte[][] contents,
+                                            int pageShift, int entryIndex, HostCallHandler hostCallHandler) {
+            if (inUse) {
+                return null;
+            }
+            for (int i = 0; i < REG_COUNT; i++) {
+                regSeg.setAtIndex(ValueLayout.JAVA_LONG, i, regs[i]);
+            }
+            gasSeg.set(ValueLayout.JAVA_LONG, 0, gas);
+            if (REGION_SIZE * regions.length > regionsSeg.byteSize()) {
+                regionsSeg = arena.allocate(REGION_SIZE * regions.length);
+            }
+            for (int i = 0; i < regions.length; i++) {
+                Region r = regions[i];
+                long base = r.base();
+                long len = r.len();
+                byte[] bytes = contents[i];
+                if (base < 0 || len < 0 || base + len > GUEST_SPACE || (bytes != null && bytes.length > len)) {
+                    throw new IllegalArgumentException("Region[" + i + "] (base=" + base + ", len=" + len
+                            + ") does not lie in the 32-bit guest address space, or its contents are longer");
+                }
+                long off = i * REGION_SIZE;
+                regionsSeg.set(ValueLayout.JAVA_INT, off, (int) base);
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) len);
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) base);
+                regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
+                if (len > 0) {
+                    if (bytes != null && bytes.length > 0) {
+                        MemorySegment.copy(bytes, 0, guestSeg, ValueLayout.JAVA_BYTE, base, bytes.length);
+                    }
+                    setPerms(base, len, r.writable() ? (byte) 2 : (byte) 1);
+                }
+            }
+            upcallState.handler = hostCallHandler;
+            upcallState.pending = null;
+            MemorySegment hostFnSeg = hostCallHandler == null ? MemorySegment.NULL : stub.fnPointer();
+            inUse = true;
+            return new LiveExecution(null, block, regSeg, gasSeg, regionsSeg, regions.length,
+                    guestSeg, pageShift, entryIndex, outSeg, regs, null, hostFnSeg, MemorySegment.NULL,
+                    hostCallHandler == null ? null : stub, regions, this);
+        }
+
+        /** A region grew (the heap, in a host call): record its length and open the pages it now covers. */
+        private void regionGrown(int index, long newLen) {
+            long off = index * REGION_SIZE;
+            long base = Integer.toUnsignedLong(regionsSeg.get(ValueLayout.JAVA_INT, off));
+            boolean writable = regionsSeg.get(ValueLayout.JAVA_INT, off + 12) != 0;
+            regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) newLen);
+            setPerms(base, newLen, writable ? (byte) 2 : (byte) 1);
+        }
+
+        /** Called by the execution's close(): leave the mapping zero and the table empty for the next run. */
+        private void finish(long nRegions) {
+            for (long i = 0; i < nRegions; i++) {
+                long off = i * REGION_SIZE;
+                long base = Integer.toUnsignedLong(regionsSeg.get(ValueLayout.JAVA_INT, off));
+                long len = Integer.toUnsignedLong(regionsSeg.get(ValueLayout.JAVA_INT, off + 4));
+                if (len > 0) {
+                    zeroGuest(base, len);
+                    setPerms(base, len, (byte) 0);
+                }
+            }
+            upcallState.handler = null;
+            inUse = false;
+        }
+    }
+
+    private static final java.lang.ref.Cleaner CONTEXT_CLEANER = java.lang.ref.Cleaner.create();
+
+    /** One anonymous mapping, unmapped exactly once by {@link #run} (which is also the context's cleaner action). */
+    private static final class ContextMapping implements Runnable {
+        private long address = 0L;
+        private long length = 0L;
+
+        synchronized MemorySegment map(long total) {
+            run();
+            if (total == 0) {
+                return MemorySegment.NULL;
+            }
+            try {
+                MemorySegment addr = (MemorySegment) MMAP_MH.invokeExact(
+                        MemorySegment.NULL, total, MMAP_PROT_READ | MMAP_PROT_WRITE,
+                        MMAP_MAP_PRIVATE | MMAP_MAP_ANON | MMAP_MAP_NORESERVE, -1, 0L);
+                if (addr.address() == MMAP_FAILED.address()) {
+                    throw new RuntimeException("mmap(" + total + ") failed (MAP_FAILED)");
+                }
+                address = addr.address();
+                length = total;
+                return addr.reinterpret(total);
+            } catch (Throwable t) {
+                if (t instanceof RuntimeException re) throw re;
+                throw new RuntimeException("mmap(" + total + ") failed", t);
+            }
+        }
+
+        @Override
+        public synchronized void run() {
+            if (length > 0) {
+                long len = length;
+                length = 0L;
+                munmapChecked(MemorySegment.ofAddress(address), len);
+            }
+        }
+    }
+
+    /** A reusable execution context for the calling thread to keep (see {@link ExecContext}). */
+    public ExecContext newContext() {
+        return new ExecContext();
+    }
+
+    /**
+     * One execution in a context of its own, released when the execution is closed: for a run that starts while
+     * the thread's own context is busy (a guest invoked from inside another guest's host call).
+     */
+    public LiveExecution beginOnce(Block block, long[] regs, long gas, Region[] regions, byte[] backing,
+                                   int pageShift, int entryIndex, HostCallHandler hostCallHandler) {
+        ExecContext ctx = new ExecContext();
+        LiveExecution live = ctx.tryBegin(block, regs, gas, regions, backing, pageShift, entryIndex, hostCallHandler);
+        live.disposeContext = true;
+        return live;
+    }
+
+    /** {@link #beginOnce} for {@link ExecContext#tryBeginDirect}. */
+    public LiveExecution beginDirectOnce(Block block, long[] regs, long gas, Region[] regions, byte[][] contents,
+                                         int pageShift, int entryIndex, HostCallHandler hostCallHandler) {
+        ExecContext ctx = new ExecContext();
+        LiveExecution live =
+                ctx.tryBeginDirect(block, regs, gas, regions, contents, pageShift, entryIndex, hostCallHandler);
+        live.disposeContext = true;
+        return live;
+    }
+
+    private static void writeRegionTable(MemorySegment regionsSeg, Region[] regions, long mmapTotalLen,
+                                         long backingLength, long extraBackingSlack) {
+        for (int i = 0; i < regions.length; i++) {
+            long off = i * REGION_SIZE;
+            Region r = regions[i];
+            if (r.bufOffset() < 0 || r.bufOffset() > 0xFFFFFFFFL) {
+                throw new IllegalArgumentException("Region.bufOffset() " + r.bufOffset() + " does not fit in u32 (region base=" + r.base() + ")");
+            }
+            if (r.base() < 0 || r.base() > 0xFFFFFFFFL) {
+                throw new IllegalArgumentException("Region.base() " + r.base() + " does not fit in u32");
+            }
+            if (r.len() < 0 || r.len() > 0xFFFFFFFFL) {
+                throw new IllegalArgumentException("Region.len() " + r.len() + " does not fit in u32 (region base=" + r.base() + ")");
+            }
+            if (r.bufOffset() + r.len() > mmapTotalLen) {
+                throw new IllegalArgumentException("Region[" + i + "] extent (bufOffset=" + r.bufOffset()
+                        + ", len=" + r.len() + ", end=" + (r.bufOffset() + r.len())
+                        + ") exceeds the mmap'd backing segment's total length (" + mmapTotalLen
+                        + " = backing.length=" + backingLength + " + extraBackingSlack=" + extraBackingSlack + ")");
+            }
+            regionsSeg.set(ValueLayout.JAVA_INT, off, (int) r.base());
+            regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) r.len());
+            regionsSeg.set(ValueLayout.JAVA_INT, off + 8, (int) r.bufOffset());
+            regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
+        }
+    }
+
     public final class LiveExecution implements AutoCloseable {
-        private final Arena call;
+        private final Arena call; // null when the segments belong to a reusable ExecContext
+        private final ExecContext context;
         private final Block block;
         private final MemorySegment regSeg;
         private final MemorySegment gasSeg;
@@ -477,14 +780,25 @@ public final class PvmRecompiler implements AutoCloseable {
         private final Region[] regionsForCopy;
         private boolean closed = false;
         private boolean ran = false;
+        private boolean disposeContext = false;
+
+        /** Record that region `index` now has `newLen` bytes (heap growth). */
+        public void growRegion(int index, long newLen) {
+            if (context != null) {
+                context.regionGrown(index, newLen);
+            } else {
+                regionsSeg.set(ValueLayout.JAVA_INT, index * REGION_SIZE + 4, (int) newLen);
+            }
+        }
 
         private LiveExecution(Arena call, Block block, MemorySegment regSeg, MemorySegment gasSeg,
                                MemorySegment regionsSeg, long nRegions, MemorySegment backingSeg,
                                int pageShift, int entryIndex, MemorySegment outSeg,
                                long[] regsOut, byte[] backingOut,
                                MemorySegment hostFnSeg, MemorySegment hostCtxSeg, UpcallStub upcallStub,
-                               Region[] regionsForCopy) {
+                               Region[] regionsForCopy, ExecContext context) {
             this.call = call;
+            this.context = context;
             this.block = block;
             this.regSeg = regSeg;
             this.gasSeg = gasSeg;
@@ -529,8 +843,12 @@ public final class PvmRecompiler implements AutoCloseable {
             }
             ran = true;
             try {
-                int exit = (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
-                        nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg);
+                int exit = context != null
+                        ? (int) executeFlat.invoke(block.handle, regSeg, gasSeg, regionsSeg,
+                                nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg,
+                                context.permsSeg)
+                        : (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
+                                nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg);
                 if (upcallStub != null) {
                     upcallStub.rethrowIfPending();
                 }
@@ -555,14 +873,23 @@ public final class PvmRecompiler implements AutoCloseable {
                 regsOut[i] = regSeg.getAtIndex(ValueLayout.JAVA_LONG, i);
             }
             long compactOff = 0L;
-            for (Region r : regionsForCopy) {
+            for (Region r : backingOut == null ? new Region[0] : regionsForCopy) {
                 long len = r.len();
                 if (len > 0) {
-                    MemorySegment.copy(backingSeg, ValueLayout.JAVA_BYTE, r.bufOffset(), backingOut, (int) compactOff, (int) len);
+                    // In a context a region's bytes are at its guest address.
+                    long at = context != null ? r.base() : r.bufOffset();
+                    MemorySegment.copy(backingSeg, ValueLayout.JAVA_BYTE, at, backingOut, (int) compactOff, (int) len);
                 }
                 compactOff += len;
             }
-            call.close();
+            if (context != null) {
+                context.finish(nRegions);
+                if (disposeContext) {
+                    context.dispose();
+                }
+            } else {
+                call.close();
+            }
         }
     }
 

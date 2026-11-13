@@ -20,7 +20,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
     Option(System.getProperty("jam.pvm.recompiler.lib")).map(Path.of(_)).filter(Files.exists(_))
   private def isAarch64Host: Boolean =
     val arch = System.getProperty("os.arch", "").toLowerCase
-    arch == "aarch64" || arch == "arm64"
+    arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64"
 
   private val testDir = new File(getClass.getClassLoader.getResource("pvm").toURI)
 
@@ -270,7 +270,7 @@ class VectorConformanceSpec extends AnyFlatSpec with Matchers:
 
   "the native recompiler" should "match the production interpreter and expected-* fields across all PVM test vectors (hard gate)" in {
     if !isAarch64Host then
-      cancel(s"recompiler is AArch64-only through Phase 4 (host os.arch=" +
+      cancel(s"the recompiler emits AArch64 and x86-64 code only (host os.arch=" +
         s"${System.getProperty("os.arch", "<unknown>")}); skipping — this is NOT a pass, " +
         s"the gate does not execute on this architecture")
     libPath match

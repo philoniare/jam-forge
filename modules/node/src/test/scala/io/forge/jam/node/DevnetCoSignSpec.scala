@@ -147,6 +147,10 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
 
       // B and C both refine at once, each waiting for the other's CE 134 signature: neither may wait out the
       // co-sign timeout behind its own request.
+      // Both guarantors must be on block 3: they sign for slot 4, and one still on block 2 would rightly refuse a
+      // package for slot 4's core.
+      awaitSync(nodeA, nodeB)
+      awaitSync(nodeA, nodeC)
       val assignments4 = GuarantorService.coreAssignments(nodeB.chain.stateView().entropy.pool(2), 4L, spec.config)
       val core = assignments4(core0Validators(0))
       assignments4(core0Validators(1)) shouldBe core

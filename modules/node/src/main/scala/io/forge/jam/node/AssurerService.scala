@@ -70,7 +70,8 @@ final class AssurerService(
     ()
 
   private[node] def assure(head: ChainManager#Head): Unit =
-    val view = chain.stateView()
+    // The state of the block being assured, not of whatever is best by now: the assurance is anchored at `head`.
+    val view = chain.stateViewAtRoot(head.stateRoot)
     val reports = view.cores.reports
     if !reports.exists(_.isDefined) then return
 

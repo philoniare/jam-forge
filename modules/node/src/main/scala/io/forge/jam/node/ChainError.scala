@@ -25,10 +25,16 @@ enum ChainError:
   case SideBranchRefused(detail: String)
   /** A side-branch block whose seal cannot be checked yet, refused because the `scope` (node or peer) cap is full. */
   case UnverifiedLimit(scope: String)
+  /** A block for a slot that has not started by our clock (such a block is not yet valid). Not a verdict on the
+    * block: it is not stored or marked, and imports once its slot comes (a peer announces it again, or a child of
+    * it brings it back as a missing ancestor).
+    */
+  case FutureSlot(slot: Long, now: Long)
 
   def message: String = this match
     case SideBranchRefused(detail) => s"side-branch block refused: $detail"
     case UnverifiedLimit(scope)    => s"too many unverified side-branch blocks ($scope limit)"
+    case FutureSlot(slot, now)     => s"block of slot $slot is ahead of the current slot $now"
     case Undecodable(detail)  => detail
     case AlreadyImported      => "block already imported"
     case PreviouslyInvalid    => "block failed validation before"

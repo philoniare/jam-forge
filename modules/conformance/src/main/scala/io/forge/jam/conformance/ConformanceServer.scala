@@ -172,6 +172,9 @@ object ConformanceServerApp:
           return 1
     Runtime.getRuntime.addShutdownHook(new Thread(() => {
       System.err.println("[JAM-FORGE] Shutting down (if this is unexpected, check for OOM / cgroup kill).")
+      // -Djam.stageTimers=true: where the session's imports spent their time.
+      if io.forge.jam.protocol.pipeline.StageTimers.enabled then
+        io.forge.jam.protocol.pipeline.StageTimers.report.foreach(l => System.err.println(l))
       server.close()
       logger.close()
       System.err.flush()

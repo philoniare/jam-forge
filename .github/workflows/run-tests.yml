@@ -101,6 +101,51 @@ jobs:
             -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
                 run: sbt "pvm/test"
 
+    # The x86-64 emitter: its unit tests run the emitted code, and the pvm module's differential and vector tests
+    # compare it with the interpreter.
+    pvm-recompiler-linux-x86-64:
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@v7
+                with:
+                    submodules: recursive
+
+            -   name: Set up JDK
+                uses: actions/setup-java@v6
+                with:
+                    distribution: 'temurin'
+                    java-version: '24'
+
+            -   name: Set up sbt
+                uses: sbt/setup-sbt@v1
+
+            -   name: Set up Rust
+                uses: dtolnay/rust-toolchain@stable
+
+            -   name: Cache sbt dependencies
+                uses: actions/cache@v6
+                with:
+                    path: |
+                        ~/.sbt
+                        ~/.ivy2/cache
+                        ~/.cache/coursier
+                    key: ${{ runner.os }}-${{ runner.arch }}-sbt-${{ hashFiles('**/build.sbt', '**/project/**') }}
+                    restore-keys: |
+                        ${{ runner.os }}-${{ runner.arch }}-sbt-
+
+            -   name: Require x86-64 runner
+                run: test "$(uname -m)" = "x86_64"
+
+            -   name: Run recompiler unit tests (execute emitted code natively)
+                working-directory: modules/pvm/native/pvm-recompiler
+                run: cargo test --release
+
+            -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
+                run: sbt "pvm/test"
+
     full-corpus:
         if: github.event_name == 'workflow_dispatch'
         runs-on: ubuntu-latest

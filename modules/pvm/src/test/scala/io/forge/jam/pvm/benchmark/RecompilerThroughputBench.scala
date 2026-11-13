@@ -17,9 +17,8 @@ import scala.io.Source
 object RecompilerThroughputBench:
   private def requireAarch64Host(): Unit =
     val arch = System.getProperty("os.arch", "").toLowerCase
-    if arch != "aarch64" && arch != "arm64" then
-      sys.error(s"RecompilerThroughputBench requires an aarch64 host (recompiler backend is " +
-        s"AArch64-only through Phase 4); host os.arch=$arch. Refusing to bench nothing silently.")
+    if !(arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64") then
+      sys.error(s"RecompilerThroughputBench requires an AArch64 or x86-64 host (the recompiler emits code for those); host os.arch=$arch. Refusing to bench nothing silently.")
 
   private def requireLibPath(): Path =
     Option(System.getProperty("jam.pvm.recompiler.lib")).map(Path.of(_)).filter(Files.exists(_)) match
@@ -438,8 +437,14 @@ object RecompilerThroughputBench:
       val testDir = resolveVectorResourceDir()
       val files = testDir.listFiles().filter(_.getName.endsWith(".json")).sortBy(_.getName)
       println(s"  preparing ${files.length} vectors (decode/prepare excluded from timing)...")
-      val vectors = files.flatMap(f => prepareVector(loadTestCase(f)))
-      println(s"  ${vectors.length}/${files.length} vectors have a valid recompiler entry index; replaying...")
+      // A vector with several `run` steps stops at a host call and is resumed by its script; a single run to
+      // completion cannot replay it (VectorConformanceSpec skips the same ones).
+      val (multiRun, singleRun) =
+        files.map(loadTestCase).partition(_.steps.count(_ == io.forge.jam.pvm.PvmStep.Run) > 1)
+      if multiRun.nonEmpty then
+        println(s"  skipping ${multiRun.length} multi-run vectors (${multiRun.map(_.name).mkString(", ")})")
+      val vectors = singleRun.flatMap(prepareVector)
+      println(s"  ${vectors.length}/${singleRun.length} single-run vectors have a valid recompiler entry index; replaying...")
       val vectorResult = runVectorCorpusReplay(rc, vectors.toSeq)
       println(f"  interpreter: ${vectorResult.interpExecSeconds}%.4f s total (${vectorResult.interpMips}%.1f MIPS)")
       println(f"  recompiler:  compile ${vectorResult.recompCompileSeconds * 1000}%.2f ms total, " +
@@ -458,7 +463,7 @@ object RecompilerThroughputBench:
       }
       sb ++= ("-" * 100) + "\n"
       val vectorSpeedup = vectorResult.recompMips / vectorResult.interpMips
-      sb ++= f"${"vector-corpus (309)"}%-24s ${vectorResult.interpMips}%14.1f ${vectorResult.recompMips}%14.1f ${vectorSpeedup}%9.2fx " +
+      sb ++= f"${s"vector-corpus (${vectorResult.total})"}%-24s ${vectorResult.interpMips}%14.1f ${vectorResult.recompMips}%14.1f ${vectorSpeedup}%9.2fx " +
         f"${vectorResult.recompCompileSeconds * 1000}%10.2f ms\n"
       sb ++= ("=" * 100) + "\n"
       sb ++= f"vector-corpus detail: total=${vectorResult.total} compiled=${vectorResult.compiledCount} deopt=${vectorResult.deoptCount}  " +

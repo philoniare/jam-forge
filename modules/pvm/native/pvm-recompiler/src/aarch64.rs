@@ -10,13 +10,14 @@ type Asm = dynasmrt::aarch64::Assembler;
 
 pub struct Aarch64Backend;
 
-struct Blocks {
-    block_of: Vec<usize>,
-    block_lo: Vec<usize>,
-    block_hi: Vec<usize>,
+pub(crate) struct Blocks {
+    pub(crate) block_of: Vec<usize>,
+    pub(crate) block_lo: Vec<usize>,
+    pub(crate) block_hi: Vec<usize>,
 }
 
-fn analyze_blocks(ops: &[Op], jump_table: &[u32]) -> Blocks {
+/// Basic blocks of a program: shared by every backend, so they agree on where gas is charged.
+pub(crate) fn analyze_blocks(ops: &[Op], jump_table: &[u32]) -> Blocks {
     let n = ops.len();
     // Leaders: op 0, every branch/jump target, every indirect (djump) target,
     // and the op after any terminator.
@@ -149,6 +150,52 @@ fn emit_blt_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
         ; b =>target
         ; =>skip
     );
+}
+
+/// With x13 = the guest address (already masked to 32 bits): bounds-check `width` bytes for a load or store and
+/// leave the host address in x8; an access that fails goes to `fault`.
+///
+/// The fast path reads the page permission table in x22 (one byte per 4 KiB guest page: 0 = take the slow
+/// path, 1 = readable, 2 = writable; see the x86-64 emitter's module doc for what an entry promises). Anything
+/// it cannot settle goes to the region scan, which also works out the fault.
+fn emit_checked_access(
+    a: &mut Asm,
+    width: u8,
+    store: bool,
+    bounds_check: dynasmrt::DynamicLabel,
+    fault: dynasmrt::DynamicLabel,
+) {
+    let slow = a.new_dynamic_label();
+    let done = a.new_dynamic_label();
+    let need: u32 = if store { 2 } else { 1 };
+    dynasm!(a
+        ; .arch aarch64
+        ; lsr x16, x13, #12
+        ; ldrb w16, [x22, x16]
+        ; cmp w16, #need
+        ; b.lo =>slow
+    );
+    if width > 1 {
+        // The whole access must lie in the page that was checked.
+        let last_start: u32 = 0x1000 - width as u32;
+        dynasm!(a
+            ; .arch aarch64
+            ; and x16, x13, #0xfff
+            ; cmp x16, #last_start
+            ; b.hi =>slow
+        );
+    }
+    dynasm!(a
+        ; .arch aarch64
+        ; add x8, x4, x13
+        ; b =>done
+        ; =>slow
+        ; mov x14, #width as u64
+        ; mov x15, #store as u64
+        ; bl =>bounds_check
+    );
+    emit_cbz_far(a, 9, fault);
+    dynasm!(a; .arch aarch64; =>done);
 }
 
 fn emit_bounds_check_subroutine(a: &mut Asm, entry: dynasmrt::DynamicLabel) {
@@ -744,6 +791,7 @@ impl Backend for Aarch64Backend {
             ; mov x19, x30    // save the entry LR before any `bl` clobbers x30 (see LR NOTE)
             ; ldr x20, [sp, #32]        // x20 = host_fn (arg 9; may be the null pointer)
             ; ldr x21, [sp, #40]        // x21 = host_ctx (arg 10)
+            ; ldr x22, [sp, #48]        // x22 = page permission table (arg 11)
         );
         dynasm!(a; .arch aarch64; b =>dispatch_by_index_label);
         dynasm!(a; .arch aarch64; =>dispatch_by_index_label);
@@ -835,11 +883,8 @@ impl Backend for Aarch64Backend {
                             ; ldr x13, [x0, #srcr * 8]
                             ; add x13, x13, x9
                             ; mov w13, w13          // mask address to 32 bits (UXTW)
-                            ; mov x14, #width as u64
-                            ; mov x15, #0            // load
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, false, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                         );
@@ -855,11 +900,8 @@ impl Backend for Aarch64Backend {
                             ; ldr x13, [x0, #srcr * 8]
                             ; add x13, x13, x9
                             ; mov w13, w13
-                            ; mov x14, #width as u64
-                            ; mov x15, #1            // store
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, true, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                             ; ldr x10, [x0, #dst * 8]
@@ -979,11 +1021,8 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; mov w13, w13          // mask address to 32 bits (UXTW)
-                            ; mov x14, #8            // width
-                            ; mov x15, #0            // load
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, 8 as u8, false, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                         );
@@ -996,11 +1035,8 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; mov w13, w13
-                            ; mov x14, #8
-                            ; mov x15, #1            // store
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, 8 as u8, true, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                             ; ldr x10, [x0, #src * 8]
@@ -1487,11 +1523,8 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; mov w13, w13          // mask address to 32 bits (UXTW)
-                            ; mov x14, #width as u64
-                            ; mov x15, #0            // load
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, false, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                         );
@@ -1504,11 +1537,8 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; mov w13, w13
-                            ; mov x14, #width as u64
-                            ; mov x15, #1            // store
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, true, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                             ; ldr x10, [x0, #src * 8]
@@ -1520,11 +1550,8 @@ impl Backend for Aarch64Backend {
                         dynasm!(a
                             ; .arch aarch64
                             ; mov w13, w13
-                            ; mov x14, #width as u64
-                            ; mov x15, #1            // store
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, true, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                         );
@@ -1539,11 +1566,8 @@ impl Backend for Aarch64Backend {
                             ; ldr x13, [x0, #baser * 8]
                             ; add x13, x13, x9
                             ; mov w13, w13
-                            ; mov x14, #width as u64
-                            ; mov x15, #1            // store
-                            ; bl =>bounds_check_label
                         );
-                        emit_cbz_far(&mut a, 9, fault_label);
+                        emit_checked_access(&mut a, width as u8, true, bounds_check_label, fault_label);
                         dynasm!(a
                             ; .arch aarch64
                         );

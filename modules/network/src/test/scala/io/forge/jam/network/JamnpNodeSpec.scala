@@ -246,6 +246,53 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
     NodeIdentity.validateCertificate(other.certificate).map(_.toSeq) should not be Right(id.publicKeyBytes.toSeq)
   }
 
+  test("inbound: one address is capped, and a validator is admitted when ordinary peers hold every slot") {
+    // Three slots for ordinary peers (5 less 2 for builders); at most two per address.
+    val serverNode = new JamnpNode(
+      NodeIdentity.generate(),
+      config.copy(maxInboundConnections = 5, builderSlots = 2, maxInboundPerAddress = 2)
+    )
+    val validatorId = NodeIdentity.generate()
+    serverNode.setPriorityPeers(k => java.util.Arrays.equals(k, validatorId.publicKeyBytes))
+    val strangers = Seq.fill(3)(new JamnpNode(NodeIdentity.generate(), config))
+    val validator = new JamnpNode(validatorId, config)
+    def staysOpen(c: JamnpConnection): Boolean =
+      val deadline = System.currentTimeMillis() + 1500
+      while c.isOpen && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      c.isOpen
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val address = new InetSocketAddress("127.0.0.1", serverNode.boundPort)
+      val first = strangers.take(2).map(_.connect(address).get(10, TimeUnit.SECONDS))
+      first.forall(staysOpen) shouldBe true
+      // A third from the same address is over the per-address cap, though a slot is free.
+      val third = strangers(2).connect(address).get(10, TimeUnit.SECONDS)
+      staysOpen(third) shouldBe false
+
+      // Validators are not counted against the address: two more take the last ordinary slot and then one of a
+      // stranger's.
+      val v1 = validator.connect(address).get(10, TimeUnit.SECONDS)
+      staysOpen(v1) shouldBe true
+      first.count(_.isOpen) shouldBe 2
+      val secondValidatorId = NodeIdentity.generate()
+      val secondValidator = new JamnpNode(secondValidatorId, config)
+      try
+        serverNode.setPriorityPeers(k =>
+          java.util.Arrays.equals(k, validatorId.publicKeyBytes) || java.util.Arrays.equals(k, secondValidatorId.publicKeyBytes)
+        )
+        val v2 = secondValidator.connect(address).get(10, TimeUnit.SECONDS)
+        staysOpen(v2) shouldBe true
+        v1.isOpen shouldBe true
+        val deadline = System.currentTimeMillis() + 5000
+        while first.count(_.isOpen) > 1 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+        first.count(_.isOpen) shouldBe 1 // one stranger made room
+      finally secondValidator.shutdown()
+    finally
+      validator.shutdown()
+      strangers.foreach(_.shutdown())
+      serverNode.shutdown()
+  }
+
   test("JAMNP-S: inbound slots reserved for builders admit only /builder connections") {
     val serverNode =
       new JamnpNode(NodeIdentity.generate(), config.copy(maxInboundConnections = 1, builderSlots = 1))

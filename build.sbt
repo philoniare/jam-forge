@@ -52,7 +52,8 @@ def commonSettings = Seq(
 
 val hasNativeRecompiler = (osName.contains("mac") || osName.contains("linux")) && {
   val arch = System.getProperty("os.arch").toLowerCase
-  arch.contains("aarch64") || arch.contains("arm64")
+  // The recompiler emits AArch64 and x86-64 (System V) code.
+  arch.contains("aarch64") || arch.contains("arm64") || arch.contains("amd64") || arch.contains("x86_64")
 }
 
 def recompilerLibJavaOptions(baseDir: File): Seq[String] =

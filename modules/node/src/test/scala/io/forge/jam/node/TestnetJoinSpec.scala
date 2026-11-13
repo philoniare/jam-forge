@@ -83,7 +83,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       genesisState = genesis.state.keyvals,
       bootnodes = Nil
     )
-    val dirs = List.fill(4)(Files.createTempDirectory("jam-join"))
+    val dirs = List.fill(5)(Files.createTempDirectory("jam-join"))
     var nodes: List[JamNode] = Nil
     try
       val ahead = new JamNode(spec, NodeConfig(dataDir = dirs(0), slotTicking = false)).start()
@@ -120,6 +120,19 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       eventually("the voter to catch up")(voter.chain.best.hash == ahead.chain.best.hash)
       Thread.sleep(2000) // several rounds of the half-second connectivity loop
       voter.chain.finalized.slot shouldBe 0L
+
+      // A node whose best head is on a fork the peer never saw: nothing can be served "after" that head, so it asks
+      // from its finalized block and is led along the peer's chain.
+      val forked = new JamNode(spec, NodeConfig(dataDir = dirs(4), slotTicking = false)).start()
+      nodes = forked :: nodes
+      forked.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
+      // Slots the peer's chain has no block for: a second block in one of its slots would be an equivocation, and
+      // a chain with one is never adopted.
+      forked.authorSlot(71).isDefined shouldBe true
+      forked.authorSlot(72).isDefined shouldBe true
+      ahead.chain.hasBlock(forked.chain.best.hash) shouldBe false
+      forked.connectPeer(address)
+      eventually("the forked node to leave its fork for the peer's chain")(forked.chain.best.hash == ahead.chain.best.hash)
     finally
       nodes.foreach(_.shutdown())
       dirs.foreach(cleanup)

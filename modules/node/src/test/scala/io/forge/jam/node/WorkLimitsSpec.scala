@@ -137,6 +137,31 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
     a[RejectedExecutionException] should be thrownBy egress.execute(() => ())
   }
 
+  test("requests waiting on a silent peer do not hold up the egress thread, and their queue is bounded") {
+    val egress = WorkLimits.dropOldestExecutor("egress-spec", threads = 1, 128, daemon("egress-spec"))
+    val dist = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
+    val release = new CountDownLatch(1)
+    try
+      // Far more requests than threads, each stuck as on a peer that never answers.
+      val started = new AtomicInteger()
+      for _ <- 1 to 1000 do dist.submitRequest(() => { started.incrementAndGet(); release.await() })
+      eventually("the request threads to be busy")(started.get() == DistributionService.RequestThreads)
+      dist.queuedRequests should be <= DistributionService.MaxQueuedRequests
+
+      // A one-shot send still goes out at once.
+      val sent = new CountDownLatch(1)
+      dist.submitSend(
+        () => { sent.countDown(); CompletableFuture.failedFuture[JamnpStream](new RuntimeException("no peer")) },
+        StreamKind.AssuranceDistribution,
+        Array[Byte](1)
+      )
+      sent.await(2, TimeUnit.SECONDS) shouldBe true
+    finally
+      release.countDown()
+      dist.shutdown()
+      egress.shutdownNow()
+  }
+
   // --- sync fetch queue, end to end ------------------------------------------------------------------------------
 
   private given io.circe.Decoder[TraceStep] = TraceStep.decoder(using summon[io.circe.Decoder[Block]])
@@ -155,6 +180,57 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
 
   private def cleanup(dir: Path): Unit =
     Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
+
+  test("sync serving: a flood of CE 128 and CE 129 requests is answered or refused off the event loops, and the node still serves") {
+    val step = anyStep().getOrElse(cancel("no fuzz trace available (jam-conformance corpus not present)"))
+    val spec = ChainSpec(
+      id = "serve-limits",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = None,
+      explicitGenesisHash = Some(step.block.header.parent),
+      genesisState = step.preState.keyvals,
+      bootnodes = Nil
+    )
+    val dir = Files.createTempDirectory("jam-serve-limits")
+    var node: JamNode = null
+    val peer = new JamnpNode(NodeIdentity.generate(), JamnpConfig(genesisHashPrefix = spec.alpnPrefix))
+    try
+      node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false)).start()
+      val conn = peer.connect(new InetSocketAddress("127.0.0.1", node.listenPort)).get(10, TimeUnit.SECONDS)
+      val genesis = node.chain.finalized.hash
+      val closed = new AtomicInteger()
+      val answered = new AtomicInteger()
+      def ask(kind: Byte, payload: Array[Byte]): Unit =
+        val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
+        stream.onMessage { _ => answered.incrementAndGet(); () }
+        stream.onClosed(() => { closed.incrementAndGet(); () })
+        stream.send(payload)
+        stream.finish()
+      val total = 400
+      for i <- 1 to total do
+        // QUIC allows a peer only so many streams open at once: keep well under it, still far more than may wait.
+        eventually("earlier requests to finish")(i - 1 - closed.get() < 40)
+        if i % 2 == 0 then ask(StreamKind.BlockRequest, SyncCodec.encodeBlockRequest(genesis, ascending = true, maxBlocks = 64))
+        else
+          ask(
+            StreamKind.StateRequest,
+            SyncCodec.encodeStateRequest(genesis, io.forge.jam.core.JamBytes(new Array[Byte](31)), io.forge.jam.core.JamBytes(Array.fill[Byte](31)(-1)), 1L << 20)
+          )
+      // Every stream ends: answered, or reset when too many waited (a peer may queue only a few).
+      eventually("every request to be answered or refused", 60)(closed.get() == total)
+      answered.get() should be > 0
+      // Still serving afterwards.
+      val before = answered.get()
+      ask(
+        StreamKind.StateRequest,
+        SyncCodec.encodeStateRequest(genesis, io.forge.jam.core.JamBytes(new Array[Byte](31)), io.forge.jam.core.JamBytes(Array.fill[Byte](31)(-1)), 4096L)
+      )
+      eventually("a request after the flood to be answered")(answered.get() > before && closed.get() == total + 1)
+    finally
+      peer.shutdown()
+      if node != null then node.shutdown()
+      cleanup(dir)
+  }
 
   test("sync: a peer announcing thousands of unknown blocks leaves a handful of fetches queued, the newest among them") {
     val step = anyStep().getOrElse(cancel("no fuzz trace available (jam-conformance corpus not present)"))

@@ -48,6 +48,10 @@ final class InterpretedModule private (
 
   lazy val isBlobStructurallyValid: Boolean = Program.isValidBlob(blob.code, blob.bitmask)
 
+  /** Slot for whatever a native backend derives from this module (its compiled code), so it is built once per
+    * module rather than once per invocation. Owned by the backend; null until it first runs the module. */
+  @volatile var nativeArtifact: AnyRef = null
+
   // Fallback cache for block costs charged away from a compiled block's first instruction (rare: entry mid-block).
   private val blockGasCosts = new java.util.concurrent.ConcurrentHashMap[Integer, java.lang.Long]()
 

@@ -15,9 +15,11 @@ mkdir -p "$OUT"
 
 CP_FILE=target/fuzz-perf/classpath.txt
 mkdir -p target/fuzz-perf
+# Always compile: the classpath file only names the class directories, so a source change since the last run
+# would otherwise be measured as the old build.
+sbt --error "conformance/Test/compile" >/dev/null
 if [[ ! -s "$CP_FILE" || build.sbt -nt "$CP_FILE" ]]; then
   echo "== resolving classpath (sbt) =="
-  sbt --error "conformance/Test/compile" >/dev/null
   sbt -no-colors -Dsbt.supershell=false --error "export conformance/Test/fullClasspath" | grep -E '[.]jar' | tail -1 \
     | sed 's#^[^/]*/#/#' > "$CP_FILE"
 fi
@@ -26,8 +28,15 @@ CP="$(cat "$CP_FILE")"
 HEAP="${JAM_HEAP:-4g}"
 JOPTS=(-XX:+UseZGC -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError
   --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
-  -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/src/main/resources"
+  -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/native/build/mac:$PWD/modules/crypto/src/main/resources"
   -Dlogback.configurationFile="$PWD/modules/conformance/src/main/resources/logback-prod.xml")
+# The PVM recompiler, as the Docker image has it: guest code then runs natively by default.
+for lib in "$PWD"/modules/pvm/native/build/{linux/libpvm_recompiler.so,mac/libpvm_recompiler.dylib}; do
+  [[ -f "$lib" ]] && JOPTS+=(-Djam.pvm.recompiler.lib="$lib")
+done
+# Extra target JVM flags, e.g. JAM_EXTRA_JOPTS="-Djam.pvm.executionMode=interpreted".
+# shellcheck disable=SC2206
+JOPTS+=(${JAM_EXTRA_JOPTS:-})
 # Warmup corpus, laid out as the image's /app/warmup-traces: the preimages traces plus the generated ones in
 # warmup-traces/. FUZZ_WARMUP_DIRS (space-separated trace directories) replaces the whole list.
 WARMUP_DIR="$(mktemp -d /tmp/jam_warmup.XXXXXX)"

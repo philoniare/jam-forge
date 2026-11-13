@@ -37,11 +37,22 @@ object InboundWork:
   /** Handles each message on the calling thread: for services built without a node around them. */
   val direct: InboundWork = new InboundWork(null, null)
 
-  def pooled(): InboundWork =
+  def pooled(): InboundWork = pooled("inbound", Threads, MaxQueuedMessages, MaxQueuedBytes, MaxQueuedPerPeer)
+
+  /** Where requests a peer has us answer from the store (CE 128 blocks, CE 129 state ranges) are served: each
+    * reads megabytes, so only a few wait, and few per peer. A request over a limit is reset; the peer asks another.
+    */
+  def serving(): InboundWork = pooled("serve", ServingThreads, MaxQueuedRequests, MaxQueuedBytes, MaxQueuedRequestsPerPeer)
+
+  val ServingThreads: Int = 2
+  val MaxQueuedRequests: Int = 64
+  val MaxQueuedRequestsPerPeer: Int = 4
+
+  private def pooled(name: String, threads: Int, maxQueued: Int, maxBytes: Long, perPeer: Int): InboundWork =
     val n = new AtomicInteger()
     val exec = Executors.newFixedThreadPool(
-      Threads,
+      threads,
       r =>
-        val t = new Thread(r, s"jam-inbound-${n.incrementAndGet()}"); t.setDaemon(true); t
+        val t = new Thread(r, s"jam-$name-${n.incrementAndGet()}"); t.setDaemon(true); t
     )
-    new InboundWork(exec, new WorkGate("inbound", MaxQueuedMessages, MaxQueuedBytes, MaxQueuedPerPeer))
+    new InboundWork(exec, new WorkGate(name, maxQueued, maxBytes, perPeer))

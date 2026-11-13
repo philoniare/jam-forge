@@ -790,7 +790,13 @@ final class ChainManager(
         val parent = block.header.parent
         if blockRoot(hash).isDefined then Left(ChainError.AlreadyImported)
         else if flag(s"invalid:${hash.toHex}") then Left(ChainError.PreviouslyInvalid)
-        else if parent == bestHead.hash then importOnBest(block, blockBytes, events)
+        else if parent == bestHead.hash then
+          // The same clock check side-branch blocks get: a block ahead of our clock is not executed, and nothing
+          // is recorded against it.
+          val slot = block.header.slot.toLong
+          wallClockSlot.map(_()).filter(now => slot > now + ChainManager.FutureSlotTolerance) match
+            case Some(now) => Left(ChainError.FutureSlot(slot, now))
+            case None      => importOnBest(block, blockBytes, events)
         else
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
@@ -1059,8 +1065,15 @@ final class ChainManager(
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */
-  def stateView(): TrieBackedJamState = {
-    val root = bestHead.stateRoot
+  def stateView(): TrieBackedJamState = stateViewOf(bestHead)
+
+  /** The state after `head`, which the caller read once: a role that takes the head and then its state with two
+    * reads of the chain can get the state of a newer head, and build on a parent whose state it never saw.
+    */
+  def stateViewOf(head: Head): TrieBackedJamState = stateViewAtRoot(head.stateRoot)
+
+  /** As [[stateViewOf]], by the head's state root. */
+  def stateViewAtRoot(root: Hash): TrieBackedJamState = {
     val trie = StateTrie.at(trieStore.backend, root)
     new TrieBackedJamState(
       trie,
@@ -1100,15 +1113,20 @@ final class ChainManager(
           cursor = Hash.zero
     out.toList
 
-  /** Walk up to `max` blocks strictly after `from` (ascending, exclusive)
-    * along the linear chain via the children index.
+  /** Walk up to `max` blocks strictly after `from` (ascending, exclusive) via the children index. At a fork the
+    * child on our best chain is taken, else the heaviest: a peer catching up should be led along the chain we
+    * would have it adopt, not along whichever sibling was stored first.
     */
   def blocksAscending(from: Hash, max: Int): List[Array[Byte]] =
     val out = mutable.ListBuffer.empty[Array[Byte]]
     var cursor = from
     var continue = true
     while out.size < max && continue do
-      blockStore.children(cursor).filter(canBeFinalized) match
+      val children = blockStore.children(cursor).filter(canBeFinalized)
+      val preferred = children
+        .find(c => blockHeight(c).exists(h => ancestorAtHeight(bestHead.hash, h).contains(c)))
+        .orElse(children.maxByOption(c => (weightOf(c), blockHeight(c).getOrElse(0L))))
+      preferred.toList match
         case child :: _ =>
           blockStore.getBlock(child) match
             case Some(bytes) if bytes.nonEmpty =>

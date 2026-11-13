@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.traces
 
+import io.forge.jam.protocol.pipeline.StageTimers
+
 import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.vrfs.BandersnatchWrapper
@@ -121,7 +123,7 @@ class BlockImporter(
         "BlockImporter.importBlock invoked concurrently on the same instance; " +
           "callers must serialize imports per instance (e.g. via synchronized)"
       )
-    try importBlockUnguarded(block, preState, ancestry)
+    try StageTimers.time("total")(importBlockUnguarded(block, preState, ancestry))
     finally importInFlight.set(false)
 
   private def importBlockUnguarded(
@@ -153,12 +155,14 @@ class BlockImporter(
 
       val pipelineResult =
         try
-          BlockPipeline.execute(
-            block,
-            view,
-            skipAncestryValidation,
-            Some(sharedExecutor),
-            ancestry
+          StageTimers.time("pipeline")(
+            BlockPipeline.execute(
+              block,
+              view,
+              skipAncestryValidation,
+              Some(sharedExecutor),
+              ancestry
+            )
           )
         finally sharedExecutor.setStorageView(None)
 
@@ -187,13 +191,16 @@ class BlockImporter(
 
           // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
           // A key in both takes the storage view's value, as when they were applied one after the other.
-          val updates = view.commitUpdates()
-          updates ++= storageView.commitUpdates()
-          trie.update(updates.toIndexedSeq)
+          val updates = StageTimers.time("commit-encode") {
+            val u = view.commitUpdates()
+            u ++= storageView.commitUpdates()
+            u
+          }
+          StageTimers.time("trie-update")(trie.update(updates.toIndexedSeq))
           backendLock.synchronized {
-            trie.save()
+            StageTimers.time("trie-save")(trie.save())
             trieStore.commitChild(block.header.parentStateRoot, trie.rootHash)
-            if gcAfterImport then trieStore.gc()
+            if gcAfterImport then StageTimers.time("trie-gc")(trieStore.gc())
           }
 
           ImportResult.Success(trie.rootHash, result.headerHash)

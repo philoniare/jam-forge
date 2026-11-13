@@ -63,6 +63,10 @@ final case class JamnpConfig(
       * (JAMNP-S "Required connectivity": "e.g. 20").
       */
     builderSlots: Int = 20,
+    /** Inbound connections one address may hold, for peers that are neither validators nor builders: one host
+      * cannot take the slots of many. Validators (see [[JamnpNode.setPriorityPeers]]) are not counted or limited.
+      */
+    maxInboundPerAddress: Int = 32,
     /** A CE stream with no bytes read or written for this long is reset, so a
       * silent peer cannot hold stream credit forever. UP streams are exempt
       * (they stay open and may be quiet). 0 disables the timeout.
@@ -513,15 +517,43 @@ final class JamnpNode(
         fireConnectionChange(conn, false)
       ctx.fireChannelInactive()
 
-  /** Inbound admission: builders may use any free slot, other nodes all but
-    * the `builderSlots` reserved for builders.
+  @volatile private var priorityPeer: Array[Byte] => Boolean = _ => false
+
+  /** Tell the node which peers (by Ed25519 key) are validators it must stay reachable for: they are admitted ahead
+    * of everyone else. JAMNP-S has every validator connected to every other, and the preferred-initiator rule makes
+    * half of those connections inbound, so strangers filling the inbound slots would cut validators off.
     */
-  private def admitInbound(conn: JamnpConnection): Boolean =
-    val inbound = connections.asScala.filter(c => !c.initiator && c.isOpen)
-    if JamnpConfig.isBuilderAlpn(conn.negotiatedAlpn) then inbound.size < config.maxInboundConnections
+  def setPriorityPeers(isPriority: Array[Byte] => Boolean): Unit = priorityPeer = isPriority
+
+  private def addressOf(c: JamnpConnection): Option[java.net.InetAddress] =
+    c.remoteAddress.collect { case a: InetSocketAddress => a.getAddress }
+
+  /** Inbound admission.
+    *   - A validator is admitted while any slot is free, and when the slots open to ordinary peers are all taken
+    *     an ordinary peer is closed to make room for it.
+    *   - A builder may use any free slot.
+    *   - Any other peer may use all but the `builderSlots` reserved for builders, and at most
+    *     `maxInboundPerAddress` from one address.
+    */
+  private def admitInbound(conn: JamnpConnection): Boolean = synchronized {
+    val inbound = connections.asScala.filter(c => !c.initiator && c.isOpen).toList
+    def isBuilder(c: JamnpConnection) = JamnpConfig.isBuilderAlpn(c.negotiatedAlpn)
+    def isPriority(c: JamnpConnection) = priorityPeer(c.peerPublicKey.bytes.toArray)
+    val ordinaryLimit = config.maxInboundConnections - config.builderSlots
+    val nonBuilders = inbound.filterNot(isBuilder)
+    if isBuilder(conn) then inbound.size < config.maxInboundConnections
+    else if isPriority(conn) then
+      if nonBuilders.size < ordinaryLimit then true
+      else
+        nonBuilders.filterNot(isPriority).lastOption match
+          case Some(evicted) =>
+            evicted.close()
+            true
+          case None => inbound.size < config.maxInboundConnections
     else
-      val others = inbound.count(c => !JamnpConfig.isBuilderAlpn(c.negotiatedAlpn))
-      others < config.maxInboundConnections - config.builderSlots
+      val sameAddress = addressOf(conn).fold(0)(a => nonBuilders.count(c => !isPriority(c) && addressOf(c).contains(a)))
+      nonBuilders.size < ordinaryLimit && sameAddress < config.maxInboundPerAddress
+  }
 
   def boundPort: Int =
     serverChannel.localAddress().asInstanceOf[InetSocketAddress].getPort

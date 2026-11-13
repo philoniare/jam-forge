@@ -68,43 +68,43 @@ object BlockPipeline:
 
     val pipeline: StfStepWith[BlockPipelineResult] = for {
       // Step 0: Validate extrinsic hash
-      _ <- validateExtrinsicHash
+      _ <- StageTimers.step("extrinsic-hash")(validateExtrinsicHash)
       _ <- setPosteriorOffenders
 
       // Step 1: Safrole
-      safroleOut <- safroleEpoch
+      safroleOut <- StageTimers.step("safrole")(safroleEpoch)
       _ <- storeSafroleOutput(safroleOut)
 
       // Step 2: Block seal validation (uses post-Safrole state)
       _ <- validateEpochMark
       _ <- validateTicketsMark
-      _ <- validateBlockSeal
-      _ <- validateEntropyVrf
+      _ <- StageTimers.step("seal")(validateBlockSeal)
+      _ <- StageTimers.step("entropy-vrf")(validateEntropyVrf)
 
-      _ <- safroleTickets
+      _ <- StageTimers.step("tickets")(safroleTickets)
 
       // Capture post-Safrole tau for later restoration
       postSafroleTau <- inspect((v, _) => v.timeslot)
 
       // Step 3: Disputes
-      disputeOut <- disputes
+      disputeOut <- StageTimers.step("disputes")(disputes)
       _ <- storeDisputeOutput(disputeOut)
       _ <- validateOffendersMark
 
       // Step 4: Assurances
-      assuranceOut <- assurances
+      assuranceOut <- StageTimers.step("assurances")(assurances)
       _ <- storeAvailableReports(assuranceOut.reported)
 
       // Step 5: Update beta before Reports
       _ <- updateRecentHistoryPartial
 
       // Step 6: Reports
-      _ <- reports(skipAncestryValidation, ancestry)
+      _ <- StageTimers.step("reports")(reports(skipAncestryValidation, ancestry))
 
       _ <- savepointStorageView(storageView)
 
       // Step 7: Accumulation
-      accOut <- accumulation(sharedExecutor)
+      accOut <- StageTimers.step("accumulation")(accumulation(sharedExecutor))
       accRoot = Hash(accOut.ok.toArray)
       _ <- storeAccumulateRoot(accRoot)
       _ <- storeAccumulationStats(accOut.accumulationStats)
@@ -112,17 +112,17 @@ object BlockPipeline:
       _ <- storeLastAccumulationOutputs(accOut.commitments)
 
       // Step 8: History (uses accumulateRoot)
-      _ <- history(accRoot)
+      _ <- StageTimers.step("history")(history(accRoot))
 
       // Step 9: Authorization
-      _ <- authorization
+      _ <- StageTimers.step("authorization")(authorization)
 
       // Step 10: Preimages
-      _ <- preimages
+      _ <- StageTimers.step("preimages")(preimages)
 
       // Step 11: Statistics (needs pre-transition tau)
       _ <- setPreTransitionTau
-      _ <- statistics
+      _ <- StageTimers.step("statistics")(statistics)
       _ <- restorePostTransitionTau(postSafroleTau)
 
       _ <- discardStorageViewCheckpoint(storageView)

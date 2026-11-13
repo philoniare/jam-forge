@@ -13,11 +13,16 @@ import scala.util.control.NonFatal
 /** JIT warmup before the fuzz socket opens, plus the legacy CRaC checkpoint commands.  */
 object WarmupRunner extends Resource:
 
-  /** Passes over the warmup corpus unless `JAM_WARMUP_ROUNDS` says otherwise. */
-  val DefaultRounds: Int = 2
+  /** Passes over the warmup corpus unless `JAM_WARMUP_ROUNDS` says otherwise.
+    *
+    * A fuzz-perf run times only the first hundred blocks, so how much of the import path the JIT has compiled by
+    * then decides the result: on an 8-core EPYC 7763, two passes (4 s) leave the storage trace at 2.0 ms a block,
+    * six (7 s) at 1.7 and fifteen (12 s) at 1.6. Eight keeps the start-up under about 9 s.
+    */
+  val DefaultRounds: Int = 8
 
   /** What a warmup run imported. */
-  final case class Summary(traces: Int, imported: Int, mismatches: Int, millis: Long)
+  final case class Summary(traces: Int, imported: Int, mismatches: Int, millis: Long, failedReplays: Int = 0)
 
   /** Warm the JVM by replaying all available traces, take a CRaC checkpoint, and on restore launch the fuzz server.
     * Returns only after restore (the original process exits inside Core.checkpointRestore()).
@@ -109,7 +114,7 @@ object WarmupRunner extends Resource:
         val summary = replayThroughSocket(traces, rounds)
         println(
           s"Warmup complete: ${summary.traces} trace replays, ${summary.imported} blocks in ${summary.millis}ms, " +
-            s"${summary.mismatches} root mismatches"
+            s"${summary.mismatches} root mismatches, ${summary.failedReplays} replays skipped"
         )
         if summary.imported == 0 then
           println("WARNING: No successful block imports during warmup; JIT may not be fully warmed.")
@@ -129,15 +134,26 @@ object WarmupRunner extends Resource:
     val start = System.nanoTime()
     var imported = 0
     var mismatches = 0
+    var failed = 0
     try
       for _ <- 1 to rounds; trace <- traces do
-        val (ok, bad) = replay(server.socketPath, trace)
-        imported += ok
-        mismatches += bad
+        // One trace that does not decode or replay (a corpus older than the decoder) must not cost the rest of
+        // the warmup: it is reported and skipped.
+        try
+          val (ok, bad) = replay(server.socketPath, trace)
+          imported += ok
+          mismatches += bad
+        catch
+          case NonFatal(e) =>
+            failed += 1
+            println(
+              s"WARNING: warmup trace ${trace.genesis.getParent} skipped " +
+                s"(${e.getClass.getSimpleName}: ${e.getMessage})"
+            )
     finally
       server.close()
       Using.resource(Files.walk(dir))(_.sorted(Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p)))
-    Summary(traces.size * rounds, imported, mismatches, (System.nanoTime() - start) / 1_000_000)
+    Summary(traces.size * rounds, imported, mismatches, (System.nanoTime() - start) / 1_000_000, failed)
 
   /** One fuzzer session: handshake, Initialize from the genesis, every step as ImportBlock, then a GetState for the
     * last imported block. Returns (blocks whose reply root matched, blocks that did not).

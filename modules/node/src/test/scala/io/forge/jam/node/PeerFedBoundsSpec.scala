@@ -171,6 +171,14 @@ class PeerFedBoundsSpec extends AnyFunSuite with Matchers:
       nodeB.pools.ticketCount shouldBe valid.size
       tickets.pendingForwardCount shouldBe valid.size
       tickets.pendingForwardCount should be <= maxTickets
+
+      // Before forwarding is due nothing is sent; once the lottery is over (slot index `ticketCutoff - 1`) what is
+      // still queued is dropped, not sent to authors that can no longer include it.
+      val e = spec.config.epochLength
+      tickets.releaseForwards(epoch * e, appliedSlot = epoch * e + 5)
+      tickets.pendingForwardCount shouldBe valid.size
+      tickets.releaseForwards(epoch * e + spec.config.ticketCutoff - 1, appliedSlot = epoch * e)
+      tickets.pendingForwardCount shouldBe 0
     finally
       if nodeA != null then nodeA.shutdown()
       if nodeB != null then nodeB.shutdown()

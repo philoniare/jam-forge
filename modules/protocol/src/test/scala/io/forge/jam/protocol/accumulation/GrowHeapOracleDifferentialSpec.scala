@@ -20,7 +20,7 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
 
   private def canRunNative: Boolean =
     val arch = System.getProperty("os.arch", "").toLowerCase
-    (arch == "aarch64" || arch == "arm64") && libPath.isDefined
+    (arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64") && libPath.isDefined
 
   private val RW_DATA_LEN = 64
   private val PAGE = 4096

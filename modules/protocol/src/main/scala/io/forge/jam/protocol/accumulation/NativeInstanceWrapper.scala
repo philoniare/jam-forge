@@ -57,8 +57,7 @@ final class NativeInstanceWrapper(
   private val regions: Array[RegionView] = Array.tabulate(nRegions.toInt)(i => regionAt(i.toLong))
 
   def growRegion(regionIndex: Int, newLen: Long): Unit =
-    val off = regionIndex * REGION_SIZE
-    regionsSeg.set(ValueLayout.JAVA_INT, off + 4, newLen.toInt)
+    live.growRegion(regionIndex, newLen)
     val old = regions(regionIndex)
     regions(regionIndex) = old.copy(len = newLen)
 

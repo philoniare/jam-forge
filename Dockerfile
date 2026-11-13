@@ -6,6 +6,7 @@ WORKDIR /build
 COPY modules/crypto/native/bandersnatch-vrfs-wrapper ./bandersnatch-vrfs-wrapper
 COPY modules/crypto/native/ed25519-zebra-wrapper ./ed25519-zebra-wrapper
 COPY modules/crypto/native/erasure-coding-wrapper ./erasure-coding-wrapper
+COPY modules/pvm/native/pvm-recompiler ./pvm-recompiler
 
 WORKDIR /build/bandersnatch-vrfs-wrapper
 RUN cargo build --release --locked
@@ -14,6 +15,10 @@ WORKDIR /build/ed25519-zebra-wrapper
 RUN cargo build --release --locked
 
 WORKDIR /build/erasure-coding-wrapper
+RUN cargo build --release --locked
+
+# The PVM recompiler: emits AArch64 or x86-64 code, whichever this image is built for.
+WORKDIR /build/pvm-recompiler
 RUN cargo build --release --locked
 
 FROM sbtscala/scala-sbt:eclipse-temurin-24.0.1_9_1.12.11_3.3.7 AS scala-builder
@@ -38,7 +43,8 @@ COPY modules/pvm ./modules/pvm
 COPY modules/protocol ./modules/protocol
 COPY modules/conformance ./modules/conformance
 
-RUN mkdir -p modules/pvm/native/build/linux && touch modules/pvm/native/build/linux/libpvm_recompiler.so
+# After the sources, so it is newer than them and sbt does not try to rebuild it (this stage has no cargo).
+COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so modules/pvm/native/build/linux/
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
@@ -64,6 +70,7 @@ WORKDIR /app
 COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /app/lib/
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /app/lib/
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /app/lib/
+COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /app/lib/
 COPY --from=node-builder /build/modules/node/target/scala-3.3.7/jam-node.jar /app/
 
 ENV LD_LIBRARY_PATH=/app/lib
@@ -71,7 +78,8 @@ ENV LD_LIBRARY_PATH=/app/lib
 VOLUME ["/data"]
 # JAMNP-S (QUIC); publish with -p 40000:40000/udp or run with --network host.
 EXPOSE 40000/udp
-ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/jam-node.jar", "--data", "/data"]
+# With the recompiler library named here guest code runs natively; -Djam.pvm.executionMode=interpreted turns that off.
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-Djam.pvm.recompiler.lib=/app/lib/libpvm_recompiler.so", "-jar", "/app/jam-node.jar", "--data", "/data"]
 
 # Stage 3: Runtime image (default target: the conformance fuzz target)
 FROM azul/zulu-openjdk:24.0.2-24.32-jdk-crac
@@ -85,6 +93,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /app/lib/
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /app/lib/
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /app/lib/
+COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /app/lib/
 
 COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conformance.jar /app/
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
@@ -95,7 +104,7 @@ ENV JAM_TRACES_DIR=/app/warmup-traces
 
 ENV LD_LIBRARY_PATH=/app/lib
 ENV LOG_LEVEL=ERROR
-ENV JAVA_OPTS="-XX:+UseZGC -Xms4g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dlogback.configurationFile=/app/logback.xml"
+ENV JAVA_OPTS="-XX:+UseZGC -Xms4g -Xmx4g -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/jam_oom.hprof --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dlogback.configurationFile=/app/logback.xml -Djam.pvm.recompiler.lib=/app/lib/libpvm_recompiler.so"
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown

@@ -113,7 +113,9 @@ final class JamNode(
       pruneFinalizedHistory = nodeConfig.pruneFinalizedHistory,
       pruneOldState = nodeConfig.pruneOldState
     )
-  val sync = new SyncService(chain)
+  /** CE 128 / CE 129 requests are answered here, not on the network event loops. */
+  private val serving: InboundWork = InboundWork.serving()
+  val sync = new SyncService(chain, serving)
   val pools = new ExtrinsicPools
   val distribution = new DistributionService(
     pools,
@@ -444,6 +446,9 @@ final class JamNode(
 
   def start(): JamNode =
     chain.initializeOrRestore(spec)
+
+    // Validators of the sets around the head keep their inbound slots whoever else connects.
+    network.setPriorityPeers(key => connectivity.exists(_.validators.contains(JamBytes(key))))
 
     if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
@@ -854,7 +859,9 @@ final class JamNode(
     refinePool.shutdown() // drains in-flight refine work
     network.shutdown()
     inbound.shutdown() // received messages still being checked read the chain
+    serving.shutdown() // requests being answered read the store
     sync.shutdown() // waits for an in-flight sync import
+    distribution.shutdown()
     egress.shutdown()
     egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)
     preimages.shutdown() // its own executor for CE143 fetches, drained alongside egress

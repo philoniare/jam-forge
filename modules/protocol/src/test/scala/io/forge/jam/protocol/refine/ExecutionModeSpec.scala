@@ -11,7 +11,7 @@ import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.pvm.program.{JumpTable, ProgramBlob}
-import io.forge.jam.protocol.accumulation.{HostCall, HostCallResult, PvmInstance}
+import io.forge.jam.protocol.accumulation.{HostCall, HostCallResult, NativeRunner, PvmInstance}
 import spire.math.UShort
 
 import java.nio.file.{Files, Path}
@@ -25,7 +25,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
 
   private def isAarch64Host: Boolean =
     val arch = System.getProperty("os.arch", "").toLowerCase
-    arch == "aarch64" || arch == "arm64"
+    arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64"
 
   private def canRunNative: Boolean = isAarch64Host && libPath.isDefined
   private val haltCode = Array[Byte](50, 0)
@@ -87,6 +87,59 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
       nativeExit shouldBe PvmRunner.PvmExit.Halt
       nativeGas shouldBe interpGas
       nativeOutput.toSeq shouldBe interpOutput.toSeq
+  }
+
+  test("a direct native run returns the argument bytes its registers name, as the interpreter does") {
+    if !canRunNative then cancel("recompiler dylib not available on this host — skipping native-mode run")
+    else
+      val module = moduleOf(haltCode, haltBitmask)
+      // r7/r8 start as the argument address and length, so a program that halts at once returns its arguments.
+      for len <- Seq(0, 1, 4095, 4096, 4097, 20000) do
+        val args = Array.tabulate[Byte](len)(i => (i * 31 + len).toByte)
+        val interp = PvmRunner.run(module, args, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Interpreted)
+        val before = NativeRunner.nativeCount
+        val native = PvmRunner.run(module, args, gasLimit = 1000L, entryPc = 0, NoHostCalls, ExecutionMode.Recompiled)
+        NativeRunner.nativeCount shouldBe (before + 1)
+        native._1 shouldBe interp._1
+        native._2 shouldBe interp._2
+        native._3.toSeq shouldBe interp._3.toSeq
+        native._3.toSeq shouldBe args.toSeq
+  }
+
+  test("native runs on many threads at once keep their guest memory apart") {
+    if !canRunNative then cancel("recompiler dylib not available on this host — skipping native-mode run")
+    else
+      // One module, so every thread runs the same compiled code; each thread has its own arguments and checks
+      // that it gets exactly those back, run after run.
+      val module = moduleOf(ecalliThenHaltCode, ecalliThenHaltBitmask)
+      val threads = 8
+      val failures = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+      val start = new java.util.concurrent.CountDownLatch(1)
+      val workers = (0 until threads).map { t =>
+        val body: Runnable = () =>
+          val args = Array.tabulate[Byte](3000 + t * 700)(i => (i * 7 + t).toByte)
+          // The host call checks that guest memory holds this thread's arguments while the run is in progress.
+          val hostCalls = new HostCallDispatcher:
+            def getGasCost(hostCallId: Int, instance: PvmInstance): Long = 10L
+            def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
+              if !instance.readBytes(instance.reg(7).toInt, args.length).exists(_.sameElements(args)) then
+                failures.add(s"thread $t: host call saw another run's arguments")
+              instance.setReg(9, t.toLong)
+          start.await()
+          try
+            for _ <- 0 until 300 do
+              val (exit, _, output) =
+                PvmRunner.run(module, args, gasLimit = 1000L, entryPc = 0, hostCalls, ExecutionMode.Recompiled)
+              if exit != PvmRunner.PvmExit.Halt then failures.add(s"thread $t: exit $exit")
+              else if !output.sameElements(args) then failures.add(s"thread $t: output is not this thread's arguments")
+          catch case e: Throwable => { failures.add(s"thread $t: $e"); () }
+        val thread = new Thread(body)
+        thread.start()
+        thread
+      }
+      start.countDown()
+      workers.foreach(_.join())
+      failures.toArray.toSeq.distinct shouldBe Seq.empty
   }
 
   test("NativeRunner.run executes an otherwise native-eligible program natively, with no deopt") {

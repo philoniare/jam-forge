@@ -17,7 +17,7 @@ class RecompiledHostCallPropagationSpec extends AnyFlatSpec with Matchers:
 
   private def canRunNative: Boolean =
     val arch = System.getProperty("os.arch", "").toLowerCase
-    (arch == "aarch64" || arch == "arm64") && libPath.isDefined
+    (arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64") && libPath.isDefined
 
   private val PAGE_SHIFT = 12
 

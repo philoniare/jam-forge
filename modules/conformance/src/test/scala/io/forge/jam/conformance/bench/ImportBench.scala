@@ -67,7 +67,7 @@ object ImportBench:
       case Array(k) => k -> "true"
     }.toMap
     val known = Set("mode", "spec", "traces", "warmup", "reps", "per-trace", "imports", "sample-every", "mutate",
-      "max-growth-mb", "csv")
+      "max-growth-mb", "csv", "stages")
     opts.keys.find(!known(_)).foreach(k => fail(s"unknown option --$k (known: ${known.toSeq.sorted.mkString(", ")})"))
     quietLogging()
 
@@ -86,7 +86,14 @@ object ImportBench:
 
     val ok = opts.getOrElse("mode", "bench") match
       case "bench" =>
-        bench(config, traces, opts.get("warmup").fold(2)(_.toInt), opts.get("reps").fold(5)(_.toInt), opts.contains("per-trace"))
+        bench(
+          config,
+          traces,
+          opts.get("warmup").fold(2)(_.toInt),
+          opts.get("reps").fold(5)(_.toInt),
+          opts.contains("per-trace"),
+          opts.contains("stages")
+        )
       case "soak" =>
         soak(
           config,
@@ -102,7 +109,14 @@ object ImportBench:
 
   // ── bench ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  private def bench(config: ChainConfig, traces: Vector[Trace], warmup: Int, reps: Int, perTrace: Boolean): Boolean =
+  private def bench(
+      config: ChainConfig,
+      traces: Vector[Trace],
+      warmup: Int,
+      reps: Int,
+      perTrace: Boolean,
+      stages: Boolean = false
+  ): Boolean =
     val times = traces.map(t => t.name -> ArrayBuffer.empty[Double]).toMap
     // CPU time of the importing thread only: work handed to other threads is not in it, but it is much steadier
     // than wall time on a loaded machine.
@@ -111,6 +125,10 @@ object ImportBench:
     var mismatches = 0
     val t0 = System.nanoTime()
     for pass <- 0 until warmup + reps; t <- traces do
+      // --stages: time each import stage over the timed passes only.
+      if stages && pass == warmup && (t eq traces.head) then
+        io.forge.jam.protocol.pipeline.StageTimers.enable()
+        io.forge.jam.protocol.pipeline.StageTimers.reset()
       val session = new Session(config)
       session.start(t)
       for s <- t.steps do
@@ -135,6 +153,15 @@ object ImportBench:
       }
     println(resultLine("import", "ALL", blocks, traces.flatMap(t => times(t.name)).toArray))
     println(resultLine("import-cpu", "ALL", blocks, traces.flatMap(t => cpuTimes(t.name)).toArray))
+    if stages then io.forge.jam.protocol.pipeline.StageTimers.report.foreach(println)
+    // Whether the PVM actually ran natively: a missing library or a rejected program silently runs interpreted.
+    locally {
+      import io.forge.jam.protocol.accumulation.NativeRunner
+      println(
+        s"RESULT native runs=${NativeRunner.nativeCount} compiled=${NativeRunner.compileCount} " +
+          s"deopt=${NativeRunner.deoptCount} reasons=${NativeRunner.deoptReasons.mkString(",")}"
+      )
+    }
     println(f"TOTAL $total%.1fs warmup=$warmup reps=$reps mismatches=$mismatches")
     if mismatches > 0 then System.err.println(s"FAILED: $mismatches state-root mismatches against the fixtures")
     mismatches == 0
