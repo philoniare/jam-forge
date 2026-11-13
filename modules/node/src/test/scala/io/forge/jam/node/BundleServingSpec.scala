@@ -492,6 +492,82 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
+  test("CE147/148: once the caches have let a report go, its bundle and segments are rebuilt from our own shards") {
+    val tiny = ChainConfig.TINY
+    val exported = (0 until 5).map(i => Array.fill[Byte](io.forge.jam.core.constants.Csegmentsize.toInt)((i * 7 + 1).toByte))
+    val bundle = Array.tabulate[Byte](5000)(i => (i * 13).toByte)
+    val all = io.forge.jam.protocol.refine.DaShards.buildAll(bundle, exported, tiny).fold(e => fail(e), identity)
+    val erasureRoot = Hash(io.forge.jam.core.merkle.BinaryMerkle.Tree(all.map(_.leaf)).root)
+    val segmentsRoot = io.forge.jam.protocol.refine.AvailabilitySpecifier.segmentsRoot(exported)
+
+    val dir = Files.createTempDirectory("jam-bundle-serving-rebuild")
+    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false)
+    val blockStore = BlockStore.open(dir.resolve("blocks"))
+    val shardStore = io.forge.jam.db.ShardStore.open(dir.resolve("shards"))
+    val chain = new ChainManager(tiny, trieBackend, blockStore)
+    val shards = new ShardService(shardStore, tiny)
+    // What a guarantor custodies for a report it guaranteed: every validator's shard set, and nothing in the caches.
+    all.zipWithIndex.foreach((s, i) => shardStore.put(erasureRoot, i, s.encode))
+    val exportIndex = new ExportIndex()
+    val base = sampleReport(0x07)
+    val report = base.copy(packageSpec =
+      base.packageSpec.copy(
+        length = UInt(bundle.length),
+        erasureRoot = erasureRoot,
+        exportsRoot = segmentsRoot,
+        exportsCount = UShort(exported.size)
+      )
+    )
+    exportIndex.record(Seq(io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic(report, Timeslot(1), List.empty)))
+    val guarantor = new GuarantorService(
+      chain,
+      new DistributionService(new ExtrinsicPools, coresCount = 1, newEgress()),
+      new ExtrinsicPools,
+      Seq.empty,
+      shardStore = Some(shardStore),
+      segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => Nil)),
+      localBundle = root => exportIndex.bundleLength(root).flatMap(n => shards.reconstructBundle(root, n, Nil).toOption)
+    )
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config)
+    serverNode.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    def ask(kind: Byte, payload: Array[Byte], conn: io.forge.jam.network.JamnpConnection): List[Array[Byte]] =
+      val responses = new LinkedBlockingQueue[Array[Byte]]()
+      val closed = new LinkedBlockingQueue[Boolean]()
+      val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
+      stream.onMessage(responses.offer(_))
+      stream.onClosed(() => closed.offer(true))
+      stream.send(payload)
+      stream.finish()
+      await(closed)
+      Iterator.continually(responses.poll()).takeWhile(_ != null).toList
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = clientNode.connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort)).get(10, TimeUnit.SECONDS)
+
+      ask(StreamKind.BundleRequest, erasureRoot.bytes.toArray, conn).map(_.toList) shouldBe List(bundle.toList)
+
+      val segmentReply = ask(StreamKind.SegmentRequest, encodeSegmentRequest(segmentsRoot -> Seq(1, 4)), conn)
+      segmentReply should have size 2
+      segmentReply.head.toList shouldBe (exported(1) ++ exported(4)).toList
+      val proofs = io.forge.jam.core.merkle.BinaryMerkle.pagedJustifications(exported, 0).map(_._1)
+      segmentReply(1).toList shouldBe Seq(1, 4).flatMap { i =>
+        io.forge.jam.core.codec.JamCodecs.encodeCompactInteger(proofs(i).size.toLong) ++ proofs(i).flatten
+      }.toList
+
+      // A root we hold no shards for is still refused.
+      ask(StreamKind.BundleRequest, Hashing.blake2b256(Array[Byte](1)).bytes.toArray, conn) shouldBe Nil
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+      shards.shutdown()
+      shardStore.close()
+      blockStore.close()
+      trieBackend.close()
+      cleanup(dir)
+  }
+
   test("CE148: an unknown segments-root is rejected with no response message") {
     val (guarantor, pool, dir) = newGuarantor()
     pool.put(Hashing.blake2b256(Array.fill[Byte](4)(0x06)), fakeSegments(1))

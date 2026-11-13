@@ -226,7 +226,7 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       bootnodes = Nil
     )
 
-  test("GP: a branch with an unfinalized equivocation is not adopted (§bestchain)") {
+  test("a branch with an unfinalized equivocation is not adopted, and the best chain leaves one") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
     )
@@ -257,10 +257,17 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       nodeB.chain.importBlock(b3).isRight shouldBe true
       nodeB.chain.best.hash should not be headA2.hash
 
+      val head1 = nodeA.chain.parentHash(headA2.hash).getOrElse(fail("parent of 2"))
+      // Seeing 2' makes slot 2 equivocated: A's own block 2 is on its best chain above finality, so the best head
+      // leaves it, for block 1 (B's branch holds the same slot and is not acceptable either).
       nodeA.chain.importBlock(b2).isLeft shouldBe true
+      nodeA.chain.best.hash shouldBe head1
       val longer = nodeA.chain.importBlock(b3)
       withClue(s"import of 3': $longer") { longer.isLeft shouldBe true }
-      nodeA.chain.best.hash shouldBe headA2.hash
+      nodeA.chain.best.hash shouldBe head1
+      // The chain goes on from block 1.
+      nodeA.authorSlot(4).isDefined shouldBe true
+      nodeA.chain.parentHash(nodeA.chain.best.hash) shouldBe Some(head1)
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()

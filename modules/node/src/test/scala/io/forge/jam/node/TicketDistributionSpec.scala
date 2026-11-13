@@ -96,6 +96,41 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
+  test("tickets made in the background: the call returns at once, they are announced complete, and a call while one runs adds none") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec("ticket-bg", ChainConfig.TINY, Some(genesis.header.encode.toArray), None, genesis.state.keyvals, Nil)
+    val dir = tempDir("jam-tix-bg")
+    var node: JamNode = null
+    try
+      node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
+      node.chain.initializeOrRestore(spec)
+      node.enableAuthoring(devKeys)
+      val slot = node.chain.best.slot
+      val epoch = slot / ChainConfig.TINY.epochLength
+      val before = node.tickets.generation
+      val started = System.nanoTime()
+      node.tickets.generateInBackground(slot)
+      node.tickets.generateInBackground(slot) // one is running: nothing more is queued
+      val returnedAfterMs = (System.nanoTime() - started) / 1_000_000
+      val deadline = System.currentTimeMillis() + 60000
+      while !node.tickets.hasTicketsFor(epoch) && System.currentTimeMillis() < deadline do Thread.sleep(20)
+      node.tickets.hasTicketsFor(epoch) shouldBe true
+      node.pools.ticketCount should be > 0
+      node.tickets.generation shouldBe before + 1
+      // Done for this epoch and entropy: another call generates nothing.
+      node.tickets.generateInBackground(slot)
+      Thread.sleep(200)
+      node.tickets.generation shouldBe before + 1
+      withClue(s"returned after $returnedAfterMs ms: ") { returnedAfterMs should be < 1000L }
+    finally
+      if node != null then
+        node.tickets.shutdown()
+        node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
   test("CE131/132: node A distributes a generated ticket and node B pools it") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")

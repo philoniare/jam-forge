@@ -265,7 +265,11 @@ final class JamNode(
       ownNetworkKey = Some(identity.publicKeyBytes),
       sharedRefinePool = Some(refinePool),
       segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)),
-      tamperReports = nodeConfig.tamperReports
+      tamperReports = nodeConfig.tamperReports,
+      // Our own custody only: a request must not make us fetch shards from the network on the requester's behalf.
+      localBundle = root =>
+        exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
+      serving = serving
     )
     guarantor = Some(g)
     network.registerHandler(
@@ -338,7 +342,9 @@ final class JamNode(
     */
   def authorSlot(slot: Long): Option[ChainManager#Head] =
     if shuttingDown then return None
-    tickets.maybeGenerate(slot): Unit
+    // On the clock the ring proofs are made off this thread, which must author by the slot's deadline; a node
+    // driven slot by slot (no clock, as in tests) makes them here, so this slot's block already carries them.
+    if nodeConfig.slotTicking then tickets.generateInBackground(slot) else tickets.maybeGenerate(slot): Unit
     updateConnectivity(slot)
     maybeSendTickets(slot)
     connectivity.filter(_.epoch == slot / chain.config.epochLength).foreach(v => tickets.releaseForwards(slot, v.appliedSlot))
@@ -855,6 +861,7 @@ final class JamNode(
     if assuranceTimer != null then assuranceTimer.shutdownNow()
     telemetry.foreach(_.shutdown())
     if slotTicker != null then slotTicker.close() // waits for in-flight tick
+    tickets.shutdown()
     guarantor.foreach(_.shutdown())
     refinePool.shutdown() // drains in-flight refine work
     network.shutdown()

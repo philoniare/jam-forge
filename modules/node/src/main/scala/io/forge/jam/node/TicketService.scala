@@ -80,6 +80,29 @@ final class TicketService(
   @volatile private var readyEpoch: Long = -1L
   @volatile private var generatedForEntropy: Hash = Hash.zero
 
+  /** Where [[generateInBackground]] makes the ring proofs: one thread, so at most one generation at a time. */
+  private lazy val generator = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = new Thread(r, "jam-tickets"); t.setDaemon(true); t
+  }
+  private val generating = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** [[maybeGenerate]] on a thread of its own, unless one is already running: ring-VRF proofs for an epoch take far
+    * longer than authoring a block, and the slot thread must not wait for them. Senders see the tickets once all of
+    * them are made ([[hasTicketsFor]]).
+    */
+  def generateInBackground(wallSlot: Long): Unit =
+    if validatorKeys.nonEmpty && generating.compareAndSet(false, true) then
+      try
+        generator.execute { () =>
+          try maybeGenerate(wallSlot): Unit
+          catch case e: Exception => logger.error("ticket generation failed", e)
+          finally generating.set(false)
+        }
+      catch
+        case _: java.util.concurrent.RejectedExecutionException => generating.set(false) // shutting down
+
+  def shutdown(): Unit = if validatorKeys.nonEmpty then generator.shutdownNow(): Unit
+
   /** Register the validator keys this node holds, enabling ticket generation
     * for them.
     */

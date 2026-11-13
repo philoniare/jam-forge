@@ -84,7 +84,8 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       val head1 = node.chain.importBlock(block1Bytes).fold(e => fail(s"import of block 1: $e"), identity)
       nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
 
-      // A's own block 2; B's competing 3' is parked on A as a side branch off block 1.
+      // A's own block 2; B's competing 3' is parked on A as a side branch off block 1. A leaves slot 3 to it: two
+      // blocks at one slot are an equivocation, and the best chain would leave its own.
       val head2 = authorOn(node, 2)
       val side = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(3).getOrElse(fail("author 3'"))
       val sideHash = nodeB.chain.headerHashOf(side)
@@ -92,7 +93,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       node.chain.hasBlock(sideHash) shouldBe true
 
       // While block 1 is inside the window the side branch stays.
-      val early = List(1L -> head1.hash, 2L -> head2.hash) ++ grow(node, 3 to 20)
+      val early = List(1L -> head1.hash, 2L -> head2.hash) ++ grow(node, 4 to 20)
       node.chain.hasBlock(sideHash) shouldBe true
 
       val blocks = early ++ grow(node, 21 to 40)
@@ -104,7 +105,9 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       val (old, kept) = blocks.partition(_._1 < cutoff)
       old.size should be > 10
       old.init.foreach((slot, h) => withClue(s"slot $slot: ") { stored(node, h) shouldBe false })
-      node.chain.pruneFloorHeight shouldBe old.last._1 // one block per slot, so height == slot
+      // Heights along A's chain: one block per slot, except the slot it left to 3'.
+      def heightOf(h: Hash): Long = blocks.indexWhere(_._2 == h) + 1L
+      node.chain.pruneFloorHeight shouldBe heightOf(old.last._2)
       // Inside it: every block, with its header for the ancestor set.
       kept.foreach { (slot, h) =>
         withClue(s"slot $slot: ") {
@@ -116,7 +119,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       node.chain.headerBytes(sp.genesisHeaderHash).isDefined shouldBe true
       // The finalized-chain index holds only the kept range.
       node.chain.meta(f"fin:${5L}%016x") shouldBe None
-      node.chain.meta(f"fin:${fin.slot}%016x").map(Hash(_)) shouldBe Some(fin.hash)
+      node.chain.meta(f"fin:${heightOf(fin.hash)}%016x").map(Hash(_)) shouldBe Some(fin.hash)
       // Block 1 is pruned, so the side branch off it went with it.
       stored(node, sideHash) shouldBe false
       node.chain.leaves.map(_.hash) shouldBe List(node.chain.best.hash)

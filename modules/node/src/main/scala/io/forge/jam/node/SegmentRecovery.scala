@@ -17,14 +17,25 @@ final class ExportIndex(maxEntries: Int = ExportIndex.Capacity):
     }
   )
 
+  /** Every report's bundle length by erasure root: what rebuilding its bundle from shards needs. */
+  private val bundleLengths = java.util.Collections.synchronizedMap(
+    new java.util.LinkedHashMap[Hash, Integer](256, 0.75f, false) {
+      override def removeEldestEntry(e: java.util.Map.Entry[Hash, Integer]) = size > maxEntries
+    }
+  )
+
   def record(guarantees: Iterable[GuaranteeExtrinsic]): Unit =
     guarantees.foreach { g =>
       val spec = g.report.packageSpec
+      bundleLengths.put(spec.erasureRoot, Integer.valueOf(spec.length.toLong.toInt))
       if spec.exportsCount.toInt > 0 then
         byRoot.put(spec.exportsRoot, ExportIndex.Entry(spec.erasureRoot, spec.exportsCount.toInt, g.report.coreIndex.toInt))
     }
 
   def get(segmentsRoot: Hash): Option[ExportIndex.Entry] = Option(byRoot.get(segmentsRoot))
+
+  /** The length of the bundle a recorded report's erasure root commits to. */
+  def bundleLength(erasureRoot: Hash): Option[Int] = Option(bundleLengths.get(erasureRoot)).map(_.intValue)
 
 object ExportIndex:
   final case class Entry(erasureRoot: Hash, exports: Int, core: Int)
@@ -44,7 +55,16 @@ final class SegmentRecovery(
     peers: () => Iterable[JamnpConnection]
 ) extends LazyLogging:
 
-  def recover(segmentsRoot: Hash, indices: Seq[Int]): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
+  /** Segments `indices` of `segmentsRoot` with their proofs, verified against the root; None when they cannot be
+    * rebuilt. With `localOnly` only the shards in our own custody are used: a guarantor holds every validator's
+    * shards of the reports it guaranteed, so it can serve their segments long after its segment cache let them go,
+    * without asking the network on a peer's behalf.
+    */
+  def recover(
+      segmentsRoot: Hash,
+      indices: Seq[Int],
+      localOnly: Boolean = false
+  ): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
     exports.get(segmentsRoot) match
       case None =>
         logger.debug(s"no known report exported ${segmentsRoot.toHex.take(18)}; cannot rebuild its segments")
@@ -53,13 +73,15 @@ final class SegmentRecovery(
         val pages = indices.map(_ / ImportResolver.PageSize).distinct.map(entry.exports + _)
         val wanted = (indices ++ pages).distinct.toList
         val total = entry.exports + ImportResolver.pagedProofCount(entry.exports)
-        val view = chain.stateView()
-        val sets = List(view.validators.current, view.validators.previous)
+        // Read only when peers are asked: which shards each one holds.
+        lazy val sets =
+          val view = chain.stateView()
+          List(view.validators.current, view.validators.previous)
         val rebuilt = shards.reconstructSegments(
           entry.erasureRoot,
           total,
           wanted,
-          peers(),
+          if localOnly then Nil else peers(),
           conn =>
             sets
               .flatMap(_.zipWithIndex.collect { case (vk, v) if vk.ed25519 == conn.peerPublicKey => v })

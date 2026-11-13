@@ -346,9 +346,8 @@ final class ChainManager(
       .map(b => io.forge.jam.core.LittleEndian.get(b, 96, 4))
       .getOrElse(0L)
 
-  /** Equivocation tracking: two distinct blocks at one timeslot by one author
-    * A branch holding an unfinalized equivocated slot
-    * is never adopted.
+  /** Equivocation tracking: two distinct blocks at one timeslot by one author. A branch holding an unfinalized
+    * equivocated slot is never adopted, and the best chain leaves one as soon as it is seen ([[importBlock]]).
     */
   private def recordSlotAuthor(hash: Hash, slot: Long, author: Int): Unit =
     val key = s"slotauthor:$slot:$author"
@@ -359,8 +358,28 @@ final class ChainManager(
           logger.warn(
             s"equivocation at slot $slot by validator $author: ${seen.toHex.take(18)} vs ${hash.toHex.take(18)}"
           )
+          newEquivocation = Some(slot)
         putMetaLong(s"equivocated:$slot", 1L)
       case _ => ()
+
+  /** A slot first seen equivocated during the import in progress (set and cleared under [[commit]]). */
+  private var newEquivocation: Option[Long] = None
+
+  /** The best block may have no unfinalized ancestor at a slot where two blocks were seen. When the best chain holds
+    * such a block above finality, the best head moves below it, to the heaviest acceptable branch; which of the two
+    * came first does not matter.
+    */
+  private def leaveEquivocatedSlot(slot: Long, events: mutable.ListBuffer[(Head, Block)]): Unit =
+    val finalizedHeight = metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
+    var cursor = bestHead.hash
+    while blockHeight(cursor).exists(_ > finalizedHeight) && slotOfHeader(cursor) > slot do
+      cursor = parentOf(cursor).getOrElse(Hash.zero)
+    if blockHeight(cursor).exists(_ > finalizedHeight) && slotOfHeader(cursor) == slot then
+      parentOf(cursor).foreach { parent =>
+        logger.warn(s"best chain holds ${cursor.toHex.take(18)} at equivocated slot $slot; leaving it")
+        val head = leaveBestFrom(parent, events)
+        logger.warn(s"best is now ${head.hash.toHex.take(18)} slot=${head.slot}")
+      }
 
   private def isEquivocated(h: Hash): Boolean = flag(s"equivocated:${slotOfHeader(h)}")
 
@@ -545,6 +564,11 @@ final class ChainManager(
 
   /** Refuse side-branch blocks whose slot is more than [[ChainManager.FutureSlotTolerance]] ahead of `now()`. */
   def useWallClock(now: () => Long): Unit = wallClockSlot = Some(now)
+
+  /** The slot it is now: by the wall clock when the node runs on one, else the slot after the best head's (a chain
+    * driven slot by slot, as in tests). A head that lags the clock does not hold this back.
+    */
+  def currentSlot: Long = wallClockSlot.map(_()).getOrElse(bestHead.slot + 1)
 
   /** Side-branch blocks stored without a seal check. */
   def unverifiedCount: Int = synchronized(unverified.size)
@@ -785,6 +809,24 @@ final class ChainManager(
   def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
     val result = commit {
+      newEquivocation = None
+      val imported = importUnderCommit(blockBytes, source, events)
+      newEquivocation.foreach { slot =>
+        newEquivocation = None
+        leaveEquivocatedSlot(slot, events)
+        // Blocks the best chain has just left are not announced as imported heads.
+        events.filterInPlace((head, _) => blockRoot(head.hash).isDefined)
+      }
+      imported
+    }
+    events.foreach((head, block) => postImportBus.publish(head, block))
+    result
+
+  private def importUnderCommit(
+      blockBytes: Array[Byte],
+      source: Option[Ed25519PublicKey],
+      events: mutable.ListBuffer[(Head, Block)]
+  ): Either[ChainError, Head] =
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
         val parent = block.header.parent
@@ -825,9 +867,6 @@ final class ChainManager(
             case _ =>
               Left(ChainError.UnknownParent(parent))
       }
-    }
-    events.foreach((head, block) => postImportBus.publish(head, block))
-    result
 
   private def importOnBest(
       block: Block,
@@ -1029,21 +1068,25 @@ final class ChainManager(
         case (_, None) => Left(ChainError.NoParent)
         case (Some(_), Some(parent)) if blockHeight(hash).getOrElse(0L) <= finalizedHeight =>
           Left(ChainError.AlreadyFinalized(parent))
-        case (Some(_), Some(parent)) =>
-          rewindTo(parent)
-          val (pw, ph) = (weightOf(parent), blockHeight(parent).getOrElse(0L))
-          val candidates = leafMap.keySet.asScala.toList.filter(l =>
-            l != parent && !branchInvalid(l) && !branchEquivocates(l) && blockRoot(l).isEmpty &&
-              (weightOf(l) > pw || (weightOf(l) == pw && blockHeight(l).getOrElse(0L) > ph))
-          )
-          candidates.sortBy(l => (-weightOf(l), -blockHeight(l).getOrElse(0L))).iterator
-            .map(l => reorgTo(l, events))
-            .collectFirst { case Right(h) => h }
-            .map(Right(_))
-            .getOrElse(Right(bestHead))
+        case (Some(_), Some(parent)) => Right(leaveBestFrom(parent, events))
     }
     events.foreach((head, block) => postImportBus.publish(head, block))
     result
+
+  /** Rewind the best head to `parent` and adopt the heaviest branch that is now acceptable (no invalid block, no
+    * equivocated slot) and heavier than `parent`; `parent` itself when there is none.
+    */
+  private def leaveBestFrom(parent: Hash, events: mutable.ListBuffer[(Head, Block)]): Head =
+    rewindTo(parent)
+    val (pw, ph) = (weightOf(parent), blockHeight(parent).getOrElse(0L))
+    val candidates = leafMap.keySet.asScala.toList.filter(l =>
+      l != parent && !branchInvalid(l) && !branchEquivocates(l) && blockRoot(l).isEmpty &&
+        (weightOf(l) > pw || (weightOf(l) == pw && blockHeight(l).getOrElse(0L) > ph))
+    )
+    candidates.sortBy(l => (-weightOf(l), -blockHeight(l).getOrElse(0L))).iterator
+      .map(l => reorgTo(l, events))
+      .collectFirst { case Right(h) => h }
+      .getOrElse(bestHead)
 
   /** Move the best head back to its ancestor `ancestor`; the blocks above it lose main-chain status. */
   private def rewindTo(ancestor: Hash): Unit =

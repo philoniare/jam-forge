@@ -72,9 +72,10 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       nodeA.authorSlot(2).isDefined shouldBe true
       val headA2 = nodeA.chain.best
 
-      // B's competing block 2' parks on a side branch: a dead tip that will
-      // never be adoptable again once A's chain is finalized past it.
-      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
+      // B's competing block 3' on block 1 parks on a side branch: a dead tip that will never be adoptable again
+      // once A's chain is finalized past it. (Not at slot 2: two blocks at one slot are an equivocation, and the
+      // best chain would leave A's own block 2.)
+      val block2b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
       val block2bBytes = nodeB.chain.encodeBlock(block2b)
       val block2bHash = nodeB.chain.headerHashOf(block2b)
       nodeA.chain.importBlock(block2bBytes).isLeft shouldBe true
@@ -84,7 +85,7 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       val bestBefore = nodeA.chain.best
       leavesBefore.map(_._1) shouldBe Set(headA2.hash, block2bHash)
       leavesBefore should contain((headA2.hash, headA2.slot, headA2.stateRoot))
-      leavesBefore should contain((block2bHash, 2L, Hash.zero))
+      leavesBefore should contain((block2bHash, 3L, Hash.zero))
 
       nodeA.shutdownStorageOnly()
       nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))
@@ -95,7 +96,7 @@ class LeavesSpec extends AnyFunSuite with Matchers:
 
       // A extends past it: block2b (height 2) is now behind A's new best
       // (height 3), but it's still tracked as a (dead) leaf.
-      val block3 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(3).getOrElse(fail("author block 3"))
+      val block3 = new BlockAuthor(nodeA.chain, devKeys).tryAuthor(4).getOrElse(fail("author block 4"))
       val headA3 = nodeA.chain.importBlock(nodeA.chain.encodeBlock(block3)).fold(e => fail(s"import 3: $e"), identity)
       nodeA.chain.leaves.map(_.hash).toSet shouldBe Set(headA3.hash, block2bHash)
 

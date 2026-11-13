@@ -125,7 +125,11 @@ final class GuarantorService(
     /** Rebuilds imported segments from the availability layer when no guarantor serves them. */
     segmentRecovery: Option[SegmentRecovery] = None,
     /** FAULT INJECTION, for testing disputes only: sign a deliberately wrong report (see [[tamper]]). */
-    tamperReports: Boolean = false
+    tamperReports: Boolean = false,
+    /** A bundle rebuilt from the shards in our own custody, by erasure root: CE 147 once the bundle cache let it go. */
+    localBundle: Hash => Option[Array[Byte]] = _ => None,
+    /** Where a CE 147/148 request that has to rebuild from shards is answered, off the network threads. */
+    serving: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   /** The report this guarantor signs: the computed one, or with `tamperReports` a wrong one (auth gas used + 1),
@@ -181,18 +185,36 @@ final class GuarantorService(
   def recordBundle(erasureRoot: Hash, bundleBytes: Array[Byte]): Unit =
     heldBundles.put(erasureRoot, bundleBytes)
 
-  /** CE 147: Erasure-Root (32) -> Bundle; reset when we don't hold it. */
+  /** CE 147: Erasure-Root (32) -> Bundle; reset when we cannot provide it. From the bundle cache, else rebuilt from
+    * the shards we custody (every validator's, for a report we guaranteed) and cached again: auditors of one report
+    * ask at about the same time.
+    */
   def bundleRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        val bundle =
-          if msg.length == 32 then Option(heldBundles.get(Hash(msg)))
-          else None
-        bundle match
-          case Some(b) =>
-            stream.send(b)
-            stream.finish()
-          case None => stream.reset()
+        if msg.length != 32 then stream.reset()
+        else
+          val root = Hash(msg)
+          Option(heldBundles.get(root)) match
+            case Some(b) =>
+              stream.send(b)
+              stream.finish()
+            case None =>
+              val taken = serving.submit(connection, msg.length.toLong) {
+                val rebuilt =
+                  try localBundle(root)
+                  catch
+                    case e: Exception =>
+                      logger.warn(s"CE147 rebuild of ${root.toHex.take(18)} failed: ${e.getMessage}")
+                      None
+                rebuilt match
+                  case Some(b) =>
+                    heldBundles.put(root, b)
+                    stream.send(b)
+                    stream.finish()
+                  case None => stream.reset()
+              }
+              if !taken then stream.reset()
       }
 
   /** CE 148: repeated `(segments-root(32) ++ compact-len ++ [u16 LE index])`
@@ -205,34 +227,60 @@ final class GuarantorService(
   def segmentRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        val served =
-          try
-            decodeSegmentRequest(msg)
-              .filter(_.map(_._2.size).sum <= GuarantorService.MaxSegmentsPerRequest)
-              .flatMap(_.foldLeft(Option(IndexedSeq.empty[(Array[Byte], List[Array[Byte]])])) { (acc, group) =>
-                val (root, indices) = group
-                acc.flatMap(collected => segments.getWithProofs(root, indices).map(collected ++ _))
-              })
-          catch
-            case e: Exception =>
-              logger.warn(s"CE148 failed: ${e.getMessage}")
-              None
-        served match
-          case Some(found) =>
-            val segs = new java.io.ByteArrayOutputStream()
-            val proofs = new java.io.ByteArrayOutputStream()
-            found.foreach { (seg, proof) =>
-              segs.write(seg)
-              proofs.write(JamCodecs.encodeCompactInteger(proof.size.toLong))
-              proof.foreach(h => proofs.write(h))
-            }
-            stream.send(segs.toByteArray)
-            stream.send(proofs.toByteArray)
-            stream.finish()
-          case None =>
-            logger.debug("CE148: request not servable")
-            stream.reset()
+        val request =
+          try decodeSegmentRequest(msg).filter(_.map(_._2.size).sum <= GuarantorService.MaxSegmentsPerRequest)
+          catch case _: Exception => None
+        request match
+          case None => stream.reset()
+          // Every root still in the segment cache: answered here. Otherwise the missing ones are rebuilt from the
+          // shards we custody, which is real work: off the network threads.
+          case Some(groups) if groups.forall((root, indices) => segments.getWithProofs(root, indices).isDefined) =>
+            answerSegments(stream, groups, rebuild = false)
+          case Some(groups) =>
+            if !serving.submit(connection, msg.length.toLong)(answerSegments(stream, groups, rebuild = true)) then
+              stream.reset()
       }
+
+  /** Answer a CE 148 request: every requested segment from the segment cache, else (with `rebuild`) from our own
+    * shards; a reset when any cannot be provided.
+    */
+  private def answerSegments(stream: JamnpStream, groups: IndexedSeq[(Hash, Seq[Int])], rebuild: Boolean): Unit =
+    val served =
+      try
+        groups.foldLeft(Option(IndexedSeq.empty[(Array[Byte], List[Array[Byte]])])) { (acc, group) =>
+          val (root, indices) = group
+          acc.flatMap { collected =>
+            segments
+              .getWithProofs(root, indices)
+              .orElse(
+                if !rebuild then None
+                else
+                  segmentRecovery
+                    .flatMap(_.recover(root, indices, localOnly = true))
+                    .map(byIndex => indices.map(byIndex).toIndexedSeq)
+              )
+              .map(collected ++ _)
+          }
+        }
+      catch
+        case e: Exception =>
+          logger.warn(s"CE148 failed: ${e.getMessage}")
+          None
+    served match
+      case Some(found) =>
+        val segs = new java.io.ByteArrayOutputStream()
+        val proofs = new java.io.ByteArrayOutputStream()
+        found.foreach { (seg, proof) =>
+          segs.write(seg)
+          proofs.write(JamCodecs.encodeCompactInteger(proof.size.toLong))
+          proof.foreach(h => proofs.write(h))
+        }
+        stream.send(segs.toByteArray)
+        stream.send(proofs.toByteArray)
+        stream.finish()
+      case None =>
+        logger.debug("CE148: request not servable")
+        stream.reset()
 
   /** Decode CE 148's repeated `(root(32) ++ compact-len ++ [u16 LE index])`
     * groups. `None` on any structural malformation (short buffer, bad
@@ -487,7 +535,7 @@ final class GuarantorService(
       case Right(extrinsicData) =>
         // Imports are fetched (and checked) off the refine threads, then the package goes back to be refined.
         val resolved = for
-          _ <- precheck(wp, coreIndex, chain.best.slot + 1)
+          _ <- precheck(wp, coreIndex, chain.currentSlot)
           r <- ImportResolver.resolve(wp, reportedPackages)
         yield r
         resolved match
@@ -564,7 +612,9 @@ final class GuarantorService(
       justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
       segmentRootLookup: Map[Hash, Hash]
   ): Unit =
-    val slot = chain.best.slot + 1
+    // Assignments and the guarantee's timeslot follow the clock, not the head: a head a few slots behind would put
+    // the guarantee in a rotation that may be over by the time a block can include it.
+    val slot = chain.currentSlot
     precheck(wp, coreIndex, slot) match
       case Left(why) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused before refine: $why")
       case Right(anchorState) => refineAndGuarantee(coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState)
@@ -609,7 +659,7 @@ final class GuarantorService(
         logger.warn(s"work package refused: $err")
       case Right(computed) =>
         storeShards(computed)
-        val slot = chain.best.slot + 1
+        val slot = chain.currentSlot
         // Gathering co-signatures waits on peers for up to CoSignTimeoutMillis: off the refine thread.
         try coSignPool.execute(() =>
             try signAndDistribute(computed, slot)
@@ -736,7 +786,7 @@ final class GuarantorService(
       case Right((coreIndex, shardCount, lookup)) =>
         // JAMNP-S CE 134: the shard count must be the active validator count
         // at a slot the report could be included in; ours is fixed per chain.
-        val slot = chain.best.slot + 1
+        val slot = chain.currentSlot
         val held = ownAssignedKeys(slot, coreIndex)
         if shardCount != chain.config.validatorCount then
           logger.warn(s"CE134: shard count $shardCount is not the validator count ${chain.config.validatorCount}")
