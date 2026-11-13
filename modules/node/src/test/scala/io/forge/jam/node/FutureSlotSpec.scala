@@ -43,11 +43,12 @@ class FutureSlotSpec extends AnyFunSuite with Matchers:
       b.chain.importBlock(bytes).map(_.hash) shouldBe Right(head.hash)
       b.chain.best.stateRoot shouldBe head.stateRoot
 
-      // The slot it is now (what a guarantor signs for) follows the clock, also while the head lags it; with no clock
-      // it is the one after the head.
-      a.chain.currentSlot shouldBe 4L
+      a.chain.nextBlockSlot shouldBe 4L
+      b.chain.nextBlockSlot shouldBe 4L
+      now = 3L
+      b.chain.nextBlockSlot shouldBe 4L
       now = 9L
-      b.chain.currentSlot shouldBe 9L
+      b.chain.nextBlockSlot shouldBe 9L
     finally
       nodes.foreach(n => if n != null then n.shutdown())
       dirs.foreach(cleanup)

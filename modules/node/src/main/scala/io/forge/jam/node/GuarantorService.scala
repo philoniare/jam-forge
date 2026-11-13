@@ -535,7 +535,7 @@ final class GuarantorService(
       case Right(extrinsicData) =>
         // Imports are fetched (and checked) off the refine threads, then the package goes back to be refined.
         val resolved = for
-          _ <- precheck(wp, coreIndex, chain.currentSlot)
+          _ <- precheck(wp, coreIndex, chain.nextBlockSlot)
           r <- ImportResolver.resolve(wp, reportedPackages)
         yield r
         resolved match
@@ -612,9 +612,7 @@ final class GuarantorService(
       justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
       segmentRootLookup: Map[Hash, Hash]
   ): Unit =
-    // Assignments and the guarantee's timeslot follow the clock, not the head: a head a few slots behind would put
-    // the guarantee in a rotation that may be over by the time a block can include it.
-    val slot = chain.currentSlot
+    val slot = chain.nextBlockSlot
     precheck(wp, coreIndex, slot) match
       case Left(why) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused before refine: $why")
       case Right(anchorState) => refineAndGuarantee(coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState)
@@ -659,7 +657,7 @@ final class GuarantorService(
         logger.warn(s"work package refused: $err")
       case Right(computed) =>
         storeShards(computed)
-        val slot = chain.currentSlot
+        val slot = chain.nextBlockSlot
         // Gathering co-signatures waits on peers for up to CoSignTimeoutMillis: off the refine thread.
         try coSignPool.execute(() =>
             try signAndDistribute(computed, slot)
@@ -786,7 +784,7 @@ final class GuarantorService(
       case Right((coreIndex, shardCount, lookup)) =>
         // JAMNP-S CE 134: the shard count must be the active validator count
         // at a slot the report could be included in; ours is fixed per chain.
-        val slot = chain.currentSlot
+        val slot = chain.nextBlockSlot
         val held = ownAssignedKeys(slot, coreIndex)
         if shardCount != chain.config.validatorCount then
           logger.warn(s"CE134: shard count $shardCount is not the validator count ${chain.config.validatorCount}")

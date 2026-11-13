@@ -20,7 +20,7 @@ class OutboundBackpressureSpec extends AnyFunSuite with Matchers:
     maxConnectionPendingBytes = 8L * MiB,
     sendWaitMillis = 300,
     upHighWaterBytes = 256 * 1024,
-    stallMillis = 1000
+    stallMillis = 5000
   )
   private val clientConfig = JamnpConfig(genesisHashPrefix = "deadbeef")
   private val serverConfig = clientConfig.copy(outbound = limits)

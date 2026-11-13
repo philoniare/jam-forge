@@ -565,10 +565,9 @@ final class ChainManager(
   /** Refuse side-branch blocks whose slot is more than [[ChainManager.FutureSlotTolerance]] ahead of `now()`. */
   def useWallClock(now: () => Long): Unit = wallClockSlot = Some(now)
 
-  /** The slot it is now: by the wall clock when the node runs on one, else the slot after the best head's (a chain
-    * driven slot by slot, as in tests). A head that lags the clock does not hold this back.
-    */
-  def currentSlot: Long = wallClockSlot.map(_()).getOrElse(bestHead.slot + 1)
+  def nextBlockSlot: Long =
+    val afterHead = bestHead.slot + 1
+    wallClockSlot.fold(afterHead)(now => math.max(now(), afterHead))
 
   /** Side-branch blocks stored without a seal check. */
   def unverifiedCount: Int = synchronized(unverified.size)
