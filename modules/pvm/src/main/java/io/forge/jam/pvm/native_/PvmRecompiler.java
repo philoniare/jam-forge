@@ -465,6 +465,11 @@ public final class PvmRecompiler implements AutoCloseable {
     /** The whole 32-bit guest address space. */
     private static final long GUEST_SPACE = 1L << 32;
     private static final int PERM_PAGE_SHIFT = 12;
+    // Page permission bits, as the emitters read them (see the x86-64 emitter's module doc).
+    private static final byte PERM_READ = 1;
+    private static final byte PERM_READ_WITH_PREVIOUS = 2;
+    private static final byte PERM_WRITE = 4;
+    private static final byte PERM_WRITE_WITH_PREVIOUS = 8;
     /** One permission byte per 4 KiB guest page; must equal the native library's PAGE_PERMS_LEN. */
     private static final long PAGE_PERMS_LEN = GUEST_SPACE >>> PERM_PAGE_SHIFT;
 
@@ -537,12 +542,50 @@ public final class PvmRecompiler implements AutoCloseable {
             }
         }
 
-        /** Mark the pages lying wholly inside [base, base+len) with `perm`. */
-        private void setPerms(long base, long len, byte perm) {
+        /**
+         * Open the pages lying wholly inside the region [base, base+len): each gets its "open" bits, and every
+         * page after the first also its "and the page before" bits, since that page is in the same region. The
+         * first page gets those from {@link #linkFirstPage}, once every region's pages are open.
+         */
+        private void openPages(long base, long len, boolean writable) {
+            long first = (base + (1L << PERM_PAGE_SHIFT) - 1) >>> PERM_PAGE_SHIFT;
+            long end = (base + len) >>> PERM_PAGE_SHIFT;
+            if (end <= first) {
+                return;
+            }
+            byte alone = writable ? (byte) (PERM_READ | PERM_WRITE) : PERM_READ;
+            byte both = (byte) (alone | (writable ? PERM_READ_WITH_PREVIOUS | PERM_WRITE_WITH_PREVIOUS : PERM_READ_WITH_PREVIOUS));
+            permsSeg.set(ValueLayout.JAVA_BYTE, first, alone);
+            if (end > first + 1) {
+                permsSeg.asSlice(first + 1, end - first - 1).fill(both);
+            }
+        }
+
+        /** Give a region's first page its "and the page before" bits when the page before it (another region's
+         *  last) is open in the same way. */
+        private void linkFirstPage(long base, long len, boolean writable) {
+            long first = (base + (1L << PERM_PAGE_SHIFT) - 1) >>> PERM_PAGE_SHIFT;
+            long end = (base + len) >>> PERM_PAGE_SHIFT;
+            if (end <= first || first == 0) {
+                return;
+            }
+            byte previous = permsSeg.get(ValueLayout.JAVA_BYTE, first - 1);
+            byte own = permsSeg.get(ValueLayout.JAVA_BYTE, first);
+            if ((previous & PERM_READ) != 0) {
+                own |= PERM_READ_WITH_PREVIOUS;
+            }
+            if (writable && (previous & PERM_WRITE) != 0) {
+                own |= PERM_WRITE_WITH_PREVIOUS;
+            }
+            permsSeg.set(ValueLayout.JAVA_BYTE, first, own);
+        }
+
+        /** Close the pages lying wholly inside [base, base+len). */
+        private void closePages(long base, long len) {
             long first = (base + (1L << PERM_PAGE_SHIFT) - 1) >>> PERM_PAGE_SHIFT;
             long end = (base + len) >>> PERM_PAGE_SHIFT;
             if (end > first) {
-                permsSeg.asSlice(first, end - first).fill(perm);
+                permsSeg.asSlice(first, end - first).fill((byte) 0);
             }
         }
 
@@ -582,9 +625,12 @@ public final class PvmRecompiler implements AutoCloseable {
                 regionsSeg.set(ValueLayout.JAVA_INT, off + 12, r.writable() ? 1 : 0);
                 if (len > 0) {
                     MemorySegment.copy(backing, (int) compactOff, guestSeg, ValueLayout.JAVA_BYTE, base, (int) len);
-                    setPerms(base, len, r.writable() ? (byte) 2 : (byte) 1);
+                    openPages(base, len, r.writable());
                 }
                 compactOff += len;
+            }
+            for (Region r : regions) {
+                linkFirstPage(r.base(), r.len(), r.writable());
             }
             upcallState.handler = hostCallHandler;
             upcallState.pending = null;
@@ -631,8 +677,11 @@ public final class PvmRecompiler implements AutoCloseable {
                     if (bytes != null && bytes.length > 0) {
                         MemorySegment.copy(bytes, 0, guestSeg, ValueLayout.JAVA_BYTE, base, bytes.length);
                     }
-                    setPerms(base, len, r.writable() ? (byte) 2 : (byte) 1);
+                    openPages(base, len, r.writable());
                 }
+            }
+            for (Region r : regions) {
+                linkFirstPage(r.base(), r.len(), r.writable());
             }
             upcallState.handler = hostCallHandler;
             upcallState.pending = null;
@@ -649,7 +698,8 @@ public final class PvmRecompiler implements AutoCloseable {
             long base = Integer.toUnsignedLong(regionsSeg.get(ValueLayout.JAVA_INT, off));
             boolean writable = regionsSeg.get(ValueLayout.JAVA_INT, off + 12) != 0;
             regionsSeg.set(ValueLayout.JAVA_INT, off + 4, (int) newLen);
-            setPerms(base, newLen, writable ? (byte) 2 : (byte) 1);
+            openPages(base, newLen, writable);
+            linkFirstPage(base, newLen, writable);
         }
 
         /** Called by the execution's close(): leave the mapping zero and the table empty for the next run. */
@@ -660,7 +710,7 @@ public final class PvmRecompiler implements AutoCloseable {
                 long len = Integer.toUnsignedLong(regionsSeg.get(ValueLayout.JAVA_INT, off + 4));
                 if (len > 0) {
                     zeroGuest(base, len);
-                    setPerms(base, len, (byte) 0);
+                    closePages(base, len);
                 }
             }
             upcallState.handler = null;

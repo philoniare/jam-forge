@@ -155,9 +155,10 @@ fn emit_blt_far(a: &mut Asm, target: dynasmrt::DynamicLabel) {
 /// With x13 = the guest address (already masked to 32 bits): bounds-check `width` bytes for a load or store and
 /// leave the host address in x8; an access that fails goes to `fault`.
 ///
-/// The fast path reads the page permission table in x22 (one byte per 4 KiB guest page: 0 = take the slow
-/// path, 1 = readable, 2 = writable; see the x86-64 emitter's module doc for what an entry promises). Anything
-/// it cannot settle goes to the region scan, which also works out the fault.
+/// The fast path reads the page permission table in x22, one byte of flags per 4 KiB guest page (the bits are
+/// in the x86-64 emitter's module doc), at the page of the access's last byte. With that page and the one before
+/// it open the access goes ahead; with only that page open it does when it does not straddle; anything else
+/// goes to the region scan, which also works out the fault.
 fn emit_checked_access(
     a: &mut Asm,
     width: u8,
@@ -165,18 +166,27 @@ fn emit_checked_access(
     bounds_check: dynasmrt::DynamicLabel,
     fault: dynasmrt::DynamicLabel,
 ) {
+    let ok = a.new_dynamic_label();
     let slow = a.new_dynamic_label();
     let done = a.new_dynamic_label();
-    let need: u32 = if store { 2 } else { 1 };
+    let (alone, both): (u32, u32) = if store { (4, 8) } else { (1, 2) };
+    if width > 1 {
+        let last: u32 = width as u32 - 1;
+        dynasm!(a; .arch aarch64; add w16, w13, #last);
+    } else {
+        dynasm!(a; .arch aarch64; mov w16, w13);
+    }
     dynasm!(a
         ; .arch aarch64
-        ; lsr x16, x13, #12
+        ; lsr w16, w16, #12
         ; ldrb w16, [x22, x16]
-        ; cmp w16, #need
-        ; b.lo =>slow
+        ; tst w16, #both
+        ; b.ne =>ok
+        ; tst w16, #alone
+        ; b.eq =>slow
     );
     if width > 1 {
-        // The whole access must lie in the page that was checked.
+        // Only this page is known to be open: the whole access must lie in it.
         let last_start: u32 = 0x1000 - width as u32;
         dynasm!(a
             ; .arch aarch64
@@ -187,6 +197,7 @@ fn emit_checked_access(
     }
     dynasm!(a
         ; .arch aarch64
+        ; =>ok
         ; add x8, x4, x13
         ; b =>done
         ; =>slow

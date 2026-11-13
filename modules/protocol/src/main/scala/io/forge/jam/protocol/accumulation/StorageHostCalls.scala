@@ -35,7 +35,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       case FetchSelector.SINGLE_OPERAND =>
         index match
           case Some(i) if i < indexedOperands.size =>
-            Some(encodeOperand(indexedOperands(i.toInt)))
+            Some(encodedOperand(i.toInt))
           case _ => None
       case _ => None
 
@@ -723,7 +723,14 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
   private def encodeOperandsList(): Array[Byte] =
     cachedOperandsList
 
-  /** Encode a single operand.
+  /** Each operand's encoding, made the first time it is fetched: a service fetches the same operand several
+    * times (its length, then pieces of it), and the operands do not change.
     */
-  private def encodeOperand(operand: AccumulationOperand): Array[Byte] =
-    operand.encode()
+  private lazy val operandEncodings = new Array[Array[Byte]](indexedOperands.size)
+
+  private def encodedOperand(index: Int): Array[Byte] =
+    var bytes = operandEncodings(index)
+    if bytes == null then
+      bytes = indexedOperands(index).encode()
+      operandEncodings(index) = bytes
+    bytes

@@ -21,7 +21,8 @@ final class BlockStore private (
     metaCf: ColumnFamilyHandle,
     ownedHandles: Seq[ColumnFamilyHandle],
     cfOptions: ColumnFamilyOptions,
-    dbOptions: DBOptions
+    dbOptions: DBOptions,
+    watched: AutoCloseable
 ) extends AutoCloseable:
 
   // RocksDB copies keys, so the hash's own array can be passed.
@@ -150,6 +151,7 @@ final class BlockStore private (
   def getHead(name: String): Option[Hash] = getMeta(name).map(Hash(_))
 
   override def close(): Unit =
+    watched.close() // before the database: the budget must not reach for it again
     writeOptions.close()
     syncWriteOptions.close()
     ownedHandles.foreach(_.close())
@@ -194,5 +196,6 @@ object BlockStore:
       metaCf = hs(4),
       ownedHandles = hs,
       cfOptions = cfOptions,
-      dbOptions = options
+      dbOptions = options,
+      watched = memory.watch(db, hs)
     )

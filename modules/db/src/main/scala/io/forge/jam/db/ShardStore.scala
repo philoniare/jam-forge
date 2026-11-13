@@ -19,7 +19,8 @@ final class ShardStore private (
     clock: () => Long,
     ownedHandles: Seq[ColumnFamilyHandle],
     cfOptions: ColumnFamilyOptions,
-    dbOptions: DBOptions
+    dbOptions: DBOptions,
+    watched: AutoCloseable
 ) extends AutoCloseable:
   private def key(erasureRoot: Hash, validatorIndex: Int): Array[Byte] =
     val out = new Array[Byte](34)
@@ -116,6 +117,7 @@ final class ShardStore private (
     db.delete(shardsCf, key(erasureRoot, validatorIndex))
 
   override def close(): Unit =
+    watched.close() // before the database: the budget must not reach for it again
     ownedHandles.foreach(_.close())
     db.close()
     cfOptions.close()
@@ -159,5 +161,6 @@ object ShardStore:
       clock = clock,
       ownedHandles = hs,
       cfOptions = cfOptions,
-      dbOptions = options
+      dbOptions = options,
+      watched = memory.watch(db, hs)
     )

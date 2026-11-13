@@ -362,6 +362,26 @@ impl Op {
                 | Op::LoadImmAndJumpIndirect { .. }
         )
     }
+    /// True if this op can end the run (fault, panic, halt, out of gas, a host call): the only ops for which the
+    /// emitted code has to know its own pc.
+    pub fn may_exit(&self) -> bool {
+        matches!(
+            self,
+            Op::Load { .. }
+                | Op::Store { .. }
+                | Op::LoadAbs64 { .. }
+                | Op::StoreAbs64 { .. }
+                | Op::LoadAbs { .. }
+                | Op::StoreAbs { .. }
+                | Op::StoreImmAbs { .. }
+                | Op::StoreImmIndirect { .. }
+                | Op::Trap
+                | Op::Ecalli { .. }
+                | Op::Fallthrough
+                | Op::Djump { .. }
+                | Op::LoadImmAndJumpIndirect { .. }
+        )
+    }
     /// The branch/jump target instruction index, if any.
     pub fn target(&self) -> Option<u32> {
         match self {

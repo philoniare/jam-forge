@@ -40,6 +40,7 @@ final class RocksDbTrieBackend private (
     nodeBornCf: ColumnFamilyHandle,
     ownedHandles: Seq[ColumnFamilyHandle],
     resources: Seq[AutoCloseable],
+    watched: AutoCloseable,
     val tracksGarbage: Boolean
 ) extends StateTrieBackend
     with AutoCloseable:
@@ -266,6 +267,7 @@ final class RocksDbTrieBackend private (
   def syncWal(): Unit = db.flushWal(true)
 
   override def close(): Unit =
+    watched.close() // before the database: the budget must not reach for it again
     writeOptions.close()
     ownedHandles.foreach(_.close())
     db.close()
@@ -392,6 +394,7 @@ object RocksDbTrieBackend:
         nodeBornCf = hs(6),
         ownedHandles = hs,
         resources = resources.reverse.toSeq,
+        watched = memory.watch(db, hs),
         tracksGarbage = trackGarbage
       )
     catch

@@ -61,14 +61,16 @@ final class NativeInstanceWrapper(
     val old = regions(regionIndex)
     regions(regionIndex) = old.copy(len = newLen)
 
-  private def findRegion(addr: Long, length: Long, permitted: RegionView => Boolean): Option[RegionView] =
+  /** The region holding all of `[addr, addr+length)` (a writable one when `writable`), or null. Host calls read
+    * and write guest memory several times each, so this allocates nothing.
+    */
+  private def findRegion(addr: Long, length: Long, writable: Boolean): RegionView =
     var i = 0
-    var found: Option[RegionView] = None
-    while found.isEmpty && i < regions.length do
+    while i < regions.length do
       val r = regions(i)
-      if permitted(r) && r.contains(addr, length) then found = Some(r)
+      if (!writable || r.writable) && r.contains(addr, length) then return r
       i += 1
-    found
+    null
 
   private def widen(address: Int): Long = address.toLong & 0xFFFFFFFFL
 
@@ -78,58 +80,54 @@ final class NativeInstanceWrapper(
   override def isMemoryReadable(address: Int, length: Int): Boolean =
     if length < 0 then false
     else if length == 0 then true
-    else findRegion(widen(address), length.toLong, _ => true).isDefined
+    else findRegion(widen(address), length.toLong, writable = false) != null
 
   override def isMemoryWritable(address: Int, length: Int): Boolean =
     if length < 0 then false
     else if length == 0 then true
-    else findRegion(widen(address), length.toLong, _.writable).isDefined
+    else findRegion(widen(address), length.toLong, writable = true) != null
 
   override def readByte(address: Int): Option[Byte] =
-    findRegion(widen(address), 1L, _ => true).map { r =>
-      val off = r.bufOffset + (widen(address) - r.base)
-      backing.get(ValueLayout.JAVA_BYTE, off)
-    }
+    val r = findRegion(widen(address), 1L, writable = false)
+    if r == null then None
+    else Some(backing.get(ValueLayout.JAVA_BYTE, r.bufOffset + (widen(address) - r.base)))
 
   override def writeByte(address: Int, value: Byte): Boolean =
-    findRegion(widen(address), 1L, _.writable) match
-      case Some(r) =>
-        val off = r.bufOffset + (widen(address) - r.base)
-        backing.set(ValueLayout.JAVA_BYTE, off, value)
-        true
-      case None => false
+    val r = findRegion(widen(address), 1L, writable = true)
+    if r == null then false
+    else
+      backing.set(ValueLayout.JAVA_BYTE, r.bufOffset + (widen(address) - r.base), value)
+      true
 
   override def readBytes(address: Int, length: Int): Option[Array[Byte]] =
     if length < 0 then None
     else if length == 0 then Some(Array.emptyByteArray)
     else
-      findRegion(widen(address), length.toLong, _ => true).map { r =>
-        val off = r.bufOffset + (widen(address) - r.base)
+      val r = findRegion(widen(address), length.toLong, writable = false)
+      if r == null then None
+      else
         val out = new Array[Byte](length)
-        MemorySegment.copy(backing, ValueLayout.JAVA_BYTE, off, out, 0, length)
-        out
-      }
+        MemorySegment.copy(backing, ValueLayout.JAVA_BYTE, r.bufOffset + (widen(address) - r.base), out, 0, length)
+        Some(out)
 
   override def readInto(address: Int, dest: Array[Byte], destOffset: Int, length: Int): Boolean =
     if length < 0 || destOffset < 0 || destOffset + length > dest.length then false
     else if length == 0 then true
     else
-      findRegion(widen(address), length.toLong, _ => true) match
-        case Some(r) =>
-          val off = r.bufOffset + (widen(address) - r.base)
-          MemorySegment.copy(backing, ValueLayout.JAVA_BYTE, off, dest, destOffset, length)
-          true
-        case None => false
+      val r = findRegion(widen(address), length.toLong, writable = false)
+      if r == null then false
+      else
+        MemorySegment.copy(backing, ValueLayout.JAVA_BYTE, r.bufOffset + (widen(address) - r.base), dest, destOffset, length)
+        true
 
   override def writeBytes(address: Int, data: Array[Byte]): Boolean =
     if data.isEmpty then true
     else
-      findRegion(widen(address), data.length.toLong, _.writable) match
-        case Some(r) =>
-          val off = r.bufOffset + (widen(address) - r.base)
-          MemorySegment.copy(data, 0, backing, ValueLayout.JAVA_BYTE, off, data.length)
-          true
-        case None => false
+      val r = findRegion(widen(address), data.length.toLong, writable = true)
+      if r == null then false
+      else
+        MemorySegment.copy(data, 0, backing, ValueLayout.JAVA_BYTE, r.bufOffset + (widen(address) - r.base), data.length)
+        true
 
   private var forcedOutOfGas: Boolean = false
 

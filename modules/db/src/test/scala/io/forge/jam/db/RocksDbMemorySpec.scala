@@ -56,6 +56,32 @@ class RocksDbMemorySpec extends AnyFunSuite with Matchers:
       cleanup(dirB)
   }
 
+  test("a store that has gone quiet gives up its write buffers when another store takes the total over the limit") {
+    // RocksDB flushes only the store being written. Here the full store is the idle one.
+    val memory = new RocksDbMemory(cacheBytes = 64 * MiB, writeBufferBytes = 16 * MiB)
+    val dirA = Files.createTempDirectory("jam-rocks-mem-e")
+    val dirB = Files.createTempDirectory("jam-rocks-mem-f")
+    val a = ShardStore.open(dirA, memory)
+    val b = ShardStore.open(dirB, memory)
+    try
+      // 12 MiB (13 with the index's buffer): a mebibyte under the 14 at which RocksDB flushes on a write, so it
+      // all stays in memory.
+      fill(a, 12, 1)
+      a.memTableBytes should be > 11 * MiB
+      // One 2 MiB write to the other store takes the total a mebibyte over, and nothing is written to the full
+      // one again.
+      b.put(Hashing.blake2b256(Array[Byte](9)), 0, new Array[Byte](2 * 1024 * 1024))
+      val deadline = System.nanoTime() + 30_000_000_000L
+      while a.memTableBytes > 2 * MiB && System.nanoTime() < deadline do Thread.sleep(50)
+      a.memTableBytes should be <= 2 * MiB
+      a.get(Hashing.blake2b256(Array[Byte](1, 0, 0)), 0).map(_.length) shouldBe Some(256 * 1024)
+    finally
+      a.close()
+      b.close()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   test("without a shared limit the same writes stay in memory") {
     // The contrast for the test above: a budget too large to matter leaves each store its 64 MiB default.
     val memory = new RocksDbMemory(cacheBytes = 1024 * MiB, writeBufferBytes = 1024 * MiB)
