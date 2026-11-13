@@ -25,8 +25,13 @@ object NativeBuild {
     val sources = cargoSources(rustProjectDir)
     val newestSource = if (sources.isEmpty) 0L else sources.map(_.lastModified()).max
     val isStale = !targetLib.exists() || targetLib.lastModified() < newestSource
+    val cargoMissing =
+      try { (if (isWindows) "where cargo" else "which cargo").!(ProcessLogger(_ => ())) != 0 }
+      catch { case _: Exception => true }
 
-    if (isStale) {
+    if (isStale && targetLib.exists() && cargoMissing) {
+      println(s"$displayName looks out of date but cargo is not installed; using ${targetLib.absolutePath}")
+    } else if (isStale) {
       val why = if (targetLib.exists()) "out of date" else "missing"
       println(s"Building $displayName for ${targetDir.getName} ($why)...")
       targetDir.mkdirs()
