@@ -77,8 +77,9 @@ object PvmRunner:
     val instance = InterpretedInstance.fromModule(
       module,
       inputData,
-      forceStepTracing = false
+      forceStepTracing = RefineHostCalls.trace
     )
+    val recent = new java.util.ArrayDeque[String]()
     instance.basicMemory.setReservation(reservation)
 
     val pvmWrapper = new InterpretedInstanceWrapper(instance)
@@ -140,17 +141,23 @@ object PvmRunner:
                 exit = PvmExit.Panic
                 continueExecution = false
 
-        case Right(InterruptKind.Segfault(_)) =>
+        case Right(InterruptKind.Segfault(fault)) =>
+          if RefineHostCalls.trace then System.err.println(s"[refine] page fault $fault")
           exit = PvmExit.PageFault
           continueExecution = false
 
         case Right(InterruptKind.Step) =>
-        // step tracing only; continue
+          // step tracing (diagnostics): keep the last few program counters with their registers
+          recent.addLast(s"pc=${instance.programCounter.map(_.value).getOrElse(-1)} r0=0x${instance.reg(0).toHexString} r1=0x${instance.reg(1).toHexString}")
+          if recent.size > 40 then recent.removeFirst()
 
         case Left(_) =>
           exit = PvmExit.Panic
           continueExecution = false
 
+    if RefineHostCalls.trace then
+      recent.forEach(l => System.err.println(s"[refine]   step $l"))
+      System.err.println(s"[refine] exit $exit pc=${instance.programCounter} regs=${(0 to 12).map(i => f"0x${instance.reg(i)}%x").mkString(",")}")
     val finalGas = instance.gas
     val gasUsed = if finalGas >= 0 then initialGas - finalGas else initialGas
 

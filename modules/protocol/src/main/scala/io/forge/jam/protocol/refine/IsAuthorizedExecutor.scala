@@ -89,10 +89,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
   /** The work-package's implied authorizer hash:
     * blake(authCodeHash ++ authorizerConfig).
     */
-  def authorizerHash(workPackage: WorkPackage): Hash =
-    Hashing.blake2b256(
-      workPackage.authCodeHash.bytes.toArray ++ workPackage.authorizerConfig.toArray
-    )
+  def authorizerHash(workPackage: WorkPackage): Hash = IsAuthorizedExecutor.authorizerHashOf(workPackage)
 
   def execute(
       workPackage: WorkPackage,
@@ -160,3 +157,8 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       codeHash: JamBytes
   ): Option[InterpretedModule] =
     ServiceCode.module(codeHash, code)
+
+object IsAuthorizedExecutor:
+  /** The work-package's implied authorizer hash: blake(authCodeHash ++ authorizerConfig). */
+  def authorizerHashOf(workPackage: WorkPackage): Hash =
+    Hashing.blake2b256(workPackage.authCodeHash.bytes.toArray ++ workPackage.authorizerConfig.toArray)

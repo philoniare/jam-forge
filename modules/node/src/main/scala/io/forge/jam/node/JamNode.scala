@@ -4,6 +4,7 @@ import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
+import io.forge.jam.protocol.traces.ImportError
 import io.forge.jam.core.JamBytes
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.core.primitives.Hash
@@ -39,6 +40,10 @@ final case class NodeConfig(
       * nothing reads it.
       */
     pruneOldState: Boolean = true,
+    /** FAULT INJECTION, `--fault-tamper-reports`: guarantee deliberately wrong reports, to test disputes. Never on a
+      * real network: the node's guarantors become culprits.
+      */
+    tamperReports: Boolean = false,
     /** Loopback port of the local submission endpoint ([[SubmitServer]]), from `--submit-port N`. */
     submitPort: Option[Int] = None,
     /** First retry delay for a lost bootnode connection; doubles per failed
@@ -216,6 +221,15 @@ final class JamNode(
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
+
+  /** Erasure roots of recently included reports with exports, by segments-root. */
+  private val exportIndex = new ExportIndex()
+
+  /** PVM-heavy work of the guarantor and auditor roles: audits first, then co-signing, then new submissions. */
+  private lazy val refinePool = new RefinePool("jam-refine")
+
+  /** The guarantor service when guaranteeing is enabled. */
+  private[node] def guarantorService: Option[GuarantorService] = guarantor
   @volatile private var auditor: Option[AuditorService] = None
   @volatile private var assurer: Option[AssurerService] = None
   @volatile private var shuttingDown: Boolean = false
@@ -246,7 +260,10 @@ final class JamNode(
       keys,
       Some(shardStore),
       segments,
-      ownNetworkKey = Some(identity.publicKeyBytes)
+      ownNetworkKey = Some(identity.publicKeyBytes),
+      sharedRefinePool = Some(refinePool),
+      segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)),
+      tamperReports = nodeConfig.tamperReports
     )
     guarantor = Some(g)
     network.registerHandler(
@@ -290,7 +307,16 @@ final class JamNode(
     val origin: (Long, Long) => Long =
       if nodeConfig.slotTicking then (slot, _) => slotClock.slotStartMillis(slot)
       else (_, importedAt) => importedAt
-    val a = new AuditorService(chain, distribution, shards, pools, keys, egress, trancheOrigin = origin)
+    val a = new AuditorService(
+      chain,
+      distribution,
+      shards,
+      pools,
+      keys,
+      egress,
+      trancheOrigin = origin,
+      sharedRefinePool = Some(refinePool)
+    )
     a.onDisregard(h =>
       chain.disregard(h) match
         case Right(head) => logger.warn(s"disregarded ${h.toHex.take(18)}; best is now ${head.hash.toHex.take(18)}")
@@ -318,25 +344,29 @@ final class JamNode(
       a.tryAuthor(slot).flatMap { block =>
         val authoring = telemetry.flatMap(_.authoring(slot, block.header.parent))
         importAuthored(block, authoring) match
-          case Some(head) => Some(head)
-          case None if block.extrinsic.guarantees.nonEmpty ||
-              block.extrinsic.assurances.nonEmpty ||
-              block.extrinsic.preimages.nonEmpty =>
-            // Guarantees are the likeliest culprit; keep assurances for the first retry.
+          case Right(head) => Some(head)
+          // Only a block the pipeline found invalid says anything about its contents. Losing a race (a peer's block
+          // got there first: side branch, already imported) or a failure of ours leaves the pools as they are.
+          case Left(ChainError.ImportFailed(error, _)) if error != ImportError.UnknownError && hasContent(block) =>
+            // The contents were checked against the state transitions before sealing, so this should not happen.
+            // Should it, the block's own items go, guarantees first, then the rest, and disputes are left out.
             def retry(): Option[ChainManager#Head] =
-              a.tryAuthor(slot).flatMap(b => importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))))
+              a.tryAuthor(slot, withDisputes = false)
+                .flatMap(b => importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))).toOption)
+            val x = block.extrinsic
             val withoutGuarantees =
-              if block.extrinsic.guarantees.isEmpty then None
+              if x.guarantees.isEmpty then None
               else
-                logger.warn("authored block rejected; dropping guarantees and retrying")
-                pools.clearGuarantees()
+                logger.warn(s"authored block rejected ($error); dropping its ${x.guarantees.size} guarantee(s) and retrying")
+                pools.removeGuarantees(x.guarantees)
                 retry()
             withoutGuarantees.orElse {
-              logger.warn("authored block rejected; dropping pools and retrying empty")
-              pools.clear()
+              logger.warn(s"authored block rejected ($error); dropping its assurances and preimages and retrying")
+              pools.removeAssurances(x.assurances)
+              pools.removePreimages(x.preimages)
               retry()
             }
-          case None => None
+          case Left(_) => None
       }
     }
 
@@ -373,10 +403,14 @@ final class JamNode(
       distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
     }
 
+  private def hasContent(block: io.forge.jam.core.types.block.Block): Boolean =
+    val x = block.extrinsic
+    x.guarantees.nonEmpty || x.assurances.nonEmpty || x.preimages.nonEmpty || x.disputes.verdicts.nonEmpty
+
   private def importAuthored(
       block: io.forge.jam.core.types.block.Block,
       authoring: Option[Telemetry.EventRef]
-  ): Option[ChainManager#Head] =
+  ): Either[ChainError, ChainManager#Head] =
     val bytes = chain.encodeBlock(block)
     telemetry.foreach { t =>
       val x = block.extrinsic
@@ -402,11 +436,11 @@ final class JamNode(
           block.extrinsic.preimages,
           head.hash
         )
-        Some(head)
+        Right(head)
       case Left(err) =>
         logger.error(s"authored block failed to import: $err")
         telemetry.foreach(_.authoringFailed(authoring, err.message))
-        None
+        Left(err)
 
   def start(): JamNode =
     chain.initializeOrRestore(spec)
@@ -419,6 +453,13 @@ final class JamNode(
       chain.onImported((_, _) => sync.followPeerFinality(peerFinalityQuorum))
 
     chain.onImported((head, block) => preimages.onImported(head, block))
+    // Guarantor credentials of included reports: the culprits of a bad verdict, should one come. Their exports, so
+    // segments can be rebuilt from the availability layer for a later import.
+    chain.onImported((head, block) =>
+      if block.extrinsic.guarantees.nonEmpty then
+        pools.recordCredentials(block.header.parent, head.slot, block.extrinsic.guarantees)
+        exportIndex.record(block.extrinsic.guarantees)
+    )
     // Custody units are kept for 28 days (672 epochs) after they were last stored, as exported-segment shards
     // must be; bundle shards share the unit and so are kept as long, which is more than required.
     chain.onImported { (_, _) =>
@@ -615,7 +656,9 @@ final class JamNode(
     if shuttingDown then return
     updateConnectivity(currentSlot)
     if author.isDefined then maybeSendTickets(currentSlot)
-    sync.followPeerFinality(peerFinalityQuorum)
+    // A node that runs no GRANDPA voter (a follower) takes its finality from its peers' UP 0
+    // announcements. A voter takes it from GRANDPA only: unauthenticated peer claims must not move it.
+    if !nodeConfig.grandpa then sync.followPeerFinality(peerFinalityQuorum)
     val now = System.currentTimeMillis()
     val self = identity.publicKeyBytes
     validatorDials.values.forEach { d =>
@@ -807,7 +850,8 @@ final class JamNode(
     if assuranceTimer != null then assuranceTimer.shutdownNow()
     telemetry.foreach(_.shutdown())
     if slotTicker != null then slotTicker.close() // waits for in-flight tick
-    guarantor.foreach(_.shutdown()) // drains in-flight refine/co-sign work
+    guarantor.foreach(_.shutdown())
+    refinePool.shutdown() // drains in-flight refine work
     network.shutdown()
     inbound.shutdown() // received messages still being checked read the chain
     sync.shutdown() // waits for an in-flight sync import

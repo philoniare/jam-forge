@@ -144,6 +144,25 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
       guarantee.signatures.map(_.validatorIndex.toInt).toSet shouldBe
         Set(core0Validators(0), core0Validators(1))
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
+
+      // B and C both refine at once, each waiting for the other's CE 134 signature: neither may wait out the
+      // co-sign timeout behind its own request.
+      val assignments4 = GuarantorService.coreAssignments(nodeB.chain.stateView().entropy.pool(2), 4L, spec.config)
+      val core = assignments4(core0Validators(0))
+      assignments4(core0Validators(1)) shouldBe core
+      def submit(from: JamNode, to: JamNode, payload: String): Unit =
+        val conn = from.connectPeer(new java.net.InetSocketAddress("127.0.0.1", to.listenPort))
+        val s = conn.openStream(StreamKind.WorkPackageSubmission).get(10, TimeUnit.SECONDS)
+        val item = wp.items.head.copy(payload = JamBytes(payload.getBytes("UTF-8")))
+        s.send(Array[Byte](core.toByte, 0) ++ wp.copy(items = List(item)).encode.toArray)
+        s.finish()
+      val before = nodeA.pools.guaranteeCount
+      val started = System.currentTimeMillis()
+      submit(nodeA, nodeB, "to B")
+      submit(nodeA, nodeC, "to C")
+      val bothDeadline = started + GuarantorService.CoSignTimeoutMillis
+      while nodeA.pools.guaranteeCount < before + 2 && System.currentTimeMillis() < bothDeadline do Thread.sleep(50)
+      nodeA.pools.guaranteeCount shouldBe before + 2
     finally
       nodes.foreach(n => if n != null then n.shutdown())
       dirs.foreach(cleanup)

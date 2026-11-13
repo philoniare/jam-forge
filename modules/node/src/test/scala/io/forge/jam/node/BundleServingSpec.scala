@@ -412,6 +412,42 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
   private def fakeSegments(count: Int): IndexedSeq[Array[Byte]] =
     (0 until count).map(i => Array.fill[Byte](4104)(i.toByte)).toIndexedSeq
 
+  test("import fetcher: CE 148 segments are used only when they verify; a lying peer is passed over") {
+    val (honest, honestPool, dirA) = newGuarantor()
+    val (liar, liarPool, dirB) = newGuarantor()
+    val segs = fakeSegments(5)
+    val root = io.forge.jam.protocol.refine.AvailabilitySpecifier.segmentsRoot(segs)
+    honestPool.put(root, segs)
+    liarPool.put(root, fakeSegments(6).drop(1)) // other segments under the same root: their proofs do not verify
+    val nodes = Seq.fill(3)(new JamnpNode(NodeIdentity.generate(), config))
+    val Seq(honestNode, liarNode, client) = nodes
+    honestNode.registerHandler(StreamKind.SegmentRequest, honest.segmentRequestHandler)
+    liarNode.registerHandler(StreamKind.SegmentRequest, liar.segmentRequestHandler)
+    try
+      honestNode.start(new InetSocketAddress("127.0.0.1", 0))
+      liarNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val toLiar = client.connect(new InetSocketAddress("127.0.0.1", liarNode.boundPort)).get(10, TimeUnit.SECONDS)
+      val toHonest = client.connect(new InetSocketAddress("127.0.0.1", honestNode.boundPort)).get(10, TimeUnit.SECONDS)
+      import io.forge.jam.protocol.refine.ImportResolver.Import
+      val wanted = IndexedSeq(IndexedSeq(Import(root, 3), Import(root, 0)), IndexedSeq(Import(root, 4)))
+
+      val fetched = new ImportFetcher(new SegmentPool(), () => Seq(toLiar, toHonest)).fetch(wanted)
+      val Right((got, proofs)) = fetched: @unchecked
+      got.map(_.map(_.toList)) shouldBe IndexedSeq(IndexedSeq(segs(3).toList, segs(0).toList), IndexedSeq(segs(4).toList))
+      for (item, i) <- wanted.zipWithIndex; (imp, j) <- item.zipWithIndex do
+        io.forge.jam.protocol.refine.ImportResolver.verify(root, imp.index, got(i)(j), proofs(i)(j)) shouldBe true
+
+      new ImportFetcher(new SegmentPool(), () => Seq(toLiar)).fetch(wanted).isLeft shouldBe true
+      // Segments we exported ourselves need no peer.
+      val local = new SegmentPool()
+      local.put(root, segs)
+      new ImportFetcher(local, () => Nil).fetch(wanted).isRight shouldBe true
+    finally
+      nodes.foreach(_.shutdown())
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   test("CE148: requested segments are served concatenated, followed by their import proofs") {
     val (guarantor, pool, dir) = newGuarantor()
     val root = Hashing.blake2b256(Array.fill[Byte](4)(0x05))

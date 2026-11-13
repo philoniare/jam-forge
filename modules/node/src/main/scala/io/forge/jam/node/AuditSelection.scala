@@ -38,10 +38,26 @@ object AuditSelection:
   def initialCores(q: IndexedSeq[Option[?]], seedOutput: Array[Byte]): Seq[Int] =
     Shuffle.jamComputeShuffle(q.size, Hash(seedOutput)).take(InitialCores).filter(c => q(c).isDefined)
 
-  /** a_n(w) for n > 0: `V / (65536 · C_bias) · E₂⁻¹(Y(s_n(w))[0..2]) < noShows`, in integers. */
+  /** a_n(w) for n > 0: `V / (256 · C_bias) · Y(s_n(w))₀ < noShows`, in integers, on the first byte of the VRF
+    * output. This is the rule we apply to our own keys.
+    */
   def escalates(seedOutput: Array[Byte], validatorCount: Int, noShows: Int): Boolean =
+    val d = seedOutput(0) & 0xff
+    validatorCount.toLong * d < noShows.toLong * 256L * BiasFactor
+
+  /** a_n(w) on the first two bytes of the VRF output:
+    * `V / (65536 · C_bias) · E₂⁻¹(Y(s_n(w))[0..2]) < noShows`.
+    */
+  def escalatesWide(seedOutput: Array[Byte], validatorCount: Int, noShows: Int): Boolean =
     val d = (seedOutput(0) & 0xff) | ((seedOutput(1) & 0xff) << 8)
     validatorCount.toLong * d < noShows.toLong * 65536L * BiasFactor
+
+  /** Whether a peer's later-tranche announcement is a valid selection: under either rule, so peers on the one-byte
+    * and on the two-byte rule are both heard. Accepting an extra auditor only adds judgments; rejecting a genuine one
+    * would make its report look like a no-show.
+    */
+  def peerEscalates(seedOutput: Array[Byte], validatorCount: Int, noShows: Int): Boolean =
+    escalates(seedOutput, validatorCount, noShows) || escalatesWide(seedOutput, validatorCount, noShows)
 
   /** x_n of eq:announcement: `E₂(core) ++ H(w)` per announced report, in the order the announcement lists them, with
     * no length prefix. That is what polkajam v0.8.0 signs: its two-report announcements verify only in wire order

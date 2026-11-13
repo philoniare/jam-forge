@@ -145,6 +145,21 @@ object BinaryMerkle:
                 )
       recompute(index, leafCount, path).exists(java.util.Arrays.equals(_, root))
 
+  /** Verify an import proof (a segment's justification): that `value` is item `index` of the values whose
+    * constant-depth root ([[merklizeCD]]) is `root`, `path` being the trace [[pagedJustifications]] gives for it with
+    * no page offset. The padded tree has 2^|path| leaves.
+    */
+  def verifyConstantDepth(
+      root: Array[Byte],
+      value: Array[Byte],
+      index: Int,
+      path: List[Array[Byte]],
+      h: Hasher = blake2b
+  ): Boolean =
+    val leaf = hashConcat(h, LeafPrefix, value)
+    if path.isEmpty then index == 0 && java.util.Arrays.equals(leaf, root)
+    else path.length < 31 && verifyTrace(root, leaf, index, 1 << path.length, path, h)
+
   /** Constancy preprocessor C: hash each item with the "leaf" prefix and pad
     * with zero hashes to the next power of two (minimum 1).
     */

@@ -241,6 +241,58 @@ final class ShardService(
         case _ => None
       }
 
+  /** Rebuild segments `indices` of a report's erasure-coded segments (its exports then their paged proofs,
+    * `segmentCount` in all) from R shard indices: our own custody first, then CE 140 from `peers`, each shard
+    * checked against the erasure root as it arrives. In `indices` order.
+    */
+  def reconstructSegments(
+      erasureRoot: Hash,
+      segmentCount: Int,
+      indices: List[Int],
+      peers: Iterable[JamnpConnection],
+      /** The shard indexes a peer is expected to hold for this report, asked for first. */
+      holds: JamnpConnection => Seq[Int]
+  ): Either[String, IndexedSeq[Array[Byte]]] =
+    val needed = DaShards.recoveryThreshold(config)
+    val collected = new ConcurrentHashMap[Int, IndexedSeq[Array[Byte]]]()
+    store.heldIndexes(erasureRoot).foreach { idx =>
+      store.get(erasureRoot, idx).flatMap(b => DaShards.decode(b).toOption).foreach { s =>
+        if s.segmentShards.size == segmentCount then collected.put(idx, indices.map(s.segmentShards).toIndexedSeq)
+      }
+    }
+    val peerList = peers.filter(_.isOpen).toList
+    if collected.size < needed && peerList.nonEmpty then
+      val done = peerList.map { conn =>
+        try
+          CompletableFuture.runAsync(
+            () =>
+              holds(conn).distinct.foreach { idx =>
+                if collected.size < needed && idx >= 0 && idx < config.validatorCount && !collected.containsKey(idx) then
+                  fetchSegmentShards(conn, erasureRoot, idx, indices, verified = true, segmentCount)
+                    .foreach(collected.putIfAbsent(idx, _))
+              },
+            fetchPool
+          )
+        catch case _: java.util.concurrent.RejectedExecutionException => CompletableFuture.completedFuture[Void](null)
+      }
+      done.foreach(f => try f.get() catch case _: Exception => ())
+    if collected.size < needed then Left(s"only ${collected.size}/$needed segment shards recoverable")
+    else
+      val held = collected.entrySet.iterator
+      val chosen = (0 until needed).map { _ => val e = held.next(); (e.getKey.intValue, e.getValue) }
+      val rebuilt = indices.indices.map { k =>
+        io.forge.jam.crypto.ErasureCoding
+          .reconstruct(
+            chosen.sortBy(_._1).map((i, chunks) => io.forge.jam.crypto.ErasureCoding.Shard(chunks(k), i)).toArray,
+            config.ecPieceSize,
+            config.validatorCount
+          )
+          .map(d => java.util.Arrays.copyOf(d, io.forge.jam.core.constants.Csegmentsize.toInt))
+      }
+      rebuilt.collectFirst { case Left(e) => e } match
+        case Some(e) => Left(s"segment reconstruction failed: ${e.getMessage}")
+        case None    => Right(rebuilt.map(_.toOption.get))
+
   /** Fetch enough bundle shards (local store first, then CE 138 from `peers`)
     * to reconstruct the audit bundle for a report.
     */
@@ -318,22 +370,7 @@ final class ShardService(
       payload: Array[Byte],
       timeoutMs: Long
   ): Option[List[Array[Byte]]] =
-    var stream: JamnpStream = null
-    try
-      stream = conn.openStream(kind).get(timeoutMs, TimeUnit.MILLISECONDS)
-      val messages = mutable.ListBuffer.empty[Array[Byte]]
-      val done = new CompletableFuture[List[Array[Byte]]]()
-      stream.onMessage(m => messages.synchronized(messages += m))
-      stream.onClosed(() => done.complete(messages.synchronized(messages.toList)))
-      stream.send(payload)
-      stream.finish()
-      Some(done.get(timeoutMs, TimeUnit.MILLISECONDS)).filter(_.nonEmpty)
-    catch
-      case e: Exception =>
-        logger.debug(s"shard request on ${StreamKind.name(kind)} failed: ${e.getMessage}")
-        // The peer has not closed the stream (timeout, error): give it up on both sides.
-        if stream != null then stream.reset()
-        None
+    StreamRequest.collect(conn, kind, payload, timeoutMs)
 
 object ShardService:
 

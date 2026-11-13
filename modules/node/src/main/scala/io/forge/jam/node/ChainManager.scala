@@ -9,7 +9,7 @@ import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.pipeline.BlockPipeline
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState}
+import io.forge.jam.protocol.traces.{BlockImporter, ImportError, ImportResult, RawState}
 
 import scala.collection.mutable
 import scala.util.boundary, boundary.break
@@ -83,6 +83,13 @@ final class ChainManager(
   private[node] val headerLinks =
     new HeaderLinkCache(config.maxLookupAnchorAge + config.epochLength, h => blockStore.getHeader(h))
 
+  /** A change to the chain (import, reorg, finality, disregard): serialised, and its metadata (heads, state roots,
+    * heights, fork-choice and validity marks) written as one atomic, synced batch after the state trie it points to
+    * is durable. A crash anywhere leaves the chain as it was before the change or after it.
+    */
+  private def commit[A](f: => A): A =
+    synchronized(blockStore.atomically(() => trieBackend.syncWal())(f))
+
   private def storeBlock(hash: Hash, parent: Hash, headerBytes: Array[Byte], blockBytes: Array[Byte]): Unit =
     blockStore.putBlock(hash, parent, headerBytes, blockBytes)
     headerLinks.record(hash, headerBytes)
@@ -121,7 +128,7 @@ final class ChainManager(
     * side branches forking at or below it are no longer adoptable
     */
   def finalize(hash: Hash, belowCurrent: Boolean = false): Either[ChainError, Head] =
-    synchronized {
+    commit {
       blockRoot(hash) match
         case None => Left(ChainError.NotOnMainChain)
         case Some(root) =>
@@ -184,7 +191,7 @@ final class ChainManager(
     */
   def followPeerFinality(peerFinals: Iterable[(Hash, Long)], needed: Int): Either[Hash, Option[Head]] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
-    val result = synchronized {
+    val result = commit {
       val finals = peerFinals.toList
       val current = finalized
       def supports(f: Hash, x: Hash, xHeight: Long): Boolean = f == x || ancestorAtHeight(f, xHeight).contains(x)
@@ -213,7 +220,7 @@ final class ChainManager(
     */
   def finalizeAdopting(x: Hash): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
-    val result = synchronized(adoptAndFinalize(x, events, belowCurrent = false))
+    val result = commit(adoptAndFinalize(x, events, belowCurrent = false))
     events.foreach((head, block) => postImportBus.publish(head, block))
     result
 
@@ -251,6 +258,9 @@ final class ChainManager(
 
   /** Encoded header of a stored block. */
   def headerBytes(h: Hash): Option[Array[Byte]] = blockStore.getHeader(h)
+
+  /** Decoded stored block. */
+  def block(h: Hash): Option[Block] = blockStore.getBlock(h).flatMap(b => decodeBlock(b).toOption)
 
   /** Decoded header of a stored block. */
   def header(h: Hash): Option[io.forge.jam.core.types.header.Header] =
@@ -447,7 +457,9 @@ final class ChainManager(
           s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
         )
         false
-      case None =>
+      case None => commit(initializeGenesis(spec))
+
+  private def initializeGenesis(spec: ChainSpec): Boolean =
         val genesisHash = spec.genesisHeaderHash
         // Genesis's nodes are added at height 0, so a later block's replacements of them can be pruned.
         val root = trieBackend.withJournal(genesisHash, 0L) {
@@ -772,7 +784,7 @@ final class ChainManager(
     */
   def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
-    val result = synchronized {
+    val result = commit {
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
         val parent = block.header.parent
@@ -824,7 +836,8 @@ final class ChainManager(
     val journalHeight = blockHeight(parent).getOrElse(0L) + 1
     trieBackend.withJournal(headerHashOf(block), journalHeight)(importer.importBlock(block, preState, ancestry)) match
       case ImportResult.Failure(error, message, _) =>
-        markInvalid(headerHashOf(block))
+        // An exception of ours (UnknownError) says nothing about the block: it may import on a later try.
+        if error != ImportError.UnknownError then markInvalid(headerHashOf(block))
         Left(ChainError.ImportFailed(error, message))
       case ImportResult.Success(postRoot, _) =>
         val hash = headerHashOf(block)
@@ -1002,7 +1015,7 @@ final class ChainManager(
     */
   def disregard(hash: Hash): Either[ChainError, Head] =
     val events = mutable.ListBuffer.empty[(Head, Block)]
-    val result = synchronized {
+    val result = commit {
       markInvalid(hash)
       val finalizedHeight = metaLong(s"height:${finalized.hash.toHex}").getOrElse(0L)
       (blockRoot(hash), parentOf(hash)) match

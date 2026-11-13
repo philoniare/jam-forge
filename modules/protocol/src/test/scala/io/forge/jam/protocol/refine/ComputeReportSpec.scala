@@ -85,9 +85,10 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
 
   private def compute(
       wp: WorkPackage,
-      accounts: HistoricalLookupService
+      accounts: HistoricalLookupService,
+      precedence: RefineErrorPrecedence = RefineErrorPrecedence.ExportCountFirst
   ): Either[ComputeReportError, ComputedReport] =
-    new ComputeReport(config).compute(
+    new ComputeReport(config, precedence).compute(
       workPackage = wp,
       coreIndex = 1,
       segmentRootLookup = Map.empty,
@@ -165,6 +166,30 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
     computed.report.packageSpec.exportsCount.toInt shouldBe 2
     computed.report.packageSpec.exportsRoot.bytes.toArray should not be
       BinaryMerkle.ZeroHash
+  }
+
+  // trap (opcode 0): the item panics without exporting.
+  private val trapAtOnce = preimageOf(Array[Byte](0), Array[Byte](1))
+
+  test("a Refine that panics with declared exports is BadExports; Panic under RefineErrorFirst") {
+    assume(ErasureCoding.isAvailable)
+    val accounts = accountsWith(trapAtOnce)
+    val declared = workPackageWith(exportCount = 1, serviceCode = trapAtOnce)
+    val spec = compute(declared, accounts).toOption.get
+    spec.report.results.head.result shouldBe ExecutionResult.BadExports
+    spec.exportedSegments.size shouldBe 1
+    spec.exportedSegments.head.forall(_ == 0) shouldBe true
+    val proposed = compute(declared, accounts, RefineErrorPrecedence.RefineErrorFirst).toOption.get
+    proposed.report.results.head.result shouldBe ExecutionResult.Panic
+    proposed.exportedSegments.size shouldBe 1 // zero-filled to the declared count either way
+    // Same gas either way: only the reported result differs.
+    proposed.report.results.head.refineLoad.gasUsed shouldBe spec.report.results.head.refineLoad.gasUsed
+
+    // With no declared exports the count is right, so the error itself is reported under both orders.
+    val none = workPackageWith(exportCount = 0, serviceCode = trapAtOnce)
+    compute(none, accounts).toOption.get.report.results.head.result shouldBe ExecutionResult.Panic
+    compute(none, accounts, RefineErrorPrecedence.RefineErrorFirst).toOption.get.report.results.head.result shouldBe
+      ExecutionResult.Panic
   }
 
   test("a service that exports its declared segment count reports Ok with real exports") {

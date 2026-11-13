@@ -90,6 +90,14 @@ class RefineHostCalls(
       if readMemory(instance, o, buf) then ULong(LittleEndian.get(buf, 0, 8)) else ULong(0L)
 
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
+    if RefineHostCalls.trace then
+      val regs = (7 to 12).map(i => f"r$i=0x${instance.reg(i)}%x").mkString(" ")
+      System.err.println(s"[refine] host call $hostCallId $regs gas=${instance.gas}")
+      dispatchCall(hostCallId, instance)
+      System.err.println(f"[refine]   -> r7=0x${instance.reg(7)}%x")
+    else dispatchCall(hostCallId, instance)
+
+  private def dispatchCall(hostCallId: Int, instance: PvmInstance): Unit =
     hostCallId match
       case HostCall.GAS               => handleGas(instance)
       case HostCall.GROW_HEAP         => GrowHeapHostCall.handle(instance)
@@ -468,6 +476,9 @@ class RefineHostCalls(
         context.innerPvms.remove(n.toLong)
 
 object RefineHostCalls:
+  /** `-Djam.trace.refine=true`: print every refine host call with its argument registers and result. Diagnostics. */
+  val trace: Boolean = java.lang.Boolean.getBoolean("jam.trace.refine")
+
   /** Inner-VM limit of Omega_M: machine returns FULL once 63 exist. */
   val MaxInnerPvms: Int = 63
 
@@ -653,4 +664,3 @@ object RefineFetch:
     LittleEndian.put(out, off, w.extrinsic.size.toLong, 2); off += 2
     LittleEndian.put(out, off, w.payload.length.toLong, 4)
     out
-

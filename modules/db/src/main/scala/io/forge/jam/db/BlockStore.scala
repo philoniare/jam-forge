@@ -26,6 +26,39 @@ final class BlockStore private (
 
   // RocksDB copies keys, so the hash's own array can be passed.
   private val writeOptions = new WriteOptions()
+  private val syncWriteOptions = new WriteOptions().setSync(true)
+
+  /** Metadata writes of the calling thread's open [[atomically]] scope, in order: a value, or None for a delete. */
+  private val pending = new ThreadLocal[java.util.LinkedHashMap[String, Option[Array[Byte]]]]()
+
+  /** Run `f` with every metadata write it makes (heads, pointers, per-block metadata) held back and then written in
+    * one atomic, synced batch, so a crash leaves either all of them or none. The calling thread reads its own held
+    * writes; other threads see none of them until the batch is written. `beforeCommit` runs first, to make durable
+    * what the metadata refers to (the state trie). If `f` throws, nothing is written. A nested scope joins the outer
+    * one. Blocks themselves ([[putBlock]], [[deleteBlock]]) are written at once: a stored block without metadata is
+    * an unvalidated side-branch block, which restore handles.
+    */
+  def atomically[A](beforeCommit: () => Unit = () => ())(f: => A): A =
+    if pending.get() != null then f
+    else
+      val writes = new java.util.LinkedHashMap[String, Option[Array[Byte]]]()
+      pending.set(writes)
+      try
+        val result = f
+        if !writes.isEmpty then
+          beforeCommit()
+          val batch = new WriteBatch()
+          try
+            writes.forEach { (name, value) =>
+              val k = name.getBytes("UTF-8")
+              value match
+                case Some(v) => batch.put(metaCf, k, v)
+                case None    => batch.delete(metaCf, k)
+            }
+            db.write(syncWriteOptions, batch)
+          finally batch.close()
+        result
+      finally pending.remove()
 
   private inline def key(h: Hash): Array[Byte] = h.toArrayUnsafe
 
@@ -94,13 +127,23 @@ final class BlockStore private (
   // --- named pointers / metadata ---
 
   def setMeta(name: String, value: Array[Byte]): Unit =
-    db.put(metaCf, name.getBytes("UTF-8"), value)
+    val writes = pending.get()
+    if writes != null then
+      writes.remove(name) // keep the batch in write order
+      writes.put(name, Some(value.clone()))
+    else db.put(metaCf, name.getBytes("UTF-8"), value)
 
   def getMeta(name: String): Option[Array[Byte]] =
-    Option(db.get(metaCf, name.getBytes("UTF-8")))
+    val writes = pending.get()
+    if writes != null && writes.containsKey(name) then writes.get(name)
+    else Option(db.get(metaCf, name.getBytes("UTF-8")))
 
   def deleteMeta(name: String): Unit =
-    db.delete(metaCf, name.getBytes("UTF-8"))
+    val writes = pending.get()
+    if writes != null then
+      writes.remove(name)
+      writes.put(name, None)
+    else db.delete(metaCf, name.getBytes("UTF-8"))
 
   def setHead(name: String, hash: Hash): Unit = setMeta(name, hash.bytes)
 
@@ -108,6 +151,7 @@ final class BlockStore private (
 
   override def close(): Unit =
     writeOptions.close()
+    syncWriteOptions.close()
     ownedHandles.foreach(_.close())
     db.close()
     cfOptions.close()

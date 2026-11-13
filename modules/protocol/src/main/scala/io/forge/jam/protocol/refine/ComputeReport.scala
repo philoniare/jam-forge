@@ -21,6 +21,26 @@ enum ComputeReportError:
   /** Availability-specifier construction failed. */
   case AvailabilityFailed(message: String)
 
+/** How a work-item's Refine error ranks against a wrong export count when its digest result is chosen.
+  *
+  * The spec checks a work-item's result in the order oversize, export count, Refine error. Refine returns no exports
+  * when it fails, so a failing item that declares exports is reported BadExports, not its error; other
+  * implementations' guarantors and auditors expect this.
+  *
+  * Reporting the Refine error first is kept as an option, for if the spec changes to that order.
+  */
+enum RefineErrorPrecedence:
+  /** The spec's order: export count before the Refine error. */
+  case ExportCountFirst
+
+  /** A Refine error ahead of the oversize and export-count checks. */
+  case RefineErrorFirst
+
+object RefineErrorPrecedence:
+  /** `-Djam.refine.errorFirst=true` selects [[RefineErrorFirst]]; otherwise the spec's current order. */
+  def default: RefineErrorPrecedence =
+    if java.lang.Boolean.getBoolean("jam.refine.errorFirst") then RefineErrorFirst else ExportCountFirst
+
 /** The computed report plus everything a guarantor must distribute. */
 final case class ComputedReport(
     report: WorkReport,
@@ -35,7 +55,10 @@ final case class ComputedReport(
   * the digests (with graceful oversize/bad-exports handling), the audit
   * bundle, and the availability specifier.
   */
-class ComputeReport(val config: ChainConfig):
+class ComputeReport(
+    val config: ChainConfig,
+    val precedence: RefineErrorPrecedence = RefineErrorPrecedence.default
+):
 
   private val isAuthorizedExecutor = new IsAuthorizedExecutor(config)
   private val refineExecutor = new RefineExecutor(config)
@@ -87,12 +110,16 @@ class ComputeReport(val config: ChainConfig):
       val zeroSegments =
         IndexedSeq.fill(declaredExports)(new Array[Byte](Csegmentsize.toInt))
 
+      val wrongExportCount = refineResult.exports.length != declaredExports
       val (finalResult, exports) = refineResult.result match
         case ExecutionResult.Ok(output)
             if cumulativeOutputSize + output.length > constants.Cmaxreportvarsize =>
           (ExecutionResult.Oversize, zeroSegments)
-        case ExecutionResult.Ok(output)
-            if refineResult.exports.length != declaredExports =>
+        // The export count is checked before the Refine error, so a failed Refine (which exports nothing) with
+        // declared exports is BadExports. Under RefineErrorFirst only a successful Refine reaches this check.
+        case ExecutionResult.Ok(_) if wrongExportCount =>
+          (ExecutionResult.BadExports, zeroSegments)
+        case _ if wrongExportCount && precedence == RefineErrorPrecedence.ExportCountFirst =>
           (ExecutionResult.BadExports, zeroSegments)
         case ok @ ExecutionResult.Ok(output) =>
           cumulativeOutputSize += output.length

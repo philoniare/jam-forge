@@ -16,7 +16,10 @@ import io.forge.jam.protocol.refine.{
   ComputeReport,
   DaShards,
   HistoricalLookupService,
-  WorkPackageBundle
+  ImportResolver,
+  RefineFetch,
+  WorkPackageBundle,
+  WorkPackageValidator
 }
 import io.forge.jam.core.codec.Codec
 import spire.math.UInt
@@ -37,6 +40,13 @@ final class StateHistoricalLookup(chain: ChainManager, anchorStateRoot: Option[H
 
   /** The lookup for a work-package whose lookup anchor has posterior state root `root`. */
   def forAnchor(root: Hash): StateHistoricalLookup = new StateHistoricalLookup(chain, Some(root))
+
+  /** Whether the lookup anchor's state is held. When it is not, reads fall back to the head's state, which can give a
+    * different refine result: callers check this first and refuse.
+    */
+  def anchorAvailable: Boolean =
+    // A zero root is the newest history entry's placeholder, never a real state (though the empty trie "exists").
+    anchorStateRoot.isEmpty || (!anchorStateRoot.contains(Hash.zero) && anchorState.isDefined)
 
   def serviceExists(serviceId: Long): Boolean =
     readRaw(StateKey.computeServiceAccountKey(serviceId)).isDefined
@@ -109,20 +119,34 @@ final class GuarantorService(
       */
     maxSubmissionBytes: Long = GuarantorService.DefaultMaxSubmissionBytes,
     /** This node's network (TLS) Ed25519 key, preferred when signing CE 134. */
-    ownNetworkKey: Option[Array[Byte]] = None
+    ownNetworkKey: Option[Array[Byte]] = None,
+    /** Where refining runs, shared with the auditor; None: a pool of this service's own. */
+    sharedRefinePool: Option[RefinePool] = None,
+    /** Rebuilds imported segments from the availability layer when no guarantor serves them. */
+    segmentRecovery: Option[SegmentRecovery] = None,
+    /** FAULT INJECTION, for testing disputes only: sign a deliberately wrong report (see [[tamper]]). */
+    tamperReports: Boolean = false
 ) extends LazyLogging:
+
+  /** The report this guarantor signs: the computed one, or with `tamperReports` a wrong one (auth gas used + 1),
+    * the same way every time so that two faulty co-guarantors agree on it. Only guaranteeing is affected: this
+    * node's auditor still judges reports honestly.
+    */
+  private def tamper(computed: ComputedReport): ComputedReport =
+    if !tamperReports then computed
+    else
+      logger.warn(s"FAULT INJECTION: signing a wrong report for package ${computed.report.packageSpec.hash.toHex.take(18)}")
+      computed.copy(report =
+        computed.report.copy(authGasUsed = io.forge.jam.core.primitives.Gas(computed.report.authGasUsed.toLong + 1))
+      )
 
   private val computeReport = new ComputeReport(chain.config)
   private val accounts = new StateHistoricalLookup(chain)
 
-  /** Refine/co-sign work happens off the netty event loops: PVM execution is
-    * slow and CE 134 needs blocking round-trips to other peers.
+  /** Refining runs off the netty event loops on the refine pool: a co-guarantor's CE 134 bundle ahead of a new
+    * submission, since another guarantor is waiting on it. Waiting for co-signatures does not hold a refine thread.
     */
-  private val executor = java.util.concurrent.Executors.newSingleThreadExecutor(r =>
-    val t = new Thread(r, "jam-guarantor")
-    t.setDaemon(true)
-    t
-  )
+  private val refinePool = sharedRefinePool.getOrElse(new RefinePool("jam-guarantor"))
 
   /** Refine takes seconds and each queued submission holds its messages (up to 48 MiB for CE 146, 32 MiB for a
     * CE 134 bundle), so only a few may wait; one over the limit is rejected by resetting its stream.
@@ -130,8 +154,12 @@ final class GuarantorService(
   private val admission =
     new WorkGate("guarantor intake", GuarantorService.MaxQueuedSubmissions, GuarantorService.MaxQueuedSubmissionBytes)
 
-  /** Submissions waiting for the guarantor thread. */
-  private[node] def queuedSubmissions: Int = admission.queued
+  /** CE 134 bundles to co-sign have their own limit, so a flood of submissions cannot crowd out co-signing. */
+  private val coSignAdmission =
+    new WorkGate("co-sign intake", GuarantorService.MaxQueuedSubmissions, GuarantorService.MaxQueuedSubmissionBytes)
+
+  /** Submissions waiting for a refine thread. */
+  private[node] def queuedSubmissions: Int = admission.queued + coSignAdmission.queued
 
   /** Bounded (cap 64) insertion-evicting cache of full work-package bundles
     * this node holds — either its own refine output or a bundle re-executed
@@ -232,9 +260,10 @@ final class GuarantorService(
     catch case _: Exception => None
 
   def shutdown(): Unit =
+    importPool.shutdownNow()
+    if sharedRefinePool.isEmpty then refinePool.shutdown()
     coSignPool.shutdownNow()
-    executor.shutdown()
-    executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
+    ()
 
   private val ed25519ByPublic: Map[Ed25519PublicKey, ValidatorKeySet] =
     validatorKeys.map(k => k.ed25519Key -> k).toMap
@@ -263,7 +292,7 @@ final class GuarantorService(
       stream.onClosed { () =>
         if !rejected then
           val messages = intake.messages
-          val admitted = admission.tryExecute(executor, intake.bytes, conn) {
+          val admitted = admission.tryExecute(refinePool.at(RefinePool.Priority.Submission), intake.bytes, conn) {
             try
               if messages.nonEmpty then
                 val first = messages.head
@@ -323,13 +352,16 @@ final class GuarantorService(
         if !dispatched then
           dispatched = true
           val snapshot = messages.toIndexedSeq
-          val admitted = admission.tryExecute(executor, totalBytes, conn) {
+          val admitted = admission.tryExecute(refinePool.at(RefinePool.Priority.Submission), totalBytes, conn) {
             try
               decodeBundleSubmission(snapshot) match
                 case Left(err) =>
                   logger.warn(s"CE146: $err")
                 case Right((coreIndex, lookup, wp, extrinsicData, importSegments, justifications)) =>
-                  guaranteeWorkPackage(coreIndex, wp, extrinsicData, importSegments, justifications, lookup)
+                  verifyBuilderImports(wp, lookup, extrinsicData, importSegments, justifications) match
+                    case Left(err) => logger.warn(s"CE146: imports refused: $err")
+                    case Right(ourLookup) =>
+                      guaranteeWorkPackage(coreIndex, wp, extrinsicData, importSegments, justifications, ourLookup)
             catch case e: Exception => logger.error("CE146 handling failed", e)
             finally stream.finish()
           }
@@ -449,10 +481,75 @@ final class GuarantorService(
     splitExtrinsics(wp, extrinsicBlob) match
       case Left(err) =>
         logger.warn(s"work package rejected: $err")
+      case Right(extrinsicData) if wp.items.forall(_.importSegments.isEmpty) =>
+        val none = wp.items.map(_ => IndexedSeq.empty).toIndexedSeq
+        guaranteeWorkPackage(coreIndex, wp, extrinsicData, none, none, Map.empty)
       case Right(extrinsicData) =>
-        val importSegments = wp.items.map(_ => IndexedSeq.empty[Array[Byte]]).toIndexedSeq
-        val justifications = wp.items.map(_ => IndexedSeq.empty[List[Array[Byte]]]).toIndexedSeq
-        guaranteeWorkPackage(coreIndex, wp, extrinsicData, importSegments, justifications, Map.empty)
+        // Imports are fetched (and checked) off the refine threads, then the package goes back to be refined.
+        val resolved = for
+          _ <- precheck(wp, coreIndex, chain.best.slot + 1)
+          r <- ImportResolver.resolve(wp, reportedPackages)
+        yield r
+        resolved match
+          case Left(err) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused: $err")
+          case Right((imports, lookup)) =>
+            try
+              importPool.execute { () =>
+                importFetcher.fetch(imports) match
+                  case Left(err) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused: $err")
+                  case Right((segs, proofs)) =>
+                    refinePool.submit(RefinePool.Priority.Submission)(
+                      guaranteeWorkPackage(coreIndex, wp, extrinsicData, segs, proofs, lookup)
+                    )
+              }
+            catch
+              case _: java.util.concurrent.RejectedExecutionException =>
+                logger.warn("too many work packages waiting for their imports; refused")
+
+  /** Segments-roots of the work-packages reported in recent history, by package hash: what an import named by
+    * package hash can be resolved through, since the report's segment-root lookup must be checkable on chain.
+    */
+  private def reportedPackages: Map[Hash, Hash] =
+    chain.stateView().beta.history.flatMap(_.reported).map(r => r.hash -> r.exportsRoot).toMap
+
+  /** A builder's CE 146 imports: its segment-root lookup must agree with what recent history says, and each imported
+    * segment must verify by its justification. Returns the lookup the report will carry.
+    */
+  private def verifyBuilderImports(
+      wp: WorkPackage,
+      builderLookup: Map[Hash, Hash],
+      extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
+      importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
+      justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]]
+  ): Either[String, Map[Hash, Hash]] =
+    for
+      resolved <- ImportResolver.resolve(wp, reportedPackages)
+      lookup = resolved._2
+      _ <- Either.cond(
+        builderLookup.forall((h, root) => lookup.get(h).forall(_ == root)),
+        (),
+        "segment-root lookup disagrees with recent history"
+      )
+      _ <- ImportResolver.verifyBundle(WorkPackageBundle(wp, extrinsicData, importSegments, justifications), lookup)
+    yield lookup
+
+  private val importFetcher = new ImportFetcher(
+    segments,
+    () => distribution.peers,
+    recover = (root, indices) => segmentRecovery.flatMap(_.recover(root, indices))
+  )
+
+  /** Fetches of imported segments: a few at once, a bounded number waiting. */
+  private val importPool = new java.util.concurrent.ThreadPoolExecutor(
+    GuarantorService.ImportFetchThreads,
+    GuarantorService.ImportFetchThreads,
+    30L,
+    java.util.concurrent.TimeUnit.SECONDS,
+    new java.util.concurrent.LinkedBlockingQueue[Runnable](GuarantorService.MaxQueuedSubmissions),
+    { r =>
+      val t = new Thread(r, "jam-import-fetch"); t.setDaemon(true); t
+    }
+  )
 
   /** Run the work-report computation pipeline (Xi) and, on success, custody
     * the bundle/shards and sign+pool+distribute the resulting report. Shared
@@ -467,6 +564,38 @@ final class GuarantorService(
       justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
       segmentRootLookup: Map[Hash, Hash]
   ): Unit =
+    val slot = chain.best.slot + 1
+    precheck(wp, coreIndex, slot) match
+      case Left(why) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused before refine: $why")
+      case Right(anchorState) => refineAndGuarantee(coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState)
+
+  /** Everything that can be judged before refining. The work-package limits and the guarantee
+    * extrinsic's refine-independent rules (authorizer in the pool, anchors) against the head, that one of our keys is
+    * assigned to the core, and that we hold the lookup anchor's state. Returns that state's lookup.
+    */
+  private def precheck(wp: WorkPackage, coreIndex: Int, slot: Long): Either[String, StateHistoricalLookup] =
+    val view = chain.stateView()
+    val context = WorkPackageValidator.ChainContext(
+      authPool = view.authPools.lift(coreIndex).getOrElse(Nil),
+      recentHistory = view.beta.history,
+      slot = slot
+    )
+    val lookup = accounts.forAnchor(wp.context.lookupAnchorStateRoot)
+    for
+      _ <- WorkPackageValidator.validate(wp, coreIndex, context, chain.config)
+      _ <- Either.cond(ownAssignedKeys(slot, coreIndex).nonEmpty, (), s"no key of ours is assigned to core $coreIndex")
+      _ <- Either.cond(lookup.anchorAvailable, (), "lookup anchor state not held")
+    yield lookup
+
+  private def refineAndGuarantee(
+      coreIndex: Int,
+      wp: WorkPackage,
+      extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
+      importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
+      justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
+      segmentRootLookup: Map[Hash, Hash],
+      lookup: StateHistoricalLookup
+  ): Unit =
     computeReport.compute(
       workPackage = wp,
       coreIndex = coreIndex,
@@ -474,14 +603,19 @@ final class GuarantorService(
       importSegments = importSegments,
       extrinsicData = extrinsicData,
       justifications = justifications,
-      accounts = accounts.forAnchor(wp.context.lookupAnchorStateRoot)
-    ) match
+      accounts = lookup
+    ).map(tamper) match
       case Left(err) =>
         logger.warn(s"work package refused: $err")
       case Right(computed) =>
         storeShards(computed)
         val slot = chain.best.slot + 1
-        signAndDistribute(computed, slot)
+        // Gathering co-signatures waits on peers for up to CoSignTimeoutMillis: off the refine thread.
+        try coSignPool.execute(() =>
+            try signAndDistribute(computed, slot)
+            catch case e: Exception => logger.error("guaranteeing failed", e)
+          )
+        catch case _: java.util.concurrent.RejectedExecutionException => () // shutting down
 
   /** Build and custody every validator's DA shards so assurers can pull
     * theirs via CE 137 (and auditors bundle shards via CE 138).
@@ -552,8 +686,9 @@ final class GuarantorService(
       distribution.recordReport(report)
       distribution.distributeGuaranteeToAll(guarantee)
       logger.info(
-        s"guaranteed package ${report.packageSpec.hash.toHex.take(18)} on core ${report.coreIndex.toInt} " +
-          s"with ${signatures.size} credentials"
+        s"guaranteed package ${report.packageSpec.hash.toHex} on core ${report.coreIndex.toInt} " +
+          s"with ${signatures.size} credentials: ${report.results.map(_.result).mkString(",")}, " +
+          s"${report.packageSpec.exportsCount.toInt} export(s) under ${report.packageSpec.exportsRoot.toHex}"
       )
 
   // =========================================================================
@@ -576,7 +711,7 @@ final class GuarantorService(
         if intake.offer(msg) then
           if intake.size == 2 then
             val Seq(header, bundle) = intake.messages: @unchecked
-            val admitted = admission.tryExecute(executor, intake.bytes, conn) {
+            val admitted = coSignAdmission.tryExecute(refinePool.at(RefinePool.Priority.CoSign), intake.bytes, conn) {
               try respondCoSign(stream, header, bundle)
               catch
                 case e: Exception =>
@@ -612,6 +747,14 @@ final class GuarantorService(
         else
           val result = for
             bundle <- WorkPackageBundle.decode(bundleBytes)
+            anchored <- precheck(bundle.workPackage, coreIndex, slot)
+            _ <- verifyBuilderImports(
+              bundle.workPackage,
+              lookup,
+              bundle.extrinsicData,
+              bundle.importSegments,
+              bundle.justifications
+            )
             computed <- computeReport
               .compute(
                 workPackage = bundle.workPackage,
@@ -620,8 +763,9 @@ final class GuarantorService(
                 importSegments = bundle.importSegments,
                 extrinsicData = bundle.extrinsicData,
                 justifications = bundle.justifications,
-                accounts = accounts.forAnchor(bundle.workPackage.context.lookupAnchorStateRoot)
+                accounts = anchored
               )
+              .map(tamper)
               .left
               .map(e => s"re-execution refused: $e")
           yield computed
@@ -694,6 +838,8 @@ final class GuarantorService(
           if r.length != 96 then logger.warn(s"CE134: bad response length ${r.length}")
           else if Hash(java.util.Arrays.copyOfRange(r, 0, 32)) != reportHash then
             logger.warn("CE134: peer computed a different report; rejecting its signature")
+            explainDifference(conn, report, Hash(java.util.Arrays.copyOfRange(r, 0, 32)))
+            dumpMismatch(computed, Hash(java.util.Arrays.copyOfRange(r, 0, 32)))
           else
             val sig = java.util.Arrays.copyOfRange(r, 32, 96)
             def verifies(i: Int) = Ed25519.verify(activeSet(i).ed25519.bytes.toArray, message, sig)
@@ -712,6 +858,43 @@ final class GuarantorService(
         }
       }
     collected.toList
+
+  /** With debug logging on, keep our report, bundle and exports and the peer's report hash under
+    * `<tmpdir>/jam-forge-mismatch/`, to work out offline which rule the peer applied.
+    */
+  private def dumpMismatch(computed: ComputedReport, theirs: Hash): Unit =
+    if logger.underlying.isDebugEnabled then
+      try
+        val dir = java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"), "jam-forge-mismatch")
+        java.nio.file.Files.createDirectories(dir)
+        val base = computed.report.packageSpec.hash.toHex.stripPrefix("0x").take(16)
+        def put(ext: String, bytes: Array[Byte]) = java.nio.file.Files.write(dir.resolve(s"$base.$ext"), bytes)
+        put("report", summon[Codec[io.forge.jam.core.types.workpackage.WorkReport]].encode(computed.report))
+        put("bundle", computed.bundleBytes)
+        put("exports", computed.exportedSegments.flatten.toArray)
+        put("theirs", theirs.bytes)
+        logger.debug(s"CE134 mismatch kept in $dir/$base.*")
+      catch case e: Exception => logger.debug(s"could not keep the mismatch: $e")
+
+  /** Ask a co-guarantor that computed a different report for its report (CE 136) and log where the two differ: the
+    * only way to see why two implementations disagree on a package. Off the waiting thread; best effort.
+    */
+  private def explainDifference(conn: JamnpConnection, ours: io.forge.jam.core.types.workpackage.WorkReport, theirs: Hash): Unit =
+    try
+      coSignPool.execute { () =>
+        StreamRequest.collect(conn, io.forge.jam.network.StreamKind.WorkReportRequest, theirs.bytes, 5000) match
+          case Some(msg :: _) =>
+            summon[Codec[io.forge.jam.core.types.workpackage.WorkReport]].decodeExact(msg) match
+              case Right(report) =>
+                val fields = ReportDiff.diff(ours, report)
+                logger.warn(
+                  s"CE134: report of package ${ours.packageSpec.hash.toHex.take(18)} differs from peer " +
+                    s"${JamNode.hex(conn.peerKey).take(16)}'s in ${fields.size} field(s):\n  " + fields.mkString("\n  ")
+                )
+              case Left(err) => logger.warn(s"CE136: peer's report ${theirs.toHex.take(18)} does not decode: $err")
+          case _ => logger.debug(s"CE136: peer did not serve its report ${theirs.toHex.take(18)}")
+      }
+    catch case _: java.util.concurrent.RejectedExecutionException => ()
 
   /** Runs CE 134 round trips in parallel, off the guarantor thread. */
   private val coSignPool = java.util.concurrent.Executors.newCachedThreadPool(r =>
@@ -748,6 +931,9 @@ final class GuarantorService(
     signed
 
 object GuarantorService:
+  /** Work packages fetching their imports at once. */
+  val ImportFetchThreads: Int = 4
+
   /** CE 133/134/146 submissions that may wait for the guarantor thread, and the message bytes they may hold
     * (two of the largest CE 146 submissions).
     */

@@ -83,7 +83,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       genesisState = genesis.state.keyvals,
       bootnodes = Nil
     )
-    val dirs = List.fill(3)(Files.createTempDirectory("jam-join"))
+    val dirs = List.fill(4)(Files.createTempDirectory("jam-join"))
     var nodes: List[JamNode] = Nil
     try
       val ahead = new JamNode(spec, NodeConfig(dataDir = dirs(0), slotTicking = false)).start()
@@ -109,6 +109,17 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers:
       eventually("the trusting node to follow the peer's finality")(trusting.chain.finalized.hash == ahead.chain.finalized.hash)
       trusting.chain.finalized.slot shouldBe 65L
       cautious.chain.finalized.slot shouldBe 0L
+
+      // A GRANDPA voter takes finality from GRANDPA only, whatever it is told to trust: peer claims never move it.
+      val voter = new JamNode(
+        spec,
+        NodeConfig(dataDir = dirs(3), slotTicking = false, finalityPeers = Some(1), grandpa = true)
+      ).start()
+      nodes = voter :: nodes
+      voter.connectPeer(address)
+      eventually("the voter to catch up")(voter.chain.best.hash == ahead.chain.best.hash)
+      Thread.sleep(2000) // several rounds of the half-second connectivity loop
+      voter.chain.finalized.slot shouldBe 0L
     finally
       nodes.foreach(_.shutdown())
       dirs.foreach(cleanup)

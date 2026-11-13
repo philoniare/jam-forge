@@ -28,16 +28,34 @@ class AuditSelectionSpec extends AnyFunSuite with Matchers:
     initialCores(IndexedSeq(Some(1), None), seed) shouldBe Seq(0)
   }
 
-  test("a_n escalates when V/(65536·2) · E₂⁻¹(Y[0..2]) < no-shows") {
-    def out(d: Int) = Array[Byte]((d & 0xff).toByte, ((d >> 8) & 0xff).toByte) ++ Array.fill[Byte](30)(0)
-    // V = 1023, one no-show: d < 131072 / 1023 ≈ 128.1, so ≈ 2 of 1023 validators escalate (C_bias = 2).
-    escalates(out(128), 1023, 1) shouldBe true
-    escalates(out(129), 1023, 1) shouldBe false
-    escalates(out(0), 1023, 0) shouldBe false
-    escalates(out(256), 1023, 2) shouldBe true
-    // V = 6: each validator joins with probability 2/6 per no-show.
-    escalates(out(21844), 6, 1) shouldBe true
-    escalates(out(21846), 6, 1) shouldBe false
+  private def out(d: Int) = Array[Byte]((d & 0xff).toByte, ((d >> 8) & 0xff).toByte) ++ Array.fill[Byte](30)(0)
+
+  test("a_n escalates when V/(256·2) · Y₀ < no-shows") {
+    // V = 6, one no-show: Y₀ < 512 / 6 ≈ 85.3.
+    escalates(out(85), 6, 1) shouldBe true
+    escalates(out(86), 6, 1) shouldBe false
+    escalates(out(0), 6, 0) shouldBe false
+    // Only the first byte counts.
+    escalates(out(85 | (0xff << 8)), 6, 1) shouldBe true
+    // V = 1023: one no-show draws Y₀ = 0 only; three draw Y₀ ≤ 1.
+    escalates(out(0), 1023, 1) shouldBe true
+    escalates(out(1), 1023, 1) shouldBe false
+    escalates(out(1), 1023, 3) shouldBe true
+  }
+
+  test("the two-byte rule compares E₂⁻¹(Y[0..2]) against 65536; a peer's selection under either rule is heard") {
+    escalatesWide(out(128), 1023, 1) shouldBe true
+    escalatesWide(out(129), 1023, 1) shouldBe false
+    escalatesWide(out(21844), 6, 1) shouldBe true
+    escalatesWide(out(21846), 6, 1) shouldBe false
+    // d = 0x0101: wide 257·1023 ≥ 131072, narrow Y₀ = 1 < 512/1023 fails too.
+    peerEscalates(out(0x0101), 1023, 1) shouldBe false
+    // d = 0x0100 (Y₀ = 0): narrow escalates, wide does not.
+    escalatesWide(out(0x0100), 1023, 1) shouldBe false
+    peerEscalates(out(0x0100), 1023, 1) shouldBe true
+    // d = 100 (Y₀ = 100): wide escalates, narrow does not.
+    escalates(out(100), 1023, 1) shouldBe false
+    peerEscalates(out(100), 1023, 1) shouldBe true
   }
 
   test("U(w) needs every announced auditor of some tranche to judge positively and no negative judgment") {

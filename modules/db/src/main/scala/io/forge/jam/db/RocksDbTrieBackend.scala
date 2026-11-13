@@ -262,6 +262,9 @@ final class RocksDbTrieBackend private (
   def nodeRefcount(h: Hash): Long = readCount(nodeRefsCf, h)
   def valueRefcount(h: Hash): Long = readCount(valueRefsCf, h)
 
+  /** Make every write so far durable (flush and sync the write-ahead log). */
+  def syncWal(): Unit = db.flushWal(true)
+
   override def close(): Unit =
     writeOptions.close()
     ownedHandles.foreach(_.close())

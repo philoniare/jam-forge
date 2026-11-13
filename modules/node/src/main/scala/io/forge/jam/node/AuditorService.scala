@@ -10,7 +10,7 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{BandersnatchVrf, Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
-import io.forge.jam.protocol.refine.{ComputeReport, DaShards, WorkPackageBundle}
+import io.forge.jam.protocol.refine.{ComputeReport, DaShards, ImportResolver, WorkPackageBundle}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
 import scala.collection.mutable
@@ -33,7 +33,9 @@ final class AuditorService(
     /** Wall-clock millis at which tranche 0 of a block starts, from its slot and import time. */
     trancheOrigin: (Long, Long) => Long = (_, importedAt) => importedAt,
     clock: () => Long = () => System.currentTimeMillis(),
-    tickMillis: Long = 500L
+    tickMillis: Long = 500L,
+    /** Where re-execution runs, shared with the guarantor; None: a pool of this service's own. */
+    sharedRefinePool: Option[RefinePool] = None
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -51,7 +53,9 @@ final class AuditorService(
       val validators: IndexedSeq[Array[Byte]],
       val bandersnatch: IndexedSeq[Array[Byte]],
       val q: IndexedSeq[Option[WorkReport]],
-      val reportHashes: IndexedSeq[Option[Hash]]
+      val reportHashes: IndexedSeq[Option[Hash]],
+      /** The epoch of the current validator set: judgments on this block's reports index into that epoch's set. */
+      val epoch: Long
   ):
     /** A_n(w): validators announcing each report, per tranche. */
     val announced = mutable.Map.empty[(Hash, Int), mutable.Set[Int]]
@@ -70,9 +74,16 @@ final class AuditorService(
   private val exec = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
     val t = new Thread(r, "jam-audit"); t.setDaemon(true); t
   }
-  private val workers = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
-    val t = new Thread(r, "jam-audit-exec"); t.setDaemon(true); t
-  }
+  /** Audits fetch their bundle here (network waits, several reports at once); re-execution itself runs on the refine
+    * pool at audit priority, ahead of co-signing and new submissions.
+    */
+  private val workers = java.util.concurrent.Executors.newFixedThreadPool(
+    AuditorService.FetchThreads,
+    { r =>
+      val t = new Thread(r, "jam-audit-fetch"); t.setDaemon(true); t
+    }
+  )
+  private val refinePool = sharedRefinePool.getOrElse(new RefinePool("jam-audit-exec"))
 
   /** Peers' announcements and judgments waiting for the audit thread are bounded; the thread's own ticks, import
     * callbacks and audit results are not counted and never dropped.
@@ -86,6 +97,9 @@ final class AuditorService(
   private val negative = mutable.Map.empty[Hash, mutable.Set[Int]]
   private val inFlight = mutable.Set.empty[Hash]
 
+  /** Tracked blocks already disregarded: fork choice is told once, not at every tick. */
+  private val disregarded = mutable.Set.empty[Hash]
+
   /** Announcements for blocks we do not track yet, per announcing peer and by (block, tranche), oldest first: at
     * most [[AuditorService.PendingAnnouncementsPerPeer]] per validator of the sets around the head.
     */
@@ -96,10 +110,12 @@ final class AuditorService(
     * first: at most [[AuditorService.PendingJudgmentsPerValidator]] per validator. `positive` and `negative` hold
     * tracked reports only, so they are bounded by validators × reports awaiting audit.
     */
-  private val pendingJudgments = mutable.Map.empty[Int, mutable.LinkedHashMap[(Hash, Boolean), Array[Byte]]]
+  private val pendingJudgments = mutable.Map.empty[Int, mutable.LinkedHashMap[(Hash, Boolean), (Array[Byte], Long)]]
 
-  /** Readable from any thread: whether each tracked block is audited. Blocks we never tracked count as audited. */
-  private val auditedBlocks = new ConcurrentHashMap[Hash, java.lang.Boolean]()
+  /** Readable from any thread: the slot of each unfinalized block we have looked at and whether it is audited. A
+    * block above finality we have not looked at yet is not audited (see [[isAudited]]).
+    */
+  private val auditedBlocks = new ConcurrentHashMap[Hash, AuditorService.Mark]()
   private val announcementCounts = new ConcurrentHashMap[Hash, java.util.Set[Integer]]()
   @volatile private var disregard: Hash => Unit = _ => ()
 
@@ -110,8 +126,21 @@ final class AuditorService(
   def announcementsFor(reportHash: Hash): Int =
     Option(announcementCounts.get(reportHash)).map(_.size).getOrElse(0)
 
-  /** isAudited for block `hash`. */
-  def isAudited(hash: Hash): Boolean = auditedBlocks.getOrDefault(hash, java.lang.Boolean.TRUE).booleanValue
+  /** isAudited for block `hash`. A finalized block is. An unfinalized block we have not looked at (its import listener
+    * has not run yet, or it was imported before auditing was enabled or before a restart) is not: it is tracked now,
+    * and counts once its reports are audited, or at once when it made none available.
+    */
+  def isAudited(hash: Hash): Boolean =
+    val mark = auditedBlocks.get(hash)
+    if mark != null then mark.audited
+    else
+      chain.slotOf(hash) match
+        case Some(slot) if slot <= chain.finalized.slot => true
+        case Some(slot) =>
+          if auditedBlocks.putIfAbsent(hash, AuditorService.Mark(slot, false)) == null then
+            exec.execute(() => guarded(chain.block(hash).foreach(b => track(hash, slot, b))))
+          false
+        case None => false
 
   /** Called with a block whose report a third or more of the validators judged invalid. */
   def onDisregard(f: Hash => Unit): Unit = disregard = f
@@ -119,6 +148,7 @@ final class AuditorService(
   def shutdown(): Unit =
     exec.shutdownNow()
     workers.shutdownNow()
+    if sharedRefinePool.isEmpty then refinePool.shutdownNow()
 
   private def guarded(f: => Unit): Unit =
     try f
@@ -131,34 +161,44 @@ final class AuditorService(
     * block's audited flag is set before any later listener (the GRANDPA voter) can ask for it.
     */
   def onImported(head: ChainManager#Head, block: Block): Unit =
-    if head.slot <= chain.finalized.slot then return
-    val parent = block.header.parent
-    chain.stateViewAt(parent) match
-      case None => ()
+    if head.slot > chain.finalized.slot then
+      auditedBlocks.putIfAbsent(head.hash, AuditorService.Mark(head.slot, false))
+      track(head.hash, head.slot, block)
+
+  /** Start auditing block `hash` (marked unaudited already): it is audited at once when it made no report available,
+    * and otherwise tracked through the tranches. Idempotent.
+    */
+  private def track(hash: Hash, slot: Long, block: Block): Unit =
+    chain.stateViewAt(block.header.parent) match
+      case None =>
+        logger.warn(s"no prior state for ${hash.toHex.take(18)}; counting it as audited")
+        auditedBlocks.put(hash, AuditorService.Mark(slot, true))
       case Some(prior) =>
         val kappa = prior.validators.current.toIndexedSeq
         val q = justBecameAvailable(block, prior.cores.reports.toIndexedSeq, kappa.size)
         val vrfOut = BandersnatchVrf.getVrfOutput(block.header.entropySource.toArray).getOrElse(Array.emptyByteArray)
         val t = new Tracked(
-          head.hash,
-          head.slot,
-          trancheOrigin(head.slot, clock()),
+          hash,
+          slot,
+          trancheOrigin(slot, clock()),
           vrfOut,
           kappa.map(_.ed25519.bytes.toArray),
           kappa.map(_.bandersnatch.bytes.toArray),
           q,
-          q.map(_.map(w => Hashing.blake2b256(w.encode.toArray)))
+          q.map(_.map(w => Hashing.blake2b256(w.encode.toArray))),
+          prior.timeslot / chain.config.epochLength
         )
-        if t.available.nonEmpty then
-          auditedBlocks.put(head.hash, java.lang.Boolean.FALSE)
+        if t.available.isEmpty then auditedBlocks.put(hash, AuditorService.Mark(slot, true))
+        else
           exec.execute(() =>
             guarded {
-              tracked.put(t.hash, t)
-              takePendingAnnouncements(t.hash).foreach((p, h, e) => applyAnnouncement(p, h, e))
-              takePendingJudgments(t.available.map(_._3).toSet).foreach((h, v, valid, sig) =>
-                recordJudgment(h, v, valid, sig)
-              )
-              tick()
+              if !tracked.contains(t.hash) then
+                tracked.put(t.hash, t)
+                takePendingAnnouncements(t.hash).foreach((p, h, e) => applyAnnouncement(p, h, e))
+                takePendingJudgments(t.available.map(_._3).toSet).foreach((h, v, valid, sig, epoch) =>
+                  recordJudgment(h, epoch, v, valid, sig, tally = epoch == t.epoch)
+                )
+                tick()
             }
           )
 
@@ -277,7 +317,8 @@ final class AuditorService(
               try auditOutcome(w)
               catch
                 case e: Exception =>
-                  logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); Some(false)
+                  // Our own failure says nothing about the report: no judgment, retried while still tracked.
+                  logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); None
             outcome match
               case Some(valid) =>
                 verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
@@ -307,11 +348,14 @@ final class AuditorService(
     * the others' announcements and judgments, which are never resent, so it would retry forever and keep their state.
     */
   private def forgetFinalized(finalizedSlot: Long, now: Long): Unit =
+    // Marks of finalized blocks that are not being tracked: isAudited answers for those from the finalized slot.
+    auditedBlocks.entrySet.removeIf(e => e.getValue.slot <= finalizedSlot && !tracked.contains(e.getKey))
     val done = tracked.values
       .filter(t => t.slot <= finalizedSlot && (isAudited(t.hash) || trancheAt(now, t.origin) >= GiveUpTranches))
       .toList
     if done.nonEmpty then
       done.foreach(t => tracked.remove(t.hash))
+      done.foreach(t => disregarded.remove(t.hash))
       val live = tracked.values.flatMap(_.available.map(_._3)).toSet
       done.foreach { t =>
         if !isAudited(t.hash) then logger.debug(s"block ${t.hash.toHex.take(18)} finalized before we saw it audited")
@@ -328,7 +372,7 @@ final class AuditorService(
     ownIndices(t).foreach { (v, keys) =>
       val announcedIt = t.ours.get(v).exists(_.contains(reportHash))
       val judged = (if valid then positive else negative).get(reportHash).exists(_.contains(v))
-      if announcedIt && !judged then publishJudgment(reportHash, v, keys, valid)
+      if announcedIt && !judged then publishJudgment(reportHash, t.epoch, v, keys, valid)
     }
     updateAudited(t, t.lastTranche)
 
@@ -340,9 +384,9 @@ final class AuditorService(
       audited(byTranche, positive.getOrElse(h, Set.empty).toSet, negative.getOrElse(h, Set.empty).toSet, v, n)
     }
     val was = isAudited(t.hash)
-    auditedBlocks.put(t.hash, java.lang.Boolean.valueOf(ok))
+    auditedBlocks.put(t.hash, AuditorService.Mark(t.slot, ok))
     if ok && !was then logger.info(s"block ${t.hash.toHex.take(18)} slot=${t.slot} audited")
-    if reports.exists(h => disregards(negative.getOrElse(h, Set.empty).toSet, v)) then
+    if reports.exists(h => disregards(negative.getOrElse(h, Set.empty).toSet, v)) && disregarded.add(t.hash) then
       logger.warn(s"block ${t.hash.toHex.take(18)} has a report judged invalid by a third of validators; disregarding")
       disregard(t.hash)
 
@@ -351,24 +395,37 @@ final class AuditorService(
     */
   def auditReport(report: WorkReport): Boolean = auditOutcome(report).getOrElse(false)
 
-  /** The audit evaluation e_n: None when too few shards are reachable to rebuild the bundle,
-    * which says nothing about the report (reconstruction is assumed to work); a bundle that fails to decode or verify
-    * makes the report invalid.
+  /** The audit evaluation of a report. Only a bundle we know is the guaranteed one can make the report invalid:
+    *   - A bundle a peer sends on CE 147 is unauthenticated (its erasure-root commitment also covers the exported
+    *     segments, which we do not hold). If it reproduces the report it is the right one, short of a hash collision;
+    *     if not, the peer may have sent a wrong bundle, so it is rebuilt from erasure-coded shards instead.
+    *   - Shards are checked against the erasure root as they arrive, so a rebuilt bundle is authentic; if it fails to
+    *     decode or reproduce the report, the report is invalid.
+    *   - None (no judgment yet, retried while tracked) when too few shards are reachable or re-execution threw: neither
+    *     says anything about the report.
     */
   def auditOutcome(report: WorkReport): Option[Boolean] =
     val spec = report.packageSpec
-    val fetched = fetchBundleDirect(spec.erasureRoot, distribution.peers) match
-      case Some(bytes) =>
-        logger.debug(s"CE147: fetched bundle directly for ${spec.erasureRoot.toHex.take(18)}")
-        Right(bytes)
-      case None =>
+    val direct = fetchBundleDirect(spec.erasureRoot, distribution.peers)
+      .filter(_.length.toLong == spec.length.toLong)
+      .map(bytes => evaluate(report, bytes))
+    direct match
+      case Some(Right(true)) =>
+        logger.debug(s"CE147: bundle fetched directly for ${spec.erasureRoot.toHex.take(18)} reproduces the report")
+        Some(true)
+      case other =>
+        other.foreach(r =>
+          logger.warn(
+            s"CE147 bundle for ${spec.hash.toHex.take(18)} does not reproduce the report (${r.fold(identity, _ => "mismatch")}); rebuilding from shards"
+          )
+        )
         // Each validator holds one shard of the report, set by its index and the report's core: ask each peer for
         // its own first. The set may have rotated since the report was guaranteed, so both the current and the
         // previous one are tried.
         val validators = chain.stateView().validators
         val sets = List(validators.current, validators.previous)
         val core = report.coreIndex.toInt
-        shards.reconstructBundle(
+        val rebuilt = shards.reconstructBundle(
           spec.erasureRoot,
           spec.length.toLong.toInt,
           distribution.peers,
@@ -377,20 +434,50 @@ final class AuditorService(
             sets.flatMap(_.zipWithIndex.collect { case (vk, v) if vk.ed25519 == key => v })
               .map(DaShards.shardIndexFor(core, _, chain.config))
         )
-    fetched match
-      case Left(err) if err.startsWith(ShardService.TooFewShards) =>
-        logger.warn(s"audit of ${spec.hash.toHex.take(18)} postponed: $err")
-        None
-      case Left(err) =>
-        logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
-        Some(false)
-      case Right(bundleBytes) => Some(evaluate(report, bundleBytes))
+        rebuilt match
+          case Left(err) if err.startsWith(ShardService.TooFewShards) =>
+            logger.warn(s"audit of ${spec.hash.toHex.take(18)} postponed: $err")
+            None
+          case Left(err) =>
+            // Authentic shards that do not rebuild a bundle of the committed length: the guarantor's spec is wrong.
+            logger.warn(s"audit could not rebuild the bundle of ${spec.hash.toHex.take(18)}: $err")
+            Some(false)
+          case Right(bundleBytes) =>
+            evaluate(report, bundleBytes) match
+              case Right(matches) => Some(matches)
+              case Left(err) =>
+                // A guaranteed bundle that does not decode or is refused re-execution: the report is invalid.
+                logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
+                Some(false)
 
-  private def evaluate(report: WorkReport, bundleBytes: Array[Byte]): Boolean =
+  /** The lookup at the report's lookup anchor. Without that state re-execution could differ for reasons of ours, so
+    * no judgment is given (the audit is retried).
+    */
+  private def anchoredLookup(root: Hash): StateHistoricalLookup =
+    val lookup = accounts.forAnchor(root)
+    if !lookup.anchorAvailable then throw new IllegalStateException(s"lookup anchor state ${root.toHex.take(18)} not held")
+    lookup
+
+  /** [[evaluate]] on the refine pool at audit priority; this thread waits for it. */
+  private def evaluate(report: WorkReport, bundleBytes: Array[Byte]): Either[String, Boolean] =
+    try
+      CompletableFuture
+        .supplyAsync(() => reExecute(report, bundleBytes), refinePool.at(RefinePool.Priority.Audit))
+        .get()
+    catch case e: java.util.concurrent.ExecutionException => throw e.getCause
+
+  /** Whether `bundleBytes` re-executes to `report`; Left when it does not decode or re-execution is refused. */
+  private def reExecute(report: WorkReport, bundleBytes: Array[Byte]): Either[String, Boolean] =
     val spec = report.packageSpec
     val result =
       for
         bundle <- WorkPackageBundle.decode(bundleBytes)
+        // The guarantor vouched for these imports: each must verify against its segments-root, those named by package
+        // hash through the report's own lookup.
+        _ <- ImportResolver.verifyBundle(
+          bundle,
+          report.segmentRootLookup.map(l => l.workPackageHash -> l.segmentTreeRoot).toMap
+        )
         recomputed <- computeReport
           .compute(
             workPackage = bundle.workPackage,
@@ -400,21 +487,14 @@ final class AuditorService(
             importSegments = bundle.importSegments,
             extrinsicData = bundle.extrinsicData,
             justifications = bundle.justifications,
-            accounts = accounts.forAnchor(bundle.workPackage.context.lookupAnchorStateRoot)
+            accounts = anchoredLookup(bundle.workPackage.context.lookupAnchorStateRoot)
           )
           .left
           .map(e => s"re-execution refused: $e")
       yield Hashing.blake2b256(recomputed.report.encode.toArray) ==
         Hashing.blake2b256(report.encode.toArray)
-    result match
-      case Right(matches) =>
-        if !matches then
-          logger.warn(s"AUDIT MISMATCH for package ${spec.hash.toHex.take(18)}")
-        matches
-      case Left(err) =>
-        // A bundle that fails to decode or re-execute makes the report invalid.
-        logger.warn(s"audit could not re-execute ${spec.hash.toHex.take(18)}: $err")
-        false
+    result.foreach(matches => if !matches then logger.warn(s"AUDIT MISMATCH for package ${spec.hash.toHex.take(18)}"))
+    result
 
   // =========================================================================
   // CE 147 — bundle request (client side)
@@ -503,9 +583,12 @@ final class AuditorService(
     pendingAnnouncements.filterInPlace((_, mine) => mine.nonEmpty)
     out
 
-  private def takePendingJudgments(reports: Set[Hash]): Seq[(Hash, Int, Boolean, Array[Byte])] =
+  private def takePendingJudgments(reports: Set[Hash]): Seq[(Hash, Int, Boolean, Array[Byte], Long)] =
     val out = pendingJudgments.toSeq.flatMap { (v, mine) =>
-      mine.keys.filter(k => reports.contains(k._1)).toList.flatMap(k => mine.remove(k).map(sig => (k._1, v, k._2, sig)))
+      mine.keys
+        .filter(k => reports.contains(k._1))
+        .toList
+        .flatMap(k => mine.remove(k).map((sig, epoch) => (k._1, v, k._2, sig, epoch)))
     }
     pendingJudgments.filterInPlace((_, mine) => mine.nonEmpty)
     out
@@ -534,7 +617,7 @@ final class AuditorService(
                 .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
                 .exists(y =>
                   negative.get(h).exists(_.nonEmpty) ||
-                    escalates(y, t.validators.size, noShows.map(_.validator).distinct.size)
+                    peerEscalates(y, t.validators.size, noShows.map(_.validator).distinct.size)
                 )
             }
           }
@@ -550,12 +633,12 @@ final class AuditorService(
   // CE 145 — judgment publication
   // =========================================================================
 
-  /** Sign, record and send our judgment (eq:judgments) with validator index `v`. */
-  private def publishJudgment(reportHash: Hash, v: Int, keys: ValidatorKeySet, valid: Boolean): Unit =
+  /** Sign, record and send our judgment as validator `v` of the set of `epochIndex`. */
+  private def publishJudgment(reportHash: Hash, epochIndex: Long, v: Int, keys: ValidatorKeySet, valid: Boolean): Unit =
     val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
     val signature = Ed25519ZebraWrapper.sign(keys.ed25519Secret, context ++ reportHash.bytes)
-    recordJudgment(reportHash, v, valid, signature)
-    val epoch = (chain.best.slot / chain.config.epochLength).toInt
+    recordJudgment(reportHash, epochIndex, v, valid, signature, tally = true)
+    val epoch = epochIndex.toInt
     val msg = new java.io.ByteArrayOutputStream(103)
     msg.write(epoch & 0xff); msg.write((epoch >> 8) & 0xff)
     msg.write((epoch >> 16) & 0xff); msg.write((epoch >> 24) & 0xff)
@@ -567,10 +650,19 @@ final class AuditorService(
     if valid then logger.info(s"published positive judgment for ${reportHash.toHex.take(18)} as validator $v")
     else logger.warn(s"published NEGATIVE judgment for ${reportHash.toHex.take(18)} as validator $v")
 
-  /** J⊤ / J⊥; negative judgments also go to the pool for a disputes verdict. */
-  private def recordJudgment(reportHash: Hash, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
-    (if valid then positive else negative).getOrElseUpdate(reportHash, mutable.Set.empty) += v
-    if !valid then pools.addJudgment(reportHash, v, valid, signature)
+  /** Pool a genuine judgment by validator `v` of the set of `epoch` as dispute evidence, and with `tally` (its
+    * epoch is the tracked block's) count it among the positive or negative judgments.
+    */
+  private def recordJudgment(
+      reportHash: Hash,
+      epoch: Long,
+      v: Int,
+      valid: Boolean,
+      signature: Array[Byte],
+      tally: Boolean
+  ): Unit =
+    if tally then (if valid then positive else negative).getOrElseUpdate(reportHash, mutable.Set.empty) += v
+    pools.addJudgment(reportHash, epoch, v, valid, signature)
 
   def judgmentHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
@@ -592,7 +684,15 @@ final class AuditorService(
       val reportHash = Hash(java.util.Arrays.copyOfRange(msg, 7, 39))
       val signature = java.util.Arrays.copyOfRange(msg, 39, 103)
       val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
-      val signer = chain.stateView().validators.current.lift(idx)
+      // The index is into the validator set of the judgment's epoch: the current one, or the previous one.
+      val epoch = io.forge.jam.core.LittleEndian.get(msg, 0, 4)
+      val view = chain.stateView()
+      val bestEpoch = view.timeslot / chain.config.epochLength
+      val set =
+        if epoch == bestEpoch then Some(view.validators.current)
+        else if epoch == bestEpoch - 1 then Some(view.validators.previous)
+        else None
+      val signer = set.flatMap(_.lift(idx))
       val genuine = signer.exists(vk =>
         Ed25519.verify(
           vk.ed25519.bytes.toArray,
@@ -605,9 +705,9 @@ final class AuditorService(
           guarded {
             val holders = tracked.values.filter(_.reportHashes.contains(Some(reportHash))).toList
             if holders.nonEmpty then
-              recordJudgment(reportHash, idx, valid, signature)
+              recordJudgment(reportHash, epoch, idx, valid, signature, tally = holders.exists(_.epoch == epoch))
               holders.foreach(t => updateAudited(t, t.lastTranche))
-            else keepJudgment(reportHash, idx, valid, signature)
+            else keepJudgment(reportHash, epoch, idx, valid, signature)
           }
         }
         logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
@@ -618,10 +718,10 @@ final class AuditorService(
     * not be imported yet, and judgments are not resent. Anyone can replay a validator's old judgments and a
     * validator can sign any hash, so each validator's oldest goes when it has more than a few waiting.
     */
-  private def keepJudgment(reportHash: Hash, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
+  private def keepJudgment(reportHash: Hash, epoch: Long, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
     val mine = pendingJudgments.getOrElseUpdate(v, mutable.LinkedHashMap.empty)
     if !mine.contains((reportHash, valid)) then
-      mine.put((reportHash, valid), signature)
+      mine.put((reportHash, valid), (signature, epoch))
       while mine.size > AuditorService.PendingJudgmentsPerValidator do mine.remove(mine.head._1)
 
   /** Sizes of the peer-fed audit state: (reports with a recorded judgment, recorded judgments, judgments waiting
@@ -680,6 +780,12 @@ final class AuditorService(
     )
 
 object AuditorService extends LazyLogging:
+  /** Audits fetching their bundles at once. */
+  val FetchThreads: Int = 4
+
+  /** A block's slot and whether it is audited. */
+  private[node] final case class Mark(slot: Long, audited: Boolean)
+
   /** CE 144 announcements and CE 145 judgments that may wait for the audit thread, and the bytes they may hold. */
   val MaxQueuedMessages: Int = 4096
   val MaxQueuedBytes: Long = 32L * 1024 * 1024

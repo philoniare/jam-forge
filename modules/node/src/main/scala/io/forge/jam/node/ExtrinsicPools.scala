@@ -48,11 +48,17 @@ final class ExtrinsicPools(
   private val tickets =
     new java.util.concurrent.ConcurrentHashMap[Hash, (Long, Hash, TicketEnvelope)]()
 
-  /** Audit judgments (CE 145) keyed by (report hash, validator index):
-    * validity claim and its Ed25519 signature
+  /** Genuine audit judgments (ours and CE 145) keyed by (report hash, epoch, validator index into that epoch's set):
+    * validity claim and its Ed25519 signature. The evidence for a disputes verdict.
     */
   private val judgments =
-    new java.util.concurrent.ConcurrentHashMap[(Hash, Int), (Boolean, Array[Byte])]()
+    new java.util.concurrent.ConcurrentHashMap[(Hash, Long, Int), (Boolean, Array[Byte])]()
+
+  /** The guarantee credentials of reports included on chain, by report hash: the including block's parent (whose
+    * validator sets the indices refer to), its slot, and (validator index, signature) pairs. Culprits for a bad verdict.
+    */
+  private val credentials =
+    new java.util.concurrent.ConcurrentHashMap[Hash, (Hash, Long, List[(Int, Array[Byte])])]()
 
   private def reportHashOf(g: GuaranteeExtrinsic): Hash = Hashing.blake2b256(g.report.encode.toArray)
 
@@ -93,22 +99,63 @@ final class ExtrinsicPools(
   def addTicket(id: Hash, envelope: TicketEnvelope, epoch: Long, entropy: Hash): Unit =
     tickets.putIfAbsent(id, (epoch, entropy, envelope))
 
-  def addJudgment(reportHash: Hash, validatorIndex: Int, valid: Boolean, signature: Array[Byte]): Unit =
-    judgments.putIfAbsent((reportHash, validatorIndex), (valid, signature))
+  def addJudgment(reportHash: Hash, epoch: Long, validatorIndex: Int, valid: Boolean, signature: Array[Byte]): Unit =
+    judgments.putIfAbsent((reportHash, epoch, validatorIndex), (valid, signature))
 
   def judgmentsFor(reportHash: Hash): Map[Int, Boolean] =
     judgments.asScala.collect {
-      case ((h, idx), (valid, _)) if h == reportHash => idx -> valid
+      case ((h, _, idx), (valid, _)) if h == reportHash => idx -> valid
     }.toMap
 
-  /** Drop the judgments on reports whose audit is over. The auditor adds judgments only for reports of blocks it is
-    * auditing and calls this when it stops, so the pool holds at most validators × reports awaiting audit.
+  /** Drop the judgments on reports whose audit is over, unless someone judged one invalid: those stay as dispute
+    * evidence until their epoch is too old for a verdict ([[pruneDisputes]]). The auditor adds judgments only for
+    * reports of blocks it is auditing and calls this when it stops, so the pool holds at most validators × reports
+    * awaiting audit, plus the disputed ones.
     */
   def removeJudgments(reportHashes: Iterable[Hash]): Unit =
-    val gone = reportHashes.toSet
+    val disputed = judgments.asScala.collect { case ((h, _, _), (false, _)) => h }.toSet
+    val gone = reportHashes.toSet -- disputed
     if gone.nonEmpty then judgments.keySet.removeIf(k => gone.contains(k._1)): Unit
 
   def judgmentCount: Int = judgments.size
+
+  /** Judgments that a report is invalid. */
+  def negativeJudgmentCount: Int = judgments.values.asScala.count(!_._1)
+
+  /** Record the credentials of the guarantees in a block on `parent` at `slot`. */
+  def recordCredentials(parent: Hash, slot: Long, guarantees: Iterable[GuaranteeExtrinsic]): Unit =
+    guarantees.foreach { g =>
+      credentials.put(
+        reportHashOf(g),
+        (parent, slot, g.signatures.map(s => s.validatorIndex.toInt -> s.signature.bytes))
+      )
+    }
+
+  /** Reports someone judged invalid, with every judgment on them by epoch, and their credentials if known. */
+  def disputed: List[ExtrinsicPools.Disputed] =
+    val all = judgments.asScala.toList
+    val targets = all.collect { case ((h, _, _), (false, _)) => h }.toSet
+    all
+      .filter(e => targets.contains(e._1._1))
+      .groupBy(e => (e._1._1, e._1._2))
+      .toList
+      .map { case ((h, epoch), js) =>
+        ExtrinsicPools.Disputed(
+          h,
+          epoch,
+          js.map { case ((_, _, v), (valid, sig)) => (v, valid, sig) },
+          Option(credentials.get(h))
+        )
+      }
+
+  /** Forget dispute evidence too old to use: judgments of epochs before `currentEpoch - 1` (a verdict's age must be
+    * the current or the previous epoch), the judgments on reports `judged` already, and credentials of blocks two
+    * epochs back.
+    */
+  def pruneDisputes(currentEpoch: Long, epochLength: Int, judged: Set[Hash]): Unit =
+    judgments.keySet.removeIf(k => k._2 < currentEpoch - 1 || judged.contains(k._1))
+    credentials.values.removeIf(c => c._2 / epochLength < currentEpoch - 1)
+    ()
 
   /** Tickets for inclusion in a block of `epoch` whose posterior η_2 is
     * `entropy`: ascending ticket-id order,
@@ -212,10 +259,21 @@ final class ExtrinsicPools(
 
   def pendingGuarantees: List[GuaranteeExtrinsic] = guarantees.values.asScala.toList
 
+  /** The pooled guarantees, oldest first. */
+  def guaranteesByArrival: List[GuaranteeExtrinsic] =
+    guaranteeLock.synchronized {
+      guarantees.entrySet.asScala.toList
+        .sortBy(e => Option(guaranteeArrival.get(e.getKey)).fold(Long.MaxValue)(_.longValue))
+        .map(_.getValue)
+    }
+
   def pendingPreimages: List[Preimage] = preimages.values.asScala.toList
 
   def removePreimages(ps: Iterable[Preimage]): Unit =
     ps.foreach(p => preimages.remove((p.requester.toLong, Hashing.blake2b256(p.blob.toArray))))
+
+  def removeAssurances(as: Iterable[AssuranceExtrinsic]): Unit =
+    as.foreach(a => assurances.remove((a.validatorIndex.toInt, a.anchor), a))
 
   def removeGuarantees(gs: Iterable[GuaranteeExtrinsic]): Unit =
     gs.foreach(g => guarantees.remove(Hashing.blake2b256(g.report.encode.toArray)))
@@ -229,6 +287,16 @@ final class ExtrinsicPools(
   def assuranceCount: Int = assurances.size
 
 object ExtrinsicPools:
+  /** Evidence on one report judged invalid by someone: judgments of `epoch` as (validator index, valid, signature),
+    * and the including block's parent, slot and credentials when we saw it.
+    */
+  final case class Disputed(
+      reportHash: Hash,
+      epoch: Long,
+      judgments: List[(Int, Boolean, Array[Byte])],
+      credentials: Option[(Hash, Long, List[(Int, Array[Byte])])]
+  )
+
   /** A core takes one report at a time, so more than a few pending for one core are a guarantor signing several
     * reports for a slot.
     */

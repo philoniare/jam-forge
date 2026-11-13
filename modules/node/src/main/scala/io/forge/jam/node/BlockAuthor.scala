@@ -4,7 +4,9 @@ import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes}
 import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash, Timeslot, ValidatorIndex}
 import io.forge.jam.core.types.block.{Block, Extrinsic}
-import io.forge.jam.core.types.extrinsic.Dispute
+import io.forge.jam.core.primitives.Ed25519Signature
+import io.forge.jam.protocol.dispute.DisputeBuilder
+import io.forge.jam.protocol.state.TrieBackedJamStateBridges.DisputeBridge
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
@@ -63,7 +65,7 @@ final class BlockAuthor(
   /** Try to author a block for `slot` on top of the current best head.
     * Returns the block when one of our keys owns the slot.
     */
-  def tryAuthor(slot: Long): Option[Block] =
+  def tryAuthor(slot: Long, withDisputes: Boolean = true): Option[Block] =
     val best = chain.best
     if slot <= best.slot then return None
 
@@ -172,13 +174,44 @@ final class BlockAuthor(
       logger.info(s"dropping ${provided.size} preimage(s) already provided")
       pools.removePreimages(provided)
 
+    // Verdicts on reports someone judged invalid, with their culprits and faults; checked against the Disputes STF.
+    val disputes = if withDisputes then BlockAuthor.disputes(pools, preView, chain) else DisputeBuilder.empty
+    if !disputes.isEmpty then
+      logger.warn(
+        s"authoring ${disputes.dispute.verdicts.size} verdict(s), ${disputes.dispute.culprits.size} culprit(s), " +
+          s"${disputes.dispute.faults.size} fault(s)"
+      )
+
+    // Assurances and guarantees that pass the pipeline's checks on a throwaway posterior-Safrole view; the rest are
+    // left out, and those that cannot pass later leave the pool.
+    val plan = AuthoringPlan.plan(
+      runSafrole(includedTickets).fold(_ => chain.stateView(), _._1),
+      priorTau = preView.timeslot,
+      priorKappa = preView.validators.current,
+      priorLambda = preView.validators.previous,
+      disputes = disputes.dispute,
+      slot = slot,
+      parent = best.hash,
+      assurances = pools.takeAssurances(best.hash),
+      guarantees = pools.guaranteesByArrival,
+      ancestry = ancestors,
+      config = chain.config
+    )
+    if plan.droppedGuarantees.nonEmpty || plan.droppedAssurances.nonEmpty then
+      logger.warn(
+        s"leaving out ${plan.droppedGuarantees.size} guarantee(s) and ${plan.droppedAssurances.size} assurance(s) " +
+          s"that no longer pass at slot $slot"
+      )
+      pools.removeGuarantees(plan.droppedGuarantees)
+      pools.removeAssurances(plan.droppedAssurances)
+
     // Fill from the pools.
     val extrinsic = Extrinsic(
       tickets = includedTickets.map(_._2),
       preimages = pools.takePreimages(p => preimageState.get(p).forall(_.contains(true))),
-      guarantees = pools.takeGuarantees(),
-      assurances = pools.takeAssurances(best.hash),
-      disputes = Dispute(List.empty, List.empty, List.empty)
+      guarantees = plan.guarantees,
+      assurances = plan.assurances,
+      disputes = disputes.dispute
     )
     val extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config)
 
@@ -201,7 +234,7 @@ final class BlockAuthor(
       slot = Timeslot(UInt(slot.toInt)),
       epochMark = markers.epochMark,
       ticketsMark = markers.ticketsMark,
-      offendersMark = List.empty,
+      offendersMark = disputes.offendersMark.map(k => Hash(k.bytes)),
       authorIndex = ValidatorIndex(authorIndex),
       entropySource = JamBytes(entropyVrf),
       seal = JamBytes.zeros(96)
@@ -223,6 +256,39 @@ final class BlockAuthor(
     Some(block)
 
 object BlockAuthor:
+
+  /** The disputes extrinsic for a block on the state `prior`: verdicts built from the pooled judgments on reports
+    * someone judged invalid, the guarantors of each (from the credentials of the block that included it, resolved
+    * against that block's validator sets) as culprits. Evidence too old for a verdict is pruned first.
+    */
+  def disputes(pools: ExtrinsicPools, prior: io.forge.jam.protocol.state.TrieBackedJamState, chain: ChainManager)
+      : DisputeBuilder.Built =
+    val state = DisputeBridge.extract(prior)
+    val epochLength = chain.config.epochLength
+    pools.pruneDisputes(state.tau / epochLength, epochLength, (state.psi.good ++ state.psi.bad ++ state.psi.wonky).toSet)
+    val disputed = pools.disputed
+    if disputed.isEmpty then DisputeBuilder.empty
+    else
+      val evidence = disputed.map { d =>
+        val guarantors = d.credentials.toList.flatMap { (parent, _, sigs) =>
+          chain.stateViewAt(parent).toList.flatMap { pv =>
+            // An index is into the current set, or the previous one for a report of the last rotation before an
+            // epoch change; the builder keeps the key the signature verifies under.
+            val sets = List(pv.validators.current, pv.validators.previous)
+            sigs.flatMap((i, sig) =>
+              sets.flatMap(_.lift(i)).map(vk => DisputeBuilder.Credential(vk.ed25519, Ed25519Signature(sig)))
+            )
+          }
+        }
+        DisputeBuilder.Evidence(
+          d.reportHash,
+          d.epoch,
+          d.judgments.map((v, valid, sig) => DisputeBuilder.Judgment(v, valid, Ed25519Signature(sig))),
+          guarantors
+        )
+      }
+      DisputeBuilder.build(evidence, state, chain.config)
+
 
   /** The reporting checks that a guarantee fails just by ageing: its rotation is the current or the
     * previous one, its anchor is in recent history, and its lookup anchor is an ancestor at most L slots old.

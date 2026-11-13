@@ -149,6 +149,12 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
       val reportHash = Hashing.blake2b256(report.encode.toArray)
       auditorA.verdictFor(reportHash) shouldBe None // included, not yet available
+      // B now serves a wrong bundle of the right length on CE 147: A must not judge on it, but rebuild the bundle
+      // from erasure-coded shards and judge that.
+      nodeB.guarantorService.getOrElse(fail("no guarantor")).recordBundle(
+        report.packageSpec.erasureRoot,
+        Array.fill[Byte](report.packageSpec.length.toLong.toInt)(7)
+      )
       // A judgment that outruns the block making its report available is kept for that block.
       auditorA.receiveJudgment(AuditFlood.judgment(3, devKeys(3), reportHash, valid = true))
 
@@ -216,7 +222,29 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
         cleanup(dirC)
 
       // No adverse judgments for a valid report.
-      nodeA.pools.judgmentCount shouldBe 0
+      nodeA.pools.negativeJudgmentCount shouldBe 0
+
+      // Validators 2 and 4 judge the report valid and 5 invalid: five of six valid, so A authors a good verdict with
+      // validator 5 as a fault, and both nodes import it.
+      auditorA.receiveJudgment(AuditFlood.judgment(2, devKeys(2), reportHash, valid = true))
+      auditorA.receiveJudgment(AuditFlood.judgment(4, devKeys(4), reportHash, valid = true))
+      auditorA.receiveJudgment(AuditFlood.judgment(5, devKeys(5), reportHash, valid = false))
+      val judgedDeadline = System.currentTimeMillis() + 10000
+      while nodeA.pools.negativeJudgmentCount < 1 && System.currentTimeMillis() < judgedDeadline do Thread.sleep(20)
+      val disputeBlock = nodeA.authorSlot(5).getOrElse(fail("slot 5 not authored"))
+      val b5 = nodeA.chain.block(disputeBlock.hash).getOrElse(fail("no block"))
+      b5.extrinsic.disputes.verdicts.map(_.target) shouldBe List(reportHash)
+      b5.extrinsic.disputes.verdicts.head.votes.count(_.vote) shouldBe 5
+      b5.extrinsic.disputes.faults.map(_.key) shouldBe List(devKeys(5).ed25519Key)
+      b5.header.offendersMark shouldBe List(Hash(devKeys(5).ed25519Public))
+      val psi = nodeA.chain.stateView().psi
+      psi.good shouldBe List(reportHash)
+      psi.offenders shouldBe List(devKeys(5).ed25519Key)
+      awaitSync(nodeA, nodeB)
+      nodeB.chain.best.stateRoot shouldBe nodeA.chain.best.stateRoot
+      // Judged now: the next block carries no dispute.
+      val after = nodeA.authorSlot(6).getOrElse(fail("slot 6 not authored"))
+      nodeA.chain.block(after.hash).get.extrinsic.disputes.verdicts shouldBe Nil
 
       // Tampering with the report is caught by re-execution.
       val tampered = report.copy(authGasUsed = Gas(report.authGasUsed.toLong + 1))
@@ -227,6 +255,36 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       if nodeB != null then nodeB.shutdown()
       cleanup(dirA)
       cleanup(dirB)
+  }
+
+  test("a block above finality the auditor has not looked at is not audited until it has been tracked") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val spec = ChainSpec(
+      id = "auditor-untracked",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dir = tempDir("jam-audit-untracked")
+    var node: JamNode = null
+    try
+      node = new JamNode(spec, NodeConfig(dir, slotTicking = false)).start()
+      node.enableAuthoring(devKeys)
+      // Imported before the auditor exists, so its import listener never saw it (as across a restart).
+      val early = node.authorSlot(1).getOrElse(fail("slot 1 not authored"))
+      val auditor = node.enableAuditing(devKeys.take(1))
+      auditor.isAudited(node.chain.finalized.hash) shouldBe true
+      auditor.isAudited(Hash.zero) shouldBe false
+      auditor.isAudited(early.hash) shouldBe false
+      // It made no report available, so it is audited once looked at.
+      val deadline = System.currentTimeMillis() + 10000
+      while !auditor.isAudited(early.hash) && System.currentTimeMillis() < deadline do Thread.sleep(20)
+      auditor.isAudited(early.hash) shouldBe true
+    finally
+      if node != null then node.shutdown()
+      cleanup(dir)
   }
 
   private def awaitSync(a: JamNode, b: JamNode): Unit =
