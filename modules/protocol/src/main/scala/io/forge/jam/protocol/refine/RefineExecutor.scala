@@ -109,7 +109,9 @@ class RefineExecutor(val config: ChainConfig):
       machineModuleCache = Some(machineModuleCache)
     )
 
-    val gasLimit = workItem.refineGasLimit.toLong
+    val gasLimit =
+      val limit = workItem.refineGasLimit.toLong
+      if limit < 0 then Long.MaxValue else limit
     val hostCalls = new RefineHostCalls(context)
     val (exitReason, gasUsed, output) =
       PvmRunner.run(module, inputData, gasLimit, entryPc = 0, hostCalls)

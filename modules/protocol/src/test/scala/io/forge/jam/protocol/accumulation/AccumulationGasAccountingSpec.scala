@@ -173,3 +173,83 @@ class AccumulationGasAccountingSpec extends AnyFunSuite with Matchers:
 
     result.reportsAccumulated shouldBe 1
   }
+
+  private def runWithAllowances(allowances: Map[Long, Long], gasLimit: BigInt): (Int, Map[Long, Long]) =
+    val budgets = mutable.Map.empty[Long, Long]
+    val executor = new AccumulationExecutor(config):
+      override def executeService(
+          partialState: PartialState,
+          timeslot: Long,
+          serviceId: Long,
+          gasLimit: Long,
+          entropy: JamBytes,
+          operands: List[AccumulationOperand],
+          executionMode: ExecutionMode,
+          storageView: Option[ServiceStorageView]
+      ): AccumulationOneResult =
+        budgets(serviceId) = gasLimit
+        val spent = if allowances.contains(serviceId) then gasLimit else 0L
+        AccumulationOneResult(partialState, List.empty, None, spent, Set.empty)
+    val result = AccumulationTransition.outerAccumulate(
+      partialState = emptyPartialState(),
+      transfers = List.empty,
+      workReports = List(buildWorkReport(serviceId = 400L, accumulateGas = 1000L, packageTag = 0x31)),
+      alwaysAccers = allowances,
+      gasLimit = gasLimit,
+      timeslot = 1000L,
+      entropy = JamBytes.zeros(32),
+      executor = executor,
+      config = config
+    )
+    (result.reportsAccumulated, budgets.toMap)
+
+  test("an always-accumulate allowance of 2^63 or more counts as the unsigned amount it is") {
+    val allowance = BigInt(2).pow(64) - 1
+    val asLong = -1L // the same 64 bits
+
+    val (taken, budgets) = runWithAllowances(Map(7L -> asLong), allowance + 1000)
+    taken shouldBe 1
+    budgets(7L) shouldBe Long.MaxValue
+    budgets(400L) shouldBe 1000L
+  }
+
+  test("allowances that sum past 2^63 do not wrap") {
+    val each = 3L << 61 // 0.75 * 2^63, so two of them pass 2^63
+    val both = BigInt(each) * 2
+
+    runWithAllowances(Map(7L -> each, 8L -> each), both + 999)._1 shouldBe 0
+    val (taken, budgets) = runWithAllowances(Map(7L -> each, 8L -> each), both + 1000)
+    taken shouldBe 1
+    budgets(7L) shouldBe each
+    budgets(8L) shouldBe each
+  }
+
+  test("a service without code is credited a transfer of 2^63 or more") {
+    val dest = 300L
+    val info = io.forge.jam.core.types.service.ServiceInfo(
+      version = 0,
+      codeHash = hashOf(0x55),
+      balance = 5L,
+      minItemGas = 0L,
+      minMemoGas = 0L,
+      bytesUsed = 0L,
+      depositOffset = 0L,
+      items = 0,
+      creationSlot = 0L,
+      lastAccumulationSlot = 0L,
+      parentService = 0L
+    )
+    val account = ServiceAccount(info, Map.empty, Map.empty, Map.empty, 0L)
+    def credit(amounts: Long*): Long =
+      val operands = amounts.toList.map(a => AccumulationOperand.Transfer(DeferredTransfer(1L, dest, a, memo, 0L)))
+      new AccumulationExecutor(config)
+        .executeService(emptyPartialState(Map(dest -> account)), 1000L, dest, 0L, JamBytes.zeros(32), operands)
+        .postState
+        .accounts(dest)
+        .info
+        .balance
+
+    credit(Long.MinValue) shouldBe (5L + Long.MinValue)
+    credit(1L << 62, 1L << 62) shouldBe (5L + Long.MinValue)
+    credit(7L) shouldBe 12L
+  }

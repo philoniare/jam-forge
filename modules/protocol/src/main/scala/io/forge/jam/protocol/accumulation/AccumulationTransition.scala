@@ -287,9 +287,9 @@ object AccumulationTransition:
     val partialState = preState.toPartialState(initStagingSet, initAuthQueues)
 
     // Calculate total gas budget
-    val sumPrivilegedGas = partialState.alwaysAccers.values.sum
-    val minTotalGas = config.reportAccGas * config.coresCount + sumPrivilegedGas
-    val totalGasLimit = Math.max(config.maxBlockGas, minTotalGas)
+    val sumPrivilegedGas = u64Sum(partialState.alwaysAccers.values)
+    val minTotalGas = BigInt(config.reportAccGas) * config.coresCount + sumPrivilegedGas
+    val totalGasLimit = minTotalGas.max(BigInt(config.maxBlockGas))
 
     // Use shared executor if provided (for module cache reuse), otherwise create new
     val executor = sharedExecutor.getOrElse(new AccumulationExecutor(config))
@@ -540,6 +540,14 @@ object AccumulationTransition:
       authQueues: Vector[List[Hash]] = Vector.empty
   )
 
+  private val TwoTo64 = BigInt(1) << 64
+
+  private def u64(x: Long): BigInt = if x >= 0 then BigInt(x) else BigInt(x) + TwoTo64
+
+  private def u64Sum(xs: IterableOnce[Long]): BigInt = xs.iterator.foldLeft(BigInt(0))(_ + u64(_))
+
+  private def pvmGas(gas: BigInt): Long = if gas > Long.MaxValue then Long.MaxValue else gas.toLong
+
   private def mergeBy[K, V](a: Map[K, V], b: Map[K, V])(
       combine: (V, V) => V
   ): Map[K, V] =
@@ -555,7 +563,7 @@ object AccumulationTransition:
       transfers: List[DeferredTransfer],
       workReports: List[WorkReport],
       alwaysAccers: Map[Long, Long],
-      gasLimit: Long,
+      gasLimit: BigInt,
       timeslot: Long,
       entropy: JamBytes,
       executor: AccumulationExecutor,
@@ -563,7 +571,7 @@ object AccumulationTransition:
   ): OuterAccumulationResult =
     // Count how many reports can fit in gas budget
     var i = 0
-    var sumGasRequired = transfers.map(_.gasLimit).sum + alwaysAccers.values.sum
+    var sumGasRequired = u64Sum(transfers.iterator.map(_.gasLimit)) + u64Sum(alwaysAccers.values)
 
     val reportIterator = workReports.iterator
     var continue = true
@@ -571,9 +579,9 @@ object AccumulationTransition:
       val report = reportIterator.next()
       var canAccumulate = true
       for result <- report.results if canAccumulate do
-        if result.accumulateGas.toLong + sumGasRequired > gasLimit then
-          canAccumulate = false
-        else sumGasRequired += result.accumulateGas.toLong
+        val gas = u64(result.accumulateGas.toLong)
+        if gas + sumGasRequired > gasLimit then canAccumulate = false
+        else sumGasRequired += gas
       if canAccumulate then i += 1
       else continue = false
 
@@ -599,8 +607,8 @@ object AccumulationTransition:
       executor = executor
     )
 
-    val parallelGasUsed = parallelResult.gasUsedMap.values.sum
-    val transfersGas = parallelResult.deferredTransfers.map(_.gasLimit).sum
+    val parallelGasUsed = u64Sum(parallelResult.gasUsedMap.values)
+    val transfersGas = u64Sum(parallelResult.deferredTransfers.iterator.map(_.gasLimit))
 
     // Recursively process remaining reports with new deferred transfers
     val remainingReports = workReports.drop(i)
@@ -849,13 +857,12 @@ object AccumulationTransition:
       val operands =
         serviceOperands.getOrElse(serviceId, mutable.ListBuffer.empty).toList
       val alwaysAccGas = alwaysAccers.getOrElse(serviceId, 0L)
-      var workItemGas = 0L
-      var transferGas = 0L
+      var operandGas = BigInt(0)
       operands.foreach {
-        case AccumulationOperand.WorkItem(op) => workItemGas += op.gasLimit
-        case AccumulationOperand.Transfer(t)  => transferGas += t.gasLimit
+        case AccumulationOperand.WorkItem(op) => operandGas += u64(op.gasLimit)
+        case AccumulationOperand.Transfer(t)  => operandGas += u64(t.gasLimit)
       }
-      val totalGasLimit = workItemGas + alwaysAccGas + transferGas
+      val totalGasLimit = pvmGas(operandGas + u64(alwaysAccGas))
 
       executor.executeService(
         partialState = initialState,

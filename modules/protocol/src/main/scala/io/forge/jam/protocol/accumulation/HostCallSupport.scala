@@ -200,6 +200,9 @@ private[accumulation] trait HostCallSupport:
 
   /** Write memory to PVM instance, returns true on success.
     */
+  protected def window(bytes: Array[Byte], offset: Int, length: Int): Array[Byte] =
+    if offset == 0 && length == bytes.length then bytes else bytes.slice(offset, offset + length)
+
   protected def writeMemory(
       instance: PvmInstance,
       address: Int,

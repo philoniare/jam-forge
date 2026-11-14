@@ -196,7 +196,7 @@ class RefineHostCalls(
       case None =>
         setReg(instance, 7, HostCallResult.NONE)
       case Some(v) =>
-        val slice = v.slice(actualOffset, actualOffset + actualLength)
+        val slice = RefineFetch.window(v, actualOffset, actualLength)
         if !writeMemory(instance, outputAddr, slice) then
           setReg(instance, 7, HostCallResult.OOB)
         else setReg(instance, 7, ULong(v.length.toLong))
@@ -556,7 +556,7 @@ object RefineFetch:
         val actualOffset = argClampedLen(instance, 8, bytes.length.toLong)
         val actualLength =
           argClampedLen(instance, 9, (bytes.length - actualOffset).toLong)
-        val slice = bytes.slice(actualOffset, actualOffset + actualLength)
+        val slice = window(bytes, actualOffset, actualLength)
 
         if !instance.isMemoryWritable(outputAddr, actualLength) then
           throw new io.forge.jam.protocol.HostCallPanic(
@@ -637,8 +637,10 @@ object RefineFetch:
         yield wp.items(i).payload.toArrayUnsafe
       case _ => None
 
-  def encodeWorkPackage(wp: WorkPackage): Array[Byte] =
-    encodeScodec(summon[Codec[WorkPackage]], wp)
+  def encodeWorkPackage(wp: WorkPackage): Array[Byte] = wp.encoded
+
+  def window(bytes: Array[Byte], offset: Int, length: Int): Array[Byte] =
+    if offset == 0 && length == bytes.length then bytes else bytes.slice(offset, offset + length)
 
   /** Hash of the encoded work package, blake(p). */
   def workPackageHash(wp: WorkPackage): Hash =

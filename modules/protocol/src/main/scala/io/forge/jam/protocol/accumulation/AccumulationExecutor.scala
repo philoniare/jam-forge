@@ -233,7 +233,7 @@ class AccumulationExecutor(
         val transferBalance = operands.collect {
           case AccumulationOperand.Transfer(t) => t.amount
         }.sum
-        if transferBalance > 0 then
+        if transferBalance != 0 then
           state.accounts.get(sid) match
             case Some(account) =>
               val shallowCopy = state.shallowCopyWithAccountUpdate(

@@ -57,7 +57,8 @@ object workpackage:
     authorization: JamBytes,
     authorizerConfig: JamBytes,
     items: List[WorkItem]
-  )
+  ):
+    lazy val encoded: Array[Byte] = summon[Codec[WorkPackage]].encode(this)
 
   object WorkPackage:
     given Codec[WorkPackage] =

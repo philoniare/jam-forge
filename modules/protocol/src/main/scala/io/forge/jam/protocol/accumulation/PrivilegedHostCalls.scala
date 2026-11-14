@@ -276,8 +276,8 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     // Check if caller can afford: balance >= newThreshold + callerThreshold
     val callerThreshold = calculateThreshold(acc.info)
-    val requiredBalance = ULong(thresholdBalance) + ULong(callerThreshold)
-    if ULong(acc.info.balance) < requiredBalance then
+    val requiredBalance = ULong(thresholdBalance).toBigInt + ULong(callerThreshold).toBigInt
+    if ULong(acc.info.balance).toBigInt < requiredBalance then
       setReg(instance, 7, HostCallResult.CASH)
       return
 
@@ -393,7 +393,7 @@ private[accumulation] trait PrivilegedHostCalls extends HostCallSupport:
 
     // 5. Find preimage request by hash AND derived length
     val octets = acc.info.bytesUsed
-    val derivedLength = math.max(81L, octets) - 81L
+    val derivedLength = if java.lang.Long.compareUnsigned(octets, 81L) > 0 then octets - 81L else 0L
     val preimageKey =
       PreimageKey(Hash(preimageHash.toArray), derivedLength)
     val timeslots: List[Long] = loadPreimageTimeslots(

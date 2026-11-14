@@ -30,7 +30,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
 
     val data: Option[Array[Byte]] = selector match
       case FetchSelector.CONSTANTS      => Some(getConstantsBlob())
-      case FetchSelector.ENTROPY        => Some(context.entropy.toArray)
+      case FetchSelector.ENTROPY        => Some(context.entropy.toArrayUnsafe)
       case FetchSelector.ALL_OPERANDS   => Some(encodeOperandsList())
       case FetchSelector.SINGLE_OPERAND =>
         index match
@@ -46,7 +46,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
         val actualOffset = argClampedLen(instance, 8, bytes.length.toLong)
         val actualLength =
           argClampedLen(instance, 9, (bytes.length - actualOffset).toLong)
-        val slice = bytes.slice(actualOffset, actualOffset + actualLength)
+        val slice = window(bytes, actualOffset, actualLength)
 
         // Check if output address is writable - PANIC if not
         if !isMemoryWritable(instance, outputAddr, actualLength) then
@@ -308,7 +308,7 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
     // Apply offset and length slicing
     val first = argClampedLen(instance, 9, data.length.toLong)
     val len = argClampedLen(instance, 10, data.length.toLong - first)
-    val slicedData = data.slice(first, first + len)
+    val slicedData = window(data, first, len)
 
     if !writeMemory(instance, outputAddr, slicedData) then
       panic(
@@ -562,7 +562,8 @@ private[accumulation] trait StorageHostCalls extends HostCallSupport:
       context.deleteRawData(preimageStateKey)
       // Update footprint: decrease items by 2 and bytes by 81 + length
       val newItems = math.max(0, info.items - 2)
-      val newBytes = math.max(0L, info.bytesUsed - 81 - length)
+      val freed = 81L + length
+      val newBytes = if java.lang.Long.compareUnsigned(info.bytesUsed, freed) >= 0 then info.bytesUsed - freed else 0L
       val updatedInfo = info.copy(items = newItems, bytesUsed = newBytes)
       context.x.accounts = context.x.accounts.updated(
         context.serviceIndex,
