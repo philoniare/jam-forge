@@ -349,9 +349,17 @@ final class TrieBackedJamState(
    * writes into one [[StateTrie.update]] and rebuild each touched node once per block. Updates the store's service
    * caches as [[commit]] does.
    */
-  def commitUpdates(): mutable.ArrayBuffer[(JamBytes, Option[JamBytes])] =
+  private val heldStoreUpdates = mutable.ArrayBuffer.empty[StateTrieStore => Unit]
+
+  /**
+   * The store's service caches follow the state being committed. With `holdStoreUpdates` they are left as they are
+   * until [[applyStoreUpdates]], for a caller that does not yet know whether the block stands.
+   */
+  def commitUpdates(holdStoreUpdates: Boolean = false): mutable.ArrayBuffer[(JamBytes, Option[JamBytes])] =
     val updates =
       mutable.ArrayBuffer.empty[(JamBytes, Option[JamBytes])]
+    def onStore(f: StateTrieStore => Unit): Unit =
+      if holdStoreUpdates then heldStoreUpdates += f else store.foreach(f)
 
     cells.foreach { c =>
       if c.dirty then updates += ((StateKeys.simpleKey(c.prefix), Some(c.encoded)))
@@ -375,7 +383,7 @@ final class TrieBackedJamState(
           val encoded = TrieBackedJamState.encodeServiceInfo(item.data.service)
           updates += ((StateKey.computeServiceAccountKey(item.id),
             Some(encoded)))
-          store.foreach { s =>
+          onStore { s =>
             s.putCachedServiceInfo(item.id, encoded)
             if !_serviceAccountsPreIds.contains(item.id) then
               s.addKnownServiceId(item.id)
@@ -384,7 +392,7 @@ final class TrieBackedJamState(
       _serviceAccountsPreIds.foreach { id =>
         if !currIds.contains(id) then
           updates += ((StateKey.computeServiceAccountKey(id), None))
-          store.foreach { s =>
+          onStore { s =>
             s.evictCachedServiceInfo(id)
             s.removeKnownServiceId(id)
           }
@@ -392,6 +400,10 @@ final class TrieBackedJamState(
 
     updates
 
+  /** Applies the store updates a [[commitUpdates]] call held back. */
+  def applyStoreUpdates(): Unit =
+    store.foreach(s => heldStoreUpdates.foreach(_(s)))
+    heldStoreUpdates.clear()
 
   def toFullJamState(): FullJamState =
     FullJamState(

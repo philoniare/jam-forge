@@ -265,26 +265,41 @@ impl Verifier {
             return Err(VrfError::DeserializationError("signatures are not one per attempt"));
         }
         let each = signatures.len() / attempts.len();
-        // The batch verifier takes a ring verifier of its own, so one is built here, not shared.
-        let parsed = RingCommitment::deserialize_compressed(commitment)
-            .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
-        let ring_ctx = ring_context(ring_size)?;
-        let mut ring_batch = ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)).kzg_batch_verifier();
+        // The batch verifier takes a ring verifier of its own, so one is built here, not shared. Checking the
+        // commitment and building the verifier is most of a millisecond, so the signatures are decoded meanwhile.
+        let build = || {
+            let parsed = RingCommitment::deserialize_compressed(commitment)
+                .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
+            let ring_ctx = ring_context(ring_size)?;
+            Ok(ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)).kzg_batch_verifier())
+        };
+        let decode = || -> Vec<Result<_, VrfError>> {
+            signatures
+                .par_chunks(each)
+                .zip(attempts.par_iter())
+                .map(|(signature, &attempt)| {
+                    let signature = decode_ring_signature(signature)
+                        .ok_or(VrfError::DeserializationError("invalid signature format"))?;
+                    let input_data = [b"jam_ticket_seal", entropy, &[attempt]].concat();
+                    let input = input_point(&input_data).ok_or(VrfError::VerificationError)?;
+                    Ok((signature, input))
+                })
+                .collect()
+        };
+        let (built, decoded): (Result<_, VrfError>, _) = rayon::join(build, decode);
+        let mut ring_batch = built?;
+        let decoded = decoded.into_iter().collect::<Result<Vec<_>, VrfError>>()?;
         let mut pedersen_batch = PedersenBatch::new();
 
-        let prepared: Vec<_> = signatures
-            .par_chunks(each)
-            .zip(attempts.par_iter())
-            .map(|(signature, &attempt)| {
-                let signature = decode_ring_signature(signature)
-                    .ok_or(VrfError::DeserializationError("invalid signature format"))?;
-                let input_data = [b"jam_ticket_seal", entropy, &[attempt]].concat();
-                let input = input_point(&input_data).ok_or(VrfError::VerificationError)?;
+        let prepared: Vec<_> = decoded
+            .into_par_iter()
+            .map(|(signature, input)| {
                 let pedersen = PedersenBatch::prepare(input, signature.output, [], &signature.proof.pedersen_proof);
                 let key_commitment = signature.proof.pedersen_proof.key_commitment().into_te();
-                let ring = ring_batch.prepare(signature.proof.ring_proof.clone(), key_commitment);
-                let hash: [u8; 32] = signature.output.hash()[..32].try_into().map_err(|_| VrfError::ConversionError)?;
-                Ok((pedersen, ring, hash))
+                let hash: Result<[u8; 32], VrfError> =
+                    signature.output.hash()[..32].try_into().map_err(|_| VrfError::ConversionError);
+                let ring = ring_batch.prepare(signature.proof.ring_proof, key_commitment);
+                Ok((pedersen, ring, hash?))
             })
             .collect();
 

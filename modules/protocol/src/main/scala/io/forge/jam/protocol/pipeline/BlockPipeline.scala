@@ -61,7 +61,8 @@ object BlockPipeline:
       view: TrieBackedJamState,
       skipAncestryValidation: Boolean = false,
       sharedExecutor: Option[AccumulationExecutor] = None,
-      ancestry: List[AncestorHeader] = List.empty
+      ancestry: List[AncestorHeader] = List.empty,
+      whileChecksRun: BlockPipelineResult => Unit = _ => ()
   ): Either[PipelineError, BlockPipelineResult] =
     val initialContext = StageTimers.time("x/context")(PipelineContext.from(block, view.config, view))
     val storageView: Option[ServiceStorageView] = Some(view.storage)
@@ -140,8 +141,14 @@ object BlockPipeline:
     } yield finalResult
 
     val pending = initialContext.pendingChecks
+    // `whileChecksRun` is the caller's work on a block whose steps all passed, done here so that it overlaps the
+    // signature checks still running on other threads. The caller must not let it take effect until this returns
+    // Right: a check may yet fail.
     val result =
-      try pipeline.run((view, initialContext))
+      try
+        val ran = pipeline.run((view, initialContext))
+        ran.foreach((_, output) => whileChecksRun(output))
+        ran
       catch
         case NonFatal(e) =>
           pending.firstFailure() match

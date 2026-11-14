@@ -6,6 +6,7 @@ import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.vrfs.BandersnatchWrapper
 import io.forge.jam.core.types.block.Block
+import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Preimage}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.history.ReportedWorkPackage
@@ -19,7 +20,7 @@ import io.forge.jam.protocol.authorization.AuthorizationTypes.*
 import io.forge.jam.protocol.preimage.PreimageTypes.*
 import io.forge.jam.protocol.statistics.StatisticsTypes.*
 import io.forge.jam.protocol.dispute.DisputeTypes.*
-import io.forge.jam.protocol.pipeline.{BlockPipeline, PipelineError}
+import io.forge.jam.protocol.pipeline.{BlockPipeline, BlockPipelineResult, PipelineError}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.core.trie.{StateTrieStore, InMemoryTrieBackend}
 import org.slf4j.LoggerFactory
@@ -153,6 +154,41 @@ class BlockImporter(
 
       sharedExecutor.setStorageView(Some(storageView))
 
+      // The state update for a block whose steps passed: the rest of the statistics, then every write hashed into
+      // the block's own trie handle. It runs while the block's signature checks finish on other threads and touches
+      // nothing shared; the handle is saved below only once those checks have passed.
+      def stageUpdates(result: BlockPipelineResult): Unit =
+        // Reports left the guarantee-derived core and service statistics in the view; add the rest to them.
+        val (finalCoreStats, finalServiceStats) = StageTimers.time("final-stats") {
+          val finalCoreStats = computeFinalCoreStatistics(
+            guaranteeStats = view.cores.statistics,
+            availableReports = result.availableReports,
+            assurances = block.extrinsic.assurances,
+            maxCores = config.coresCount
+          )
+
+          val finalServiceStats = computeFinalServiceStatistics(
+            guaranteeStats = view.serviceStatistics,
+            preimages = block.extrinsic.preimages,
+            accumulationStats = result.accumulationStats,
+            accumulationTransferCounts = result.accumulationTransferCounts
+          )
+
+          (finalCoreStats, finalServiceStats)
+        }
+
+        view.cores.statistics = finalCoreStats
+        view.serviceStatistics = finalServiceStats
+
+        // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
+        // A key in both takes the storage view's value, as when they were applied one after the other.
+        val updates = StageTimers.time("commit-encode") {
+          val u = view.commitUpdates(holdStoreUpdates = true)
+          u ++= storageView.commitUpdates()
+          u
+        }
+        StageTimers.time("trie-update")(trie.update(updates.toIndexedSeq))
+
       val pipelineResult =
         try
           StageTimers.time("pipeline")(
@@ -161,7 +197,8 @@ class BlockImporter(
               view,
               skipAncestryValidation,
               Some(sharedExecutor),
-              ancestry
+              ancestry,
+              stageUpdates
             )
           )
         finally sharedExecutor.setStorageView(None)
@@ -171,36 +208,7 @@ class BlockImporter(
           ImportResult.Failure(mapPipelineError(error), error.message, Some(error))
 
         case Right(result) =>
-          // Reports left the guarantee-derived core and service statistics in the view; add the rest to them.
-          val (finalCoreStats, finalServiceStats) = StageTimers.time("final-stats") {
-            val finalCoreStats = computeFinalCoreStatistics(
-              guaranteeStats = view.cores.statistics,
-              availableReports = result.availableReports,
-              assurances = block.extrinsic.assurances,
-              maxCores = config.coresCount
-            )
-
-            val finalServiceStats = computeFinalServiceStatistics(
-              guaranteeStats = view.serviceStatistics,
-              preimages = block.extrinsic.preimages,
-              accumulationStats = result.accumulationStats,
-              accumulationTransferCounts = result.accumulationTransferCounts
-            )
-
-            (finalCoreStats, finalServiceStats)
-          }
-
-          view.cores.statistics = finalCoreStats
-          view.serviceStatistics = finalServiceStats
-
-          // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
-          // A key in both takes the storage view's value, as when they were applied one after the other.
-          val updates = StageTimers.time("commit-encode") {
-            val u = view.commitUpdates()
-            u ++= storageView.commitUpdates()
-            u
-          }
-          StageTimers.time("trie-update")(trie.update(updates.toIndexedSeq))
+          view.applyStoreUpdates()
           backendLock.synchronized {
             StageTimers.time("trie-save")(trie.save())
             trieStore.commitChild(block.header.parentStateRoot, trie.rootHash)
@@ -360,20 +368,19 @@ object InputExtractor:
     */
 
   def extractSafroleInput(block: Block): SafroleInput =
-    val header = block.header
-    val tickets = block.extrinsic.tickets
+    extractSafroleInput(block, entropyOutput(block.header))
 
-    // The header.entropySource is a 96-byte Bandersnatch IETF VRF signature.
+  /** As [[extractSafroleInput]], with the header's entropy output already worked out. */
+  def extractSafroleInput(block: Block, entropy: Hash): SafroleInput =
+    SafroleInput(slot = block.header.slot.toLong, entropy = entropy, extrinsic = block.extrinsic.tickets)
+
+  /** The output of the header's entropy source, a 96-byte Bandersnatch IETF VRF signature; zeroes when it has none. */
+  def entropyOutput(header: Header): Hash =
     BandersnatchWrapper.ensureLibraryLoaded()
     val vrfOutput =
       try Option(BandersnatchWrapper.getIetfVrfOutput(header.entropySource.toArray)).filter(_.length == 32)
       catch case _: RuntimeException => None
-
-    SafroleInput(
-      slot = header.slot.toLong,
-      entropy = vrfOutput.fold(Hash(new Array[Byte](32)))(Hash(_)),
-      extrinsic = tickets
-    )
+    vrfOutput.fold(Hash(new Array[Byte](32)))(Hash(_))
 
   /** Extract DisputeInput from block.
     */

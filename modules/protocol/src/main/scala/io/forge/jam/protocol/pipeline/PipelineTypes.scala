@@ -54,6 +54,9 @@ final class EncodedHeader(header: Header, config: ChainConfig):
 
   lazy val hash: Hash = Hashing.blake2b256(bytes)
 
+  /** Safrole's input entropy for this header, worked out once however many steps ask for it. */
+  lazy val entropyOutput: Hash = io.forge.jam.protocol.traces.InputExtractor.entropyOutput(header)
+
 /**
  * Context passed through the pipeline.
  * Contains configuration and accumulated intermediate results.

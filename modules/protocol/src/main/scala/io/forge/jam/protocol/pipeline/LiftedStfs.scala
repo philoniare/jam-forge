@@ -31,7 +31,7 @@ object LiftedStfs:
   // 1. Safrole STF
   val safroleEpoch: StfStepWith[SafroleOutputData] = liftStandardCtx(
     stf = (input: SafroleInput, view, _) => SafroleTransition.epochStfView(input, view),
-    extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block),
+    extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block, ctx.header.entropyOutput),
     wrapError = (e: SafroleErrorCode) => PipelineError.SafroleErr(e)
   )
 
@@ -46,7 +46,7 @@ object LiftedStfs:
           ))
         ))
       ),
-    extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block),
+    extractInput = ctx => InputExtractor.extractSafroleInput(ctx.block, ctx.header.entropyOutput),
     wrapError = (e: SafroleErrorCode) => PipelineError.SafroleErr(e)
   )
 
