@@ -97,21 +97,21 @@ object IntermediateSteps:
     else
       val blockAuthorKey = kappa(authorIndex).bandersnatch
 
-      val sealVrfOutput = BandersnatchVrf.getVrfOutput(block.header.seal.toArray)
-      if sealVrfOutput.isEmpty then
-        Left(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
-      else
-        val vrfInput = SigningContext.entropyInputData(sealVrfOutput.get)
-        ctx.pendingChecks.start {
-          val vrfResult = BandersnatchVrf.ietfVrfVerify(
-            blockAuthorKey.bytes,
-            vrfInput,
-            Array.empty[Byte],
-            block.header.entropySource.toArray
-          )
-          if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)) else None
-        }
-        Right(())
+      // The seal's output point is decoded in the check too, off the importing thread. A seal without one fails the
+      // seal check, which was started first and so is the error reported, as when this was decided here.
+      ctx.pendingChecks.start {
+        BandersnatchVrf.getVrfOutput(block.header.seal.toArray) match
+          case None => Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
+          case Some(sealVrfOutput) =>
+            val vrfResult = BandersnatchVrf.ietfVrfVerify(
+              blockAuthorKey.bytes,
+              SigningContext.entropyInputData(sealVrfOutput),
+              Array.empty[Byte],
+              block.header.entropySource.toArray
+            )
+            if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)) else None
+      }
+      Right(())
   }
 
   val validateEpochMark: StfStep = validate { (_, ctx) =>

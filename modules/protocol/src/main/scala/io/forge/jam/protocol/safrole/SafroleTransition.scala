@@ -292,13 +292,25 @@ object SafroleTransition extends StrictLogging:
           BandersnatchWrapper
             .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.validatorCount)
             .exists(_.id == mark.id)
+        // Several tickets are verified as one batch, which shares the pairing check between them.
+        def proofsHold: Boolean =
+          if tickets.sizeIs < 2 then tickets.zip(marks).forall(proofHolds)
+          else
+            BandersnatchVrf
+              .verifyRingProofs(
+                tickets.map(t => (t.signature, t.attempt)),
+                verificationGammaZ,
+                eta2,
+                config.validatorCount
+              )
+              .exists(ids => ids.corresponds(marks)((id, mark) => id == mark.id))
         val accumulated = accumulate(postState, marks, config)
         deferProofs match
           case None =>
-            if !Parallel.map(tickets.zip(marks))(proofHolds).forall(identity) then Left(SafroleErrorCode.BadTicketProof)
+            if !proofsHold then Left(SafroleErrorCode.BadTicketProof)
             else accumulated
           case Some(handOver) =>
-            val checks = tickets.zip(marks).map((ticket, mark) => Parallel.async(proofHolds(ticket, mark)))
+            val checks = List(Parallel.async(proofsHold))
             accumulated match
               case Right(state) =>
                 handOver(checks)

@@ -13,13 +13,21 @@ import scala.util.control.NonFatal
 /** JIT warmup before the fuzz socket opens, plus the legacy CRaC checkpoint commands.  */
 object WarmupRunner extends Resource:
 
-  /** Passes over the warmup corpus unless `JAM_WARMUP_ROUNDS` says otherwise.
+  /** How long a warmup goes on: a number of passes over the corpus, or passes until a time has gone by. */
+  enum Budget:
+    case Rounds(n: Int)
+
+    /** One pass, then trace after trace until `seconds` have gone by; the trace under way is finished. */
+    case Seconds(seconds: Double)
+
+  /** The warmup budget unless `JAM_WARMUP_SECONDS` or `JAM_WARMUP_ROUNDS` says otherwise.
     *
     * A fuzz-perf run times only the first hundred blocks, so how much of the import path the JIT has compiled by
-    * then decides the result: on an 8-core EPYC 7763, two passes (4 s) leave the storage trace at 2.0 ms a block,
-    * six (7 s) at 1.7 and fifteen (12 s) at 1.6. Eight keeps the start-up under about 9 s.
+    * then decides the result, and that is a matter of time, not of passes: C2 is still working through its queue
+    * twenty seconds into a replay. Twelve seconds keeps the socket up within about fifteen of the start. A time,
+    * not a count, also gives a faster machine more passes for the same wait.
     */
-  val DefaultRounds: Int = 8
+  val DefaultBudget: Budget = Budget.Seconds(12)
 
   /** What a warmup run imported. */
   final case class Summary(traces: Int, imported: Int, mismatches: Int, millis: Long, failedReplays: Int = 0)
@@ -33,7 +41,7 @@ object WarmupRunner extends Resource:
     *   true if restore-path executed cleanly; false if checkpoint was unavailable
     */
   def warmupAndCheckpoint(socketPath: Path): Boolean =
-    runWarmup(resolveTracesDir(baseDir), DefaultRounds)
+    runWarmup(resolveTracesDir(baseDir), DefaultBudget)
 
     Core.getGlobalContext.register(WarmupRunner)
 
@@ -56,9 +64,10 @@ object WarmupRunner extends Resource:
         false
 
   /** Warm the JIT before the fuzz server binds its socket, without a CRaC checkpoint. Used when the target is started
-    * through the fuzz packaging env (`JAM_FUZZ`), which is how W3F's `target.py` launches every target. Skipped when
+    * through the fuzz packaging env (`JAM_FUZZ`). Skipped when
     * `JAM_WARMUP=0` or when no binary warmup traces are found, so a missing corpus never stops the server from
-    * starting. `JAM_WARMUP_ROUNDS` sets the number of passes over the corpus.
+    * starting. `JAM_WARMUP_SECONDS` sets how long to keep replaying the corpus, `JAM_WARMUP_ROUNDS` a fixed number
+    * of passes over it instead; rounds win if both are given.
     */
   def warmupIfEnabled(env: String => Option[String] = sys.env.get): Option[Summary] =
     if env("JAM_WARMUP").contains("0") then
@@ -66,8 +75,10 @@ object WarmupRunner extends Resource:
       None
     else
       val tracesDir = resolveTracesDir(baseDir, env)
-      val rounds = env("JAM_WARMUP_ROUNDS").flatMap(_.toIntOption).filter(_ >= 0).getOrElse(DefaultRounds)
-      if Files.isDirectory(tracesDir) then runWarmup(tracesDir, rounds)
+      val budget = env("JAM_WARMUP_ROUNDS").flatMap(_.toIntOption).filter(_ >= 0).map(Budget.Rounds(_))
+        .orElse(env("JAM_WARMUP_SECONDS").flatMap(_.toDoubleOption).filter(_ >= 0).map(Budget.Seconds(_)))
+        .getOrElse(DefaultBudget)
+      if Files.isDirectory(tracesDir) then runWarmup(tracesDir, budget)
       else
         println(s"No warmup traces at $tracesDir; starting cold.")
         None
@@ -76,7 +87,7 @@ object WarmupRunner extends Resource:
     * post-restore.
     */
   def run(): Unit =
-    runWarmup(resolveTracesDir(baseDir), DefaultRounds)
+    runWarmup(resolveTracesDir(baseDir), DefaultBudget)
     Core.getGlobalContext.register(WarmupRunner)
     println("\nTriggering CRaC checkpoint...")
     try
@@ -99,19 +110,19 @@ object WarmupRunner extends Resource:
           .sortBy(_.getFileName.toString)
           .flatMap(FuzzClient.TraceDir.find)
 
-  /** Replay every trace under `tracesDir` `rounds` times through a temporary fuzz server. Never throws: a warmup
+  /** Replay every trace under `tracesDir` through a temporary fuzz server for as long as `budget` says. Never throws: a warmup
     * problem is reported and the caller starts the real server anyway.
     */
-  private[conformance] def runWarmup(tracesDir: Path, rounds: Int): Option[Summary] =
+  private[conformance] def runWarmup(tracesDir: Path, budget: Budget): Option[Summary] =
     println("=== Warmup ===")
     println(s"Traces directory: $tracesDir")
     try
       val traces = if Files.isDirectory(tracesDir) then findTraces(tracesDir) else Vector.empty
-      if traces.isEmpty || rounds == 0 then
+      if traces.isEmpty || budget == Budget.Rounds(0) || budget == Budget.Seconds(0) then
         println(s"No binary traces (genesis.bin + NNNNNNNN.bin) under $tracesDir; starting cold.")
         None
       else
-        val summary = replayThroughSocket(traces, rounds)
+        val summary = replayThroughSocket(traces, budget)
         println(
           s"Warmup complete: ${summary.traces} trace replays, ${summary.imported} blocks in ${summary.millis}ms, " +
             s"${summary.mismatches} root mismatches, ${summary.failedReplays} replays skipped"
@@ -128,16 +139,24 @@ object WarmupRunner extends Resource:
   // the code paths compiled are the same.
   private val warmupConfig = ChainConfig.TINY
 
-  private def replayThroughSocket(traces: Vector[FuzzClient.TraceDir], rounds: Int): Summary =
+  private def replayThroughSocket(traces: Vector[FuzzClient.TraceDir], budget: Budget): Summary =
     val dir = Files.createTempDirectory("jam-warmup")
     val server = FuzzServer.start(dir.resolve("warmup.sock"), warmupConfig, FileLogger.noop)
     val start = System.nanoTime()
     var imported = 0
     var mismatches = 0
     var failed = 0
+    var replays = 0
+    // Whether to replay one more trace: within the passes asked for, or, on a time budget, during the first pass
+    // and then until the time is up.
+    def another: Boolean = budget match
+      case Budget.Rounds(n)        => replays < n * traces.size
+      case Budget.Seconds(seconds) => replays < traces.size || (System.nanoTime() - start) / 1e9 < seconds
     try
-      for _ <- 1 to rounds; trace <- traces do
-        // One trace that does not decode or replay (a corpus older than the decoder) must not cost the rest of
+      while another do
+        val trace = traces(replays % traces.size)
+        replays += 1
+        // One trace that no longer decodes or replays (a corpus older than the decoder) must not cost the rest of
         // the warmup: it is reported and skipped.
         try
           val (ok, bad) = replay(server.socketPath, trace)
@@ -153,7 +172,7 @@ object WarmupRunner extends Resource:
     finally
       server.close()
       Using.resource(Files.walk(dir))(_.sorted(Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p)))
-    Summary(traces.size * rounds, imported, mismatches, (System.nanoTime() - start) / 1_000_000, failed)
+    Summary(replays, imported, mismatches, (System.nanoTime() - start) / 1_000_000, failed)
 
   /** One fuzzer session: handshake, Initialize from the genesis, every step as ImportBlock, then a GetState for the
     * last imported block. Returns (blocks whose reply root matched, blocks that did not).

@@ -45,6 +45,24 @@ class WarmupRunnerSpec extends AnyFunSpec with Matchers:
       summary.mismatches shouldBe 0
     }
 
+    it("keeps replaying the corpus until the time budget is used, and for one pass at least") {
+      val corpus = smallCorpus(2)
+      val timed = Map("JAM_TRACES_DIR" -> corpus.toString, "JAM_WARMUP_SECONDS" -> "0.4")
+      val summary = WarmupRunner.warmupIfEnabled(timed.get).getOrElse(fail("warmup did not run"))
+      summary.millis should be >= 400L
+      summary.traces should be >= 2
+      summary.imported shouldBe 2 * summary.traces
+      summary.mismatches shouldBe 0
+
+      val brief = Map("JAM_TRACES_DIR" -> corpus.toString, "JAM_WARMUP_SECONDS" -> "0.000001")
+      WarmupRunner.warmupIfEnabled(brief.get).map(_.traces) shouldBe Some(1)
+
+      val both = Map("JAM_TRACES_DIR" -> corpus.toString, "JAM_WARMUP_SECONDS" -> "30", "JAM_WARMUP_ROUNDS" -> "3")
+      WarmupRunner.warmupIfEnabled(both.get).map(_.traces) shouldBe Some(3)
+
+      WarmupRunner.warmupIfEnabled(Map("JAM_TRACES_DIR" -> corpus.toString, "JAM_WARMUP_SECONDS" -> "0").get) shouldBe None
+    }
+
     it("skips a trace that does not decode and still warms on the others") {
       val corpus = smallCorpus(3)
       val broken = Files.createDirectories(corpus.resolve("a_broken"))

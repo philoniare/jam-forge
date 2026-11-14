@@ -28,7 +28,14 @@ final class PendingChecks:
 
   /** Starts `check`, which returns the error to report if the block is invalid. */
   def start(check: => Option[PipelineError]): Unit =
-    checks += Parallel.async(check)
+    if !StageTimers.enabled then checks += Parallel.async(check)
+    else
+      // How long a check waits for a pool thread, and how long it then runs.
+      val queued = System.nanoTime()
+      checks += Parallel.async {
+        StageTimers.addNanos("check/queued", System.nanoTime() - queued)
+        StageTimers.time("check/run")(check)
+      }
 
   /** Adds a check that is already running. */
   def add(check: CompletableFuture[Option[PipelineError]]): Unit =
@@ -42,7 +49,7 @@ final class PendingChecks:
 final class EncodedHeader(header: Header, config: ChainConfig):
   lazy val bytes: Array[Byte] = Header.headerCodec(config.epochLength).encode(header)
 
-  /** E_U(H), the encoding without the 96-byte seal (GP 0.8.0 §5). */
+  /** E_U(H), the encoding without the 96-byte seal. */
   def unsealed: Array[Byte] = java.util.Arrays.copyOf(bytes, bytes.length - 96)
 
   lazy val hash: Hash = Hashing.blake2b256(bytes)

@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ark-ec-vrfs = { package = "ark-vrf", git = "https://github.com/davxy/ark-vrf", tag = "v0.2.1", features = ["bandersnatch", "ring"] }
+ark-ec-vrfs = { package = "ark-vrf", git = "https://github.com/davxy/ark-vrf", tag = "v0.2.1", features = ["bandersnatch", "ring", "parallel"] }
 hex = "0.4.3"
 libc = "0.2.161"
 jni = "0.21.1"
+rayon = "1.10"
 
 [lib]
 crate-type = ["cdylib"]

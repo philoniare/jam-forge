@@ -240,6 +240,99 @@ impl Verifier {
             .try_into()
             .map_err(|_| VrfError::ConversionError)
     }
+
+    /// Verifies the ring VRF signatures of a block's tickets together: `signatures` is one signature after
+    /// another, each `signatures.len() / attempts.len()` bytes, the i-th made with `attempts[i]`. Every proof is
+    /// decoded and prepared on its own, in parallel, then one pairing check decides all the ring proofs and one
+    /// multi-scalar multiplication all the Pedersen proofs, where verifying one by one pays both per proof. On
+    /// success returns the VRF output hashes in order; if any signature fails to decode or verify, an error and
+    /// no outputs, without saying which.
+    ///
+    /// This is ark-vrf's `ring::BatchVerifier` with its two halves kept apart so that they can be verified at
+    /// the same time.
+    fn ring_vrf_verify_batch(
+        entropy: &[u8],
+        attempts: &[u8],
+        signatures: &[u8],
+        commitment: &[u8],
+        ring_size: jint,
+    ) -> Result<Vec<u8>, VrfError> {
+        use ark_ec_vrfs::utils::te_sw_map::TEMapping;
+        use rayon::prelude::*;
+        type PedersenBatch = ark_ec_vrfs::pedersen::BatchVerifier<BandersnatchSha512Ell2>;
+
+        if attempts.is_empty() || signatures.len() % attempts.len() != 0 {
+            return Err(VrfError::DeserializationError("signatures are not one per attempt"));
+        }
+        let each = signatures.len() / attempts.len();
+        // The batch verifier takes a ring verifier of its own, so one is built here, not shared.
+        let parsed = RingCommitment::deserialize_compressed(commitment)
+            .map_err(|_| VrfError::DeserializationError("invalid commitment format"))?;
+        let ring_ctx = ring_context(ring_size)?;
+        let mut ring_batch = ring_ctx.verifier(ring_ctx.verifier_key_from_commitment(parsed)).kzg_batch_verifier();
+        let mut pedersen_batch = PedersenBatch::new();
+
+        let prepared: Vec<_> = signatures
+            .par_chunks(each)
+            .zip(attempts.par_iter())
+            .map(|(signature, &attempt)| {
+                let signature = decode_ring_signature(signature)
+                    .ok_or(VrfError::DeserializationError("invalid signature format"))?;
+                let input_data = [b"jam_ticket_seal", entropy, &[attempt]].concat();
+                let input = input_point(&input_data).ok_or(VrfError::VerificationError)?;
+                let pedersen = PedersenBatch::prepare(input, signature.output, [], &signature.proof.pedersen_proof);
+                let key_commitment = signature.proof.pedersen_proof.key_commitment().into_te();
+                let ring = ring_batch.prepare(signature.proof.ring_proof.clone(), key_commitment);
+                let hash: [u8; 32] = signature.output.hash()[..32].try_into().map_err(|_| VrfError::ConversionError)?;
+                Ok((pedersen, ring, hash))
+            })
+            .collect();
+
+        let mut outputs = Vec::with_capacity(32 * attempts.len());
+        for item in prepared {
+            let (pedersen, ring, hash): (_, _, [u8; 32]) = item?;
+            pedersen_batch.push_prepared(pedersen);
+            ring_batch.push_prepared(ring);
+            outputs.extend_from_slice(&hash);
+        }
+        let (pedersen_ok, ring_ok) = rayon::join(|| pedersen_batch.verify().is_ok(), || ring_batch.verify());
+        if pedersen_ok && ring_ok {
+            Ok(outputs)
+        } else {
+            Err(VrfError::VerificationError)
+        }
+    }
+}
+
+/// Decodes a ring VRF signature as `RingVrfSignature::deserialize_compressed` does, with the validity checks of
+/// its parts (each curve point on its curve and in its prime-order subgroup, which is two thirds of the decoding)
+/// run in parallel. Each pattern names every field, so a field added upstream fails to compile here rather than
+/// going unchecked.
+fn decode_ring_signature(bytes: &[u8]) -> Option<RingVrfSignature> {
+    use ark_serialize::Valid;
+    use rayon::prelude::*;
+    let signature = RingVrfSignature::deserialize_compressed_unchecked(bytes).ok()?;
+    let RingVrfSignature { output, proof } = &signature;
+    let RingProof { pedersen_proof, ring_proof } = proof;
+    let ark_ec_vrfs::ring::RingBareProof::<BandersnatchSha512Ell2> {
+        column_commitments,
+        columns_at_zeta,
+        quotient_commitment,
+        lin_at_zeta_omega,
+        agg_at_zeta_proof,
+        lin_at_zeta_omega_proof,
+    } = ring_proof;
+    let checks: [&(dyn Fn() -> bool + Sync); 8] = [
+        &|| output.0.is_on_curve() && in_prime_subgroup(&output.0),
+        &|| pedersen_proof.check().is_ok(),
+        &|| column_commitments.check().is_ok(),
+        &|| columns_at_zeta.check().is_ok(),
+        &|| quotient_commitment.check().is_ok(),
+        &|| lin_at_zeta_omega.check().is_ok(),
+        &|| agg_at_zeta_proof.check().is_ok(),
+        &|| lin_at_zeta_omega_proof.check().is_ok(),
+    ];
+    checks.par_iter().all(|check| check()).then_some(signature)
 }
 
 #[no_mangle]
@@ -481,6 +574,38 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVr
     })
 }
 
+/// Verifies a block's ticket signatures together (see `Verifier::ring_vrf_verify_batch`). `attempts` has one byte
+/// per ticket and `signatures` the signatures one after another. Returns the 32-byte VRF outputs in order, or
+/// throws if any ticket fails.
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_verifierRingVrfVerifyBatch(
+    mut env: JNIEnv,
+    _class: JClass,
+    entropy: JByteArray,
+    attempts: JByteArray,
+    signatures: JByteArray,
+    commitment: JByteArray,
+    ring_size: jint,
+) -> jbyteArray {
+    jni_guard!(env, std::ptr::null_mut(), {
+    let return_error = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
+        let _ = env.throw_new("java/lang/RuntimeException", error_msg);
+        std::ptr::null_mut()
+    };
+    let inputs = [entropy, attempts, signatures, commitment].map(|array| env.convert_byte_array(array).ok());
+    let [Some(entropy), Some(attempts), Some(signatures), Some(commitment)] = inputs else {
+        return return_error(&mut env, "Failed to convert input data");
+    };
+    match Verifier::ring_vrf_verify_batch(&entropy, &attempts, &signatures, &commitment, ring_size) {
+        Ok(outputs) => match env.byte_array_from_slice(&outputs) {
+            Ok(array) => array.into_raw(),
+            Err(_) => return_error(&mut env, "Failed to create output array"),
+        },
+        Err(e) => return_error(&mut env, &e.to_string()),
+    }
+    })
+}
+
 /// IETF VRF signature structure (96 bytes: 32 output + 64 proof)
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 struct IetfVrfSignature {
@@ -555,6 +680,8 @@ fn double_scalar_mul(
 /// IETF VRF verification (RFC 9381 section 5.3 with additional data), the same check as ark-vrf's
 /// `ietf::Verifier::verify`: recompute `u = s*G - c*Y` and `v = s*I - c*O` and compare the challenge. ark-vrf
 /// computes the four products one by one, which is most of a verification; here each pair shares its doublings.
+/// The reference the tests hold [`ietf_verify_signature`] to; the JNI entry runs that one.
+#[cfg(test)]
 fn ietf_verify(public: &BanderPublic, input: BanderInput, output: BanderOutput, aux: &[u8], proof: &IetfProof) -> bool {
     let minus_c = -proof.c;
     let u = double_scalar_mul(
@@ -576,6 +703,193 @@ fn ietf_verify(public: &BanderPublic, input: BanderInput, output: BanderOutput, 
     let norms = BanderProjective::normalize_batch(&[u, v]);
     let expected = BandersnatchSha512Ell2::challenge(&[&public.0, &input.0, &output.0, &norms[0], &norms[1]], aux);
     expected == proof.c
+}
+
+/// `a*P` given the odd multiples of `P` for `window`. Not constant time: verification only.
+fn scalar_mul(multiples: &[BanderProjective], window: usize, a: &BanderScalar) -> BanderProjective {
+    let digits = wnaf_digits(a, window);
+    let mut acc = BanderProjective::zero();
+    for &digit in digits.iter().rev() {
+        acc.double_in_place();
+        add_digit(&mut acc, multiples, digit);
+    }
+    acc
+}
+
+type BanderBase = <BanderAffine as AffineRepr>::BaseField;
+
+/// `e`, the Montgomery `u`-coordinate of one of the curve's two points of order 2 at infinity:
+/// `(-(a + d) + 2*sqrt(a*d)) / (a - d)` for the twisted Edwards coefficients `a` and `d`, whose product is a square.
+fn two_torsion_u() -> &'static BanderBase {
+    use ark_ec_vrfs::reexports::ark_ec::twisted_edwards::TECurveConfig;
+    use ark_ec_vrfs::reexports::ark_ff::Field;
+    type Config = <BanderAffine as AffineRepr>::Config;
+    static E: OnceLock<BanderBase> = OnceLock::new();
+    E.get_or_init(|| {
+        let (a, d) = (<Config as TECurveConfig>::COEFF_A, <Config as TECurveConfig>::COEFF_D);
+        let root = (a * d).sqrt().expect("a*d is a square on Bandersnatch");
+        (root.double() - a - d) / (a - d)
+    })
+}
+
+/// Whether the curve point `p` is in the prime-order subgroup: the same answer as arkworks' check, which
+/// multiplies by the group order, for the cost of two Legendre symbols.
+///
+/// Bandersnatch's group is Z2 x Z2 x Zr with all three points of order 2 rational, so the prime-order subgroup is
+/// exactly the doubles 2E, and a point is a double when the 2-descent characters agree with those of the identity.
+/// For the order-2 point `(0, -1)` the character is the quadratic character of `1 - a*x^2`; for one at infinity,
+/// with `u = (1 + y)/(1 - y)` the Montgomery coordinate, it is that of `(u - e)`, taken here as
+/// `(1 - y)*((1 + y) - e*(1 - y))`, which is a non-residue on the subgroup. Two characters fix the third. Where an
+/// argument is zero (the identity) the symbol says nothing and the group-order check decides.
+fn in_prime_subgroup(p: &BanderAffine) -> bool {
+    use ark_ec_vrfs::reexports::ark_ec::twisted_edwards::TECurveConfig;
+    use ark_ec_vrfs::reexports::ark_ff::{Field, LegendreSymbol, One};
+    type Config = <BanderAffine as AffineRepr>::Config;
+    let one = BanderBase::one();
+    let first = (one - <Config as TECurveConfig>::COEFF_A * p.x.square()).legendre();
+    if first == LegendreSymbol::QuadraticNonResidue {
+        return false;
+    }
+    let second = ((one - p.y) * ((one + p.y) - *two_torsion_u() * (one - p.y))).legendre();
+    match (first, second) {
+        (LegendreSymbol::QuadraticResidue, LegendreSymbol::QuadraticNonResidue) => true,
+        (LegendreSymbol::QuadraticResidue, LegendreSymbol::QuadraticResidue) => false,
+        _ => p.is_in_correct_subgroup_assuming_on_curve(),
+    }
+}
+
+/// Decodes a VRF output point as `BanderOutput::deserialize_compressed` does (canonical encoding, on the curve, in
+/// the prime-order subgroup), with [`in_prime_subgroup`] for the last check.
+fn decode_output(bytes: &[u8]) -> Option<BanderOutput> {
+    let point = BanderAffine::deserialize_compressed_unchecked(bytes).ok()?;
+    in_prime_subgroup(&point).then(|| BanderOutput::from_affine(point))
+}
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// A few threads that take the side work of a verification. The seal and the entropy source of a block are
+/// verified at the same time and each hands over two pieces, so four keeps every piece on its own thread.
+const VERIFY_WORKERS: usize = 4;
+
+fn verify_pool() -> &'static Mutex<std::sync::mpsc::Sender<Job>> {
+    static POOL: OnceLock<Mutex<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for i in 0..VERIFY_WORKERS {
+            let receiver = Arc::clone(&receiver);
+            let _ = std::thread::Builder::new().name(format!("bandersnatch-verify-{i}")).spawn(move || loop {
+                let job = lock(&receiver).recv();
+                match job {
+                    // A panicking job drops its result sender, which its caller sees as a failed verification.
+                    Ok(job) => drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))),
+                    Err(_) => break,
+                }
+            });
+        }
+        Mutex::new(sender)
+    })
+}
+
+/// Runs `job` on a pool thread and returns where its result arrives. If the pool cannot take it (no thread could
+/// be started), the job runs here, so the result is always there to receive.
+fn on_pool<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> std::sync::mpsc::Receiver<T> {
+    let (result_sender, result) = std::sync::mpsc::sync_channel::<T>(1);
+    let boxed: Job = Box::new(move || {
+        let _ = result_sender.send(job());
+    });
+    if let Err(rejected) = lock(verify_pool()).send(boxed) {
+        (rejected.0)();
+    }
+    result
+}
+
+/// Input points of VRF inputs that come back, by their data. A fallback seal's input is the same for a whole
+/// epoch and a ticket seal's one of a few, while an entropy source's is new with every block. Hashing to the curve
+/// is a quarter of a verification, so an input is kept from the second time it is seen: the repeating ones are
+/// then found here, and the ones seen once never fill the table.
+struct InputPoints {
+    points: HashMap<Vec<u8>, BanderInput>,
+    /// Fingerprints of inputs seen once, the oldest overwritten first.
+    seen_once: [u64; 16],
+    next: usize,
+}
+const INPUT_POINTS_MAX: usize = 64;
+
+fn input_point(data: &[u8]) -> Option<BanderInput> {
+    use std::hash::{BuildHasher, Hasher};
+    static INPUTS: OnceLock<(Mutex<InputPoints>, std::collections::hash_map::RandomState)> = OnceLock::new();
+    let (inputs, hasher) = INPUTS.get_or_init(|| {
+        let empty = InputPoints { points: HashMap::new(), seen_once: [0; 16], next: 0 };
+        (Mutex::new(empty), std::collections::hash_map::RandomState::new())
+    });
+    if let Some(point) = lock(inputs).points.get(data) {
+        return Some(*point);
+    }
+    let point = BanderInput::new(data)?;
+    let mut h = hasher.build_hasher();
+    h.write(data);
+    let fingerprint = h.finish();
+    let mut inputs = lock(inputs);
+    if inputs.seen_once.contains(&fingerprint) {
+        if inputs.points.len() >= INPUT_POINTS_MAX {
+            inputs.points.clear();
+        }
+        inputs.points.insert(data.to_vec(), point);
+    } else {
+        let at = inputs.next;
+        inputs.seen_once[at] = fingerprint;
+        inputs.next = (at + 1) % inputs.seen_once.len();
+    }
+    Some(point)
+}
+
+/// Verifies the 96-byte IETF VRF signature `sig` (output point, then proof) by `public` over the input hashed from
+/// `input_data`, and returns the output point. The same check as [`ietf_verify`] on the decoded values, with its
+/// three independent parts run at once: `u = s*G - c*Y` goes to one pool thread, decoding the output point `O`
+/// and `-c*O` to another, and this thread hashes to the input point `I` and computes `s*I`, the longest part, so
+/// that it is not the one waiting for a thread to wake. The caller waits for under half the work of a
+/// verification in place of all of it.
+fn ietf_verify_signature(public: &BanderPublic, input_data: &[u8], aux: &[u8], sig: &[u8]) -> Option<BanderOutput> {
+    if sig.len() < 96 {
+        return None;
+    }
+    // The proof is two scalars, cheap to read, and every part needs them.
+    let proof = IetfProof::deserialize_compressed(&sig[32..96]).ok()?;
+    let (c, s) = (proof.c, proof.s);
+    let minus_c = -c;
+
+    let public_point = public.0;
+    let u_result = on_pool(move || {
+        double_scalar_mul(
+            generator_multiples(),
+            GENERATOR_WINDOW,
+            &s,
+            &odd_multiples(&public_point, POINT_WINDOW),
+            POINT_WINDOW,
+            &minus_c,
+        )
+    });
+    let output_bytes: [u8; 32] = sig[..32].try_into().ok()?;
+    let output_result = on_pool(move || {
+        let output = decode_output(&output_bytes)?;
+        let minus_c_output = scalar_mul(&odd_multiples(&output.0, POINT_WINDOW), POINT_WINDOW, &minus_c);
+        Some((output, minus_c_output))
+    });
+
+    let input = input_point(input_data);
+    let s_input = input.as_ref().map(|i| scalar_mul(&odd_multiples(&i.0, POINT_WINDOW), POINT_WINDOW, &s));
+
+    // Both results are received whatever the outcome, so no job is left writing to a dropped channel.
+    let u = u_result.recv().ok();
+    let output = output_result.recv().ok().flatten();
+    let (input, s_input, u, (output, minus_c_output)) = (input?, s_input?, u?, output?);
+
+    let v = s_input + minus_c_output;
+    // One inversion each: with ark's `parallel` feature a batch normalisation of two goes through its thread pool.
+    let (u, v) = (u.into_affine(), v.into_affine());
+    let expected = BandersnatchSha512Ell2::challenge(&[&public.0, &input.0, &output.0, &u, &v], aux);
+    (expected == c).then_some(output)
 }
 
 /// Create a secret key from a 32-byte seed
@@ -757,17 +1071,10 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         None => return return_error_local(&mut env, "Failed to deserialize public key"),
     };
 
-    let sig = match IetfVrfSignature::deserialize_compressed(&sig_data[..]) {
-        Ok(s) => s,
-        Err(_) => return return_error_local(&mut env, "Failed to deserialize signature"),
+    let output = match ietf_verify_signature(&public, &vrf_input_data, &aux, &sig_data) {
+        Some(output) => output,
+        None => return return_error_local(&mut env, "IETF VRF verification failed"),
     };
-
-    let input = vrf_input_point(&vrf_input_data);
-    let output = sig.output;
-
-    if !ietf_verify(&public, input, output, &aux, &sig.proof) {
-        return return_error_local(&mut env, "IETF VRF verification failed");
-    }
 
     let output_hash: [u8; 32] = output.hash()[..32].try_into().unwrap_or([0u8; 32]);
 
@@ -1010,6 +1317,118 @@ mod tests {
         assert_eq!(accepted, 40);
     }
 
+    /// What the JNI entry did before the parts ran in parallel: decode the whole signature, then verify.
+    fn sequential_verify(public: &BanderPublic, input_data: &[u8], aux: &[u8], sig: &[u8]) -> Option<BanderOutput> {
+        use ark_ec_vrfs::ietf::Verifier as _;
+        let decoded = IetfVrfSignature::deserialize_compressed(sig).ok()?;
+        let input = vrf_input_point(input_data);
+        public.verify(input, decoded.output, aux, &decoded.proof).ok()?;
+        Some(decoded.output)
+    }
+
+    #[test]
+    fn ietf_verify_signature_agrees_with_ark_vrf_on_signature_bytes() {
+        use ark_ec_vrfs::ietf::Prover as _;
+        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([11u8; 32]);
+        let (mut accepted, mut rejected) = (0, 0);
+        for i in 0..24u8 {
+            let secret = BanderSecret::from_seed(&[i; 32]);
+            let other = BanderSecret::from_seed(&[i.wrapping_add(50); 32]);
+            let data = [b"jam_fallback_seal".as_slice(), &[i; 32]].concat();
+            let other_data = [b"jam_entropy".as_slice(), &[i; 32]].concat();
+            let aux = vec![i; i as usize * 5];
+            let input = vrf_input_point(&data);
+            let output = secret.output(input);
+            let proof = secret.prove(input, output, &aux);
+            let mut good = Vec::new();
+            IetfVrfSignature { output, proof }.serialize_compressed(&mut good).unwrap();
+            assert_eq!(good.len(), 96);
+
+            let mut candidates = vec![good.clone(), good[..95].to_vec(), good[..32].to_vec(), Vec::new()];
+            // Trailing bytes are ignored, as by the decoder this replaces.
+            candidates.push([good.as_slice(), &[1, 2, 3]].concat());
+            // Another signer's output point in a good proof, and the reverse.
+            let mut foreign = Vec::new();
+            other.output(input).serialize_compressed(&mut foreign).unwrap();
+            candidates.push([&foreign[..], &good[32..]].concat());
+            // Every byte position flipped once: off-curve and out-of-subgroup output points, non-canonical
+            // scalars and wrong but well-formed values all come up.
+            for at in 0..96 {
+                let mut bad = good.clone();
+                bad[at] ^= 1 << (rng.next_u32() % 8);
+                candidates.push(bad);
+            }
+            for _ in 0..40 {
+                let mut random = vec![0u8; 96];
+                rng.fill_bytes(&mut random);
+                candidates.push(random);
+            }
+            // Random output points with the good proof: most decode to a curve point outside the prime subgroup.
+            for _ in 0..40 {
+                let mut bad = good.clone();
+                rng.fill_bytes(&mut bad[..32]);
+                candidates.push(bad);
+            }
+
+            for sig in &candidates {
+                for public in [secret.public(), other.public()] {
+                    for (d, ad) in [(&data, &aux), (&other_data, &aux), (&data, &other_data)] {
+                        let expected = sequential_verify(&public, d, ad, sig);
+                        let got = ietf_verify_signature(&public, d, ad, sig);
+                        assert_eq!(got, expected, "signature {}", hex::encode(sig));
+                        if expected.is_some() { accepted += 1 } else { rejected += 1 }
+                    }
+                }
+            }
+        }
+        // Per signer: the good signature and the one with trailing bytes, under its own key, input and data.
+        assert_eq!(accepted, 24 * 2);
+        assert!(rejected > 24 * 1000);
+    }
+
+    #[test]
+    fn ietf_verify_signature_is_safe_from_many_threads() {
+        use ark_ec_vrfs::ietf::Prover as _;
+        let cases: Vec<_> = (0..16u8)
+            .map(|i| {
+                let secret = BanderSecret::from_seed(&[i; 32]);
+                let data = vec![i; 40];
+                let input = vrf_input_point(&data);
+                let output = secret.output(input);
+                let mut sig = Vec::new();
+                IetfVrfSignature { output, proof: secret.prove(input, output, b"x") }.serialize_compressed(&mut sig).unwrap();
+                (secret.public(), data, sig, output)
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for t in 0..12usize {
+                let cases = &cases;
+                scope.spawn(move || {
+                    for round in 0..200 {
+                        let (public, data, sig, output) = &cases[(t + round) % cases.len()];
+                        assert_eq!(ietf_verify_signature(public, data, b"x", sig), Some(*output));
+                        let (wrong_key, ..) = &cases[(t + round + 1) % cases.len()];
+                        assert_eq!(ietf_verify_signature(wrong_key, data, b"x", sig), None);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn input_point_is_the_hashed_point_whether_kept_or_not() {
+        // Each input several times over, so every one is computed, noted, kept and then found; and more distinct
+        // inputs than the table holds, so it is emptied and refilled on the way.
+        for round in 0..4 {
+            for i in 0..200u32 {
+                let data = [b"jam_fallback_seal".as_slice(), &i.to_le_bytes()].concat();
+                assert_eq!(input_point(&data), BanderInput::new(&data), "input {i}, round {round}");
+            }
+        }
+        assert_eq!(input_point(b""), BanderInput::new(b""));
+    }
+
     #[test]
     fn checked_public_caches_valid_keys_and_rejects_bad_ones() {
         let secret = BanderSecret::from_seed(&[7u8; 32]);
@@ -1025,5 +1444,135 @@ mod tests {
         assert!(checked_public(&bad).is_none());
         assert!(checked_public(&bad).is_none());
         assert!(checked_public(&bytes[..31]).is_none());
+    }
+
+    #[test]
+    fn in_prime_subgroup_agrees_with_the_group_order_check() {
+        use ark_ec_vrfs::reexports::ark_ff::One;
+        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([1u8; 32]);
+        let (mut inside, mut outside) = (0, 0);
+        // Random encodings decode to curve points spread evenly over the four cosets of the subgroup.
+        while inside + outside < 20_000 {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            let Ok(p) = BanderAffine::deserialize_compressed_unchecked(&bytes[..]) else { continue };
+            let expected = p.is_in_correct_subgroup_assuming_on_curve();
+            assert_eq!(in_prime_subgroup(&p), expected, "point {}", hex::encode(bytes));
+            assert_eq!(decode_output(&bytes).is_some(), BanderOutput::deserialize_compressed(&bytes[..]).is_ok());
+            if expected { inside += 1 } else { outside += 1 }
+        }
+        assert!(inside > 4000 && outside > 13000, "{inside} inside, {outside} outside");
+
+        // The identity, the affine point of order 2, and subgroup points moved by it.
+        let identity = BanderAffine::zero();
+        let order_two = BanderAffine::new_unchecked(BanderBase::zero(), -BanderBase::one());
+        assert!(order_two.is_on_curve() && !order_two.is_in_correct_subgroup_assuming_on_curve());
+        assert!(in_prime_subgroup(&identity));
+        assert!(!in_prime_subgroup(&order_two));
+        for i in 0..200u8 {
+            let p = BanderSecret::from_seed(&[i; 32]).public().0;
+            assert!(in_prime_subgroup(&p));
+            assert!(!in_prime_subgroup(&(p + order_two).into_affine()));
+        }
+    }
+
+    /// A ring of `size` keys set up from the SRS the node ships, its commitment, and a signer for each member.
+    fn test_ring(size: usize) -> (Vec<u8>, Vec<BanderSecret>, Vec<BanderAffine>) {
+        let srs = std::fs::read("../../src/main/resources/zcash-srs-2-11-uncompressed.bin").expect("SRS file");
+        initialize_ring_context(&srs, size as jint).unwrap();
+        let secrets: Vec<_> = (0..size).map(|i| BanderSecret::from_seed(&[i as u8, (i >> 8) as u8, 9])).collect();
+        let ring: Vec<_> = secrets.iter().map(|s| s.public()).collect();
+        let points = ring.iter().map(|p| p.0).collect();
+        let mut commitment = Vec::new();
+        Verifier::new(ring, size as jint).unwrap().commitment.serialize_compressed(&mut commitment).unwrap();
+        (commitment, secrets, points)
+    }
+
+    fn ticket_signature(size: usize, secrets: &[BanderSecret], points: &[BanderAffine], who: usize, entropy: &[u8], attempt: u8) -> Vec<u8> {
+        use ark_ec_vrfs::ring::Prover as _;
+        let ctx = ring_context(size as jint).unwrap();
+        let prover = ctx.prover(ctx.prover_key(points), who);
+        let input = vrf_input_point(&[b"jam_ticket_seal", entropy, &[attempt]].concat());
+        let output = secrets[who].output(input);
+        let proof = secrets[who].prove(input, output, &[], &prover);
+        let mut bytes = Vec::new();
+        RingVrfSignature { output, proof }.serialize_compressed(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn ring_batch_agrees_with_one_by_one_verification() {
+        let size = 6;
+        let (commitment, secrets, points) = test_ring(size);
+        let entropy = [42u8; 32];
+        let attempts: Vec<u8> = vec![0, 1, 2, 0, 1];
+        let signatures: Vec<Vec<u8>> =
+            attempts.iter().enumerate().map(|(i, &a)| ticket_signature(size, &secrets, &points, i, &entropy, a)).collect();
+        let each = signatures[0].len();
+        let single = |sig: &[u8], attempt: u8| Verifier::ring_vrf_verify(&entropy, attempt, sig, &commitment, size as jint).ok();
+        let batch = |sigs: &[Vec<u8>], attempts: &[u8]| {
+            Verifier::ring_vrf_verify_batch(&entropy, attempts, &sigs.concat(), &commitment, size as jint).ok()
+        };
+
+        for n in 1..=attempts.len() {
+            let expected: Vec<u8> = (0..n).flat_map(|i| single(&signatures[i], attempts[i]).expect("valid")).collect();
+            assert_eq!(batch(&signatures[..n], &attempts[..n]), Some(expected), "{n} tickets");
+        }
+
+        // One bad ticket anywhere fails the batch, as it fails that ticket alone.
+        for bad in 0..attempts.len() {
+            // A wrong attempt, a flipped proof byte, a flipped output byte, a signature from another position.
+            let mut wrong_attempt = attempts.clone();
+            wrong_attempt[bad] ^= 1;
+            assert!(single(&signatures[bad], wrong_attempt[bad]).is_none());
+            assert_eq!(batch(&signatures, &wrong_attempt), None, "attempt of ticket {bad}");
+            for at in [0, 31, 40, each / 2, each - 1] {
+                let mut tampered = signatures.clone();
+                tampered[bad][at] ^= 4;
+                assert!(single(&tampered[bad], attempts[bad]).is_none(), "byte {at} of ticket {bad} alone");
+                assert_eq!(batch(&tampered, &attempts), None, "byte {at} of ticket {bad}");
+            }
+        }
+        // Another entropy, a truncated buffer, no tickets.
+        assert!(Verifier::ring_vrf_verify_batch(&[1u8; 32], &attempts, &signatures.concat(), &commitment, size as jint).is_err());
+        let all = signatures.concat();
+        assert!(Verifier::ring_vrf_verify_batch(&entropy, &attempts, &all[..all.len() - 1], &commitment, size as jint).is_err());
+        assert!(Verifier::ring_vrf_verify_batch(&entropy, &[], &[], &commitment, size as jint).is_err());
+    }
+
+    #[test]
+    fn decode_ring_signature_agrees_with_the_checked_decoder() {
+        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        let size = 6;
+        let (_, secrets, points) = test_ring(size);
+        let good = ticket_signature(size, &secrets, &points, 2, &[3u8; 32], 1);
+        let same = |bytes: &[u8]| {
+            let expected = RingVrfSignature::deserialize_compressed(bytes).ok().map(|sig| {
+                let mut out = Vec::new();
+                sig.serialize_compressed(&mut out).unwrap();
+                out
+            });
+            let got = decode_ring_signature(bytes).map(|sig| {
+                let mut out = Vec::new();
+                sig.serialize_compressed(&mut out).unwrap();
+                out
+            });
+            assert_eq!(got, expected, "signature {}", hex::encode(bytes));
+            expected.is_some()
+        };
+        assert!(same(&good));
+        assert!(!same(&good[..good.len() - 1]));
+        assert!(!same(&[]));
+        // A flipped bit in every byte: each point comes up off its curve, outside its subgroup, or as another
+        // valid point, and each scalar out of range or changed.
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([2u8; 32]);
+        let (mut accepted, mut rejected) = (0, 0);
+        for at in 0..good.len() {
+            let mut bad = good.clone();
+            bad[at] ^= 1 << (rng.next_u32() % 8);
+            if same(&bad) { accepted += 1 } else { rejected += 1 }
+        }
+        assert!(accepted > 50 && rejected > 50, "{accepted} decoded, {rejected} did not");
     }
 }

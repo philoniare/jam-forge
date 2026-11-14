@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 TARGET="${1:?usage: $0 <target> [trace ...]}"; shift
 [[ $# -gt 0 ]] || set -- fallback safrole storage storage_light
 TRACES=("$@")
-# Chain spec for the target and the replayer: tiny (default), full or fuzz (jam-conformance#215).
+# Chain spec for the target and the replayer: tiny (default), full or fuzz.
 SPEC="${JAM_FUZZ_SPEC:-tiny}"
 # Trace directory: jamtestvectors/traces by default; point it elsewhere for traces of another spec.
 TRACE_ROOT="${FUZZ_TRACE_ROOT:-jamtestvectors/traces}"
@@ -24,9 +24,13 @@ if [[ ! -s "$CP_FILE" || build.sbt -nt "$CP_FILE" ]]; then
     | sed 's#^[^/]*/#/#' > "$CP_FILE"
 fi
 CP="$(cat "$CP_FILE")"
+# The target runs from the class directories unless FUZZ_TARGET_JAR names the assembled jar (as the image runs it;
+# an AOT cache needs a jar-only class path).
+TARGET_CP="${FUZZ_TARGET_JAR:-$CP}"
 # Same JVM flags as the jam-forge Docker image (Dockerfile JAVA_OPTS).
 HEAP="${JAM_HEAP:-4g}"
-JOPTS=(-XX:+UseZGC -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError
+# GC for the target: the image's by default; JAM_GC (e.g. "-XX:+UseParallelGC") replaces it.
+JOPTS=(${JAM_GC:--XX:+UseZGC} -Xms"$HEAP" -Xmx"$HEAP" -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError
   --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
   -Djava.library.path="$PWD/modules/crypto/native/build/linux:$PWD/modules/crypto/native/build/mac:$PWD/modules/crypto/src/main/resources"
   -Dlogback.configurationFile="$PWD/modules/conformance/src/main/resources/logback-prod.xml")
@@ -61,7 +65,7 @@ for trace in "${TRACES[@]}"; do
   if [[ "$TARGET" == jam-forge ]]; then
     JAM_FUZZ=1 JAM_FUZZ_SPEC="$SPEC" JAM_FUZZ_DATA_PATH="$DATA" JAM_FUZZ_SOCK_PATH="$DATA/fuzz.sock" LOG_LEVEL=ERROR \
       JAM_TRACES_DIR="$WARMUP_DIR" JAM_WARMUP="${JAM_WARMUP:-1}" \
-      java "${JOPTS[@]}" -cp "$CP" io.forge.jam.conformance.ConformanceServerApp > "$OUT/$trace.target.log" 2>&1 &
+      java "${JOPTS[@]}" -cp "$TARGET_CP" io.forge.jam.conformance.ConformanceServerApp > "$OUT/$trace.target.log" 2>&1 &
   else
     JAM_FUZZ_SPEC="$SPEC" JAM_FUZZ_DATA_PATH="$DATA" python3 "$CONF_DIR/scripts/target.py" run "$TARGET" > "$OUT/$trace.target.log" 2>&1 &
   fi

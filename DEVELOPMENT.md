@@ -212,7 +212,8 @@ java --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow \
 docker build -t jam-forge:latest .
 
 # Run it the way W3F's target.py does: the JAM_FUZZ env selects the fuzz server, replays the bundled warmup traces
-# through it, then opens the socket in the shared directory. JAM_WARMUP=0 skips the warmup.
+# through it for 12 s, then opens the socket in the shared directory. JAM_WARMUP=0 skips the warmup,
+# JAM_WARMUP_SECONDS=n changes how long it runs and JAM_WARMUP_ROUNDS=n makes it n passes over the traces instead.
 mkdir -p /tmp/jam_fuzz && chmod 777 /tmp/jam_fuzz
 docker run --rm -v /tmp/jam_fuzz:/tmp/jam_fuzz \
   -e JAM_FUZZ=1 -e JAM_FUZZ_SPEC=tiny -e JAM_FUZZ_DATA_PATH=/tmp/jam_fuzz/data \

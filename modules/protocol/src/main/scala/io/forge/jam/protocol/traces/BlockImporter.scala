@@ -146,7 +146,7 @@ class BlockImporter(
             s"Bootstrapped state root ${trieStore.currentRoot} does not match " +
               s"block parent_state_root ${block.header.parentStateRoot}"
           )
-      val trie = trieStore.at(block.header.parentStateRoot)
+      val trie = StageTimers.time("trie-at")(trieStore.at(block.header.parentStateRoot))
 
       val storageView = new ServiceStorageView(trie)
       val view = new TrieBackedJamState(trie, config, storageView, Some(trieStore))
@@ -172,19 +172,23 @@ class BlockImporter(
 
         case Right(result) =>
           // Reports left the guarantee-derived core and service statistics in the view; add the rest to them.
-          val finalCoreStats = computeFinalCoreStatistics(
-            guaranteeStats = view.cores.statistics,
-            availableReports = result.availableReports,
-            assurances = block.extrinsic.assurances,
-            maxCores = config.coresCount
-          )
+          val (finalCoreStats, finalServiceStats) = StageTimers.time("final-stats") {
+            val finalCoreStats = computeFinalCoreStatistics(
+              guaranteeStats = view.cores.statistics,
+              availableReports = result.availableReports,
+              assurances = block.extrinsic.assurances,
+              maxCores = config.coresCount
+            )
 
-          val finalServiceStats = computeFinalServiceStatistics(
-            guaranteeStats = view.serviceStatistics,
-            preimages = block.extrinsic.preimages,
-            accumulationStats = result.accumulationStats,
-            accumulationTransferCounts = result.accumulationTransferCounts
-          )
+            val finalServiceStats = computeFinalServiceStatistics(
+              guaranteeStats = view.serviceStatistics,
+              preimages = block.extrinsic.preimages,
+              accumulationStats = result.accumulationStats,
+              accumulationTransferCounts = result.accumulationTransferCounts
+            )
+
+            (finalCoreStats, finalServiceStats)
+          }
 
           view.cores.statistics = finalCoreStats
           view.serviceStatistics = finalServiceStats
@@ -286,7 +290,7 @@ class BlockImporter(
         Long,
         (Long, Int)
       ], // serviceId -> (gasUsed, workItemCount)
-      accumulationTransferCounts: Map[Long, Int] // serviceId -> T(s), deferred transfers delivered (gp 0.8.0 eq:accumulationstatisticsdef)
+      accumulationTransferCounts: Map[Long, Int] // serviceId -> T(s), deferred transfers delivered
   ): List[ReportTypes.ServiceStatisticsEntry] =
     // Collect all service IDs from all sources (immutable)
     val stats =

@@ -63,21 +63,21 @@ object BlockPipeline:
       sharedExecutor: Option[AccumulationExecutor] = None,
       ancestry: List[AncestorHeader] = List.empty
   ): Either[PipelineError, BlockPipelineResult] =
-    val initialContext = PipelineContext.from(block, view.config, view)
+    val initialContext = StageTimers.time("x/context")(PipelineContext.from(block, view.config, view))
     val storageView: Option[ServiceStorageView] = Some(view.storage)
 
     val pipeline: StfStepWith[BlockPipelineResult] = for {
       // Step 0: Validate extrinsic hash
       _ <- StageTimers.step("extrinsic-hash")(validateExtrinsicHash)
-      _ <- setPosteriorOffenders
+      _ <- StageTimers.step("x/setPosteriorOffenders")(setPosteriorOffenders)
 
       // Step 1: Safrole
       safroleOut <- StageTimers.step("safrole")(safroleEpoch)
-      _ <- storeSafroleOutput(safroleOut)
+      _ <- StageTimers.step("x/storeSafroleOutput")(storeSafroleOutput(safroleOut))
 
       // Step 2: Block seal validation (uses post-Safrole state)
-      _ <- validateEpochMark
-      _ <- validateTicketsMark
+      _ <- StageTimers.step("x/validateEpochMark")(validateEpochMark)
+      _ <- StageTimers.step("x/validateTicketsMark")(validateTicketsMark)
       _ <- StageTimers.step("seal")(validateBlockSeal)
       _ <- StageTimers.step("entropy-vrf")(validateEntropyVrf)
 
@@ -88,28 +88,28 @@ object BlockPipeline:
 
       // Step 3: Disputes
       disputeOut <- StageTimers.step("disputes")(disputes)
-      _ <- storeDisputeOutput(disputeOut)
-      _ <- validateOffendersMark
+      _ <- StageTimers.step("x/storeDisputeOutput")(storeDisputeOutput(disputeOut))
+      _ <- StageTimers.step("x/validateOffendersMark")(validateOffendersMark)
 
       // Step 4: Assurances
       assuranceOut <- StageTimers.step("assurances")(assurances)
-      _ <- storeAvailableReports(assuranceOut.reported)
+      _ <- StageTimers.step("x/storeAvailableReports")(storeAvailableReports(assuranceOut.reported))
 
       // Step 5: Update beta before Reports
-      _ <- updateRecentHistoryPartial
+      _ <- StageTimers.step("x/updateRecentHistoryPartial")(updateRecentHistoryPartial)
 
       // Step 6: Reports
       _ <- StageTimers.step("reports")(reports(skipAncestryValidation, ancestry))
 
-      _ <- savepointStorageView(storageView)
+      _ <- StageTimers.step("x/savepointStorageView")(savepointStorageView(storageView))
 
       // Step 7: Accumulation
       accOut <- StageTimers.step("accumulation")(accumulation(sharedExecutor))
       accRoot = Hash(accOut.ok.toArray)
-      _ <- storeAccumulateRoot(accRoot)
-      _ <- storeAccumulationStats(accOut.accumulationStats)
-      _ <- storeAccumulationTransferCounts(accOut.accumulationTransferCounts)
-      _ <- storeLastAccumulationOutputs(accOut.commitments)
+      _ <- StageTimers.step("x/storeAccumulateRoot")(storeAccumulateRoot(accRoot))
+      _ <- StageTimers.step("x/storeAccumulationStats")(storeAccumulationStats(accOut.accumulationStats))
+      _ <- StageTimers.step("x/storeAccumulationTransferCounts")(storeAccumulationTransferCounts(accOut.accumulationTransferCounts))
+      _ <- StageTimers.step("x/storeLastAccumulationOutputs")(storeLastAccumulationOutputs(accOut.commitments))
 
       // Step 8: History (uses accumulateRoot)
       _ <- StageTimers.step("history")(history(accRoot))
@@ -121,11 +121,11 @@ object BlockPipeline:
       _ <- StageTimers.step("preimages")(preimages)
 
       // Step 11: Statistics (needs pre-transition tau)
-      _ <- setPreTransitionTau
+      _ <- StageTimers.step("x/setPreTransitionTau")(setPreTransitionTau)
       _ <- StageTimers.step("statistics")(statistics)
-      _ <- restorePostTransitionTau(postSafroleTau)
+      _ <- StageTimers.step("x/restorePostTransitionTau")(restorePostTransitionTau(postSafroleTau))
 
-      _ <- discardStorageViewCheckpoint(storageView)
+      _ <- StageTimers.step("x/discardStorageViewCheckpoint")(discardStorageViewCheckpoint(storageView))
 
       finalResult <- inspect((_, ctx) =>
         BlockPipelineResult(
@@ -147,6 +147,7 @@ object BlockPipeline:
           pending.firstFailure() match
             case Some(err) => Left(err)
             case None      => throw e
+    val failed = StageTimers.time("await-checks")(pending.firstFailure())
     result match
-      case Left(err)          => Left(pending.firstFailure().getOrElse(err))
-      case Right((_, output)) => pending.firstFailure().toLeft(output)
+      case Left(err)          => Left(failed.getOrElse(err))
+      case Right((_, output)) => failed.toLeft(output)

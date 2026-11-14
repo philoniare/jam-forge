@@ -199,6 +199,42 @@ object BandersnatchVrf:
       case _: RuntimeException => None
 
   /**
+   * Verify the ring VRF proofs of several tickets together, which costs one pairing check for all of them where
+   * [[verifyRingProof]] pays one per ticket.
+   *
+   * @param tickets Each ticket's signature and attempt
+   * @return The ticket IDs in order if every proof verifies, None if any does not (without saying which)
+   */
+  def verifyRingProofs(
+    tickets: Seq[(JamBytes, UByte)],
+    ringCommitment: JamBytes,
+    entropy: Hash,
+    ringSize: Int
+  ): Option[Seq[JamBytes]] =
+    if tickets.isEmpty then Some(Seq.empty)
+    else
+      try
+        ensureInitialized(ringSize)
+        val length = tickets.head._1.length
+        if tickets.exists(_._1.length != length) then None
+        else
+          val signatures = new Array[Byte](length * tickets.size)
+          tickets.iterator.zipWithIndex.foreach { case ((signature, _), i) =>
+            System.arraycopy(signature.toArray, 0, signatures, i * length, length)
+          }
+          val result = JniBandersnatchWrapper.verifierRingVrfVerifyBatch(
+            entropy.bytes.toArray,
+            tickets.iterator.map(_._2.toByte).toArray,
+            signatures,
+            ringCommitment.toArray,
+            ringSize
+          )
+          if result == null || result.length != 32 * tickets.size then None
+          else Some(result.grouped(32).map(JamBytes(_)).toSeq)
+      catch
+        case _: RuntimeException => None
+
+  /**
    * Alternative verification method that takes raw byte arrays.
    * Useful for testing and direct integration.
    */

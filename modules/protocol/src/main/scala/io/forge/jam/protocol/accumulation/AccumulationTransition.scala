@@ -99,49 +99,60 @@ object AccumulationTransition:
   ): AccumulationStfResult =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max(input.slot - prevSlot, 1L)
-    val partition = partitionAndQueueReports(input.reports, preState.readyQueue, preState.accumulated, m, config)
+    val partition = io.forge.jam.protocol.pipeline.StageTimers.time("acc/partition") {
+      partitionAndQueueReports(input.reports, preState.readyQueue, preState.accumulated, m, config)
+    }
 
     // 8. Execute PVM for accumulated reports (respecting gas budget)
-    val run = runOuterAccumulation(
-      immediateReports = partition.immediateReports,
-      readyToAccumulate = partition.readyToAccumulate,
-      preState = preState,
-      initStagingSet = initStagingSet,
-      initAuthQueues = initAuthQueues,
-      slot = input.slot,
-      config = config,
-      sharedExecutor = sharedExecutor
-    )
+    val run = io.forge.jam.protocol.pipeline.StageTimers.time("acc/outer") {
+      runOuterAccumulation(
+        immediateReports = partition.immediateReports,
+        readyToAccumulate = partition.readyToAccumulate,
+        preState = preState,
+        initStagingSet = initStagingSet,
+        initAuthQueues = initAuthQueues,
+        slot = input.slot,
+        config = config,
+        sharedExecutor = sharedExecutor
+      )
+    }
 
     val outerResult = run.outerResult
     val commitments = outerResult.commitments
 
     // 9. Rebuild the ready queue, then rotate the accumulated sliding window —
     //    both edited with the gas-bounded actually-accumulated set (ACC-003).
-    val finalReadyQueue = rebuildReadyQueue(
-      workingReadyQueue = partition.workingReadyQueue,
-      editedNewRecords = partition.editedNewRecords,
-      actuallyAccumulated = run.actuallyAccumulated,
-      m = m,
-      deltaT = deltaT,
-      config = config
-    )
+    val finalReadyQueue = io.forge.jam.protocol.pipeline.StageTimers.time("acc/ready-queue") {
+      rebuildReadyQueue(
+        workingReadyQueue = partition.workingReadyQueue,
+        editedNewRecords = partition.editedNewRecords,
+        actuallyAccumulated = run.actuallyAccumulated,
+        m = m,
+        deltaT = deltaT,
+        config = config
+      )
+    }
 
-    val newAccumulatedArray =
+    val newAccumulatedArray = io.forge.jam.protocol.pipeline.StageTimers.time("acc/rotate") {
       rotateAccumulated(preState.accumulated, run.actuallyAccumulated, config)
+    }
 
     // 10-13. Statistics, lastAccumulationSlot, posterior privileges, post state.
-    val assembled = assemblePostState(
-      outerResult = outerResult,
-      reportsToAccumulate = run.reportsToAccumulate,
-      finalReadyQueue = finalReadyQueue,
-      newAccumulatedArray = newAccumulatedArray,
-      preState = preState,
-      slot = input.slot
-    )
+    val assembled = io.forge.jam.protocol.pipeline.StageTimers.time("acc/assemble") {
+      assemblePostState(
+        outerResult = outerResult,
+        reportsToAccumulate = run.reportsToAccumulate,
+        finalReadyQueue = finalReadyQueue,
+        newAccumulatedArray = newAccumulatedArray,
+        preState = preState,
+        slot = input.slot
+      )
+    }
 
     // 14. Compute commitment root from yields
-    val outputHash = KeccakCommitmentMerkle.computeCommitmentRoot(commitments)
+    val outputHash = io.forge.jam.protocol.pipeline.StageTimers.time("acc/commit-root") {
+      KeccakCommitmentMerkle.computeCommitmentRoot(commitments)
+    }
 
     // 15. Convert commitments to list format for state storage (key 0x10)
     val commitmentsList =
@@ -211,8 +222,8 @@ object AccumulationTransition:
     val newRecords = queuedReports.map { report =>
       val prereqs = report.context.prerequisites
       val segmentDeps = report.segmentRootLookup.map(_.workPackageHash)
-      // D(r) is a set union (GP 0.8.0 §accumulation D(r)), so a package that is both a prerequisite and a lookup key
-      // counts once, and sets serialize in sorted order (GP 0.8.0 appendix C; omega is C(14) in appendix D).
+      // D(r) is a set union, so a package that is both a prerequisite and a lookup key counts once, and sets
+      // serialize in sorted order.
       val allDeps = (prereqs ++ segmentDeps).distinct.sorted.filter(h =>
         !accumulatedSnapshot.contains(JamBytes(h.bytes))
       )
@@ -772,7 +783,7 @@ object AccumulationTransition:
     serviceOperands
 
   /**
-   * Runs ∆1 for every service of one batch. Each runs against the same initial partial state (GP 0.8.0 eq. (12.18)),
+   * Runs ∆1 for every service of one batch. Each runs against the same initial partial state,
    * so each service gets its own fork of the storage view, and their writes are applied in service order afterwards.
    * With [[AccumulationExecutor.parallelServices]] the services run concurrently, including services sharing a code
    * blob: an interpreted module is safe to share between concurrent runs, and each run has its own instance and

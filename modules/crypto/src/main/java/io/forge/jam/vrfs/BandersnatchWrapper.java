@@ -121,6 +121,18 @@ public class BandersnatchWrapper {
     );
 
     /**
+     * Verify the ring VRF proofs of several tickets together: one attempt byte per ticket and the signatures one
+     * after another. Returns the 32-byte outputs in order; throws if any ticket fails.
+     */
+    public static native byte[] verifierRingVrfVerifyBatch(
+        byte[] entropy,
+        byte[] attempts,
+        byte[] signatures,
+        byte[] commitment,
+        int ringSize
+    );
+
+    /**
      * Create an anonymous ring VRF proof (Safrole ticket) for
      * jam_ticket_seal ++ entropy ++ attempt with empty aux data.
      *

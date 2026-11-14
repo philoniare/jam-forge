@@ -43,6 +43,13 @@ object StageTimers:
         c.nanos.add(System.nanoTime() - t0)
         c.calls.increment()
 
+  /** Add a duration measured elsewhere (across threads, say) to `name`. */
+  def addNanos(name: String, nanos: Long): Unit =
+    if on then
+      val c = cell(name)
+      c.nanos.add(nanos)
+      c.calls.increment()
+
   /** Add `amount` to the counter `name` (reported as its total in the `total_ms` column, e.g. gas used). */
   def count(name: String, amount: Long): Unit =
     if on then
