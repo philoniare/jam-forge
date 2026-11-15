@@ -231,12 +231,22 @@ final class SyncService(
     t
   }
 
+  private val fetchExecutor = Executors.newFixedThreadPool(
+    SyncService.MaxConcurrentFetches,
+    r =>
+      val t = new Thread(r, "jam-sync-fetch")
+      t.setDaemon(true)
+      t
+  )
+
   /** Stop the import pipeline and wait for an in-flight import to finish —
     * must run before the chain's storage closes (a late import reading a
     * closed RocksDB segfaults in JNI).
     */
   def shutdown(): Unit =
-    importExecutor.shutdownNow() // interrupts response waits
+    fetchExecutor.shutdownNow() // interrupts response waits
+    importExecutor.shutdownNow()
+    fetchExecutor.awaitTermination(5, TimeUnit.SECONDS)
     importExecutor.awaitTermination(15, TimeUnit.SECONDS)
     ()
 
@@ -412,7 +422,7 @@ final class SyncService(
       case None    => SyncService.MaxBlocksPerRequest
 
   /** Fetch up to `maxBlocks` blocks descending (inclusive) from `from` on a fresh CE 128 stream
-    * and import them oldest-first. Runs on the import executor.
+    * and import them oldest-first. The request waits on a fetch thread; the import runs on the import executor.
     */
   private def requestAndImport(
       conn: JamnpConnection,
@@ -421,197 +431,152 @@ final class SyncService(
       onDone: () => Unit = () => (),
       ascending: Boolean = false
   ): Unit =
-    val request = new FetchRequest(conn, from, maxBlocks, onDone, ascending)
-    // A peer can announce faster than we fetch (each fetch waits on it for up to 30 s), so the waiting fetches
-    // are bounded: one per (peer, block), a few per peer, and when over a limit the oldest gives way. A fetch
-    // walks back from its block, so the newest one covers what an older one for the same chain would have brought.
-    val dropped = pendingFetches.synchronized {
-      val it = pendingFetches.iterator()
-      var samePeer = 0
-      var duplicate = false
-      // The same block wanted from another peer: one fetch brings it, so this peer is only kept as a fallback.
-      var elsewhere = inFlight == from
-      while it.hasNext do
-        val p = it.next()
-        if p.from == from then
-          if p.conn eq conn then duplicate = true else elsewhere = true
-        if p.conn eq conn then samePeer += 1
-      if duplicate then List(request)
-      else if elsewhere then
-        val others = alternates.computeIfAbsent(from, _ => new java.util.ArrayDeque[FetchRequest]())
-        if others.size < SyncService.MaxAlternatePeers && !others.stream().anyMatch(_.conn eq conn) then
-          others.addLast(request)
-          Nil
-        else List(request)
-      else
-        pendingFetches.addLast(request)
-        val out = List.newBuilder[FetchRequest]
-        if samePeer + 1 > SyncService.MaxPendingFetchesPerPeer then
-          val oldest = pendingFetches.iterator()
-          var removed = false
-          while !removed && oldest.hasNext do
-            val p = oldest.next()
-            if p.conn eq conn then
-              oldest.remove()
-              out += p
-              removed = true
-        if pendingFetches.size > SyncService.MaxPendingFetches then out += pendingFetches.pollFirst()
-        val gone = out.result()
-        // A fetch that gives way takes its fallbacks with it, unless another fetch for the block still waits.
-        gone.flatMap { p =>
-          val stillWanted = pendingFetches.stream().anyMatch(_.from == p.from) || inFlight == p.from
-          val others = if stillWanted then null else alternates.remove(p.from)
-          if others == null then List(p) else p :: others.asScala.toList
-        }
-    }
+    val request = new FetchQueue.Request(conn, from, maxBlocks, onDone, ascending)
+    val dropped = fetches.offer(request)
     dropped.foreach(_.onDone())
-    if dropped.forall(_ ne request) && fetchLoopScheduled.compareAndSet(false, true) then
-      try importExecutor.execute(() => fetchLoop())
+    if dropped.forall(_ ne request) then schedulePump()
+
+  /** Fetches waiting to be sent, and those out with a peer or being imported. */
+  private val fetches = new FetchQueue[JamnpConnection](
+    maxInFlight = SyncService.MaxConcurrentFetches,
+    maxPerPeer = SyncService.MaxPendingFetchesPerPeer,
+    maxPending = SyncService.MaxPendingFetches,
+    maxAlternates = SyncService.MaxAlternatePeers,
+    isOpen = _.isOpen
+  )
+  private val pumpScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** Fetches waiting to be sent. */
+  private[node] def pendingFetchCount: Int = fetches.size
+
+  private def schedulePump(): Unit =
+    if pumpScheduled.compareAndSet(false, true) then
+      try
+        importExecutor.execute { () =>
+          pumpScheduled.set(false)
+          pump()
+        }
       catch
         case _: java.util.concurrent.RejectedExecutionException =>
-          fetchLoopScheduled.set(false) // shutting down
+          pumpScheduled.set(false) // shutting down
 
-  private final class FetchRequest(
-      val conn: JamnpConnection,
-      val from: Hash,
-      val maxBlocks: Int,
-      val onDone: () => Unit,
-      val ascending: Boolean = false
-  )
+  private def pump(): Unit =
+    var next = fetches.next()
+    while next.isDefined do
+      val request = next.get
+      // Nothing a fetch throws may end the loop: no later fetch would ever run.
+      try
+        // An earlier fetch walking back from a descendant may already have brought this block.
+        if request.ascending || !chain.hasBlock(request.from) then fetchExecutor.execute(() => fetchThenImport(request))
+        else finish(request, answered = true)
+      catch
+        case e: Throwable =>
+          if !importExecutor.isShutdown then logger.error("block sync failed", e)
+          finish(request, answered = true)
+      next = fetches.next()
 
-  /** Fetches waiting for the import thread, oldest first. Guarded by itself. */
-  private val pendingFetches = new java.util.ArrayDeque[FetchRequest]()
-
-  /** The block the import thread is fetching now, if any. Guarded by `pendingFetches`. */
-  private var inFlight: Hash = null
-
-  /** Other peers that announced a block already waiting or being fetched, tried in turn if that fetch does not
-    * bring the block. Entries exist only while a fetch for the block waits or runs. Guarded by `pendingFetches`.
-    */
-  private val alternates = new java.util.HashMap[Hash, java.util.ArrayDeque[FetchRequest]]()
-  private val fetchLoopScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
-
-  /** Fetches waiting for the import thread. */
-  private[node] def pendingFetchCount: Int = pendingFetches.synchronized(pendingFetches.size)
-
-  /** Runs the waiting fetches in order on the import thread until none is left. */
-  private def fetchLoop(): Unit =
-    var continue = true
-    while continue do
-      val next = pendingFetches.synchronized {
-        val n = pendingFetches.pollFirst()
-        inFlight = if n == null then null else n.from
-        n
-      }
-      if next != null && !importExecutor.isShutdown then
-        // Nothing a fetch throws may end the loop: no later fetch would ever run.
-        try
-          // An earlier fetch walking back from a descendant may already have brought this block.
-          try if next.ascending || !chain.hasBlock(next.from) then fetch(next.conn, next.from, next.maxBlocks, next.ascending)
-          finally
-            val released = pendingFetches.synchronized {
-              inFlight = null
-              val others = alternates.get(next.from)
-              val have = chain.hasBlock(next.from)
-              val waiting = pendingFetches.stream().anyMatch(_.from == next.from)
-              if others == null then Nil
-              else if have then
-                alternates.remove(next.from)
-                others.asScala.toList
-              else if waiting then Nil
-              else
-                // The fetch did not bring the block: ask the next peer that announced it, ahead of other fetches.
-                var fallback = others.pollFirst()
-                val skipped = List.newBuilder[FetchRequest]
-                while fallback != null && !fallback.conn.isOpen do
-                  skipped += fallback
-                  fallback = others.pollFirst()
-                if fallback == null || others.isEmpty then alternates.remove(next.from)
-                if fallback != null then pendingFetches.addFirst(fallback)
-                skipped.result()
-            }
-            released.foreach(_.onDone())
-            next.onDone()
+  private def fetchThenImport(request: FetchQueue.Request[JamnpConnection]): Unit =
+    val answer =
+      try exchange(request.peer, request.from, request.maxBlocks, request.ascending)
+      catch
+        case e: Exception =>
+          logger.warn(s"block sync failed: ${e.getMessage}")
+          None
+    try
+      importExecutor.execute { () =>
+        try answer.foreach(importFetched(request.peer, request.from, request.ascending, _))
         catch case e: Throwable => logger.error("block sync failed", e)
-      else
-        fetchLoopScheduled.set(false)
-        // A request added after the poll saw the loop as still scheduled: pick it up.
-        continue = !importExecutor.isShutdown && pendingFetches.synchronized(!pendingFetches.isEmpty) &&
-          fetchLoopScheduled.compareAndSet(false, true)
+        finally
+          finish(request, answered = answer.isDefined)
+          pump()
+      }
+    catch
+      case _: java.util.concurrent.RejectedExecutionException =>
+        fetches.finished(request, have = false): Unit // shutting down
+
+  private def finish(request: FetchQueue.Request[JamnpConnection], answered: Boolean): Unit =
+    val released = fetches.finished(request, have = chain.hasBlock(request.from), answered = answered)
+    released.foreach(_.onDone())
+    request.onDone()
 
   /** Ask `conn` for the blocks after our best head, when its chain is ahead by more than a descending request
-    * from its tip can bridge. Repeats (from [[fetch]]) while blocks keep arriving.
+    * from its tip can bridge. Repeats (from [[importFetched]]) while blocks keep arriving.
     */
   private def catchUp(conn: JamnpConnection): Unit = catchUpFrom(conn, chain.best.hash)
 
   /** Ask `conn` for the blocks after `from`: our best head, the last block of the previous answer, or our finalized
-    * head when the peer has nothing after our best head (see [[fetch]]).
+    * head when the peer has nothing after our best head (see [[importFetched]]).
     */
   private def catchUpFrom(conn: JamnpConnection, from: Hash): Unit =
     if conn.isOpen then requestAndImport(conn, from, SyncService.MaxBlocksPerRequest, ascending = true)
 
-  private def fetch(conn: JamnpConnection, from: Hash, maxBlocks: Int, ascending: Boolean): Unit =
-        try
-          val stream = conn
-            .openStream(StreamKind.BlockRequest)
-            .get(10, TimeUnit.SECONDS)
-          // The response is one message; a peer that keeps sending is not buffered without limit.
-          val received = new LinkedBlockingQueue[Array[Byte]](SyncService.MaxResponseMessages)
-          val done = new LinkedBlockingQueue[java.lang.Boolean]()
-          stream.onMessage(received.offer(_))
-          stream.onClosed(() => done.offer(true))
-          stream.send(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong))
-          stream.finish()
+  private def exchange(
+      conn: JamnpConnection,
+      from: Hash,
+      maxBlocks: Int,
+      ascending: Boolean
+  ): Option[List[Array[Byte]]] =
+    val stream = conn
+      .openStream(StreamKind.BlockRequest)
+      .get(10, TimeUnit.SECONDS)
+    // The response is one message; a peer that keeps sending is not buffered without limit.
+    val received = new LinkedBlockingQueue[Array[Byte]](SyncService.MaxResponseMessages)
+    val done = new LinkedBlockingQueue[java.lang.Boolean]()
+    stream.onMessage(received.offer(_))
+    stream.onClosed(() => done.offer(true))
+    stream.send(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong))
+    stream.finish()
 
-          if done.poll(20, TimeUnit.SECONDS) == null then
-            logger.warn("block request timed out")
-            stream.reset() // give the stream up on both sides
-          else
-            val blocks = mutable.ListBuffer.empty[Array[Byte]]
-            var next = received.poll()
-            while next != null do
-              chain.splitBlocks(next) match
-                case Right(bs) => blocks ++= bs
-                case Left(err) => logger.warn(s"CE128 response undecodable: $err")
-              next = received.poll()
-            // Oldest first; skip blocks until one extends our best head.
-            var imported = 0
-            var stored = 0 // new to us, kept on a side branch
-            var unknownParent = false
-            val ordered = if ascending then blocks.toList else blocks.reverse.toList
-            ordered.foreach { blockBytes =>
-              chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
-                case Right(_) =>
-                  imported += 1
-                  chain.decodeBlock(blockBytes).foreach { b =>
-                    announce(chain.headerCodec.encode(b.header))
-                  }
-                case Left(err) =>
-                  if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
-                  if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
-                  logger.debug(s"sync import skipped: $err")
-            }
-            if imported > 0 then
-              logger.info(s"synced $imported block(s); best=${chain.best.slot}")
-            // The peer's blocks do not reach back to our head (a descending request), or more may follow (an
-            // ascending one that brought some): go on from our head.
-            val best = chain.best.hash
-            val finalized = chain.finalized.hash
-            if !ascending && imported == 0 && unknownParent then catchUp(conn)
-            else if ascending && imported + stored > 0 then
-              // More may follow. Go on from the last block of this answer: after our head when it extended our
-              // chain, and along the peer's branch when the blocks are a fork we hold only as a side branch so far.
-              val last = ordered.lastOption.flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf)
-              catchUpFrom(conn, last.filter(chain.hasBlock).getOrElse(best))
-            else if ascending && from == best && best != finalized then
-              // Nothing after our best head: the peer may not have it at all (we are on a fork it never saw, or
-              // one it cannot finalize, which CE 128 must not serve). Every chain shares the finalized block.
-              logger.info("catch-up: the peer has nothing after our head; asking from our finalized block")
-              catchUpFrom(conn, finalized)
-            else if ascending && blocks.isEmpty then logger.info("catch-up: the peer returned no block after our head")
-        catch
-          case e: Exception =>
-            logger.warn(s"block sync failed: ${e.getMessage}")
+    if done.poll(20, TimeUnit.SECONDS) == null then
+      logger.warn("block request timed out")
+      stream.reset() // give the stream up on both sides
+      None
+    else
+      val blocks = mutable.ListBuffer.empty[Array[Byte]]
+      var next = received.poll()
+      while next != null do
+        chain.splitBlocks(next) match
+          case Right(bs) => blocks ++= bs
+          case Left(err) => logger.warn(s"CE128 response undecodable: $err")
+        next = received.poll()
+      Some(blocks.toList)
+
+  private def importFetched(conn: JamnpConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =
+    // Oldest first; skip blocks until one extends our best head.
+    var imported = 0
+    var stored = 0 // new to us, kept on a side branch
+    var unknownParent = false
+    val ordered = if ascending then blocks else blocks.reverse
+    ordered.foreach { blockBytes =>
+      chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
+        case Right(_) =>
+          imported += 1
+          chain.decodeBlock(blockBytes).foreach { b =>
+            announce(chain.headerCodec.encode(b.header))
+          }
+        case Left(err) =>
+          if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
+          if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
+          logger.debug(s"sync import skipped: $err")
+    }
+    if imported > 0 then
+      logger.info(s"synced $imported block(s); best=${chain.best.slot}")
+    // The peer's blocks do not reach back to our head (a descending request), or more may follow (an
+    // ascending one that brought some): go on from our head.
+    val best = chain.best.hash
+    val finalized = chain.finalized.hash
+    if !ascending && imported == 0 && unknownParent then catchUp(conn)
+    else if ascending && imported + stored > 0 then
+      // More may follow. Go on from the last block of this answer: after our head when it extended our
+      // chain, and along the peer's branch when the blocks are a fork we hold only as a side branch so far.
+      val last = ordered.lastOption.flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf)
+      catchUpFrom(conn, last.filter(chain.hasBlock).getOrElse(best))
+    else if ascending && from == best && best != finalized then
+      // Nothing after our best head: the peer may not have it at all (we are on a fork it never saw, or
+      // one it cannot finalize, which CE 128 must not serve). Every chain shares the finalized block.
+      logger.info("catch-up: the peer has nothing after our head; asking from our finalized block")
+      catchUpFrom(conn, finalized)
+    else if ascending && blocks.isEmpty then logger.info("catch-up: the peer returned no block after our head")
 
   // =========================================================================
   // CE 129 — state request (trie range)
@@ -656,6 +621,8 @@ object SyncService:
 
   /** The most blocks one CE 128 request asks for. */
   val MaxBlocksPerRequest: Int = 64
+
+  val MaxConcurrentFetches: Int = 4
 
   /** Other peers remembered as fallbacks for a block already being fetched. */
   val MaxAlternatePeers: Int = 3

@@ -7,11 +7,12 @@ verification and erasure coding. Each suite is a plain `main` under `src/test/..
 | Category | Suite | Command |
 |---|---|---|
 | PVM / gas | `PvmThroughputBench`, `PvmMixedBench`, `RecompilerThroughputBench` | `sbt "pvm/Test/runMain io.forge.jam.pvm.benchmark.PvmThroughputBench"` |
-| Trie / DB | `TrieDbBench` (RocksDB and in-memory backends) | `sbt benchTrieDb` |
+| Trie / DB | `TrieDbBench` (RocksDB and in-memory backends; `--backend=node` drives RocksDB as the node does) | `sbt benchTrieDb` |
 | Signature verification | `SignatureVerifyBench` (Ed25519, Bandersnatch IETF and ring VRF) | `sbt benchSignatures` |
 | Erasure coding | `ErasureCodingBench` (full config: 1023 validators, 342 needed) | `sbt benchErasureCoding` |
 | Block import | `TracesBenchmark`, `Phase0Benchmark`, `PolkajamComparisonBenchmark` | `sbt benchmark` |
 | Block import, before/after | `ImportBench` (replay with root check; heap soak) | `sbt benchImport` (see below) |
+| Block import against state size | `ServiceScaleBench` (a trace replayed on a state with N extra service accounts) | `sbt "protocol/Test/runMain io.forge.jam.protocol.benchmark.ServiceScaleBench --services=0,10000,100000"` |
 | Node heap soak | `NodeSoak` (two nodes over loopback JAMNP) | `sbt soakNodes` (see below) |
 | Hashing | `Blake2bBench` | `sbt "core/Test/runMain io.forge.jam.core.benchmark.Blake2bBench"` |
 | PVM heap growth (`grow_heap`) | `GrowHeapBench` | `sbt benchGrowHeap` |

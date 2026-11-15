@@ -13,6 +13,7 @@ private[node] final class UnverifiedBlocks(meta: ChainMeta, maxBlocks: Int, maxP
 
   def size: Int = blocks.size
   def nonEmpty: Boolean = blocks.nonEmpty
+  def contains(hash: Hash): Boolean = blocks.contains(hash)
 
   def admits(size: Int, source: Option[Ed25519PublicKey]): Either[ChainError, Unit] =
     if blocks.size >= maxBlocks || bytes + size > maxBytes then Left(ChainError.UnverifiedLimit("node"))

@@ -12,8 +12,11 @@ import scala.util.Random
  * State trie + DB benchmark. For RocksDB and the in-memory backend: bootstrap N keys, then
  * B blocks of K dirty keys each (update, save, commit, gc, as BlockImporter does), then random reads.
  *
+ * `--backend=node` drives RocksDB the way the node does: garbage tracking off, each block's save attributed to the
+ * block ([[RocksDbTrieBackend.withJournal]]) and the state `NodePruneLag` blocks back pruned by journal, with no gc.
+ *
  * Args: `--keys=N` (1,000,000), `--blocks=B` (100), `--dirty=K` (1,000), `--reads=R` (100,000),
- * `--backend=rocksdb|memory|both` (both). Prints `RESULT name value unit` lines.
+ * `--backend=rocksdb|node|memory|both` (both: rocksdb and memory). Prints `RESULT name value unit` lines.
  */
 object TrieDbBench:
   private val KeySize = 31
@@ -43,14 +46,50 @@ object TrieDbBench:
 
   final case class Params(keys: Int, blocks: Int, dirty: Int, reads: Int)
 
-  private def run(name: String, open: () => StateTrieBackend, reopen: Option[() => StateTrieBackend], p: Params): Unit =
+  /** How many blocks behind the head the node-mode run prunes. */
+  private val NodePruneLag = 8
+
+  /** How a backend is driven: `save(block, body)` wraps what a block (or the bootstrap, block -1) saves, and
+    * `reclaim(block, store)` frees what the block made unreachable. `reclaimName` labels that step in the results.
+    */
+  private final case class Mode(
+      save: (StateTrieBackend, Int, () => Unit) => Unit,
+      reclaim: (StateTrieBackend, Int, StateTrieStore) => Unit,
+      reclaimName: String
+  )
+
+  private val gcMode = Mode((_, _, body) => body(), (_, _, store) => store.gc(), "gc")
+
+  private def blockLabel(block: Int): io.forge.jam.core.primitives.Hash =
+    io.forge.jam.core.Hashing.blake2b256(java.nio.ByteBuffer.allocate(4).putInt(block).array())
+
+  private val nodeMode = Mode(
+    (backend, block, body) =>
+      backend match
+        case rocks: RocksDbTrieBackend => rocks.withJournal(blockLabel(block), block + 1L)(body())
+        case _                         => body(),
+    (backend, block, _) =>
+      backend match
+        case rocks: RocksDbTrieBackend if block >= NodePruneLag =>
+          rocks.pruneJournal(blockLabel(block - NodePruneLag), block - NodePruneLag + 1L): Unit
+        case _ => (),
+    "prune"
+  )
+
+  private def run(
+      name: String,
+      open: () => StateTrieBackend,
+      reopen: Option[() => StateTrieBackend],
+      p: Params,
+      mode: Mode = gcMode
+  ): Unit =
     val rng = new Random(42)
     val keys = Array.fill(p.keys)(JamBytes(rng.nextBytes(KeySize)))
     def value() = JamBytes(rng.nextBytes(ValueSize))
     val backend = open()
     val store = new StateTrieStore(backend)
 
-    val (_, populateMs) = timeMs(store.bootstrap(keys.toSeq.map(k => (k, value()))))
+    val (_, populateMs) = timeMs(mode.save(backend, -1, () => store.bootstrap(keys.toSeq.map(k => (k, value()))): Unit))
     result(s"${name}_populate", populateMs, "ms")
 
     // Per block: 90% of the dirty keys overwrite existing ones, 10% are new.
@@ -66,10 +105,10 @@ object TrieDbBench:
       val trie = store.at(parent)
       trie.update(updates)
       val t1 = System.nanoTime()
-      trie.save()
+      mode.save(backend, b, () => trie.save())
       store.commitChild(parent, trie.rootHash)
       val t2 = System.nanoTime()
-      store.gc()
+      mode.reclaim(backend, b, store)
       val t3 = System.nanoTime()
       updateMs(b) = (t1 - t0) / 1e6
       saveMs(b) = (t2 - t1) / 1e6
@@ -85,7 +124,7 @@ object TrieDbBench:
     result(s"${name}_block_${p.dirty}_dirty_p99", percentile(sortedBlocks, 0.99), "ms")
     result(s"${name}_block_update_mean", mean(updateMs), "ms")
     result(s"${name}_block_save_mean", mean(saveMs), "ms")
-    result(s"${name}_block_gc_mean", mean(gcMs), "ms")
+    result(s"${name}_block_${mode.reclaimName}_mean", mean(gcMs), "ms")
 
     val root = store.currentRoot
     def readAll(trie: StateTrie): Double =
@@ -126,5 +165,12 @@ object TrieDbBench:
       try
         run("rocksdb", () => RocksDbTrieBackend.open(dir), Some(() => RocksDbTrieBackend.open(dir)), p)
         result("rocksdb_disk_size", dirSize(dir) / 1e6, "MB")
+      finally deleteDir(dir)
+    if which == "node" then
+      val dir = Files.createTempDirectory("trie-bench-node")
+      def open() = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      try
+        run("rocksdb_node", () => open(), Some(() => open()), p, nodeMode)
+        result("rocksdb_node_disk_size", dirSize(dir) / 1e6, "MB")
       finally deleteDir(dir)
     if which == "both" || which == "memory" then run("memory", () => new InMemoryTrieBackend, None, p)

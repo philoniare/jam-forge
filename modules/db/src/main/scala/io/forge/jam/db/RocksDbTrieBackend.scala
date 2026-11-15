@@ -113,7 +113,7 @@ final class RocksDbTrieBackend private (
     * deleted. Must run on the thread that saves, and only for a block every retained state descends from.
     */
   def pruneJournal(label: Hash, height: Long): (Int, Int) =
-    val journalled = journalOf(label)
+    val journalled = journalOf(label).toIndexedSeq
     if journalled.isEmpty then
       dropJournal(label)
       (0, 0)
@@ -122,18 +122,27 @@ final class RocksDbTrieBackend private (
       try
         val deletedNodes = mutable.ArrayBuffer[Hash]()
         val valueDeltas = mutable.LinkedHashMap[Hash, Long]()
-        journalled.foreach { h =>
-          if nodeBornAt(h) <= height then
-            val bytes = db.get(nodesCf, key(h))
-            if bytes != null then
-              val node = TrieNode.decodeArray(bytes)
-              if node.nodeType == TrieNodeType.RegularLeaf then
-                val v = Hash.wrap(node.right.toArrayUnsafe)
-                valueDeltas.update(v, valueDeltas.getOrElse(v, 0L) - 1)
-              batch.delete(nodesCf, key(h))
-              batch.delete(nodeRefsCf, key(h))
-              batch.delete(nodeBornCf, key(h))
-              deletedNodes += h
+        val born = readMany(nodeBornCf, journalled)
+        val prunable = journalled.indices.collect {
+          case i if (if born(i) == null || born(i).length != 8 then 0L else java.nio.ByteBuffer.wrap(born(i)).getLong) <= height =>
+            journalled(i)
+        }
+        val cached = prunable.map(nodeCache.get)
+        val missed = prunable.indices.filter(cached(_) == null)
+        val stored = readMany(nodesCf, missed.map(prunable))
+        val fetched = new Array[TrieNode](prunable.length)
+        missed.indices.foreach(m => if stored(m) != null then fetched(missed(m)) = TrieNode.decodeArray(stored(m)))
+        prunable.indices.foreach { i =>
+          val h = prunable(i)
+          val node = if cached(i) != null then cached(i) else fetched(i)
+          if node != null then
+            if node.nodeType == TrieNodeType.RegularLeaf then
+              val v = Hash.wrap(node.right.toArrayUnsafe)
+              valueDeltas.update(v, valueDeltas.getOrElse(v, 0L) - 1)
+            batch.delete(nodesCf, key(h))
+            if tracksGarbage then batch.delete(nodeRefsCf, key(h))
+            batch.delete(nodeBornCf, key(h))
+            deletedNodes += h
         }
         var deletedValues = 0
         val values = valueDeltas.keys.toIndexedSeq
@@ -153,6 +162,11 @@ final class RocksDbTrieBackend private (
   private def readCount(cf: ColumnFamilyHandle, h: Hash): Long =
     val bytes = db.get(cf, key(h))
     if bytes == null then 0L else decodeLE8(bytes)
+
+  private def readMany(cf: ColumnFamilyHandle, hashes: IndexedSeq[Hash]): IndexedSeq[Array[Byte]] =
+    hashes.grouped(RocksDbTrieBackend.MultiGetChunk).flatMap { chunk =>
+      db.multiGetAsList(java.util.Collections.nCopies(chunk.size, cf), chunk.map(key).asJava).asScala
+    }.toIndexedSeq
 
   /** Counts of `hashes` in `cf`, read in one multi-get. */
   private def readCounts(cf: ColumnFamilyHandle, hashes: IndexedSeq[Hash]): IndexedSeq[Long] =
@@ -191,8 +205,9 @@ final class RocksDbTrieBackend private (
         case BackendOp.WriteRawValue(h, v) =>
           batch.put(valuesCf, key(h), v.toArrayUnsafe)
         case BackendOp.NodeRefDelta(h, d) =>
-          batch.merge(nodeRefsCf, key(h), encodeLE8(d))
-          if d < 0 && tracksGarbage then deadNodeCandidates.add(h)
+          if tracksGarbage then
+            batch.merge(nodeRefsCf, key(h), encodeLE8(d))
+            if d < 0 then deadNodeCandidates.add(h)
           if d > 0 then batch.merge(nodeBornCf, key(h), born)
           else if d < 0 && label != null then replaced.write(key(h))
         case BackendOp.RawValueRefDelta(h, d) =>
@@ -299,6 +314,10 @@ object RocksDbTrieBackend:
    */
   private val NodeCacheSlots = 1 << 20
 
+  private val MultiGetChunk = 4096
+
+  private val UntrackedMarker = "trie-garbage-untracked".getBytes("UTF-8")
+
 
   /**
    * A direct-mapped cache of decoded nodes. Nodes are content-addressed and immutable, so an entry can only go stale
@@ -384,6 +403,17 @@ object RocksDbTrieBackend:
       )
       val db = RocksDB.open(options, path.toString, descriptors.asJava, handles)
       val hs = handles.asScala.toSeq
+      val wasUntracked = db.get(UntrackedMarker) != null
+      if trackGarbage && wasUntracked then
+        hs.foreach(_.close())
+        db.close()
+        throw new IllegalStateException(
+          s"RocksDbTrieBackend.open: $path was opened with trackGarbage = false before and holds no node refcounts; " +
+            "gc on it would delete live nodes"
+        )
+      if !trackGarbage && !wasUntracked then
+        db.deleteRange(hs(3), new Array[Byte](32), Array.fill[Byte](33)(0xff.toByte))
+        db.put(UntrackedMarker, Array[Byte](1))
       new RocksDbTrieBackend(
         db,
         nodesCf = hs(1),

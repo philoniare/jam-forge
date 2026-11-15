@@ -3,7 +3,8 @@ package io.forge.jam.protocol.state
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.protocol.accumulation.AccumulationState
+import io.forge.jam.core.types.service.ServiceInfo
+import io.forge.jam.protocol.accumulation.{AccountSource, AccumulationState, ServiceAccount}
 import io.forge.jam.protocol.assurance.AssuranceTypes.AssuranceState
 import io.forge.jam.protocol.authorization.AuthorizationTypes.AuthState
 import io.forge.jam.protocol.dispute.DisputeTypes.DisputeState
@@ -12,7 +13,6 @@ import io.forge.jam.protocol.report.ReportTypes.ReportState
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleState
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatState
 
-import scala.collection.mutable
 
 object TrieBackedJamStateBridges:
 
@@ -72,17 +72,13 @@ object TrieBackedJamStateBridges:
       view.cores.reports = post.availAssignments
 
 
+  final case class ReportPreState(state: ReportState, serviceInfo: Long => Option[ServiceInfo])
+
   object ReportBridge:
-    def extract(view: TrieBackedJamState): ReportState =
-      import io.forge.jam.core.types.service.{ServiceAccount, ServiceData}
+    def extract(view: TrieBackedJamState): ReportPreState =
+      ReportPreState(stateOf(view), view.accumulation.serviceInfo)
 
-      val accounts = view.accumulation.serviceAccounts.map { item =>
-        ServiceAccount(
-          id = item.id,
-          data = ServiceData(service = item.data.service)
-        )
-      }
-
+    private def stateOf(view: TrieBackedJamState): ReportState =
       val readyQueuePkgHashes = view.accumulation.readyQueue.flatten.map(r =>
         Hash(r.report.packageSpec.hash.bytes)
       ).toSet
@@ -101,7 +97,7 @@ object TrieBackedJamStateBridges:
         offenders = view.psi.offenders.map(k => Hash(k.bytes)),
         recentBlocks = view.beta,
         authPools = view.authPools,
-        accounts = accounts,
+        accounts = Nil,
         coresStatistics = view.cores.statistics,
         servicesStatistics = view.serviceStatistics,
         readyQueuePackageHashes = readyQueuePkgHashes,
@@ -152,7 +148,8 @@ object TrieBackedJamStateBridges:
   final case class AccumulationPreState(
       state: AccumulationState,
       initStagingSet: List[JamBytes],
-      initAuthQueues: List[List[Hash]]
+      initAuthQueues: List[List[Hash]],
+      accounts: AccountSource
   )
 
   object AccumulationBridge:
@@ -161,20 +158,6 @@ object TrieBackedJamStateBridges:
         view.validators.queue.map(_.toJamBytes).toList
       val initAuthQueues: List[List[Hash]] = view.authQueues
 
-      val rawData = mutable.Map.empty[JamBytes, JamBytes]
-      val accounts = view.accumulation.serviceAccounts
-      accounts.foreach { sa =>
-        val codeHash = sa.data.service.codeHash
-        val blobStateKey = StateKey.computeServiceDataStateKey(
-          sa.id,
-          0xfffffffeL,
-          JamBytes(codeHash.bytes.toArray)
-        )
-        view.storage.getByStateKey(blobStateKey).foreach { blob =>
-          rawData(blobStateKey) = blob
-        }
-      }
-
       val state = AccumulationState(
         slot = view.timeslot,
         entropy = view.entropy.firstAsBytes,
@@ -182,14 +165,34 @@ object TrieBackedJamStateBridges:
         accumulated = view.accumulation.accumulated,
         privileges = view.accumulation.privileges,
         statistics = List.empty,
-        accounts = accounts,
-        rawServiceDataByStateKey = rawData.toMap
+        accounts = Nil
       )
-      AccumulationPreState(state, initStagingSet, initAuthQueues)
+      AccumulationPreState(state, initStagingSet, initAuthQueues, accountSource(view))
+
+    def accountSource(view: TrieBackedJamState): AccountSource =
+      new AccountSource:
+        private val read = new java.util.concurrent.ConcurrentHashMap[Long, Option[ServiceAccount]]()
+        private val changedBefore = view.accumulation.accountChanges
+        private lazy val allIds = view.accumulation.serviceIds
+        def account(id: Long): Option[ServiceAccount] =
+          read.computeIfAbsent(
+            id,
+            _ => changedBefore.getOrElse(id, view.accumulation.priorServiceInfo(id)).map(info =>
+              ServiceAccount(
+                info = info,
+                storage = Map.empty,
+                preimages = Map.empty,
+                preimageRequests = Map.empty,
+                lastAccumulated = info.lastAccumulationSlot
+              )
+            )
+          )
+        def ids: Iterable[Long] = allIds
 
     def apply(
         view: TrieBackedJamState,
         postState: AccumulationState,
+        removedAccounts: Set[Long],
         postStagingSet: List[JamBytes],
         initStagingSet: List[JamBytes],
         postAuthQueues: List[List[Hash]],
@@ -209,4 +212,5 @@ object TrieBackedJamStateBridges:
       view.accumulation.readyQueue = postState.readyQueue
       view.accumulation.accumulated = postState.accumulated
       view.accumulation.privileges = postState.privileges
-      view.accumulation.serviceAccounts = postState.accounts
+      postState.accounts.foreach(item => view.accumulation.setServiceInfo(item.id, item.data.service))
+      removedAccounts.foreach(view.accumulation.removeService)

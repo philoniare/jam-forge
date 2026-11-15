@@ -4,7 +4,7 @@ import java.nio.file.{Files, Path, Paths}
 
 import io.circe.Decoder
 import io.circe.parser.decode
-import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, Shuffle, constants}
+import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, constants}
 import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, Hash, ServiceId, Timeslot, ValidatorIndex}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
@@ -44,14 +44,6 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
     Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
-
-  /** Validator→core assignment (mirrors ReportTransition's rotation). */
-  private def coreAssignments(randomness: Hash, slot: Long, config: ChainConfig): List[Int] =
-    val source =
-      (0 until config.validatorCount).map(i => (config.coresCount * i) / config.validatorCount).toList
-    val shuffled = Shuffle.jamComputeShuffle(config.validatorCount, randomness)
-    val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
-    shuffled.map(idx => math.floorMod(source(idx) + shift, config.coresCount))
 
   /** Build a valid signed guarantee for core 0 against `node`'s current
     * state (the report carries a real-trace result template that service 0's
@@ -111,10 +103,11 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
     val reportHash = Hashing.blake2b256(report.encode.toArray)
     val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
 
-    val assigned = coreAssignments(view.entropy.pool(2), slot, node.spec.config).zipWithIndex
+    val assigned = GuarantorService.assignments(view, slot, node.spec.config)._1.zipWithIndex
       .filter(_._1 == 0)
       .map(_._2)
       .take(3)
+      .toList
     assigned.size should be >= 2
 
     val signatures = assigned.map { vi =>

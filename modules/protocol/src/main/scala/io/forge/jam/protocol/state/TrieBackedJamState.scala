@@ -117,11 +117,7 @@ final class TrieBackedJamState(
   private var _activityStatsDirty: Boolean = false
 
 
-  private var _serviceAccounts: List[AccumulationServiceItem] = List.empty
-  private var _serviceAccountsLoaded: Boolean = false
-  private var _serviceAccountsDirty: Boolean = false
-  private var _serviceAccountsPreIds: Set[Long] = Set.empty
-  private var _serviceAccountsPreInfo: Map[Long, ServiceInfo] = Map.empty
+  private val _accountChanges = mutable.LinkedHashMap.empty[Long, Option[ServiceInfo]]
 
 
   private var _postOffenders: List[Ed25519PublicKey] = List.empty
@@ -271,16 +267,49 @@ final class TrieBackedJamState(
   private[state] def privileges_=(v: Privileges): Unit =
     privilegesCell.set(v)
 
+  private[state] def priorServiceInfoEncoded(id: Long): Option[JamBytes] =
+    store.flatMap(_.cachedServiceInfo(id)).orElse {
+      val read = trie.read(StateKey.computeServiceAccountKey(id))
+      for
+        s <- store
+        encoded <- read
+      do s.putCachedServiceInfo(id, encoded)
+      read
+    }
+
+  private[state] def priorServiceInfo(id: Long): Option[ServiceInfo] =
+    priorServiceInfoEncoded(id).map(e => FullJamStateCodecs.decodeServiceInfo(e.toArray))
+
+  private[state] def serviceInfo(id: Long): Option[ServiceInfo] =
+    _accountChanges.get(id) match
+      case Some(change) => change
+      case None         => priorServiceInfo(id)
+
+  private[state] def accountChanges: Map[Long, Option[ServiceInfo]] = _accountChanges.toMap
+
+  private[state] def setServiceInfo(id: Long, info: ServiceInfo): Unit = _accountChanges(id) = Some(info)
+
+  private[state] def removeService(id: Long): Unit = _accountChanges(id) = None
+
+  private[state] def serviceIds: Set[Long] =
+    val prior = TrieBackedJamState.readServiceIds(trie, store)
+    _accountChanges.foldLeft(prior) {
+      case (ids, (id, Some(_))) => ids + id
+      case (ids, (id, None))    => ids - id
+    }
+
   private[state] def serviceAccounts: List[AccumulationServiceItem] =
-    if !_serviceAccountsLoaded then loadServiceAccounts()
-    _serviceAccounts
+    serviceIds.toList.sorted.flatMap(id => serviceInfo(id).map(TrieBackedJamState.accountItem(id, _)))
 
   private[state] def serviceAccounts_=(v: List[AccumulationServiceItem]): Unit =
-    if !_serviceAccountsLoaded then loadServiceAccounts()
-    // commit compares each account's info with its pre-state, so a deep comparison here would only repeat that
-    if !(_serviceAccounts eq v) then
-      _serviceAccounts = v
-      _serviceAccountsDirty = true
+    val wanted = v.iterator.map(_.id).toSet
+    v.foreach(item => if !serviceInfo(item.id).contains(item.data.service) then setServiceInfo(item.id, item.data.service))
+    serviceIds.foreach(id => if !wanted.contains(id) then removeService(id))
+
+  private def accountChanged(id: Long, change: Option[ServiceInfo]): Boolean =
+    change match
+      case Some(info) => !priorServiceInfo(id).contains(info)
+      case None       => priorServiceInfoEncoded(id).isDefined
 
   private[state] def statsCurrent: List[StatCount] =
     if !_activityStatsLoaded then loadActivityStats()
@@ -319,19 +348,12 @@ final class TrieBackedJamState(
     _serviceStatistics = stats.service
     _activityStatsLoaded = true
 
-  private def loadServiceAccounts(): Unit =
-    val items = TrieBackedJamState.readServiceAccounts(trie, store)
-    _serviceAccounts = items
-    _serviceAccountsPreIds = items.iterator.map(_.id).toSet
-    _serviceAccountsPreInfo =
-      items.iterator.map(i => i.id -> i.data.service).toMap
-    _serviceAccountsLoaded = true
 
 
   
   /** How many components [[commit]] would re-encode (all service accounts count as one). */
   private[protocol] def dirtyComponents: Int =
-    cells.count(_.dirty) + Seq(_safroleDirty, _activityStatsDirty, _serviceAccountsDirty).count(identity)
+    cells.count(_.dirty) + Seq(_safroleDirty, _activityStatsDirty, _accountChanges.exists(accountChanged(_, _))).count(identity)
 
   def commit(target: StateTrie): Unit =
     val updates = commitUpdates()
@@ -368,28 +390,24 @@ final class TrieBackedJamState(
           core = _coreStatistics,
           svc = _serviceStatistics,
           config = config))))
-    if _serviceAccountsDirty then
-      val currIds = _serviceAccounts.iterator.map(_.id).toSet
-      _serviceAccounts.foreach { item =>
-        val prev = _serviceAccountsPreInfo.get(item.id)
-        if !prev.contains(item.data.service) then
-          val encoded = TrieBackedJamState.encodeServiceInfo(item.data.service)
-          updates += ((StateKey.computeServiceAccountKey(item.id),
-            Some(encoded)))
+    _accountChanges.foreach {
+      case (id, Some(info)) =>
+        val prior = priorServiceInfoEncoded(id)
+        val encoded = TrieBackedJamState.encodeServiceInfo(info)
+        if !prior.contains(encoded) then
+          updates += ((StateKey.computeServiceAccountKey(id), Some(encoded)))
           onStore { s =>
-            s.putCachedServiceInfo(item.id, encoded)
-            if !_serviceAccountsPreIds.contains(item.id) then
-              s.addKnownServiceId(item.id)
+            s.putCachedServiceInfo(id, encoded)
+            if prior.isEmpty then s.addKnownServiceId(id)
           }
-      }
-      _serviceAccountsPreIds.foreach { id =>
-        if !currIds.contains(id) then
+      case (id, None) =>
+        if priorServiceInfoEncoded(id).isDefined then
           updates += ((StateKey.computeServiceAccountKey(id), None))
           onStore { s =>
             s.evictCachedServiceInfo(id)
             s.removeKnownServiceId(id)
           }
-      }
+    }
 
     updates
 
@@ -464,12 +482,41 @@ object TrieBackedJamState:
       prefix: Byte,
       validatorCount: Int
   ): IndexedSeq[ValidatorKey] =
-    trie.read(StateKeys.simpleKey(prefix)) match
-      case None => IndexedSeq.fill(validatorCount)(emptyValidator)
-      case Some(v) =>
-        FullJamStateCodecs
-          .validatorListCodec
-          .decodeUnsafe(v.toArrayUnsafe)
+    decodedValidators.read(trie, prefix, ()) { v =>
+      FullJamStateCodecs
+        .validatorListCodec
+        .decodeUnsafe(v.toArrayUnsafe)
+    }.getOrElse(IndexedSeq.fill(validatorCount)(emptyValidator))
+
+  private val decodedValidators = new DecodedOnce[IndexedSeq[ValidatorKey]](slots = 4)
+  private val decodedReports = new DecodedOnce[List[Option[AvailabilityAssignment]]](slots = 2)
+  private val decodedSafrole =
+    new DecodedOnce[(IndexedSeq[ValidatorKey], JamBytes, TicketsOrKeys, List[TicketMark])](slots = 2)
+  private val decodedAuthQueues = new DecodedOnce[List[List[Hash]]](slots = 2)
+
+  private final class DecodedOnce[A](slots: Int):
+    private final case class Entry(hash: Hash, shape: Any, value: A)
+    private val entries = new java.util.concurrent.atomic.AtomicReferenceArray[Entry](slots)
+    private val next = new java.util.concurrent.atomic.AtomicInteger(0)
+
+    def read(trie: StateTrie, prefix: Byte, shape: Any)(decode: JamBytes => A): Option[A] =
+      val key = StateKeys.simpleKey(prefix)
+      trie.valueHash(key) match
+        case None => trie.read(key).map(decode)
+        case Some(hash) =>
+          var i = 0
+          var found: Entry = null
+          while found == null && i < slots do
+            val e = entries.get(i)
+            if e != null && e.hash == hash && e.shape == shape then found = e
+            i += 1
+          if found != null then Some(found.value)
+          else
+            trie.read(key).map { v =>
+              val value = decode(v)
+              entries.set(math.floorMod(next.getAndIncrement(), slots), Entry(hash, shape, value))
+              value
+            }
 
   private def readAuthPools(
       trie: StateTrie,
@@ -484,24 +531,11 @@ object TrieBackedJamState:
       trie: StateTrie,
       config: ChainConfig
   ): List[List[Hash]] =
-    trie.read(StateKeys.simpleKey(StateKeys.AUTHORIZATION_QUEUE)) match
-      case None =>
-        List.fill(config.coresCount)(
-          List.fill(config.authQueueSize)(Hash.zero)
-        )
-      case Some(v) =>
-        val last = lastAuthQueues.get()
-        if last != null && last.coresCount == config.coresCount && last.queueSize == config.authQueueSize &&
-          last.encoded == v
-        then last.queues
-        else
-          val queues = FullJamStateCodecs.decodeAuthQueues(v.toArrayUnsafe, config.coresCount, config.authQueueSize)
-          lastAuthQueues.set(DecodedAuthQueues(v, config.coresCount, config.authQueueSize, queues))
-          queues
-
-  /** The auth queues last decoded, with the encoded value and the sizes they were decoded from. */
-  private final case class DecodedAuthQueues(encoded: JamBytes, coresCount: Int, queueSize: Int, queues: List[List[Hash]])
-  private val lastAuthQueues = new java.util.concurrent.atomic.AtomicReference[DecodedAuthQueues](null)
+    decodedAuthQueues
+      .read(trie, StateKeys.AUTHORIZATION_QUEUE, (config.coresCount, config.authQueueSize)) { v =>
+        FullJamStateCodecs.decodeAuthQueues(v.toArrayUnsafe, config.coresCount, config.authQueueSize)
+      }
+      .getOrElse(List.fill(config.coresCount)(List.fill(config.authQueueSize)(Hash.zero)))
 
   private def readPsi(trie: StateTrie): Psi =
     trie.read(StateKeys.simpleKey(StateKeys.JUDGEMENTS)) match
@@ -521,12 +555,11 @@ object TrieBackedJamState:
       trie: StateTrie,
       coresCount: Int
   ): List[Option[AvailabilityAssignment]] =
-    trie.read(StateKeys.simpleKey(StateKeys.REPORTS)) match
-      case None    => List.fill(coresCount)(None)
-      case Some(v) =>
-        FullJamStateCodecs
-          .reportsCodec[AvailabilityAssignment](coresCount)
-          .decodeUnsafe(v.toArrayUnsafe)
+    decodedReports.read(trie, StateKeys.REPORTS, coresCount) { v =>
+      FullJamStateCodecs
+        .reportsCodec[AvailabilityAssignment](coresCount)
+        .decodeUnsafe(v.toArrayUnsafe)
+    }.getOrElse(List.fill(coresCount)(None))
 
   private def readAccumulationQueue(
       trie: StateTrie,
@@ -573,25 +606,25 @@ object TrieBackedJamState:
       trie: StateTrie,
       config: ChainConfig
   ): (IndexedSeq[ValidatorKey], JamBytes, TicketsOrKeys, List[TicketMark]) =
-    trie.read(StateKeys.simpleKey(StateKeys.SAFROLE_STATE)) match
-      case None =>
-        (
-          IndexedSeq.fill(config.validatorCount)(emptyValidator),
-          JamBytes.zeros(FullJamStateCodecs.BandersnatchRingCommitmentSize),
-          TicketsOrKeys.Keys(
-            List.fill(config.epochLength)(BandersnatchPublicKey.zero)
-          ),
-          List.empty
-        )
-      case Some(v) =>
-        val (k, z, sData, a) =
-          FullJamStateCodecs
-            .safroleGammaStateCodec(config.epochLength)
-            .decodeUnsafe(v.toArrayUnsafe)
-        val s = sData match
-          case TicketsOrKeysData.Tickets(t) => TicketsOrKeys.Tickets(t)
-          case TicketsOrKeysData.Keys(ks)   => TicketsOrKeys.Keys(ks)
-        (k, z, s, a)
+    decodedSafrole.read(trie, StateKeys.SAFROLE_STATE, config.epochLength) { v =>
+      val (k, z, sData, a) =
+        FullJamStateCodecs
+          .safroleGammaStateCodec(config.epochLength)
+          .decodeUnsafe(v.toArrayUnsafe)
+      val s = sData match
+        case TicketsOrKeysData.Tickets(t) => TicketsOrKeys.Tickets(t)
+        case TicketsOrKeysData.Keys(ks)   => TicketsOrKeys.Keys(ks)
+      (k, z, s, a)
+    }.getOrElse(
+      (
+        IndexedSeq.fill(config.validatorCount)(emptyValidator),
+        JamBytes.zeros(FullJamStateCodecs.BandersnatchRingCommitmentSize),
+        TicketsOrKeys.Keys(
+          List.fill(config.epochLength)(BandersnatchPublicKey.zero)
+        ),
+        List.empty
+      )
+    )
 
   private def readActivityStats(
       trie: StateTrie,
@@ -611,39 +644,20 @@ object TrieBackedJamState:
           config.coresCount
         )
 
-  private def readServiceAccounts(
-      trie: StateTrie,
-      store: Option[StateTrieStore]
-  ): List[AccumulationServiceItem] =
-    val cachedIds = store.flatMap(_.cachedServiceIds)
-    val out = mutable.ArrayBuffer.empty[AccumulationServiceItem]
-
-    def materialize(id: Long, encoded: JamBytes): AccumulationServiceItem =
-      val info = FullJamStateCodecs.decodeServiceInfo(encoded.toArray)
-      AccumulationServiceItem(
-        id = id,
-        data = AccumulationServiceData(
-          service = info,
-          storage = List.empty,
-          preimages = List.empty,
-          preimageRequests = List.empty
-        )
+  private def accountItem(id: Long, info: ServiceInfo): AccumulationServiceItem =
+    AccumulationServiceItem(
+      id = id,
+      data = AccumulationServiceData(
+        service = info,
+        storage = List.empty,
+        preimages = List.empty,
+        preimageRequests = List.empty
       )
+    )
 
-    cachedIds match
-      case Some(ids) =>
-        ids.foreach { id =>
-          val cached = store.flatMap(_.cachedServiceInfo(id))
-          cached match
-            case Some(encoded) =>
-              out += materialize(id, encoded)
-            case None =>
-              val key = StateKey.computeServiceAccountKey(id)
-              trie.read(key).foreach { encoded =>
-                store.foreach(_.putCachedServiceInfo(id, encoded))
-                out += materialize(id, encoded)
-              }
-        }
+  private def readServiceIds(trie: StateTrie, store: Option[StateTrieStore]): Set[Long] =
+    store.flatMap(_.cachedServiceIds) match
+      case Some(ids) => ids
       case None =>
         val ffPrefix = JamBytes(Array(0xff.toByte))
         val ids = mutable.HashSet.empty[Long]
@@ -665,11 +679,9 @@ object TrieBackedJamState:
                 ((k(7).toLong & 0xff) << 24)
             ids += serviceId
             store.foreach(_.putCachedServiceInfo(serviceId, v))
-            out += materialize(serviceId, v)
         }
         store.foreach(_.primeKnownServiceIds(ids.toSet))
-    out.sortBy(_.id).toList
-
+        ids.toSet
 
   private def encodeJB[A](codec: Codec[A], value: A): JamBytes =
     codec.encodeJam(value)

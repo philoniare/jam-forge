@@ -197,7 +197,7 @@ object DisputeTransition:
   /** Phases 3-4: culprit ordering, then each culprit's content. */
   private def validateCulprits(
       disputes: Dispute,
-      validGuarantorKeys: Set[Ed25519PublicKey],
+      validGuarantorKeys: => Set[Ed25519PublicKey],
       psiBadSet: Set[Hash],
       psiOffendersSet: Set[Ed25519PublicKey],
       newBadTargets: Set[Hash]
@@ -233,7 +233,7 @@ object DisputeTransition:
   /** Phases 5-6: fault ordering, then each fault's content. */
   private def validateFaults(
       disputes: Dispute,
-      validGuarantorKeys: Set[Ed25519PublicKey],
+      validGuarantorKeys: => Set[Ed25519PublicKey],
       psiOffendersSet: Set[Ed25519PublicKey],
       badsetPrime: Set[Hash],
       goodsetPrime: Set[Hash]
@@ -297,7 +297,7 @@ object DisputeTransition:
     val currentEpoch = state.tau / config.epochLength
 
     // Collect all ed25519 keys from kappa and lambda validator sets
-    val validGuarantorKeys = (state.kappa ++ state.lambda).map(_.ed25519).toSet
+    lazy val validGuarantorKeys = (state.kappa ++ state.lambda).map(_.ed25519).toSet
 
     val psiGoodSet = state.psi.good.toSet
     val psiBadSet = state.psi.bad.toSet

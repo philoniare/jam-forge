@@ -692,8 +692,7 @@ final class GuarantorService(
     * validator index.
     */
   private def ownAssignedKeys(slot: Long, coreIndex: Int): List[(Int, ValidatorKeySet)] =
-    val (entropy, active) = GuarantorService.assignmentContext(chain.stateView(), slot, chain.config)
-    val assignments = GuarantorService.coreAssignments(entropy, slot, chain.config)
+    val (assignments, active) = GuarantorService.assignments(chain.stateView(), slot, chain.config)
     active.zipWithIndex.flatMap { case (vk, idx) =>
       if assignments(idx) == coreIndex then
         ed25519ByPublic.get(vk.ed25519).map(idx -> _)
@@ -848,8 +847,7 @@ final class GuarantorService(
   ): List[GuaranteeSignature] =
     val report = computed.report
     recordBundle(report.packageSpec.erasureRoot, computed.bundleBytes)
-    val (entropy, activeSet) = GuarantorService.assignmentContext(chain.stateView(), slot, chain.config)
-    val assignments = GuarantorService.coreAssignments(entropy, slot, chain.config)
+    val (assignments, activeSet) = GuarantorService.assignments(chain.stateView(), slot, chain.config)
     val message = constants.JAM_GUARANTEE_BYTES ++ reportHash.bytes
     val assigned =
       activeSet.indices.filter(i => assignments.lift(i).contains(report.coreIndex.toInt) && !alreadyHave(i))
@@ -1068,16 +1066,21 @@ object GuarantorService:
     if slot / config.epochLength > stateSlot / config.epochLength then (entropy(1), pending)
     else (entropy(2), current)
 
-  /** Validator→core assignment (gp guarantor rotation). */
-  def coreAssignments(
-      randomness: Hash,
+  def assignments(
+      view: io.forge.jam.protocol.state.TrieBackedJamState,
       slot: Long,
       config: io.forge.jam.core.ChainConfig
-  ): List[Int] =
-    val source =
-      (0 until config.validatorCount)
-        .map(i => (config.coresCount * i) / config.validatorCount)
-        .toList
-    val shuffled = io.forge.jam.core.Shuffle.jamComputeShuffle(config.validatorCount, randomness)
-    val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
-    shuffled.map(idx => math.floorMod(source(idx) + shift, config.coresCount))
+  ): (IndexedSeq[Int], IndexedSeq[io.forge.jam.core.types.epoch.ValidatorKey]) =
+    assignmentsFor(view.timeslot, view.entropy.pool, view.validators.current, view.validators.nextEpoch, slot, config)
+
+  def assignmentsFor[K](
+      stateSlot: Long,
+      entropy: List[Hash],
+      current: IndexedSeq[K],
+      pending: IndexedSeq[K],
+      slot: Long,
+      config: io.forge.jam.core.ChainConfig
+  ): (IndexedSeq[Int], IndexedSeq[K]) =
+    val (randomness, validators) = rotatedForSlot(stateSlot, entropy, current, pending, slot, config)
+    val cores = io.forge.jam.protocol.report.GuarantorAssignment.coreAssignments(randomness, slot, validators.size, config)
+    (cores.toIndexedSeq, validators)

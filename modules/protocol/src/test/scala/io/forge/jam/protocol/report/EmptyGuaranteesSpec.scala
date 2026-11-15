@@ -36,7 +36,8 @@ class EmptyGuaranteesSpec extends AnyFunSuite with Matchers:
           (output, trie.rootHash)
 
         val full = posterior { v =>
-          val (post, output) = ReportTransition.stfInternal(input, ReportBridge.extract(v), config)
+          val pre = ReportBridge.extract(v)
+          val (post, output) = ReportTransition.stfInternal(input, pre.state, config, serviceInfo = Some(pre.serviceInfo))
           ReportBridge.apply(v, post)
           output
         }

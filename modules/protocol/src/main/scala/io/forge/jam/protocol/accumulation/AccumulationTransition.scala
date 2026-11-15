@@ -16,7 +16,7 @@ final case class AccumulationStfResult(
     stagingSet: List[JamBytes],
     authQueues: List[List[Hash]],
     output: AccumulationOutput
-)
+)(val removedAccounts: Set[Long])
 
 /** Accumulation State Transition Function.
   */
@@ -77,7 +77,8 @@ object AccumulationTransition:
         view.config,
         prevSlot,
         sharedExecutor,
-        storageView
+        storageView,
+        Some(pre.accounts)
       )
     )
 
@@ -85,6 +86,7 @@ object AccumulationTransition:
       AccumulationBridge.apply(
         view,
         result.state,
+        result.removedAccounts,
         result.stagingSet,
         pre.initStagingSet,
         result.authQueues,
@@ -101,7 +103,8 @@ object AccumulationTransition:
       config: ChainConfig,
       prevSlot: Long,
       sharedExecutor: Option[AccumulationExecutor] = None,
-      storageView: Option[ServiceStorageView] = None
+      storageView: Option[ServiceStorageView] = None,
+      accountSource: Option[AccountSource] = None
   ): AccumulationStfResult =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max(input.slot - prevSlot, 1L)
@@ -120,7 +123,8 @@ object AccumulationTransition:
         slot = input.slot,
         config = config,
         sharedExecutor = sharedExecutor,
-        storageView = storageView
+        storageView = storageView,
+        accountSource = accountSource
       )
     }
 
@@ -185,7 +189,7 @@ object AccumulationTransition:
           assembled.accumulationTransferCounts
         )
       )
-    )
+    )(assembled.removedAccounts)
 
   private final case class QueuedReportPartition(
       immediateReports: List[WorkReport],
@@ -289,10 +293,12 @@ object AccumulationTransition:
       slot: Long,
       config: ChainConfig,
       sharedExecutor: Option[AccumulationExecutor],
-      storageView: Option[ServiceStorageView]
+      storageView: Option[ServiceStorageView],
+      accountSource: Option[AccountSource]
   ): AccumulationRun =
     val allToAccumulate = immediateReports ++ readyToAccumulate
     val partialState = preState.toPartialState(initStagingSet, initAuthQueues)
+    accountSource.foreach(source => partialState.accounts = LazyAccounts(source))
 
     // Calculate total gas budget
     val sumPrivilegedGas = u64Sum(partialState.alwaysAccers.values)
@@ -390,7 +396,8 @@ object AccumulationTransition:
   private final case class AssembledPostState(
       state: AccumulationState,
       accumulationStats: Map[ServiceId, ServiceAccumulation],
-      accumulationTransferCounts: Map[ServiceId, Int]
+      accumulationTransferCounts: Map[ServiceId, Int],
+      removedAccounts: Set[Long]
   )
 
   private def assemblePostState(
@@ -475,10 +482,14 @@ object AccumulationTransition:
         newPartialState.rawServiceAccountsByStateKey
     )
 
+    val removedAccounts = newPartialState.accounts match
+      case changed: LazyAccounts => changed.removedIds.toSet
+      case _                     => Set.empty[Long]
     AssembledPostState(
       state = finalState,
       accumulationStats = accumulationStats,
-      accumulationTransferCounts = accumulationTransferCounts
+      accumulationTransferCounts = accumulationTransferCounts,
+      removedAccounts = removedAccounts
     )
 
   /** Edit ready queue records by removing accumulated reports and pruning
@@ -1046,15 +1057,23 @@ object AccumulationTransition:
         changes.accountUpdates(serviceId) = postAccount
     }
 
-    for (id, postAccount) <- postState.accounts
-        if id != serviceId && !initialState.accounts.contains(id) do
-      if accountChanged(initialState.accounts.get(id), postAccount) then
-        if !changes.accountUpdates.contains(id) then
-          changes.accountUpdates(id) = postAccount
+    postState.accounts match
+      case changed: LazyAccounts =>
+        for (id, postAccount) <- changed.written
+            if id != serviceId && !initialState.accounts.contains(id) do
+          if !changes.accountUpdates.contains(id) then changes.accountUpdates(id) = postAccount
+        for id <- changed.removedIds do
+          if initialState.accounts.contains(id) then changes.removedAccounts += id
+      case all =>
+        for (id, postAccount) <- all
+            if id != serviceId && !initialState.accounts.contains(id) do
+          if accountChanged(initialState.accounts.get(id), postAccount) then
+            if !changes.accountUpdates.contains(id) then
+              changes.accountUpdates(id) = postAccount
 
-    // Check for removed accounts (accounts that existed in initial but not in post)
-    for (id, _) <- initialState.accounts do
-      if !postState.accounts.contains(id) then changes.removedAccounts += id
+        // Check for removed accounts (accounts that existed in initial but not in post)
+        for (id, _) <- initialState.accounts do
+          if !all.contains(id) then changes.removedAccounts += id
 
     val keep = keepsWrite(serviceId, initialState, postState)
     for (key, value) <- postState.rawServiceDataByStateKey if keep(key) do

@@ -173,6 +173,37 @@ class SyncRequestSizingSpec extends AnyFunSuite with Matchers:
     }
   }
 
+  test("a peer that never answers holds one fetch at a time and does not delay a fetch from another peer") {
+    withNode { (node, spec) =>
+      val silent = new Peer(spec.alpnPrefix)
+      val other = new Peer(spec.alpnPrefix)
+      try
+        val fin = SyncCodec.HashSlot(node.chain.finalized.hash, node.chain.finalized.slot)
+        silent.connect(node.listenPort, fin)
+        other.connect(node.listenPort, fin)
+        val unknownParent = Hashing.blake2b256(Array[Byte](4, 5, 6))
+
+        // The silent peer announces two blocks and answers neither request.
+        silent.announce(header(unknownParent, fin.slot + 3, tag = 11), fin)
+        silent.announce(header(unknownParent, fin.slot + 4, tag = 12), fin)
+        eventually("the request to the silent peer")(silent.asked.size == 1)
+
+        // Another peer's block is asked for while that request is still unanswered (it times out after 20 s).
+        val wanted = header(unknownParent, fin.slot + 5, tag = 13)
+        other.announce(wanted, fin)
+        eventually("the request to the other peer", seconds = 5)(other.asked.size == 1)
+        other.asked.peek().from shouldBe Hashing.blake2b256(wanted)
+
+        // The silent peer's second block waits for its first.
+        Thread.sleep(500)
+        silent.asked.size shouldBe 1
+        node.sync.pendingFetchCount shouldBe 1
+      finally
+        silent.node.shutdown()
+        other.node.shutdown()
+    }
+  }
+
   test("a shard lookup asks several peers at once and returns the first answer") {
     val dir = Files.createTempDirectory("jam-shard-first")
     val store = ShardStore.open(dir)

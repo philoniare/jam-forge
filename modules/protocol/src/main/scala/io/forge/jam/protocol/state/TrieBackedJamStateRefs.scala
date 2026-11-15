@@ -3,6 +3,7 @@ package io.forge.jam.protocol.state
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.epoch.ValidatorKey
+import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.protocol.accumulation.{
@@ -65,6 +66,13 @@ final class AccumulationRef(private val s: TrieBackedJamState):
   def serviceAccounts: List[AccumulationServiceItem] = s.serviceAccounts
   def serviceAccounts_=(v: List[AccumulationServiceItem]): Unit =
     s.serviceAccounts = v
+
+  def serviceInfo(id: Long): Option[ServiceInfo] = s.serviceInfo(id)
+  def priorServiceInfo(id: Long): Option[ServiceInfo] = s.priorServiceInfo(id)
+  def serviceIds: Set[Long] = s.serviceIds
+  def accountChanges: Map[Long, Option[ServiceInfo]] = s.accountChanges
+  def setServiceInfo(id: Long, info: ServiceInfo): Unit = s.setServiceInfo(id, info)
+  def removeService(id: Long): Unit = s.removeService(id)
 
 final class StatisticsRef(private val s: TrieBackedJamState):
   def current: List[StatCount] = s.statsCurrent

@@ -22,7 +22,7 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
   def heavier(weight: Long, height: Long, bestWeight: Long, bestHeight: Long): Boolean =
     weight > bestWeight || (weight == bestWeight && height > bestHeight)
 
-  def record(hash: Hash, block: Block): Option[Long] =
+  def record(hash: Hash, block: Block, sealChecked: Boolean): Option[Long] =
     val parent = block.header.parent
     val slot = block.header.slot.toLong
     val epoch = slot / config.epochLength
@@ -32,7 +32,7 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
       else epoch == parentEpoch + 1 && meta.marked(parent)
     val marked = block.header.ticketsMark.isDefined || (epoch == parentEpoch && meta.marked(parent))
     meta.putForkChoice(hash, ticketed, marked, meta.weight(parent) + (if ticketed then 1L else 0L))
-    recordSlotAuthor(hash, slot, block.header.authorIndex.toInt)
+    if sealChecked then recordSlotAuthor(hash, slot, block.header.authorIndex.toInt) else None
 
   def recordGenesis(genesisHash: Hash, ticketed: Boolean): Unit =
     meta.putForkChoice(genesisHash, ticketed, marked = false, weight = 0L)

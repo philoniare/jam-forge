@@ -317,8 +317,8 @@ final class ChainManager(
 
   def weightOf(h: Hash): Long = forkChoice.weightOf(h)
 
-  private def recordForkChoiceMeta(hash: Hash, block: Block): Unit =
-    forkChoice.record(hash, block).foreach(slot => newEquivocation = Some(slot))
+  private def recordForkChoiceMeta(hash: Hash, block: Block, sealChecked: Boolean): Unit =
+    forkChoice.record(hash, block, sealChecked).foreach(slot => newEquivocation = Some(slot))
 
   /** Slot from stored header bytes (parent ++ prior root ++ extrinsic hash ++
     * slot as E_4), 0 for genesis or unknown blocks.
@@ -632,13 +632,13 @@ final class ChainManager(
               // A block already stored on a side branch was admitted when it was stored.
               val stored = blockHeight(hash).isDefined && blockStore.hasBlock(hash)
               val admitted =
-                if stored then Right(false) else admitSideBlock(block, blockBytes.length, source)
+                if stored then Right(unverified.contains(hash)) else admitSideBlock(block, blockBytes.length, source)
               admitted.flatMap { unverifiable =>
                 storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
                 if unverifiable then unverified.track(hash, block.header.slot.toLong, parent, blockBytes.length, source)
                 val height = parentHeight + 1
                 meta.putHeight(hash, height)
-                recordForkChoiceMeta(hash, block)
+                recordForkChoiceMeta(hash, block, sealChecked = !unverifiable)
                 leafMap.remove(parent)
                 if blockStore.children(hash).isEmpty then
                   leafMap.put(hash, ChainHead(hash, block.header.slot.toLong, Hash.zero))
@@ -677,7 +677,7 @@ final class ChainManager(
         storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
         if unverified.nonEmpty then unverified.untrack(hash) // validated now (a reorg replayed it)
         headerLinks.advance(slot)
-        recordForkChoiceMeta(hash, block)
+        recordForkChoiceMeta(hash, block, sealChecked = true)
         blockStore.setHead(BlockStore.BestHead, hash)
         meta.stateRoot = postRoot
         meta.bestSlot = slot

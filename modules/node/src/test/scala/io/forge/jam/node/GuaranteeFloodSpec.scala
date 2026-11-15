@@ -82,8 +82,7 @@ class GuaranteeFloodSpec extends AnyFunSuite with Matchers:
 
       // The guarantors of each core at the next slot, by the guarantor service's own assignment (not the STF's).
       val slot = chain.best.slot + 1
-      val (entropy, active) = GuarantorService.assignmentContext(chain.stateView(), slot, config)
-      val assignments = GuarantorService.coreAssignments(entropy, slot, config)
+      val (assignments, active) = GuarantorService.assignments(chain.stateView(), slot, config)
       def keysOf(i: Int): ValidatorKeySet =
         devKeys.find(k => java.util.Arrays.equals(k.ed25519Public, active(i).ed25519.bytes.toArray)).getOrElse(fail("dev key"))
       def guarantorsOf(core: Int): Seq[(Int, ValidatorKeySet)] =
@@ -133,8 +132,7 @@ class GuaranteeFloodSpec extends AnyFunSuite with Matchers:
       node.pools.pruneGuaranteesBefore((chain.best.slot / config.rotationPeriod - 1) * config.rotationPeriod)
       node.pools.guaranteeCount shouldBe 0
       val later = chain.best.slot + 1
-      val (laterEntropy, laterActive) = GuarantorService.assignmentContext(chain.stateView(), later, config)
-      val laterAssignments = GuarantorService.coreAssignments(laterEntropy, later, config)
+      val (laterAssignments, laterActive) = GuarantorService.assignments(chain.stateView(), later, config)
       def laterGuarantors(core: Int) = laterActive.indices
         .filter(laterAssignments(_) == core)
         .map(i => i -> devKeys.find(k => java.util.Arrays.equals(k.ed25519Public, laterActive(i).ed25519.bytes.toArray)).get)

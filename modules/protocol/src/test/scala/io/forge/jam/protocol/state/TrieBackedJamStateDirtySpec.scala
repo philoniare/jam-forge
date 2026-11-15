@@ -28,12 +28,12 @@ class TrieBackedJamStateDirtySpec extends AnyFunSuite with Matchers:
     SafroleBridge.apply(view, SafroleBridge.extract(view))
     DisputeBridge.apply(view, DisputeBridge.extract(view))
     AssuranceBridge.apply(view, AssuranceBridge.extract(view))
-    ReportBridge.apply(view, ReportBridge.extract(view))
+    ReportBridge.apply(view, ReportBridge.extract(view).state)
     AuthorizationBridge.apply(view, AuthorizationBridge.extract(view))
     HistoryBridge.apply(view, HistoryBridge.extract(view))
     StatisticsBridge.apply(view, StatisticsBridge.extract(view))
     val acc = AccumulationBridge.extract(view)
-    AccumulationBridge.apply(view, acc.state, acc.initStagingSet, acc.initStagingSet, acc.initAuthQueues, acc.initAuthQueues)
+    AccumulationBridge.apply(view, acc.state, Set.empty, acc.initStagingSet, acc.initStagingSet, acc.initAuthQueues, acc.initAuthQueues)
     view.timeslot = view.timeslot
     view.dirtyComponents shouldBe 0
   }
@@ -81,4 +81,25 @@ class TrieBackedJamStateDirtySpec extends AnyFunSuite with Matchers:
     reread should not be before
     // The old root still decodes to the old queues, not to the ones read last.
     TrieBackedJamState.at(store, store.currentRoot, config).authQueues shouldBe before
+  }
+
+  test("validator sets and the Safrole state are decoded once per distinct value") {
+    val (view, store) = freshView()
+    val again = TrieBackedJamState.at(store, store.currentRoot, config)
+    assert(again.validators.current eq view.validators.current)
+    assert(again.validators.previous eq view.validators.previous)
+    assert(again.validators.queue eq view.validators.queue)
+    assert(again.validators.nextEpoch eq view.validators.nextEpoch)
+    // A value short enough to sit inside its trie leaf (two empty cores here) is simply decoded again.
+    again.cores.reports shouldBe view.cores.reports
+
+    // A changed value is decoded afresh, and the old root still decodes to the old one.
+    val before = view.validators.current
+    val changed = before.updated(0, before(1))
+    changed should not be before
+    view.validators.current = changed
+    val trie = store.at(store.currentRoot)
+    view.commit(trie)
+    new TrieBackedJamState(trie, config, new ServiceStorageView(trie)).validators.current shouldBe changed
+    TrieBackedJamState.at(store, store.currentRoot, config).validators.current shouldBe before
   }

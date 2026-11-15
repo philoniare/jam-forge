@@ -1,13 +1,13 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{ChainConfig, Hashing, Shuffle, constants, StfResult, ValidationHelpers}
+import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.core.types.service.ServiceAccount
+import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.protocol.report.ReportTypes.*
 import io.forge.jam.protocol.state.TrieBackedJamState
@@ -112,16 +112,17 @@ object ReportTransition:
           view.serviceStatistics = Nil
           StfResult.success(ReportOutputMarks(reported = Nil, reporters = Nil))
     else
-      val preState = ReportBridge.extract(view)
+      val pre = ReportBridge.extract(view)
       val (postState, output) =
         stfInternal(
           input,
-          preState,
+          pre.state,
           view.config,
           skipAncestryValidation,
           ancestry,
           signatures = signatures,
-          deferSignatures = deferSignatures
+          deferSignatures = deferSignatures,
+          serviceInfo = Some(pre.serviceInfo)
         )
       ReportBridge.apply(view, postState)
       output
@@ -142,7 +143,8 @@ object ReportTransition:
     ancestry: List[AncestorHeader] = List.empty,
     skipAnchorContext: Boolean = false,
     signatures: Option[SignatureBatch] = None,
-    deferSignatures: Option[DeferredSignatures] = None
+    deferSignatures: Option[DeferredSignatures] = None,
+    serviceInfo: Option[Long => Option[ServiceInfo]] = None
   ): (ReportState, ReportOutput) =
     val result =
       for
@@ -156,7 +158,8 @@ object ReportTransition:
           skipAncestryValidation,
           skipAnchorContext,
           signatures.getOrElse(new SignatureBatch),
-          deferSignatures
+          deferSignatures,
+          serviceInfo
         )
       yield processedGuarantees
 
@@ -192,13 +195,15 @@ object ReportTransition:
     skipLookupAnchor: Boolean,
     skipAnchorContext: Boolean,
     signatures: SignatureBatch,
-    deferSignatures: Option[DeferredSignatures]
+    deferSignatures: Option[DeferredSignatures],
+    serviceInfo: Option[Long => Option[ServiceInfo]]
   ): Either[ReportErrorCode, (List[SegmentRootLookup], List[Hash])] =
     val offendersSet: Set[Hash] = preState.offenders.toSet
-    val accountsById: Map[Long, ServiceAccount] =
-      val m = scala.collection.mutable.HashMap.empty[Long, ServiceAccount]
-      preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a))
-      m.toMap
+    val serviceOf: Long => Option[ServiceInfo] = serviceInfo.getOrElse {
+      val m = scala.collection.mutable.HashMap.empty[Long, ServiceInfo]
+      preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a.data.service))
+      m.get
+    }
     val ancestorIndex = new AncestorIndex(ancestry)
     val cacheFor =
       rotationCaches(preState.currValidators, preState.prevValidators, preState.entropy, input.slot, config)
@@ -216,7 +221,7 @@ object ReportTransition:
           guarantee,
           input,
           preState,
-          accountsById,
+          serviceOf,
           offendersSet,
           cacheFor,
           ancestorIndex,
@@ -258,7 +263,7 @@ object ReportTransition:
         val slot =
           if ctx.isCurrent then currentSlot
           else math.max(0, currentSlot - config.rotationPeriod)
-        val assignments = calculateCoreAssignmentsArr(randomness, slot, validators.size, config)
+        val assignments = GuarantorAssignment.coreAssignments(randomness, slot, validators.size, config)
         RotationCache(validators, validators.toArray, assignments)
       })
 
@@ -320,7 +325,7 @@ object ReportTransition:
     guarantee: GuaranteeExtrinsic,
     input: ReportInput,
     preState: ReportState,
-    accountsById: Map[Long, ServiceAccount],
+    serviceOf: Long => Option[ServiceInfo],
     offendersSet: Set[Hash],
     cacheFor: RotationContext => RotationCache,
     ancestry: AncestorIndex,
@@ -354,7 +359,7 @@ object ReportTransition:
       _ <- ensure(workReport.results.length <= config.maxWorkItems, ReportErrorCode.WorkReportTooBig)
       _ <- ensure(preState.availAssignments.lift(coreIndex).flatten.isEmpty, ReportErrorCode.CoreEngaged)
       _ <- validateOutputSize(workReport)
-      _ <- validateWorkResults(workReport, accountsById)
+      _ <- validateWorkResults(workReport, serviceOf)
       _ <- ensure(
         sumWithin(workReport.results.map(_.accumulateGas.value), config.reportAccGas),
         ReportErrorCode.WorkReportGasTooHigh
@@ -488,16 +493,16 @@ object ReportTransition:
     val coreAuthPool = authPools.lift(workReport.coreIndex.toInt).getOrElse(List.empty)
     ensure(coreAuthPool.contains(workReport.authorizerHash), ReportErrorCode.CoreUnauthorized)
 
-  private def validateWorkResults(workReport: WorkReport, accountsById: Map[Long, ServiceAccount]): ValidationResult =
+  private def validateWorkResults(workReport: WorkReport, serviceOf: Long => Option[ServiceInfo]): ValidationResult =
     boundary:
       for result <- workReport.results do
         // Use toLong to preserve unsigned 32-bit service ID values
-        accountsById.get(result.serviceId.toInt.toLong & 0xffffffffL) match
+        serviceOf(result.serviceId.toInt.toLong & 0xffffffffL) match
           case None => break(Left(ReportErrorCode.BadServiceId))
-          case Some(account) =>
-            if result.codeHash != account.data.service.codeHash then
+          case Some(service) =>
+            if result.codeHash != service.codeHash then
               break(Left(ReportErrorCode.BadCodeHash))
-            if result.accumulateGas.value < ULong(account.data.service.minItemGas) then
+            if result.accumulateGas.value < ULong(service.minItemGas) then
               break(Left(ReportErrorCode.ServiceItemGasTooLow))
       Right(())
 
@@ -523,29 +528,6 @@ object ReportTransition:
         if cache.coreAssignments(idx) != reportedCore then
           break(Left(ReportErrorCode.WrongAssignment))
       Right(())
-
-  private def calculateCoreAssignmentsArr(
-    randomness: Hash,
-    slot: Long,
-    validatorCount: Int,
-    config: ChainConfig
-  ): Array[Int] =
-    val activeCores = math.max(1, validatorCount / 3)
-    val source = new Array[Int](validatorCount)
-    var i = 0
-    while i < validatorCount do
-      source(i) = i / 3
-      i += 1
-    val shuffledIndices = Shuffle.jamComputeShuffle(validatorCount, randomness)
-    val shift = (math.floorMod(slot, config.epochLength) / config.rotationPeriod).toInt
-    val out = new Array[Int](shuffledIndices.length)
-    var j = 0
-    val it = shuffledIndices.iterator
-    while it.hasNext do
-      val idx = it.next()
-      out(j) = math.floorMod(source(idx) + shift, activeCores)
-      j += 1
-    out
 
   /**
    * Update availability assignments with new reports.

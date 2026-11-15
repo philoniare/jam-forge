@@ -39,6 +39,12 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           None
     }
 
+  def valueHash(key: JamBytes): Option[Hash] =
+    require(key.length == 31, s"key must be 31 bytes, got ${key.length}")
+    findLeaf(currentRoot, key, depth = 0).flatMap { node =>
+      if node.nodeType == TrieNodeType.RegularLeaf then Some(Hash.wrapUnchecked(node.right.toArrayUnsafe)) else None
+    }
+
   /**
    * Applies `updates` (a later update to a key overrides an earlier one) as one batch: the keys are sorted, the trie is
    * descended once with the batch split by key bit at each branch, and every node on a touched path is rebuilt, hashed

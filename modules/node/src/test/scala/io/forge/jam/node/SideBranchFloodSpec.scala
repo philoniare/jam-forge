@@ -12,6 +12,8 @@ import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import scala.util.chaining.*
+
 /** Blocks that do not extend the best head are stored without being executed, so a peer must not be able to make
   * the node store what it could have refused: forged side-branch blocks are refused when their seal can be checked
   * against a validated ancestor's state, and capped (per peer and in all) and pruned at finality when it cannot.
@@ -136,6 +138,60 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers:
       restored.finalize(restored.best.hash).isRight shouldBe true
       restored.unverifiedCount shouldBe 0
       unverifiable.exists(f => restored.hasBlock(restored.headerHashOf(f))) shouldBe false
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("a side-branch block whose seal could not be checked cannot make an honest block's slot equivocated") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val chainSpec = spec(genesis)
+    val dirA = tempDir("jam-sideequiv-a")
+    val dirB = tempDir("jam-sideequiv-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(chainSpec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeB = new JamNode(chainSpec, NodeConfig(dataDir = dirB, slotTicking = false))
+      nodeA.chain.initializeOrRestore(chainSpec)
+      nodeB.chain.initializeOrRestore(chainSpec)
+      val chainA = nodeA.chain
+      val chainB = nodeB.chain
+      def author(chain: ChainManager, slot: Long): (Block, Array[Byte]) =
+        val block = new BlockAuthor(chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+        val bytes = chain.encodeBlock(block)
+        chain.importBlock(bytes).isRight shouldBe true
+        (block, bytes)
+
+      // Shared 1..10. B's 12' is an honest, seal-checked side block on A; A's own chain runs on into epoch 2.
+      for slot <- 1L to 10L do
+        val (_, bytes) = author(chainA, slot)
+        chainB.importBlock(bytes).isRight shouldBe true
+      author(chainA, 11)
+      val (b12, b12Bytes) = author(chainB, 12)
+      chainA.importBlock(b12Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      val hash12 = chainA.headerHashOf(b12)
+      val honest = (12L to 26L).map(slot => slot -> author(chainA, slot)._1).toMap
+      val target = honest(25L)
+      val best = chainA.best
+      best.slot shouldBe 26L
+
+      // A forged child of 12' at the honest block's slot, claiming its author. Slot 25 is two epochs past block 10,
+      // the branch's validated ancestor, so the seal cannot be checked and the block is only stored.
+      val forged = forge(b12, hash12, 25, 1).pipe(f => f.copy(header = f.header.copy(authorIndex = target.header.authorIndex)))
+      val forgedBytes = chainA.encodeBlock(forged)
+      chainA.importBlock(forgedBytes, Some(peer(1))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      chainA.unverifiedCount shouldBe 1
+
+      chainA.meta.equivocated(25L) shouldBe false
+      chainA.best shouldBe best
+
+      // Sending the stored block again changes nothing either.
+      chainA.importBlock(forgedBytes, Some(peer(2))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      chainA.meta.equivocated(25L) shouldBe false
+      chainA.best shouldBe best
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()

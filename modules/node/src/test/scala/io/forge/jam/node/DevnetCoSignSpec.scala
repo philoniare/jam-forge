@@ -81,8 +81,7 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
       // The report will be signed for slot 3: find the validators assigned
       // to core 0 then and give one key each to B and C.
       val view = nodeB.chain.stateView()
-      val assignments =
-        GuarantorService.coreAssignments(view.entropy.pool(2), 3L, spec.config)
+      val assignments = GuarantorService.assignments(view, 3L, spec.config)._1
       val core0Validators = assignments.zipWithIndex.collect { case (0, idx) => idx }
       core0Validators.size should be >= 2
       nodeB.enableGuaranteeing(Seq(devKeys(core0Validators(0))))
@@ -151,7 +150,7 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
       // package for slot 4's core.
       awaitSync(nodeA, nodeB)
       awaitSync(nodeA, nodeC)
-      val assignments4 = GuarantorService.coreAssignments(nodeB.chain.stateView().entropy.pool(2), 4L, spec.config)
+      val assignments4 = GuarantorService.assignments(nodeB.chain.stateView(), 4L, spec.config)._1
       val core = assignments4(core0Validators(0))
       assignments4(core0Validators(1)) shouldBe core
       def submit(from: JamNode, to: JamNode, payload: String): Unit =

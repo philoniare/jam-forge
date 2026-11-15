@@ -277,7 +277,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     finally deleteRecursively(dir)
   }
 
-  test("garbage tracking off writes the same nodes and refcounts as tracking on") {
+  test("garbage tracking off writes the same nodes and value refcounts as tracking on, and no node refcounts") {
     val dirOff = Files.createTempDirectory("jam-rocksdb-off")
     val dirOn = Files.createTempDirectory("jam-rocksdb-on")
     try
@@ -289,22 +289,62 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
         rootsOff.map(_._1) shouldBe rootsOn.map(_._1)
         val stack = scala.collection.mutable.Stack.from(rootsOn.map(_._1))
         val seen = scala.collection.mutable.HashSet[Hash]()
+        var counted = 0
         while stack.nonEmpty do
           val h = stack.pop()
           if seen.add(h) then
             val n = on.readNode(h)
             off.readNode(h) shouldBe n
-            off.nodeRefcount(h) shouldBe on.nodeRefcount(h)
+            // Node counts are read only by gc, which a store that does not track garbage never runs.
+            off.nodeRefcount(h) shouldBe 0L
+            if on.nodeRefcount(h) > 0 then counted += 1
+            n.filter(_.nodeType == io.forge.jam.core.trie.TrieNodeType.RegularLeaf).foreach { leaf =>
+              val value = Hash.wrap(leaf.right.toArray)
+              off.valueRefcount(value) shouldBe on.valueRefcount(value)
+            }
             n.filter(_.nodeType == io.forge.jam.core.trie.TrieNodeType.Branch).foreach { b =>
               stack.push(Hash.wrap(b.left.toArray))
               stack.push(Hash.wrap(b.right.toArray))
             }
+        counted should be > 0
       finally
         off.close()
         on.close()
     finally
       deleteRecursively(dirOff)
       deleteRecursively(dirOn)
+  }
+
+  test("a store opened without garbage tracking drops its node refcounts and refuses to be opened with tracking again") {
+    val dir = Files.createTempDirectory("jam-rocksdb-mode")
+    try
+      val on = RocksDbTrieBackend.open(dir)
+      val (roots, _) =
+        try saveRounds(on, rounds = 10, perRound = 10)
+        finally on.close()
+      val (lastRoot, lastState) = roots.last
+
+      val off = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      try
+        // Counts written while tracking are no use to a store that never collects by them.
+        val stack = scala.collection.mutable.Stack(lastRoot)
+        while stack.nonEmpty do
+          val h = stack.pop()
+          off.nodeRefcount(h) shouldBe 0L
+          off.readNode(h).filter(_.nodeType == io.forge.jam.core.trie.TrieNodeType.Branch).foreach { b =>
+            stack.push(Hash.wrap(b.left.toArray))
+            stack.push(Hash.wrap(b.right.toArray))
+          }
+        StateTrie.at(off, lastRoot).getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe lastState
+      finally off.close()
+
+      // With the counts gone, gc would take every replaced node for garbage.
+      an[IllegalStateException] should be thrownBy RocksDbTrieBackend.open(dir)
+      // The refusal leaves the store usable.
+      val again = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      try StateTrie.at(again, lastRoot).getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe lastState
+      finally again.close()
+    finally deleteRecursively(dir)
   }
 
   test("clear empties everything") {

@@ -68,7 +68,14 @@ object AuthoringPlan:
     // 4. Reports, on the cores as the assurances left them.
     val reportPre = ReportBridge.extract(view)
     def report(gs: List[GuaranteeExtrinsic]) =
-      ReportTransition.stfInternal(ReportInput(gs, slot), reportPre, config, skipAncestryValidation = false, ancestry)._2
+      ReportTransition.stfInternal(
+        ReportInput(gs, slot),
+        reportPre.state,
+        config,
+        skipAncestryValidation = false,
+        ancestry,
+        serviceInfo = Some(reportPre.serviceInfo)
+      )._2
     val alone = guarantees.map(g => g -> report(List(g))).toMap
     val byCore = guarantees.groupBy(_.report.coreIndex.toInt).toList.sortBy(_._1)
     // Per core, the first candidate that passes alone, oldest first.

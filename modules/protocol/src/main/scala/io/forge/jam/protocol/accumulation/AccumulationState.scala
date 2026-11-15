@@ -516,7 +516,10 @@ extension (state: PartialState)
   /** Convert PartialState back to sorted list of AccumulationServiceItems.
     */
   def toAccumulationServiceItems(): List[AccumulationServiceItem] =
-    state.accounts.toList
+    val accounts = state.accounts match
+      case changed: LazyAccounts => changed.written.toList
+      case all                   => all.toList
+    accounts
       .map { case (id, account) =>
         AccumulationServiceItem(
           id = id,
