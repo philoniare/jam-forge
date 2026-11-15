@@ -42,7 +42,9 @@ final class PreimageService(
     /** Peers a newly obtained preimage is announced to: our grid neighbours
       * (JAMNP-S CE 142).
       */
-    gossipTargets: () => Iterable[JamnpConnection] = () => Nil
+    gossipTargets: () => Iterable[JamnpConnection] = () => Nil,
+    inbound: InboundWork = InboundWork.direct,
+    serving: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   private val announcedMeta =
@@ -73,19 +75,22 @@ final class PreimageService(
   def announceHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        try
-          PreimageCodec.decodeAnnouncement(msg) match
-            case Left(err) => logger.warn(err)
-            case Right((serviceId, hash, length)) =>
-              announcedMeta.put(hash, (serviceId, length))
-              val view = chain.stateView()
-              val infoKey =
-                StateKey.computePreimageInfoStateKey(serviceId, length.toInt, JamBytes(hash.bytes))
-              val solicited = view.storage.readTrie(infoKey).exists(StateKey.isUnprovidedRequest)
-              if solicited && pools.findPreimage(hash).isEmpty then
-                requestPreimage(connection, serviceId, hash, length)
-        catch case e: Exception => logger.warn(s"CE142 handler failed: ${e.getMessage}")
-        stream.finish()
+        val taken = inbound.submit(connection, msg.length.toLong) {
+          try
+            PreimageCodec.decodeAnnouncement(msg) match
+              case Left(err) => logger.warn(err)
+              case Right((serviceId, hash, length)) =>
+                announcedMeta.put(hash, (serviceId, length))
+                val view = chain.stateView()
+                val infoKey =
+                  StateKey.computePreimageInfoStateKey(serviceId, length.toInt, JamBytes(hash.bytes))
+                val solicited = view.storage.readTrie(infoKey).exists(StateKey.isUnprovidedRequest)
+                if solicited && pools.findPreimage(hash).isEmpty then
+                  requestPreimage(connection, serviceId, hash, length)
+          catch case e: Exception => logger.warn(s"CE142 handler failed: ${e.getMessage}")
+          stream.finish()
+        }
+        if !taken then stream.reset()
       }
 
   def onImported(@annotation.unused head: ChainHead, block: Block): Unit =
@@ -97,21 +102,24 @@ final class PreimageService(
   def requestHandler: StreamHandler = new StreamHandler:
     def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
       stream.onMessage { msg =>
-        val blob =
-          try
-            if msg.length != 32 then
-              logger.warn(s"CE143: expected 32-byte hash, got ${msg.length}")
-              None
-            else lookupBlob(Hash(msg))
-          catch
-            case e: Exception =>
-              logger.warn(s"CE143 handler failed: ${e.getMessage}")
-              None
-        blob match
-          case Some(b) =>
-            stream.send(b)
-            stream.finish()
-          case None => stream.reset() // not held: reject
+        val taken = serving.submit(connection, msg.length.toLong) {
+          val blob =
+            try
+              if msg.length != 32 then
+                logger.warn(s"CE143: expected 32-byte hash, got ${msg.length}")
+                None
+              else lookupBlob(Hash(msg))
+            catch
+              case e: Exception =>
+                logger.warn(s"CE143 handler failed: ${e.getMessage}")
+                None
+          blob match
+            case Some(b) =>
+              stream.send(b)
+              stream.finish()
+            case None => stream.reset() // not held: reject
+        }
+        if !taken then stream.reset()
       }
 
   private[node] def announcedMetaSize: Int = announcedMeta.size()

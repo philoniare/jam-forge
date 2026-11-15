@@ -35,7 +35,9 @@ final class AuditorService(
     clock: () => Long = () => System.currentTimeMillis(),
     tickMillis: Long = 500L,
     /** Where re-execution runs, shared with the guarantor; None: a pool of this service's own. */
-    sharedRefinePool: Option[RefinePool] = None
+    sharedRefinePool: Option[RefinePool] = None,
+    store: RoleStore = RoleStore.none,
+    inbound: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -147,6 +149,7 @@ final class AuditorService(
 
   def shutdown(): Unit =
     exec.shutdownNow()
+    exec.awaitTermination(5, TimeUnit.SECONDS)
     workers.shutdownNow()
     if sharedRefinePool.isEmpty then refinePool.shutdownNow()
 
@@ -194,6 +197,7 @@ final class AuditorService(
             guarded {
               if !tracked.contains(t.hash) then
                 tracked.put(t.hash, t)
+                restore(t)
                 takePendingAnnouncements(t.hash).foreach((p, h, e) => applyAnnouncement(p, h, e))
                 takePendingJudgments(t.available.map(_._3).toSet).foreach((h, v, valid, sig, epoch) =>
                   recordJudgment(h, epoch, v, valid, sig, tally = epoch == t.epoch)
@@ -201,6 +205,29 @@ final class AuditorService(
                 tick()
             }
           )
+
+  private var recordsDroppedTo = -1L
+
+  private def restore(t: Tracked): Unit =
+    val own = ownIndices(t).map(_._1).toSet
+    store.scan(AuditorService.blockPrefix(t.slot, t.hash)).foreach { (_, bytes) =>
+      val b = java.nio.ByteBuffer.wrap(bytes)
+      val kind = b.get()
+      val v = b.getInt
+      if kind == AuditorService.AnnouncementRecord then
+        val head = new Array[Byte](b.remaining)
+        b.get(head)
+        decodeHead(head).foreach { (_, n, a) =>
+          remember(t, v, n, a)
+          if own(v) then a.items.foreach((_, h) => t.ours.getOrElseUpdate(v, mutable.Map.empty).put(h, n))
+        }
+      else
+        val valid = b.get() == 1
+        val report = new Array[Byte](32)
+        b.get(report)
+        (if valid then positive else negative).getOrElseUpdate(Hash(report), mutable.Set.empty) += v
+        if own(v) then verdicts.putIfAbsent(Hash(report), java.lang.Boolean.valueOf(valid)): Unit
+    }
 
   /** q of eq:auditselection: per core, the report in ρ that this block's assurances made available. */
   private def justBecameAvailable(
@@ -299,6 +326,16 @@ final class AuditorService(
     distribution.peers.foreach(c => sendTwo(c, StreamKind.AuditAnnouncement, head, evidence))
 
   private def recordAnnouncement(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
+    remember(t, v, n, a)
+    val head = encodeHead(t.hash, n, a)
+    store.write(
+      List(
+        AuditorService.announcementKey(t.slot, t.hash, n, v) ->
+          java.nio.ByteBuffer.allocate(5 + head.length).put(AuditorService.AnnouncementRecord).putInt(v).put(head).array()
+      )
+    )
+
+  private def remember(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
     t.announcements.put((n, v), a)
     a.items.foreach { (_, h) =>
       t.announced.getOrElseUpdate((h, n), mutable.Set.empty) += v
@@ -348,6 +385,10 @@ final class AuditorService(
     * the others' announcements and judgments, which are never resent, so it would retry forever and keep their state.
     */
   private def forgetFinalized(finalizedSlot: Long, now: Long): Unit =
+    if finalizedSlot > recordsDroppedTo then
+      recordsDroppedTo = finalizedSlot
+      val stale = store.scan(AuditorService.RecordPrefix, f"${finalizedSlot + 1}%016x").map(_._1)
+      if stale.nonEmpty then store.write(Nil, stale)
     // Marks of finalized blocks that are not being tracked: isAudited answers for those from the finalized slot.
     auditedBlocks.entrySet.removeIf(e => e.getValue.slot <= finalizedSlot && !tracked.contains(e.getKey))
     val done = tracked.values
@@ -661,14 +702,27 @@ final class AuditorService(
       signature: Array[Byte],
       tally: Boolean
   ): Unit =
-    if tally then (if valid then positive else negative).getOrElseUpdate(reportHash, mutable.Set.empty) += v
+    if tally && (if valid then positive else negative).getOrElseUpdate(reportHash, mutable.Set.empty).add(v) then
+      val record = java.nio.ByteBuffer
+        .allocate(38)
+        .put(AuditorService.TallyRecord)
+        .putInt(v)
+        .put((if valid then 1 else 0).toByte)
+        .put(reportHash.bytes.toArray)
+        .array()
+      store.write(
+        tracked.values
+          .filter(t => t.epoch == epoch && t.reportHashes.contains(Some(reportHash)))
+          .map(t => AuditorService.tallyKey(t.slot, t.hash, reportHash, v) -> record)
+          .toList
+      )
     pools.addJudgment(reportHash, epoch, v, valid, signature)
 
   def judgmentHandler: io.forge.jam.network.StreamHandler =
     (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
-        receiveJudgment(msg, conn)
-        stream.finish()
+        if inbound.submit(conn, msg.length.toLong)(guarded(receiveJudgment(msg, conn))) then stream.finish()
+        else stream.reset()
       }
 
   /** A CE 145 message: the signature is checked first, then the judgment is recorded when a tracked block holds
@@ -782,6 +836,18 @@ final class AuditorService(
 object AuditorService extends LazyLogging:
   /** Audits fetching their bundles at once. */
   val FetchThreads: Int = 4
+
+  private val RecordPrefix = "role:audit:"
+  private val AnnouncementRecord: Byte = 0
+  private val TallyRecord: Byte = 1
+
+  private def blockPrefix(slot: Long, block: Hash): String = f"$RecordPrefix$slot%016x:${block.toHex}:"
+
+  private def announcementKey(slot: Long, block: Hash, tranche: Int, validator: Int): String =
+    f"${blockPrefix(slot, block)}a:$tranche%02x:$validator%04x"
+
+  private def tallyKey(slot: Long, block: Hash, report: Hash, validator: Int): String =
+    f"${blockPrefix(slot, block)}j:${report.toHex}:$validator%04x"
 
   /** A block's slot and whether it is audited. */
   private[node] final case class Mark(slot: Long, audited: Boolean)

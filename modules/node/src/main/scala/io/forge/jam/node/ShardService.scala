@@ -19,7 +19,8 @@ import scala.collection.mutable
   */
 final class ShardService(
     store: ShardStore,
-    config: ChainConfig
+    config: ChainConfig,
+    work: InboundWork = InboundWork.direct
 ) extends LazyLogging:
   import ShardService.*
 
@@ -83,25 +84,39 @@ final class ShardService(
     * proof segment shards, then the justification, as three messages.
     */
   def shardDistributionHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
-        withCustody(stream, msg) { shards =>
-          stream.send(shards.bundleShard)
-          stream.send(concat(shards.segmentShards))
-          stream.send(encodeJustification(shards.justification, segmentShardSize))
+        offLoop(conn, stream, msg) {
+          withCustody(stream, msg) { shards =>
+            stream.send(shards.bundleShard)
+            stream.send(concat(shards.segmentShards))
+            stream.send(encodeJustification(shards.justification, segmentShardSize))
+          }
         }
       }
+
+  private def offLoop(conn: JamnpConnection, stream: JamnpStream, msg: Array[Byte])(serve: => Unit): Unit =
+    val taken = work.submit(conn, msg.length.toLong) {
+      try serve
+      catch
+        case e: Exception =>
+          logger.warn(s"${StreamKind.name(stream.kind)} handler failed: ${e.getMessage}")
+          stream.reset()
+    }
+    if !taken then stream.reset()
 
   /** CE 138: `Erasure-Root ++ Shard Index` → bundle shard, then the CE 137
     * justification with the segment-shard root appended. Served to any node;
     * non-validators are not throttled.
     */
   def auditShardHandler: io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
+    (conn: JamnpConnection, stream: JamnpStream) =>
       stream.onMessage { msg =>
-        withCustody(stream, msg) { shards =>
-          stream.send(shards.bundleShard)
-          stream.send(encodeJustification(DaShards.auditJustification(shards), segmentShardSize))
+        offLoop(conn, stream, msg) {
+          withCustody(stream, msg) { shards =>
+            stream.send(shards.bundleShard)
+            stream.send(encodeJustification(DaShards.auditJustification(shards), segmentShardSize))
+          }
         }
       }
 
@@ -130,34 +145,35 @@ final class ShardService(
     * rejects the whole request.
     */
   def segmentShardHandler(verified: Boolean): io.forge.jam.network.StreamHandler =
-    (_: JamnpConnection, stream: JamnpStream) =>
-      stream.onMessage { msg =>
-        val served =
-          for
-            groups <- decodeSegmentShardRequest(msg)
-            if groups.map(_._3.size).sum <= MaxSegmentShardsPerStream
-            empty = Option(Vector.empty[(ValidatorShards, Int)])
-            selected <- groups.foldLeft(empty) { case (acc, (root, index, segs)) =>
-              acc.flatMap { done =>
-                store.get(root, index).flatMap(b => DaShards.decode(b).toOption).flatMap { shards =>
-                  if segs.forall(i => i >= 0 && i < shards.segmentShards.size) then Some(done ++ segs.map(shards -> _))
-                  else None
-                }
-              }
+    (conn: JamnpConnection, stream: JamnpStream) =>
+      stream.onMessage(msg => offLoop(conn, stream, msg)(serveSegmentShards(stream, msg, verified)))
+
+  private def serveSegmentShards(stream: JamnpStream, msg: Array[Byte], verified: Boolean): Unit =
+    val served =
+      for
+        groups <- decodeSegmentShardRequest(msg)
+        if groups.map(_._3.size).sum <= MaxSegmentShardsPerStream
+        empty = Option(Vector.empty[(ValidatorShards, Int)])
+        selected <- groups.foldLeft(empty) { case (acc, (root, index, segs)) =>
+          acc.flatMap { done =>
+            store.get(root, index).flatMap(b => DaShards.decode(b).toOption).flatMap { shards =>
+              if segs.forall(i => i >= 0 && i < shards.segmentShards.size) then Some(done ++ segs.map(shards -> _))
+              else None
             }
-          yield selected
-        served match
-          case Some(selected) =>
-            stream.send(concat(selected.map((s, i) => s.segmentShards(i))))
-            if verified then
-              selected.foreach { (s, i) =>
-                stream.send(encodeJustification(DaShards.segmentJustification(s, i), segmentShardSize))
-              }
-            stream.finish()
-          case None =>
-            logger.debug(s"${StreamKind.name(stream.kind)}: request not servable")
-            stream.reset()
-      }
+          }
+        }
+      yield selected
+    served match
+      case Some(selected) =>
+        stream.send(concat(selected.map((s, i) => s.segmentShards(i))))
+        if verified then
+          selected.foreach { (s, i) =>
+            stream.send(encodeJustification(DaShards.segmentJustification(s, i), segmentShardSize))
+          }
+        stream.finish()
+      case None =>
+        logger.debug(s"${StreamKind.name(stream.kind)}: request not servable")
+        stream.reset()
 
   // =========================================================================
   // client side

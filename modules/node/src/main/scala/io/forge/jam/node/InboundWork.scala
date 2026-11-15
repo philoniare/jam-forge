@@ -44,6 +44,10 @@ object InboundWork:
     */
   def serving(): InboundWork = pooled("serve", ServingThreads, MaxQueuedRequests, MaxQueuedBytes, MaxQueuedRequestsPerPeer)
 
+  def ordered(): InboundWork = pooled("announce", 1, MaxQueuedMessages, MaxQueuedBytes, MaxQueuedAnnouncementsPerPeer)
+
+  val MaxQueuedAnnouncementsPerPeer: Int = 16
+
   val ServingThreads: Int = 2
   val MaxQueuedRequests: Int = 64
   val MaxQueuedRequestsPerPeer: Int = 4

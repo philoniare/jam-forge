@@ -146,6 +146,32 @@ final class BlockStore private (
       writes.put(name, None)
     else db.delete(metaCf, name.getBytes("UTF-8"))
 
+  def writeMeta(puts: Iterable[(String, Array[Byte])], deletes: Iterable[String]): Unit =
+    if pending.get() != null then
+      puts.foreach((name, value) => setMeta(name, value))
+      deletes.foreach(deleteMeta)
+    else if puts.nonEmpty || deletes.nonEmpty then
+      val batch = new WriteBatch()
+      try
+        puts.foreach((name, value) => batch.put(metaCf, name.getBytes("UTF-8"), value))
+        deletes.foreach(name => batch.delete(metaCf, name.getBytes("UTF-8")))
+        db.write(writeOptions, batch)
+      finally batch.close()
+
+  def scanMeta(prefix: String, before: String = ""): List[(String, Array[Byte])] =
+    val start = prefix.getBytes("UTF-8")
+    val end = (prefix + before).getBytes("UTF-8")
+    def below(key: Array[Byte]): Boolean = before.isEmpty || java.util.Arrays.compareUnsigned(key, end) < 0
+    val out = List.newBuilder[(String, Array[Byte])]
+    val it = db.newIterator(metaCf)
+    try
+      it.seek(start)
+      while it.isValid && it.key().startsWith(start) && below(it.key()) do
+        out += (new String(it.key(), "UTF-8") -> it.value())
+        it.next()
+    finally it.close()
+    out.result()
+
   def setHead(name: String, hash: Hash): Unit = setMeta(name, hash.bytes)
 
   def getHead(name: String): Option[Hash] = getMeta(name).map(Hash(_))

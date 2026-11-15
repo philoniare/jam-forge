@@ -40,6 +40,8 @@ object SyncCodec:
   def decodeHandshake(bytes: Array[Byte]): (HashSlot, List[HashSlot]) =
     val finalHead = decodeHashSlot(bytes, 0)
     val (count, consumed) = JamCodecs.decodeCompactInteger(bytes, 36)
+    if count < 0 || count > SyncService.MaxHandshakeLeaves then
+      throw new IllegalArgumentException(s"handshake names $count leaves")
     var offset = 36 + consumed
     val leaves = (0L until count).map { _ =>
       val l = decodeHashSlot(bytes, offset)
@@ -152,7 +154,8 @@ object SyncCodec:
 final class SyncService(
     chain: ChainManager,
     /** Where CE 128 and CE 129 requests are answered: off the network event loops, which only hand them over. */
-    serving: InboundWork = InboundWork.direct
+    serving: InboundWork = InboundWork.direct,
+    announcements: InboundWork = InboundWork.direct
 ) extends LazyLogging:
   import SyncCodec.*
 
@@ -181,6 +184,14 @@ final class SyncService(
       .values
       .map(_.maxBy(_._2.slot)._2.hash)
 
+  def peerBestSlots: List[Long] =
+    peerBestHeads.asScala.toList
+      .filter(_._1.isOpen)
+      .groupBy(e => JamBytes(e._1.peerKey))
+      .values
+      .map(_.map(_._2.slot).max)
+      .toList
+
   /** Finalized blocks announced by peers with a live UP 0 stream, one per peer key (the newest). */
   def peerFinalized: List[(JamnpConnection, HashSlot)] =
     peerFinals.asScala.toList
@@ -191,8 +202,8 @@ final class SyncService(
       .toList
 
   /** Keep to the chain `needed` peers announce as finalized, fetching the agreed block when we lack it. */
-  def followPeerFinality(needed: Int): Unit =
-    val finals = peerFinalized
+  def followPeerFinality(needed: Int, counts: JamnpConnection => Boolean = _ => true): Unit =
+    val finals = peerFinalized.filter((conn, _) => counts(conn))
     chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed) match
       case Left(missing) =>
         if fetching.add(missing) then
@@ -309,16 +320,25 @@ final class SyncService(
         peerBestHeads.remove(conn)
     }
     stream.onMessage { msg =>
-      if !handshaken then
-        handshaken = true
-        val (peerFinal, peerLeaves) = decodeHandshake(msg)
-        peerFinals.put(conn, peerFinal)
-        logger.info(
-          s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
-            s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
-        )
-        onPeerLeaves(conn, peerLeaves, peerFinal)
-      else onAnnouncement(conn, msg)
+      val first = !handshaken
+      handshaken = true
+      val taken = announcements.submit(conn, msg.length.toLong) {
+        try
+          if first then
+            val (peerFinal, peerLeaves) = decodeHandshake(msg)
+            peerFinals.put(conn, peerFinal)
+            logger.info(
+              s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
+                s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
+            )
+            onPeerLeaves(conn, peerLeaves, peerFinal)
+          else onAnnouncement(conn, msg)
+        catch
+          case e: Exception =>
+            logger.debug(s"UP0: bad message from $side peer: ${e.getMessage}")
+            stream.reset()
+      }
+      if !taken then logger.debug(s"UP0: too many messages waiting; dropped one from $side peer")
     }
     stream.send(ourHandshake)
 
@@ -618,6 +638,8 @@ object SyncService:
   /** Block fetches that may wait for the import thread: per peer (the newest are kept) and in total. */
   val MaxPendingFetchesPerPeer: Int = 8
   val MaxPendingFetches: Int = 2048
+
+  val MaxHandshakeLeaves: Int = 4096
 
   /** The most blocks one CE 128 request asks for. */
   val MaxBlocksPerRequest: Int = 64

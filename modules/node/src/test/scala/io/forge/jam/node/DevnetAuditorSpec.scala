@@ -250,6 +250,40 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       val tampered = report.copy(authGasUsed = Gas(report.authGasUsed.toLong + 1))
       auditorA.auditReport(tampered) shouldBe false
       auditorB.auditReport(tampered) shouldBe false
+
+      // A restarts. Announcements and judgments are never resent, so what A had recorded for the unfinalized block
+      // must come back with it, and so must its dispute evidence and what it knows of included reports.
+      nodeA.pools.addJudgment(reportHash, 0L, 5, false, new Array[Byte](64))
+      val announcedBefore = auditorA.announcementsFor(reportHash)
+      val judgesBefore = auditorA.judgesOf(reportHash)
+      announcedBefore shouldBe 3
+      judgesBefore shouldBe (Set(0, 1, 2, 3, 4), Set(5))
+      auditorA.isAudited(available.hash) shouldBe true
+      nodeA.shutdown()
+      nodeA = new JamNode(spec, NodeConfig(dirA, slotTicking = false, ed25519Seed = Some(devKeys(0).ed25519Secret)))
+        .start()
+      nodeA.exportIndex.bundleLength(report.packageSpec.erasureRoot) shouldBe Some(report.packageSpec.length.toLong.toInt)
+      val evidence = nodeA.pools.disputed.find(_.reportHash == reportHash).getOrElse(fail("dispute evidence lost"))
+      evidence.judgments.map(j => j._1 -> j._2) should contain(5 -> false)
+      evidence.credentials.map(_._2) shouldBe Some(3L)
+
+      val restarted = nodeA.enableAuditing(devKeys.take(1))
+      val _ = restarted.isAudited(available.hash) // not looked at since the restart: this starts tracking it
+      val restoreDeadline = System.currentTimeMillis() + 10000
+      while restarted.announcementsFor(reportHash) < announcedBefore && System.currentTimeMillis() < restoreDeadline do
+        Thread.sleep(20)
+      restarted.announcementsFor(reportHash) shouldBe announcedBefore
+      restarted.verdictFor(reportHash) shouldBe Some(true) // its own judgment stands: no second re-execution
+      restarted.judgesOf(reportHash) shouldBe judgesBefore
+      restarted.isAudited(available.hash) shouldBe true
+
+      // Once the block is finalized nothing of its audit is kept on disk.
+      nodeA.chain.blockStore.scanMeta("role:audit:") should not be empty
+      nodeA.chain.finalize(nodeA.chain.best.hash).isRight shouldBe true
+      val dropDeadline = System.currentTimeMillis() + 10000
+      while nodeA.chain.blockStore.scanMeta("role:audit:").nonEmpty && System.currentTimeMillis() < dropDeadline do
+        Thread.sleep(50)
+      nodeA.chain.blockStore.scanMeta("role:audit:") shouldBe Nil
     finally
       if nodeA != null then nodeA.shutdown()
       if nodeB != null then nodeB.shutdown()

@@ -22,7 +22,8 @@ final class GrandpaService(
     keys: Option[ValidatorKeySet],
     gossipMillis: Long = 1000L,
     /** We vote only for blocks we judge audited. */
-    audited: Hash => Boolean = _ => true
+    audited: Hash => Boolean = _ => true,
+    serving: InboundWork = InboundWork.direct
 ) extends LazyLogging:
 
   private val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
@@ -304,15 +305,31 @@ final class GrandpaService(
   }
 
   /** CE 130. */
-  def justificationHandler: StreamHandler = onSingleMessage { (_, stream, msg) =>
-    val j = Option.when(msg.length == 32)(Hash(msg)).flatMap(h => chain.meta.grandpaJustification(h))
-    j match
-      case Some(bytes) => stream.send(bytes); stream.finish()
-      case None        => stream.reset()
+  def justificationHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+    served(conn, stream, msg) {
+      val j = Option.when(msg.length == 32)(Hash(msg)).flatMap(h => chain.meta.grandpaJustification(h))
+      j match
+        case Some(bytes) => stream.send(bytes); stream.finish()
+        case None        => stream.reset()
+    }
   }
 
+  private def served(conn: JamnpConnection, stream: JamnpStream, msg: Array[Byte])(answer: => Unit): Unit =
+    val taken = serving.submit(conn, msg.length.toLong) {
+      try answer
+      catch
+        case e: Exception =>
+          logger.warn(s"${StreamKind.name(stream.kind)} handler failed: ${e.getMessage}")
+          stream.reset()
+    }
+    if !taken then stream.reset()
+
   /** CE 153. */
-  def warpSyncHandler: StreamHandler = onSingleMessage { (_, stream, msg) =>
+  def warpSyncHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+    served(conn, stream, msg)(answerWarpSync(stream, msg))
+  }
+
+  private def answerWarpSync(stream: JamnpStream, msg: Array[Byte]): Unit =
     val fragments =
       if msg.length != 4 then Nil
       else
@@ -331,7 +348,6 @@ final class GrandpaService(
       fragments.foreach(w.bytes(_))
       stream.send(w.toArray)
       stream.finish()
-  }
 
   def register(network: io.forge.jam.network.JamnpNode): Unit =
     network
