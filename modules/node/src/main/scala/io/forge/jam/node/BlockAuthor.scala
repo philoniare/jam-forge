@@ -20,7 +20,7 @@ import spire.math.UInt
   * slot
   */
 final class BlockAuthor(
-    chain: ChainManager,
+    chain: ChainReader,
     validators: Seq[ValidatorKeySet],
     pools: ExtrinsicPools = new ExtrinsicPools,
     /** Own tickets (id bytes → keys, attempt), populated by TicketService. */
@@ -261,7 +261,7 @@ object BlockAuthor:
     * someone judged invalid, the guarantors of each (from the credentials of the block that included it, resolved
     * against that block's validator sets) as culprits. Evidence too old for a verdict is pruned first.
     */
-  def disputes(pools: ExtrinsicPools, prior: io.forge.jam.protocol.state.TrieBackedJamState, chain: ChainManager)
+  def disputes(pools: ExtrinsicPools, prior: io.forge.jam.protocol.state.TrieBackedJamState, chain: ChainReader)
       : DisputeBuilder.Built =
     val state = DisputeBridge.extract(prior)
     val epochLength = chain.config.epochLength
@@ -316,7 +316,7 @@ object BlockAuthor:
       p: io.forge.jam.core.types.extrinsic.Preimage,
       state: io.forge.jam.protocol.state.TrieBackedJamState
   ): Option[Boolean] =
-    import io.forge.jam.protocol.accumulation.StateKey
+    import io.forge.jam.protocol.state.StateKey
     val blob = p.blob.toArray
     val hash = JamBytes(Hashing.blake2b256(blob).bytes)
     val key = StateKey.computePreimageInfoStateKey(p.requester.toLong, blob.length, hash)

@@ -1,11 +1,13 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{GrowHeapHostCall, HostCall, InterpretedInstanceWrapper, NativeRunner, PvmInstance}
 import io.forge.jam.pvm.InterruptKind
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.{JumpTable, ProgramBlob}
 import io.forge.jam.pvm.types.ProgramCounter
-import io.forge.jam.protocol.refine.HostCallDispatcher
+import io.forge.jam.protocol.pvmhost.HostCallDispatcher
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers

@@ -117,14 +117,14 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
     instance.configureGrowHeap(hInitial = 48L, maxPage = 1044431L)
 
     instance.setReg(7, 50L) // grow by 2 pages
-    hc.dispatch(io.forge.jam.protocol.accumulation.HostCall.GROW_HEAP, instance)
+    hc.dispatch(io.forge.jam.protocol.pvmhost.HostCall.GROW_HEAP, instance)
 
     instance.reg(7) shouldBe 50L
     instance.gas shouldBe (1_000_000L - (275L + 2L * 121L))
     instance.growHeapPagesGrown shouldBe 2L
 
     // Self-metered: excluded from the flat pre-charge.
-    hc.getGasCost(io.forge.jam.protocol.accumulation.HostCall.GROW_HEAP, instance) shouldBe 0L
+    hc.getGasCost(io.forge.jam.protocol.pvmhost.HostCall.GROW_HEAP, instance) shouldBe 0L
   }
 
   test("is-authorized FETCH panics when the output address is >= 2^32 (no 32-bit truncation)") {
@@ -143,7 +143,7 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
       instance.setReg(8, 0L) // offset
       instance.setReg(9, 3L) // length
       instance.setReg(10, 9L) // selector 9: authorization token
-      hc.dispatch(io.forge.jam.protocol.accumulation.HostCall.FETCH, instance)
+      hc.dispatch(io.forge.jam.protocol.pvmhost.HostCall.FETCH, instance)
 
     // Low 32 bits point at writable memory, but o ∉ writable(μ) over the full 64-bit o.
     a[io.forge.jam.protocol.HostCallPanic] should be thrownBy fetchToken((1L << 32) + 0x20000L)

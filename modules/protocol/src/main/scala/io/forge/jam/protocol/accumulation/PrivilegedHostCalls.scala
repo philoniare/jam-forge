@@ -1,5 +1,8 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallResult, PvmInstance}
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.{JamBytes, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo

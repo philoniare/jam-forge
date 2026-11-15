@@ -1,7 +1,9 @@
 package io.forge.jam.protocol.benchmark
 
 import io.forge.jam.core.ChainConfig
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, Genesis}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.state.RawState
+import io.forge.jam.protocol.traces.Genesis
 import io.forge.jam.protocol.TestFileLoader
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers

@@ -1,6 +1,6 @@
 package io.forge.jam.protocol.accumulation.hostcalls
 
-import io.forge.jam.protocol.accumulation.HostCall
+import io.forge.jam.protocol.pvmhost.HostCall
 
 class HostCallNumberingSpec extends org.scalatest.funsuite.AnyFunSuite with org.scalatest.matchers.should.Matchers:
 

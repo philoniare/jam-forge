@@ -1,9 +1,11 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 import java.util.concurrent.atomic.AtomicInteger
 
 import io.forge.jam.core.{JamBytes, Parallel}
-import io.forge.jam.protocol.accumulation.{PvmInstance, ServiceCode}
+import io.forge.jam.protocol.pvmhost.{PvmInstance, ServiceCode}
 import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.pvm.memory.InstanceMemoryBudget
 import org.scalatest.funsuite.AnyFunSuite

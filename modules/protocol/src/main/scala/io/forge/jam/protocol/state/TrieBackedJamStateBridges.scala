@@ -3,10 +3,7 @@ package io.forge.jam.protocol.state
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.epoch.ValidatorKey
-import io.forge.jam.protocol.accumulation.{
-  AccumulationState,
-  StateKey
-}
+import io.forge.jam.protocol.accumulation.AccumulationState
 import io.forge.jam.protocol.assurance.AssuranceTypes.AssuranceState
 import io.forge.jam.protocol.authorization.AuthorizationTypes.AuthState
 import io.forge.jam.protocol.dispute.DisputeTypes.DisputeState

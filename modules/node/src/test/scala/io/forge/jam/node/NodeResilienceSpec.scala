@@ -197,7 +197,7 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers:
 
       val info = readMessage()
       info(0) shouldBe 1.toByte
-      val params = io.forge.jam.protocol.accumulation.ConstantsBlob.build(spec.config)
+      val params = io.forge.jam.protocol.pvmhost.ConstantsBlob.build(spec.config)
       info.slice(1, 1 + params.length) shouldBe params
       info.slice(1 + params.length, 33 + params.length) shouldBe spec.genesisHeaderHash.bytes.toArray
 

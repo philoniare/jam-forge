@@ -5,7 +5,9 @@ import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.state.FuzzSpecGenesis
-import io.forge.jam.protocol.traces.{BlockImporter, Genesis, ImportResult, RawState, TraceStep}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.traces.{Genesis, TraceStep}
+import io.forge.jam.protocol.state.RawState
 
 import java.nio.file.{Files, Paths}
 

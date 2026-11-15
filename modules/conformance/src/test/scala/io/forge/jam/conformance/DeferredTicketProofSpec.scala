@@ -3,7 +3,9 @@ package io.forge.jam.conformance
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.codec.JamCodecs.encode as jencode
 import io.forge.jam.protocol.pipeline.ExtrinsicHashing
-import io.forge.jam.protocol.traces.{BlockImporter, Genesis, RawState, StateMerklization, TraceStep}
+import io.forge.jam.protocol.importing.BlockImporter
+import io.forge.jam.protocol.traces.{Genesis, TraceStep}
+import io.forge.jam.protocol.state.{RawState, StateMerklization}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.nio.file.{Files, Paths}

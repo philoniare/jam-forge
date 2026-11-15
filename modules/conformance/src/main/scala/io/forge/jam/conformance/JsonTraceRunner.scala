@@ -3,7 +3,9 @@ package io.forge.jam.conformance
 import io.circe.{Decoder, parser}
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.types.block.Block
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, KeyValue, StateMerklization, TraceStep}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.state.{KeyValue, StateMerklization}
+import io.forge.jam.protocol.traces.TraceStep
 
 import java.io.File
 import java.nio.file.{Files, Path}

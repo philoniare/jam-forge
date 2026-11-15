@@ -1,7 +1,9 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, Parallel, StfResult}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Gas, Hash, ServiceId}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AccumulationBridge
@@ -24,9 +26,10 @@ object AccumulationTransition:
       input: AccumulationInput,
       view: TrieBackedJamState,
       prevSlot: Long,
-      sharedExecutor: Option[AccumulationExecutor] = None
+      sharedExecutor: Option[AccumulationExecutor] = None,
+      storageView: Option[ServiceStorageView] = None
   ): AccumulationOutput =
-    idle(input, view, prevSlot).getOrElse(accumulate(input, view, prevSlot, sharedExecutor))
+    idle(input, view, prevSlot).getOrElse(accumulate(input, view, prevSlot, sharedExecutor, storageView))
 
   /**
    * A block with nothing to accumulate: no new or ready reports and no always-accumulate services
@@ -59,7 +62,8 @@ object AccumulationTransition:
       input: AccumulationInput,
       view: TrieBackedJamState,
       prevSlot: Long,
-      sharedExecutor: Option[AccumulationExecutor]
+      sharedExecutor: Option[AccumulationExecutor],
+      storageView: Option[ServiceStorageView] = None
   ): AccumulationOutput =
     import io.forge.jam.protocol.pipeline.StageTimers
     val pre = StageTimers.time("acc/extract")(AccumulationBridge.extract(view))
@@ -72,7 +76,8 @@ object AccumulationTransition:
         pre.initAuthQueues,
         view.config,
         prevSlot,
-        sharedExecutor
+        sharedExecutor,
+        storageView
       )
     )
 
@@ -95,7 +100,8 @@ object AccumulationTransition:
       initAuthQueues: List[List[Hash]],
       config: ChainConfig,
       prevSlot: Long,
-      sharedExecutor: Option[AccumulationExecutor] = None
+      sharedExecutor: Option[AccumulationExecutor] = None,
+      storageView: Option[ServiceStorageView] = None
   ): AccumulationStfResult =
     val m = (input.slot % config.epochLength).toInt
     val deltaT = Math.max(input.slot - prevSlot, 1L)
@@ -113,7 +119,8 @@ object AccumulationTransition:
         initAuthQueues = initAuthQueues,
         slot = input.slot,
         config = config,
-        sharedExecutor = sharedExecutor
+        sharedExecutor = sharedExecutor,
+        storageView = storageView
       )
     }
 
@@ -281,7 +288,8 @@ object AccumulationTransition:
       initAuthQueues: List[List[Hash]],
       slot: Long,
       config: ChainConfig,
-      sharedExecutor: Option[AccumulationExecutor]
+      sharedExecutor: Option[AccumulationExecutor],
+      storageView: Option[ServiceStorageView]
   ): AccumulationRun =
     val allToAccumulate = immediateReports ++ readyToAccumulate
     val partialState = preState.toPartialState(initStagingSet, initAuthQueues)
@@ -304,7 +312,8 @@ object AccumulationTransition:
       timeslot = slot,
       entropy = preState.entropy,
       executor = executor,
-      config = config
+      config = config,
+      storageView = storageView
     )
 
     // Determine which reports were actually accumulated (based on reportsAccumulated count)
@@ -380,8 +389,8 @@ object AccumulationTransition:
     */
   private final case class AssembledPostState(
       state: AccumulationState,
-      accumulationStats: Map[Long, (Long, Int)],
-      accumulationTransferCounts: Map[Long, Int]
+      accumulationStats: Map[ServiceId, ServiceAccumulation],
+      accumulationTransferCounts: Map[ServiceId, Int]
   )
 
   private def assemblePostState(
@@ -408,25 +417,26 @@ object AccumulationTransition:
     val statsServiceIds =
       gasUsedPerService.keySet ++ workItemsPerService.keySet ++
         transferCountsPerService.keySet
-    val accumulationStats: Map[Long, (Long, Int)] = statsServiceIds.iterator
+    val accumulationStats: Map[ServiceId, ServiceAccumulation] = statsServiceIds.iterator
       .map { serviceId =>
-        serviceId -> (
-          gasUsedPerService.getOrElse(serviceId, 0L),
+        ServiceId.fromLong(serviceId) -> ServiceAccumulation(
+          Gas(gasUsedPerService.getOrElse(serviceId, 0L)),
           workItemsPerService.getOrElse(serviceId, 0)
         )
       }
-      .filter { case (sid, (gas, count)) =>
-        gas > 0 || count > 0 || transferCountsPerService.getOrElse(sid, 0) > 0
+      .filter { case (sid, done) =>
+        done.gasUsed.toLong > 0 || done.workItems > 0 || transferCountsPerService.getOrElse(sid.toLong, 0) > 0
       }
       .toMap
-    val accumulationTransferCounts: Map[Long, Int] =
+    val accumulationTransferCounts: Map[ServiceId, Int] =
       accumulationStats.keysIterator
-        .map(sid => sid -> transferCountsPerService.getOrElse(sid, 0))
+        .map(sid => sid -> transferCountsPerService.getOrElse(sid.toLong, 0))
         .filter(_._2 > 0)
         .toMap
 
     // 12. Update lastAccumulationSlot for all services in accumulationStats
-    for (serviceId, _) <- accumulationStats do
+    for (sid, _) <- accumulationStats do
+      val serviceId = sid.toLong
       newPartialState.accounts.get(serviceId).foreach { account =>
         newPartialState.accounts = newPartialState.accounts.updated(
           serviceId,
@@ -567,7 +577,8 @@ object AccumulationTransition:
       timeslot: Long,
       entropy: JamBytes,
       executor: AccumulationExecutor,
-      config: ChainConfig
+      config: ChainConfig,
+      storageView: Option[ServiceStorageView] = None
   ): OuterAccumulationResult =
     // Count how many reports can fit in gas budget
     var i = 0
@@ -604,7 +615,8 @@ object AccumulationTransition:
       alwaysAccers = alwaysAccers,
       timeslot = timeslot,
       entropy = entropy,
-      executor = executor
+      executor = executor,
+      storageView = storageView
     )
 
     val parallelGasUsed = u64Sum(parallelResult.gasUsedMap.values)
@@ -626,7 +638,8 @@ object AccumulationTransition:
       timeslot = timeslot,
       entropy = entropy,
       executor = executor,
-      config = config
+      config = config,
+      storageView = storageView
     )
 
     // Merge results
@@ -690,7 +703,8 @@ object AccumulationTransition:
       alwaysAccers: Map[Long, Long],
       timeslot: Long,
       entropy: JamBytes,
-      executor: AccumulationExecutor
+      executor: AccumulationExecutor,
+      storageView: Option[ServiceStorageView]
   ): AccumulationExecResult =
     val initialState = partialState.deepCopy()
 
@@ -718,7 +732,8 @@ object AccumulationTransition:
       initialState = initialState,
       timeslot = timeslot,
       entropy = entropy,
-      executor = executor
+      executor = executor,
+      blockStorage = storageView
     )
 
     val finalState = initialState
@@ -745,7 +760,7 @@ object AccumulationTransition:
           run.provisions,
           finalState,
           timeslot,
-          executor.storageView
+          storageView
         )
       else finalState
     AccumulationExecResult(
@@ -800,16 +815,17 @@ object AccumulationTransition:
   private def accumulateAll(
       sortedServices: List[Long],
       initialState: PartialState,
-      executor: AccumulationExecutor
+      executor: AccumulationExecutor,
+      storageView: Option[ServiceStorageView]
   )(accumulateOne: (Long, Option[ServiceStorageView]) => AccumulationOneResult): List[AccumulationOneResult] =
     val parallel = sortedServices.lengthCompare(1) > 0 && executor.parallelServices
-    val forks = sortedServices.map(s => s -> executor.storageView.map(_.fork(shareReadCache = !parallel))).toMap
+    val forks = sortedServices.map(s => s -> storageView.map(_.fork(shareReadCache = !parallel))).toMap
     val results =
       if !parallel then sortedServices.map(s => accumulateOne(s, forks(s)))
       else Parallel.map(sortedServices)(s => accumulateOne(s, forks(s)))
     for
       (s, result) <- sortedServices.zip(results)
-      parent      <- executor.storageView
+      parent      <- storageView
       child       <- forks(s)
     do parent.absorb(child, keepsWrite(s, initialState, result.postState))
     results
@@ -840,7 +856,8 @@ object AccumulationTransition:
       initialState: PartialState,
       timeslot: Long,
       entropy: JamBytes,
-      executor: AccumulationExecutor
+      executor: AccumulationExecutor,
+      blockStorage: Option[ServiceStorageView]
   ): ServiceRunResults =
     val gasUsedMap = mutable.Map.empty[Long, Long]
     val commitments = mutable.Set.empty[Commitment]
@@ -874,7 +891,7 @@ object AccumulationTransition:
         storageView = storageView
       )
 
-    val results = accumulateAll(sortedServices, initialState, executor)(accumulateOne)
+    val results = accumulateAll(sortedServices, initialState, executor, blockStorage)(accumulateOne)
 
     for (serviceId, execResult) <- sortedServices.zip(results) do
       // Compute changes this service made

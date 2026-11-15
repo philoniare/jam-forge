@@ -5,7 +5,7 @@ import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
-import io.forge.jam.protocol.traces.KeyValue
+import io.forge.jam.protocol.state.KeyValue
 import io.forge.jam.conformance.ConformanceCodecs.{encode, decodeAs}
 import spire.math.{UByte, UInt}
 import io.forge.jam.core.codec.Codec

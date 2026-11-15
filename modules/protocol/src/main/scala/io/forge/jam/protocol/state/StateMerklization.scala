@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.traces
+package io.forge.jam.protocol.state
 
 import io.forge.jam.core.{JamBytes, Hashing}
 import io.forge.jam.core.primitives.Hash

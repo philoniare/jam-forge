@@ -51,7 +51,7 @@ final class GrandpaService(
     def finalizeBlock(h: Hash): Either[String, Unit] = chain.finalizeAdopting(h).left.map(_.message).map(_ => ())
     override def isAudited(h: Hash): Boolean = audited(h)
 
-  private def toVote(h: chain.Head): Vote = Vote(h.hash, h.stateRoot, h.slot)
+  private def toVote(h: ChainHead): Vote = Vote(h.hash, h.stateRoot, h.slot)
 
   @volatile private var genesisHash: Hash = Hash.zero
 
@@ -124,7 +124,7 @@ final class GrandpaService(
   /** Start voting from the persisted voter set, or set 0 at genesis with the genesis validators. */
   def start(genesis: Hash, genesisKeys: IndexedSeq[Array[Byte]]): Unit =
     genesisHash = genesis
-    val set = chain.meta("grandpa:set").filter(_.length == 40) match
+    val set = chain.meta.grandpaSet.filter(_.length == 40) match
       case Some(b) =>
         val setId = LittleEndian.get(b, 0, 8)
         val base = Hash(b.drop(8))
@@ -141,12 +141,10 @@ final class GrandpaService(
       keys,
       gossipMillis = gossipMillis,
       onFinalized = persist,
-      onSetAdopted = s => chain.putMeta("grandpa:set", LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray),
+      onSetAdopted = s => chain.meta.grandpaSet = LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray,
       onProgress = (setId, round, votes) =>
-        chain.putMeta(
-          "grandpa:round",
-          LittleEndian.encode(setId, 8) ++ LittleEndian.encode(round, 8) ++ votes.flatMap(encodeVoteMessage)
-        ),
+        chain.meta.grandpaRound =
+          LittleEndian.encode(setId, 8) ++ LittleEndian.encode(round, 8) ++ votes.flatMap(encodeVoteMessage),
       resume = storedRound(set.setId)
     )
     logger.info(s"GRANDPA voter started: set ${set.setId} round ${voter.round}, ${set.size} voters, voting=${keys
@@ -170,17 +168,17 @@ final class GrandpaService(
 
   /** The round and our votes in it persisted for `setId` before a restart. */
   private def storedRound(setId: Long): Option[(Long, List[VoteMessage])] =
-    chain.meta("grandpa:round").filter(b => b.length >= 16 && LittleEndian.get(b, 0, 8) == setId).map { b =>
+    chain.meta.grandpaRound.filter(b => b.length >= 16 && LittleEndian.get(b, 0, 8) == setId).map { b =>
       val votes = b.drop(16).grouped(VoteMessageSize).flatMap(v => decodeVoteMessage(v).toOption).toList
       (LittleEndian.get(b, 8, 8), votes)
     }
 
   private def persist(target: Vote, j: Justification, setChanged: Boolean): Unit =
     val encoded = encodeJustification(j)
-    chain.putMeta(s"grandpa:just:${target.hash.toHex}", encoded)
+    chain.meta.putGrandpaJustification(target.hash, encoded)
     if setChanged then
-      chain.headerBytes(target.hash).foreach(h => chain.putMeta(s"grandpa:warp:${j.setId}", h ++ encoded))
-      chain.putMeta("grandpa:set", LittleEndian.encode(j.setId + 1, 8) ++ target.hash.bytes.toArray)
+      chain.headerBytes(target.hash).foreach(h => chain.meta.putGrandpaWarp(j.setId, h ++ encoded))
+      chain.meta.grandpaSet = LittleEndian.encode(j.setId + 1, 8) ++ target.hash.bytes.toArray
 
   private def retryPending(imported: Hash): Unit =
     pendingCommits.take(imported).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None): Unit)
@@ -307,7 +305,7 @@ final class GrandpaService(
 
   /** CE 130. */
   def justificationHandler: StreamHandler = onSingleMessage { (_, stream, msg) =>
-    val j = Option.when(msg.length == 32)(Hash(msg)).flatMap(h => chain.meta(s"grandpa:just:${h.toHex}"))
+    val j = Option.when(msg.length == 32)(Hash(msg)).flatMap(h => chain.meta.grandpaJustification(h))
     j match
       case Some(bytes) => stream.send(bytes); stream.finish()
       case None        => stream.reset()
@@ -321,7 +319,7 @@ final class GrandpaService(
         val from = LittleEndian.get(msg, 0, 4)
         Iterator
           .iterate(from)(_ + 1)
-          .map(id => chain.meta(s"grandpa:warp:$id"))
+          .map(id => chain.meta.grandpaWarp(id))
           .takeWhile(_.isDefined)
           .take(MaxWarpFragments)
           .flatten

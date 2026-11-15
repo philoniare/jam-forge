@@ -24,7 +24,7 @@ import scala.collection.mutable
   * disregarded by fork choice.
   */
 final class AuditorService(
-    chain: ChainManager,
+    chain: ChainReader,
     distribution: DistributionService,
     shards: ShardService,
     pools: ExtrinsicPools,
@@ -160,7 +160,7 @@ final class AuditorService(
   /** Import listener: track the reports that just became available in `block`. Runs on the import bus, so the
     * block's audited flag is set before any later listener (the GRANDPA voter) can ask for it.
     */
-  def onImported(head: ChainManager#Head, block: Block): Unit =
+  def onImported(head: ChainHead, block: Block): Unit =
     if head.slot > chain.finalized.slot then
       auditedBlocks.putIfAbsent(head.hash, AuditorService.Mark(head.slot, false))
       track(head.hash, head.slot, block)

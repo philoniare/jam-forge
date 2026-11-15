@@ -1,7 +1,8 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
-import io.forge.jam.protocol.traces.{BlockImporter, RawState, StateMerklization}
+import io.forge.jam.protocol.importing.BlockImporter
+import io.forge.jam.protocol.state.{RawState, StateMerklization}
 
 import java.io.EOFException
 import java.nio.{ByteBuffer, ByteOrder}

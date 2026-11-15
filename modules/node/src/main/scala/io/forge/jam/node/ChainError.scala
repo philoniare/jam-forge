@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.traces.ImportError
+import io.forge.jam.protocol.importing.ImportError
 
 /** Why [[ChainManager]] refused an import, finalization, reorg or disregard. */
 enum ChainError:

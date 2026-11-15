@@ -1,7 +1,9 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 import io.forge.jam.protocol.HostCallPanic
-import io.forge.jam.protocol.accumulation.PvmInstance
+import io.forge.jam.protocol.pvmhost.PvmInstance
 import io.forge.jam.pvm.engine.InterpretedModule
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers

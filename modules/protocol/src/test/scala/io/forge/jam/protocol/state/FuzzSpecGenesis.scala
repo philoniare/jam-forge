@@ -7,7 +7,6 @@ import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrieStore}
 import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
-import io.forge.jam.protocol.traces.{KeyValue, RawState, StateKeys, StateMerklization}
 import io.forge.jam.protocol.report.ReportTypes.CoreStatisticsRecord
 import io.forge.jam.crypto.BandersnatchVrf
 

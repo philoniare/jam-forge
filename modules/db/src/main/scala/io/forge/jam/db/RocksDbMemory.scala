@@ -1,5 +1,7 @@
 package io.forge.jam.db
 
+import io.forge.jam.core.ProcessSettings
+
 import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledFuture, TimeUnit}
 
 import org.rocksdb.{BlockBasedTableConfig, Cache, ColumnFamilyHandle, DBOptions, FlushOptions, LRUCache, RocksDB, WriteBufferManager}
@@ -111,14 +113,28 @@ object RocksDbMemory:
     t
   }
 
-  private def bytes(property: String, default: Long): Long =
-    sys.props.get(property).flatMap(_.toLongOption).filter(_ > 0).getOrElse(default)
-
   /** Default budget: 256 MiB in all, of which write buffers may take 96 MiB before a flush.
     * `-Djam.db.cacheBytes` and `-Djam.db.writeBufferBytes` change it.
     */
-  lazy val shared: RocksDbMemory =
-    new RocksDbMemory(
-      cacheBytes = bytes("jam.db.cacheBytes", 256L * 1024 * 1024),
-      writeBufferBytes = bytes("jam.db.writeBufferBytes", 96L * 1024 * 1024)
+  final case class Settings(
+      cacheBytes: Long = 256L * 1024 * 1024,
+      writeBufferBytes: Long = 96L * 1024 * 1024
+  )
+
+  object Settings:
+    val CacheBytesProperty = "jam.db.cacheBytes"
+    val WriteBufferBytesProperty = "jam.db.writeBufferBytes"
+
+    val process: ProcessSettings[Settings] = new ProcessSettings(lookup =>
+      def bytes(property: String, default: Long): Long =
+        lookup(property).flatMap(_.toLongOption).filter(_ > 0).getOrElse(default)
+      val defaults = Settings()
+      Settings(
+        cacheBytes = bytes(CacheBytesProperty, defaults.cacheBytes),
+        writeBufferBytes = bytes(WriteBufferBytesProperty, defaults.writeBufferBytes)
+      )
     )
+
+  lazy val shared: RocksDbMemory =
+    val settings = Settings.process.current
+    new RocksDbMemory(cacheBytes = settings.cacheBytes, writeBufferBytes = settings.writeBufferBytes)

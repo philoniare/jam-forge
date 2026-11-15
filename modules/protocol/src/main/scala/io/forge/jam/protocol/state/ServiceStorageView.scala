@@ -2,7 +2,6 @@ package io.forge.jam.protocol.state
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.trie.StateTrie
-import io.forge.jam.protocol.accumulation.StateKey
 
 import scala.collection.mutable
 

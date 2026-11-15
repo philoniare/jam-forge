@@ -1,7 +1,7 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.ChainConfig
-import io.forge.jam.protocol.accumulation.NativeRunner
+import io.forge.jam.protocol.pvmhost.NativeRunner
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers

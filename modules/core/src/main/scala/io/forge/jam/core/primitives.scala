@@ -267,23 +267,6 @@ object primitives:
     @targetName("timeslotMinusInt")
     inline def -(n: Int): Timeslot = (ts - (n & 0xffffffffL)) & 0xffffffffL
 
-  /** Epoch index (32-bit unsigned, held in a Long) */
-  opaque type EpochIndex = Long
-
-  object EpochIndex:
-    inline def apply(v: UInt): EpochIndex = v.toLong
-    @targetName("epochIndexFromInt")
-    inline def apply(v: Int): EpochIndex = v & 0xffffffffL
-    val Zero: EpochIndex = 0L
-
-  extension (e: EpochIndex)
-    @targetName("epochIndexValue")
-    inline def value: UInt = UInt(e.toInt)
-    @targetName("epochIndexToInt")
-    inline def toInt: Int = e.toInt
-    @targetName("epochIndexToLong")
-    inline def toLong: Long = e
-
   // ============================================================================
   // Gas and Balance
   // ============================================================================

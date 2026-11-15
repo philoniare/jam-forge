@@ -3,8 +3,8 @@ package io.forge.jam.protocol.benchmark
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import io.forge.jam.core.{JamBytes, Parallel}
-import io.forge.jam.protocol.accumulation.{PvmInstance, ServiceCode}
-import io.forge.jam.protocol.refine.{HostCallDispatcher, PvmRunner}
+import io.forge.jam.protocol.pvmhost.{PvmInstance, ServiceCode}
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 
 /** Memory held by PVM instances that run at the same time, as the services of one accumulation batch do:
   * `--services=16` services each declaring `--heap-pages=65535` (the largest declarable heap, about 256 MiB) run

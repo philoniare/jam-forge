@@ -3,12 +3,9 @@ package io.forge.jam.protocol.pipeline
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.LongAdder
 
-import cats.data.StateT
-import io.forge.jam.protocol.pipeline.PipelineTypes.StfKleisli
-
 /** Where block import spends its time, stage by stage. Off unless `-Djam.stageTimers=true` (or [[enable]]): the
-  * pipeline is then run through [[step]] wrappers that add each stage's wall time to a counter. Off, a stage is run
-  * as it is, with no clock read.
+  * pipeline's stages are then run through [[time]], which adds each stage's wall time to a counter. Off, a stage is
+  * run as it is, with no clock read.
   *
   * Stages are timed on the importing thread, so work a stage hands to other threads (deferred signature batches) is
   * charged to the stage that waits for it.
@@ -56,10 +53,6 @@ object StageTimers:
       val c = cell(name)
       c.nanos.add(amount * 1_000_000L)
       c.calls.increment()
-
-  /** A pipeline step timed under `name`. */
-  def step[A](name: String)(s: StfKleisli[A]): StfKleisli[A] =
-    if !on then s else StateT(state => time(name)(s.run(state)))
 
   /** (stage, calls, total ms, mean µs per call), in first-use order. */
   def snapshot: List[(String, Long, Double, Double)] =

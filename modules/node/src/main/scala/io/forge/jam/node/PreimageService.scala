@@ -12,7 +12,7 @@ import io.forge.jam.core.primitives.{Hash, ServiceId}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
-import io.forge.jam.protocol.accumulation.StateKey
+import io.forge.jam.protocol.state.StateKey
 
 /** CE 142 wire format (jamnp-s): Service Index (u32 LE) ++ Hash (32) ++
   * Length (u32 LE) = 40 bytes. CE 143 request/response are unframed: the
@@ -35,7 +35,7 @@ object PreimageCodec:
       Right((serviceId, hash, length))
 
 final class PreimageService(
-    chain: ChainManager,
+    chain: ChainReader,
     pools: ExtrinsicPools,
     egress: ExecutorService,
     announcedMetaCap: Int = PreimageService.DefaultAnnouncedMetaCap,
@@ -88,7 +88,7 @@ final class PreimageService(
         stream.finish()
       }
 
-  def onImported(@annotation.unused head: ChainManager#Head, block: Block): Unit =
+  def onImported(@annotation.unused head: ChainHead, block: Block): Unit =
     block.extrinsic.preimages.foreach { p =>
       val hash = Hashing.blake2b256(p.blob.toArray)
       announcedMeta.put(hash, (p.requester.toLong, p.blob.length.toLong))

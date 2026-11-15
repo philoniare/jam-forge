@@ -3,6 +3,8 @@ package io.forge.jam.protocol.accumulation.hostcalls
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.trie.{StateTrie, InMemoryTrieBackend}
 import io.forge.jam.protocol.accumulation._
+import io.forge.jam.protocol.pvmhost.*
+import io.forge.jam.protocol.state.*
 import io.forge.jam.protocol.state.ServiceStorageView
 
 import scala.collection.mutable

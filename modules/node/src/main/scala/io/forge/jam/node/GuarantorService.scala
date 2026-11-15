@@ -10,7 +10,7 @@ import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}
 import io.forge.jam.network.{JamnpConnection, JamnpStream}
-import io.forge.jam.protocol.accumulation.StateKey
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.protocol.refine.{
   ComputedReport,
   ComputeReport,
@@ -33,7 +33,7 @@ import scala.util.boundary, boundary.break
   * synced past it) the best state is read instead. Either way a blob is returned only when its request history
   * `a_l[(h, |p|)]` shows it available at the anchor timeslot t (`I(l, t)`).
   */
-final class StateHistoricalLookup(chain: ChainManager, anchorStateRoot: Option[Hash] = None)
+final class StateHistoricalLookup(chain: ChainReader, anchorStateRoot: Option[Hash] = None)
     extends HistoricalLookupService:
 
   private lazy val anchorState = anchorStateRoot.flatMap(chain.stateAtRoot)
@@ -108,7 +108,7 @@ private[node] final class StreamIntake(maxMessages: Int, maxBytes: Long):
   * the guaranteed report via CE 135.
   */
 final class GuarantorService(
-    chain: ChainManager,
+    chain: ChainReader,
     distribution: DistributionService,
     pools: ExtrinsicPools,
     validatorKeys: Seq[ValidatorKeySet],

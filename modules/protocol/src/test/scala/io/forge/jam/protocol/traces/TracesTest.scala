@@ -1,5 +1,9 @@
 package io.forge.jam.protocol.traces
 
+
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.pipeline.InputExtractor
+import io.forge.jam.protocol.state.{RawState, StateMerklization}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.AppendedClues.convertToClueful

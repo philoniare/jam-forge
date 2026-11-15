@@ -7,6 +7,8 @@ import io.forge.jam.core.{ChainConfig, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.protocol.accumulation._
+import io.forge.jam.protocol.pvmhost.*
+import io.forge.jam.protocol.state.*
 
 import scala.collection.mutable
 

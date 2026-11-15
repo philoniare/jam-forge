@@ -1,9 +1,10 @@
 package io.forge.jam.protocol.accumulation
 
+import io.forge.jam.protocol.state.StateKey
 import io.circe.derivation.ConfiguredDecoder
 import io.forge.jam.core.json.JsonConfig.given
 import io.forge.jam.core.{JamBytes, StfResult}
-import io.forge.jam.core.primitives.Hash
+import io.forge.jam.core.primitives.{Gas, Hash, ServiceId}
 import io.forge.jam.core.types.service.ServiceInfo
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.types.preimage.PreimageHash
@@ -555,12 +556,14 @@ object AccumulationInput:
 
   given Decoder[AccumulationInput] = ConfiguredDecoder.derived
 
+final case class ServiceAccumulation(gasUsed: Gas, workItems: Int)
+
 /** Output data from the accumulation STF.
   *
   * @param ok
   *   The accumulation root hash
   * @param accumulationStats
-  *   Per-service accumulation statistics: serviceId -> (gasUsed, workItemCount)
+  *   Per-service accumulation statistics
   * @param accumulationTransferCounts
   *   T(s): serviceId -> number of
   *   deferred transfers delivered to that service during accumulation.
@@ -570,9 +573,9 @@ object AccumulationInput:
   */
 final case class AccumulationOutputData(
     ok: JamBytes,
-    accumulationStats: Map[Long, (Long, Int)] = Map.empty,
+    accumulationStats: Map[ServiceId, ServiceAccumulation] = Map.empty,
     commitments: List[(Long, JamBytes)] = List.empty,
-    accumulationTransferCounts: Map[Long, Int] = Map.empty
+    accumulationTransferCounts: Map[ServiceId, Int] = Map.empty
 )
 
 object AccumulationOutputData:

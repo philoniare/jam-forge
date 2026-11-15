@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.accumulation
+package io.forge.jam.protocol.pvmhost
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.pvm.engine.{InterpretedModule, ModuleCache}

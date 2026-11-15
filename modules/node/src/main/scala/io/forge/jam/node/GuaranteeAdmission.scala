@@ -26,7 +26,7 @@ import scala.util.control.NonFatal
   * A guarantee whose slot is in an epoch after the next one of the best state is refused: the keys of that epoch are
   * not determined yet. That only happens to a node more than an epoch behind, which does not author.
   */
-final class GuaranteeAdmission(chain: ChainManager, now: () => Long):
+final class GuaranteeAdmission(chain: ChainReader, now: () => Long):
   import GuaranteeAdmission.*
 
   def check(g: GuaranteeExtrinsic): Either[String, Unit] =

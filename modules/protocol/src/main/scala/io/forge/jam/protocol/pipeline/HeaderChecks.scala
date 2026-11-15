@@ -1,21 +1,21 @@
 package io.forge.jam.protocol.pipeline
 
-import cats.data.StateT
-import io.forge.jam.core.JamBytes
-import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.types.workpackage.WorkReport
+import io.forge.jam.core.ChainConfig
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
+import io.forge.jam.core.types.block.Block
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
-import io.forge.jam.protocol.state.ServiceStorageView
 import io.forge.jam.protocol.safrole.SafroleTypes.*
-import io.forge.jam.protocol.dispute.DisputeTypes.DisputeOutputMarks
-import io.forge.jam.protocol.pipeline.PipelineTypes.*
-import io.forge.jam.protocol.pipeline.StfLifters.*
+import io.forge.jam.protocol.state.TrieBackedJamState
 
-object IntermediateSteps:
+object HeaderChecks:
 
-  val validateBlockSeal: StfStep = validate { (view, ctx) =>
-    val block = ctx.block
-    val config = ctx.config
+  def blockSeal(
+      block: Block,
+      header: EncodedHeader,
+      view: TrieBackedJamState,
+      checks: PendingChecks
+  ): Either[PipelineError, Unit] =
+    val config = view.config
     val slotIndex = ((block.header.slot.toLong & 0xffffffffL) % config.epochLength).toInt
     val authorIndex = block.header.authorIndex.toInt
 
@@ -30,7 +30,7 @@ object IntermediateSteps:
 
       val entropy = pool(3).bytes
 
-      val encodedHeader = ctx.header.unsealed
+      val encodedHeader = header.unsealed
 
       view.gamma.st match
         case TicketsOrKeys.Keys(keys) =>
@@ -42,7 +42,7 @@ object IntermediateSteps:
               Left(PipelineError.HeaderErr(HeaderErrorCode.UnexpectedAuthor))
             else
               val vrfInput = SigningContext.fallbackSealInputData(entropy)
-              ctx.pendingChecks.start {
+              checks.start {
                 val vrfResult = BandersnatchVrf.ietfVrfVerify(
                   blockAuthorKey.bytes,
                   vrfInput,
@@ -59,7 +59,7 @@ object IntermediateSteps:
           else
             val ticket = tickets(slotIndex)
             val vrfInput = SigningContext.safroleTicketInputData(entropy, ticket.attempt.toByte)
-            ctx.pendingChecks.start {
+            checks.start {
               val vrfResult = BandersnatchVrf.ietfVrfVerify(
                 blockAuthorKey.bytes,
                 vrfInput,
@@ -74,22 +74,18 @@ object IntermediateSteps:
                   else None
             }
             Right(())
-  }
 
-  val validateExtrinsicHash: StfStep = validate { (_, ctx) =>
-    val block = ctx.block
+  def extrinsicHash(block: Block, config: ChainConfig): Either[PipelineError, Unit] =
     try
       // Shared with block authoring (ExtrinsicHashing) — logic unchanged.
       val computedExtrinsicHash =
-        ExtrinsicHashing.computeExtrinsicHash(block.extrinsic, ctx.config)
+        ExtrinsicHashing.computeExtrinsicHash(block.extrinsic, config)
       if computedExtrinsicHash != block.header.extrinsicHash then
         Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidExtrinsicHash))
       else Right(())
     catch case _: Exception => Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidExtrinsicHash))
-  }
 
-  val validateEntropyVrf: StfStep = validate { (view, ctx) =>
-    val block = ctx.block
+  def entropyVrf(block: Block, view: TrieBackedJamState, checks: PendingChecks): Either[PipelineError, Unit] =
     val authorIndex = block.header.authorIndex.toInt
     val kappa = view.validators.current
     if authorIndex < 0 || authorIndex >= kappa.length then
@@ -99,7 +95,7 @@ object IntermediateSteps:
 
       // The seal's output point is decoded in the check too, off the importing thread. A seal without one fails the
       // seal check, which was started first and so is the error reported, as when this was decided here.
-      ctx.pendingChecks.start {
+      checks.start {
         BandersnatchVrf.getVrfOutput(block.header.seal.toArray) match
           case None => Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
           case Some(sealVrfOutput) =>
@@ -112,88 +108,24 @@ object IntermediateSteps:
             if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)) else None
       }
       Right(())
-  }
 
-  val validateEpochMark: StfStep = validate { (_, ctx) =>
-    val safroleEpochMark = ctx.safroleOutput.flatMap(_.epochMark)
-    if safroleEpochMark != ctx.block.header.epochMark then
+  def epochMark(block: Block, safrole: SafroleOutputData): Either[PipelineError, Unit] =
+    if safrole.epochMark != block.header.epochMark then
       Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidEpochMark))
     else
       Right(())
-  }
 
-  val validateTicketsMark: StfStep = validate { (_, ctx) =>
-    val safroleTicketsMark = ctx.safroleOutput.flatMap(_.ticketsMark)
-    if safroleTicketsMark != ctx.block.header.ticketsMark then
+  def ticketsMark(block: Block, safrole: SafroleOutputData): Either[PipelineError, Unit] =
+    if safrole.ticketsMark != block.header.ticketsMark then
       Left(PipelineError.HeaderErr(HeaderErrorCode.InvalidTicketsMark))
     else
       Right(())
-  }
-
-  def storeDisputeOutput(output: DisputeOutputMarks): StfStep =
-    modifyContext(_.copy(disputeOffendersMark = output.offenders))
 
   /** The header's offenders mark must be the keys of this block's culprits and faults */
-  val validateOffendersMark: StfStep = validate { (_, ctx) =>
+  def offendersMark(block: Block, newOffenders: List[Ed25519PublicKey]): Either[PipelineError, Unit] =
     // The mark holds the keys as hashes; a key never equals a hash, so compare the bytes.
-    val expected = ctx.disputeOffendersMark.map(k => Hash(k.toArrayUnsafe))
-    if expected != ctx.block.header.offendersMark then
+    val expected = newOffenders.map(k => Hash(k.toArrayUnsafe))
+    if expected != block.header.offendersMark then
       Left(PipelineError.InvalidOffendersMark)
     else
       Right(())
-  }
-
-  val updateRecentHistoryPartial: StfStep = modifyState { (view, ctx) =>
-    val recentHistory = view.beta
-    val history = recentHistory.history
-    if history.nonEmpty then
-      val updatedHistory = history.updated(
-        history.length - 1,
-        history.last.copy(stateRoot = ctx.block.header.parentStateRoot)
-      )
-      view.beta = recentHistory.copy(history = updatedHistory)
-  }
-
-  def storeSafroleOutput(output: SafroleOutputData): StfStep =
-    modifyContext(_.copy(safroleOutput = Some(output)))
-
-  def storeAvailableReports(reports: List[WorkReport]): StfStep =
-    modifyContext(_.copy(availableReports = reports))
-
-  def storeAccumulateRoot(root: Hash): StfStep =
-    modifyContext(_.copy(accumulateRoot = Some(root)))
-
-  def storeAccumulationStats(stats: Map[Long, (Long, Int)]): StfStep =
-    modifyContext(_.copy(accumulationStats = stats))
-
-  def storeAccumulationTransferCounts(counts: Map[Long, Int]): StfStep =
-    modifyContext(_.copy(accumulationTransferCounts = counts))
-
-  def storeLastAccumulationOutputs(
-      commitments: List[(Long, JamBytes)]
-  ): StfStep =
-    modifyState((view, _) => view.lastAccumulationOutputs = commitments)
-
-  def savepointStorageView(view: Option[ServiceStorageView]): StfStep =
-    StateT { case (state, ctx) =>
-      view.foreach(_.savepoint())
-      Right(((state, ctx), ()))
-    }
-
-  def discardStorageViewCheckpoint(view: Option[ServiceStorageView]): StfStep =
-    StateT { case (state, ctx) =>
-      view.foreach(_.discardCheckpoint())
-      Right(((state, ctx), ()))
-    }
-
-  val setPreTransitionTau: StfStep = modifyState { (view, ctx) =>
-    view.timeslot = ctx.preTransitionTau
-  }
-
-  val setPosteriorOffenders: StfStep = modifyState { (view, ctx) =>
-    view.postOffenders = ctx.posteriorOffenders
-  }
-
-  def restorePostTransitionTau(postTau: Long): StfStep = modifyState {
-    (view, _) => view.timeslot = postTau
-  }

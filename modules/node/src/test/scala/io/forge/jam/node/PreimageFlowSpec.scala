@@ -11,8 +11,9 @@ import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.network.StreamKind
-import io.forge.jam.protocol.accumulation.StateKey
-import io.forge.jam.protocol.traces.{Genesis, KeyValue}
+import io.forge.jam.protocol.state.StateKey
+import io.forge.jam.protocol.traces.Genesis
+import io.forge.jam.protocol.state.KeyValue
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 

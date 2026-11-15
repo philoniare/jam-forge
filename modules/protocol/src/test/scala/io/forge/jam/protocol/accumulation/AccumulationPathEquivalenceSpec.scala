@@ -23,7 +23,6 @@ class AccumulationPathEquivalenceSpec extends AnyFunSuite with Matchers:
     if raw.nonEmpty then trie.update(raw.toSeq.map((k, v) => (k, Some(v))))
     val view = new ServiceStorageView(trie)
     val executor = new AccumulationExecutor(config, parallelServices = parallel)
-    executor.setStorageView(Some(view))
     val result = AccumulationTransition.stfInternal(
       testCase.input,
       testCase.preState,
@@ -31,7 +30,8 @@ class AccumulationPathEquivalenceSpec extends AnyFunSuite with Matchers:
       List.empty,
       config,
       testCase.preState.slot,
-      Some(executor)
+      Some(executor),
+      Some(view)
     )
     val staged: Map[JamBytes, Option[JamBytes]] =
       view.pendingStateKeys.iterator.map(k => k -> view.getByStateKey(k)).toMap
@@ -66,7 +66,7 @@ class AccumulationPathEquivalenceSpec extends AnyFunSuite with Matchers:
         case Right(c)  => c
         case Left(err) => fail(s"$name: $err")
       val (seq, seqStaged) = runWith(testCase, parallel = false)
-      val accumulated = seq.output.toOption.toList.flatMap(_.accumulationStats.keys)
+      val accumulated = seq.output.toOption.toList.flatMap(_.accumulationStats.keys.map(_.toLong))
       val codeHashes = accumulated.flatMap(s => testCase.preState.accounts.find(_.id == s)).map(_.data.service.codeHash)
       if codeHashes.distinct.size < codeHashes.size then
         sharing += 1

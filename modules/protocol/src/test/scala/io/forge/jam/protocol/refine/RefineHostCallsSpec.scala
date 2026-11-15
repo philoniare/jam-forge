@@ -8,12 +8,8 @@ import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.core.types.workpackage.WorkPackage
-import io.forge.jam.protocol.accumulation.{
-  ConstantsBlob,
-  HostCall,
-  HostCallResult,
-  MockPvmInstance
-}
+import io.forge.jam.protocol.pvmhost.{ConstantsBlob, HostCall, HostCallResult}
+import io.forge.jam.protocol.accumulation.MockPvmInstance
 import spire.math.{ULong, UShort}
 
 import scala.collection.mutable

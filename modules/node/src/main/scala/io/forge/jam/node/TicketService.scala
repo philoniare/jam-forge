@@ -26,7 +26,7 @@ import scala.jdk.CollectionConverters.*
   * as proxy (CE 131) — re-distributes them to every validator on CE 132.
   */
 final class TicketService(
-    chain: ChainManager,
+    chain: ChainReader,
     pools: ExtrinsicPools,
     distribution: DistributionService,
     egress: ExecutorService,

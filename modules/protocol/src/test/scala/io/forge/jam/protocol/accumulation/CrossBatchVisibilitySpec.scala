@@ -1,5 +1,8 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{HostCall, HostCallResult}
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrie}
@@ -124,7 +127,6 @@ class CrossBatchVisibilitySpec extends AnyFunSuite with Matchers:
     if preBlock.nonEmpty then trie.update(preBlock.map((k, v) => (k, Some(v))))
     val view = new ServiceStorageView(trie)
     val executor = new ScriptedExecutor(parallel, scripts)
-    executor.setStorageView(Some(view))
     val state = PartialState(
       accounts = Seq(A, B, C, D).map(id => id -> account(id)).toMap,
       stagingSet = mutable.ListBuffer.empty,
@@ -144,7 +146,8 @@ class CrossBatchVisibilitySpec extends AnyFunSuite with Matchers:
       timeslot = slot,
       entropy = JamBytes.zeros(32),
       executor = executor,
-      config = config
+      config = config,
+      storageView = Some(view)
     )
     Run(result, view)
 

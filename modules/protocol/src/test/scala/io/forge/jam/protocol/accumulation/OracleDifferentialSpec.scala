@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{InterpretedInstanceWrapper, NativeRunner, PvmInstance}
 import io.forge.jam.pvm.{Instruction, InterruptKind}
 import io.forge.jam.pvm.engine.{BlockGasModel, InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.native_.PvmRecompiler
@@ -7,7 +9,7 @@ import io.forge.jam.pvm.program.{InstructionDecoder, JumpTable, ProgramBlob}
 import io.forge.jam.pvm.recompiler.RecompilerAbi
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.HostCallPanic
-import io.forge.jam.protocol.refine.HostCallDispatcher
+import io.forge.jam.protocol.pvmhost.HostCallDispatcher
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers

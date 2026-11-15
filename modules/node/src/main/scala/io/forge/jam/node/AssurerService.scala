@@ -13,7 +13,7 @@ import io.forge.jam.protocol.refine.DaShards
   * anchored at the new head, and pools/distributes the assurances (CE 141).
   */
 final class AssurerService(
-    chain: ChainManager,
+    chain: ChainReader,
     distribution: DistributionService,
     pools: ExtrinsicPools,
     validatorKeys: Seq[ValidatorKeySet],
@@ -37,7 +37,7 @@ final class AssurerService(
     * its own thread rather than the one every post-import listener shares; only the newest head matters (an
     * assurance is anchored at the head), so a head that arrives while an older one is in hand replaces any waiting.
     */
-  private val latest = new java.util.concurrent.atomic.AtomicReference[ChainManager#Head](null)
+  private val latest = new java.util.concurrent.atomic.AtomicReference[ChainHead](null)
   private val worker = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
     val t = new Thread(r, "jam-assurer"); t.setDaemon(true); t
   }
@@ -50,7 +50,7 @@ final class AssurerService(
   )
 
   /** Import listener: acquire custody, then assure held cores, off the caller's thread. */
-  def onImported(head: ChainManager#Head): Unit =
+  def onImported(head: ChainHead): Unit =
     if latest.getAndSet(head) == null then
       try
         worker.execute { () =>
@@ -69,7 +69,7 @@ final class AssurerService(
     custodyPool.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
     ()
 
-  private[node] def assure(head: ChainManager#Head): Unit =
+  private[node] def assure(head: ChainHead): Unit =
     // The state of the block being assured, not of whatever is best by now: the assurance is anchored at `head`.
     val view = chain.stateViewAtRoot(head.stateRoot)
     val reports = view.cores.reports

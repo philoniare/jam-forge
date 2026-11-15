@@ -1,19 +1,14 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.pvm.engine.InterpretedModule
-import io.forge.jam.protocol.accumulation.{
-  GrowHeapHostCall,
-  HostCall,
-  HostCallGas,
-  HostCallResult,
-  PvmInstance,
-  ServiceCode
-}
+import io.forge.jam.protocol.pvmhost.{GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance, ServiceCode}
 import spire.math.ULong
 
 /** Result of the Is-Authorized invocation Psi_I: Ok(authorizer trace) or a

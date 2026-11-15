@@ -6,7 +6,9 @@ import io.forge.jam.core.types.header.Header
 import io.forge.jam.protocol.TestFileLoader
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.traces.{TraceStep, Genesis, InputExtractor, BlockImporter, ImportResult}
+import io.forge.jam.protocol.traces.{TraceStep, Genesis}
+import io.forge.jam.protocol.pipeline.InputExtractor
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
 import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrieStore}
 import io.circe.Decoder
 

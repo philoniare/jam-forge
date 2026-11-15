@@ -54,7 +54,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
   /** Author `slot` on `node` with a bare [[BlockAuthor]] and import it. No ticket service, so no ring-VRF ticket
     * generation each epoch: the chain is key-sealed throughout, which is all pruning needs.
     */
-  private def authorOn(node: JamNode, slot: Long): ChainManager#Head =
+  private def authorOn(node: JamNode, slot: Long): ChainHead =
     val block = new BlockAuthor(node.chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
     node.chain.importBlock(node.chain.encodeBlock(block)).fold(e => fail(s"import of slot $slot: $e"), identity)
 
@@ -67,7 +67,7 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
     }
 
   private def stored(node: JamNode, h: Hash): Boolean =
-    node.chain.hasBlock(h) || node.chain.headerBytes(h).isDefined || node.chain.meta(s"height:${h.toHex}").isDefined
+    node.chain.hasBlock(h) || node.chain.headerBytes(h).isDefined || node.chain.meta.height(h).isDefined
 
   test("blocks more than maxLookupAnchorAge slots behind finality are deleted with the side branches off them; the rest, genesis and the chain's progress are kept") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
@@ -118,8 +118,8 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers:
       // Genesis stays.
       node.chain.headerBytes(sp.genesisHeaderHash).isDefined shouldBe true
       // The finalized-chain index holds only the kept range.
-      node.chain.meta(f"fin:${5L}%016x") shouldBe None
-      node.chain.meta(f"fin:${heightOf(fin.hash)}%016x").map(Hash(_)) shouldBe Some(fin.hash)
+      node.chain.meta.finalizedAt(5L) shouldBe None
+      node.chain.meta.finalizedAt(heightOf(fin.hash)) shouldBe Some(fin.hash)
       // Block 1 is pruned, so the side branch off it went with it.
       stored(node, sideHash) shouldBe false
       node.chain.leaves.map(_.hash) shouldBe List(node.chain.best.hash)

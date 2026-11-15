@@ -7,7 +7,7 @@ import io.circe.parser.decode
 import io.circe.{Decoder, HCursor}
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.traces.KeyValue
+import io.forge.jam.protocol.state.KeyValue
 
 /** A bootnode address: the peer's Ed25519 key (hex) plus host and port. */
 final case class Bootnode(ed25519Hex: String, host: String, port: Int):

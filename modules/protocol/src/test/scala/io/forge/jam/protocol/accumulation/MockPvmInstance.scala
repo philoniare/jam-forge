@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.PvmInstance
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import io.forge.jam.core.{ChainConfig, JamBytes}

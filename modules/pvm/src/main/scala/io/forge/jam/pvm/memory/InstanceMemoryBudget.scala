@@ -1,5 +1,7 @@
 package io.forge.jam.pvm.memory
 
+import io.forge.jam.pvm.PvmSettings
+
 import java.util.concurrent.locks.ReentrantLock
 
 /** A byte budget for the memory of PVM instances that are running at the same time.
@@ -142,13 +144,13 @@ object InstanceMemoryBudget:
     override def close(): Unit = budget.close(this)
 
   /** `-Djam.pvm.instanceMemoryBytes`: the process-wide budget in bytes. */
-  val LimitProperty = "jam.pvm.instanceMemoryBytes"
+  val LimitProperty: String = PvmSettings.InstanceMemoryProperty
 
   /** A quarter of the JVM's maximum heap unless set: room for a few instances of the largest declarable size
     * (about 256 MiB each) next to everything else the heap holds.
     */
   private def defaultLimit: Long =
-    Option(System.getProperty(LimitProperty)).flatMap(_.toLongOption).filter(_ > 0)
+    PvmSettings.current.instanceMemoryBytes
       .getOrElse(math.max(64L << 20, Runtime.getRuntime.maxMemory() / 4))
 
   /** The budget every accumulate, refine and is-authorized run in this process shares. */

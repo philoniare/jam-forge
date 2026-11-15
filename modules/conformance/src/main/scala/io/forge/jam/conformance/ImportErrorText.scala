@@ -10,7 +10,7 @@ import io.forge.jam.protocol.pipeline.PipelineError
 import io.forge.jam.protocol.preimage.PreimageTypes.PreimageErrorCode
 import io.forge.jam.protocol.report.ReportTypes.ReportErrorCode
 import io.forge.jam.protocol.safrole.SafroleTypes.SafroleErrorCode
-import io.forge.jam.protocol.traces.{ImportError, ImportResult}
+import io.forge.jam.protocol.importing.{ImportError, ImportResult}
 
 object ImportErrorText:
 

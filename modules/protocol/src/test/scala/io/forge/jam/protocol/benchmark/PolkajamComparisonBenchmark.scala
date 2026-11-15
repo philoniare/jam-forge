@@ -5,7 +5,8 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrie, StateTrieStore, TrieNodeType}
 import io.forge.jam.crypto.ErasureCoding
 import io.forge.jam.protocol.TestFileLoader
-import io.forge.jam.protocol.traces.{BlockImporter, TraceStep}
+import io.forge.jam.protocol.importing.BlockImporter
+import io.forge.jam.protocol.traces.TraceStep
 import io.circe.Decoder
 import io.forge.jam.core.types.block.Block.given
 

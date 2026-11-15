@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.accumulation
+package io.forge.jam.protocol.pvmhost
 
 /**
  * Host call identifiers for accumulation.

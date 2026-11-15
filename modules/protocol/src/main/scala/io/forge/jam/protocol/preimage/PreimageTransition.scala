@@ -1,13 +1,12 @@
 package io.forge.jam.protocol.preimage
 
-import cats.syntax.all.*
 import io.forge.jam.core.JamBytes.compareUnsigned
 import io.forge.jam.core.{JamBytes, Hashing, StfResult}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.core.types.preimage.PreimageHash
 import io.forge.jam.protocol.preimage.PreimageTypes.*
-import io.forge.jam.protocol.accumulation.StateKey
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.protocol.state.TrieBackedJamState
 
 /**
@@ -97,18 +96,13 @@ object PreimageTransition:
     if !arePreimagesSortedAndUnique(preimages) then
       Left(PreimageErrorCode.PreimagesNotSortedUnique)
     else
-      preimages
-        .traverse { submission =>
-          val serviceId = submission.requester.toLong
-          val hash = Hashing.blake2b256(submission.blob).bytes
-          val length = submission.blob.length
-          Either.cond(
-            isProvidable(serviceId, hash, length),
-            (),
-            PreimageErrorCode.PreimageUnneeded
-          )
-        }
-        .map(_ => ())
+      val unneeded = preimages.exists { submission =>
+        val serviceId = submission.requester.toLong
+        val hash = Hashing.blake2b256(submission.blob).bytes
+        val length = submission.blob.length
+        !isProvidable(serviceId, hash, length)
+      }
+      if unneeded then Left(PreimageErrorCode.PreimageUnneeded) else Right(())
 
   def stfView(
     input: PreimageInput,

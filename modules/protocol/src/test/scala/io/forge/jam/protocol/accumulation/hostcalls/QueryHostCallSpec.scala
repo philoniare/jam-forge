@@ -4,6 +4,8 @@ import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.accumulation._
+import io.forge.jam.protocol.pvmhost.*
+import io.forge.jam.protocol.state.*
 import spire.math.ULong
 
 import scala.collection.mutable

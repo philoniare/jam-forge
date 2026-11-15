@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.JamBytes
 
 import scala.collection.mutable

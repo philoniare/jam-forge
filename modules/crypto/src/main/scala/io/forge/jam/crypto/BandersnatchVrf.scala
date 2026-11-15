@@ -1,6 +1,6 @@
 package io.forge.jam.crypto
 
-import io.forge.jam.core.JamBytes
+import io.forge.jam.core.{JamBytes, ProcessSettings}
 import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash}
 import io.forge.jam.vrfs.BandersnatchWrapper as JniBandersnatchWrapper
 import spire.math.UByte
@@ -21,6 +21,8 @@ object BandersnatchVrf:
 
   /** Size of a ring VRF signature in bytes */
   val RingVrfSignatureSize: Int = 784
+
+  val baseDir: ProcessSettings[Option[String]] = new ProcessSettings(lookup => lookup("jam.base.dir"))
 
   /** Cached SRS data */
   private var srsData: Array[Byte] = uninitialized
@@ -57,7 +59,7 @@ object BandersnatchVrf:
           stream.close()
       case None =>
         // Get base directory from system property or use current working directory
-        val baseDir = System.getProperty("jam.base.dir", System.getProperty("user.dir"))
+        val baseDir = BandersnatchVrf.baseDir.current.getOrElse(System.getProperty("user.dir"))
 
         // Try to load from file system paths
         val possiblePaths = List(

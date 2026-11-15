@@ -2,7 +2,7 @@ package io.forge.jam.conformance
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.{Hash, Timeslot}
-import io.forge.jam.protocol.traces.RawState
+import io.forge.jam.protocol.state.RawState
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 

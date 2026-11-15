@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.traces
 
+
+import io.forge.jam.protocol.state.{KeyValue, StateMerklization}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import io.circe.parser.parse

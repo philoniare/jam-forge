@@ -1,5 +1,8 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.PvmInstance
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.LittleEndian
@@ -73,9 +76,9 @@ private[accumulation] trait HostCallSupport:
     val v = getReg(instance, reg)
     if v > ULong(0xffffffffL) then None else Some(v.toLong)
 
-  /** Read a register as a guest memory address, see [[io.forge.jam.protocol.refine.PvmRunner.memAddr]]. */
+  /** Read a register as a guest memory address, see [[io.forge.jam.protocol.pvmhost.PvmRunner.memAddr]]. */
   protected def argAddr(instance: PvmInstance, reg: Int): Int =
-    io.forge.jam.protocol.refine.PvmRunner.memAddr(instance.reg(reg))
+    io.forge.jam.protocol.pvmhost.PvmRunner.memAddr(instance.reg(reg))
 
   protected def panic(message: String): Nothing =
     throw new io.forge.jam.protocol.HostCallPanic(message)

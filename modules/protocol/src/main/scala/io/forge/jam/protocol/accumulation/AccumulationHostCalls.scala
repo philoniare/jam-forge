@@ -1,7 +1,9 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
 import io.forge.jam.core.ChainConfig
-import io.forge.jam.protocol.refine.HostCallDispatcher
+import io.forge.jam.protocol.pvmhost.HostCallDispatcher
 
 /** Handles host calls during accumulation PVM execution: the single dispatch
   * surface over the cohesion-based host-call families —

@@ -20,7 +20,9 @@ import io.forge.jam.protocol.report.ReportTypes.ReportErrorCode
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleInput, TicketsOrKeys}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.traces.{BlockImporter, Genesis, ImportResult, RawState}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.traces.Genesis
+import io.forge.jam.protocol.state.RawState
 import io.forge.jam.vrfs.BandersnatchWrapper
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers

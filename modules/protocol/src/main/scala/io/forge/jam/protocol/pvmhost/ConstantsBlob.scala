@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.accumulation
+package io.forge.jam.protocol.pvmhost
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.LittleEndian

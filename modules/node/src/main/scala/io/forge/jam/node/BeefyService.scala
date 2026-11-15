@@ -59,7 +59,7 @@ final class BeefyService(
   def latestProof: Option[BeefyProof] = latest
 
   def proof(block: Hash): Option[BeefyProof] =
-    chain.meta(s"beefy:proof:${block.toHex}").flatMap(decodeProof(_).toOption)
+    chain.meta.beefyProof(block).flatMap(decodeProof(_).toOption)
 
   def start(): Unit =
     exec.scheduleAtFixedRate(() => guarded(step()), pollMillis, pollMillis, TimeUnit.MILLISECONDS)
@@ -211,10 +211,10 @@ final class BeefyService(
           proven += c.block
           while proven.size > MaxTracked do proven -= proven.head
           val bytes = encodeProof(p)
-          chain.putMeta(s"beefy:proof:${c.block.toHex}", bytes)
+          chain.meta.putBeefyProof(c.block, bytes)
           if latest.forall(_.slot < p.slot) then
             latest = Some(p)
-            chain.putMeta("beefy:latest", bytes)
+            chain.meta.beefyLatest = bytes
           logger.info(
             s"BEEFY proof for ${c.block.toHex.take(18)}@${p.slot}: ${sigs.size}/${ctx.keys.size} signers, " +
               s"super-peak ${p.superPeak.toHex.take(18)}"

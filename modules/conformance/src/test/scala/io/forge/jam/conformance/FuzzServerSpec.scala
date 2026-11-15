@@ -3,7 +3,8 @@ package io.forge.jam.conformance
 import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.traces.{StateMerklization, TraceStep}
+import io.forge.jam.protocol.state.StateMerklization
+import io.forge.jam.protocol.traces.TraceStep
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers
 

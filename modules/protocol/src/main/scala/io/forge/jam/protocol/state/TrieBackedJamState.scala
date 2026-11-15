@@ -15,13 +15,7 @@ import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.core.types.workpackage.AvailabilityAssignment
 import io.forge.jam.core.types.history.HistoricalBetaContainer
 import io.forge.jam.core.types.service.ServiceInfo
-import io.forge.jam.protocol.accumulation.{
-  AccumulationReadyRecord,
-  AccumulationServiceData,
-  AccumulationServiceItem,
-  Privileges,
-  StateKey
-}
+import io.forge.jam.protocol.accumulation.{AccumulationReadyRecord, AccumulationServiceData, AccumulationServiceItem, Privileges}
 import io.forge.jam.protocol.dispute.DisputeTypes.Psi
 import io.forge.jam.protocol.report.ReportTypes.{
   CoreStatisticsRecord,
@@ -30,7 +24,6 @@ import io.forge.jam.protocol.report.ReportTypes.{
 import io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys
 import io.forge.jam.protocol.statistics.ActivityStatisticsCodec
 import io.forge.jam.protocol.statistics.StatisticsTypes.StatCount
-import io.forge.jam.protocol.traces.{FullJamState, StateKeys}
 
 import io.forge.jam.core.codec.Codec
 import scala.collection.mutable

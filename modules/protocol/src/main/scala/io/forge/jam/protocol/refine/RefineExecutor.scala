@@ -1,11 +1,13 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.PvmRunner
 import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.engine.InterpretedModule
-import io.forge.jam.protocol.accumulation.ServiceCode
+import io.forge.jam.protocol.pvmhost.ServiceCode
 
 /** Result of a refine invocation Psi_R: the execution result (Ok(output) or a
   * work error), the exported segments (empty unless successful) and the gas

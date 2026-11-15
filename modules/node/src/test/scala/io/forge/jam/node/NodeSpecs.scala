@@ -4,7 +4,7 @@ import java.nio.file.Files
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.network.NodeIdentity
-import io.forge.jam.protocol.traces.StateMerklization
+import io.forge.jam.protocol.state.StateMerklization
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -101,11 +101,11 @@ class GenesisBootstrapSpec extends AnyFunSuite with Matchers:
   test("genesis initialization pins the merklized state root and survives restart") {
     val dir = Files.createTempDirectory("jam-node-genesis")
     val keyvals = List(
-      io.forge.jam.protocol.traces.KeyValue(
+      io.forge.jam.protocol.state.KeyValue(
         JamBytes.fromHexUnsafe("0x01000000000000000000000000000000000000000000000000000000000000"),
         JamBytes.fromHexUnsafe("0x11223344")
       ),
-      io.forge.jam.protocol.traces.KeyValue(
+      io.forge.jam.protocol.state.KeyValue(
         JamBytes.fromHexUnsafe("0x02000000000000000000000000000000000000000000000000000000000000"),
         JamBytes.fromHexUnsafe("0x55")
       )

@@ -1,6 +1,6 @@
-package io.forge.jam.protocol.accumulation
+package io.forge.jam.protocol.pvmhost
 
-import io.forge.jam.pvm.{ExecutionMode, Instruction}
+import io.forge.jam.pvm.{ExecutionMode, Instruction, PvmSettings}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.InstanceMemoryBudget
 import io.forge.jam.pvm.native_.PvmRecompiler
@@ -9,11 +9,10 @@ import io.forge.jam.pvm.recompiler.{RecompilerAbi, RecompilerMemory}
 import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.protocol.pipeline.StageTimers
-import io.forge.jam.protocol.refine.HostCallDispatcher
 import com.typesafe.scalalogging.StrictLogging
 import spire.math.UInt
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Files
 import java.util.concurrent.atomic.{AtomicLong, LongAdder}
 import scala.jdk.CollectionConverters.*
 
@@ -63,8 +62,7 @@ object NativeRunner extends StrictLogging:
       case ExecutionMode.Recompiled => runRecompiled(instance, entryPc, hostCalls = Some((dispatcher, preDispatch)))
 
   private lazy val recompiler: Option[PvmRecompiler] =
-    Option(System.getProperty("jam.pvm.recompiler.lib"))
-      .map(Path.of(_))
+    PvmSettings.current.recompilerLib
       .filter(Files.exists(_))
       .flatMap { lib =>
         try Some(new PvmRecompiler(lib))

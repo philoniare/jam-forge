@@ -5,7 +5,8 @@ import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Hash, Timeslot}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
-import io.forge.jam.protocol.traces.{BlockImporter, RawState}
+import io.forge.jam.protocol.importing.BlockImporter
+import io.forge.jam.protocol.state.RawState
 
 import java.lang.management.ManagementFactory
 import java.nio.file.{Files, Path, Paths}
@@ -156,7 +157,7 @@ object ImportBench:
     if stages then io.forge.jam.protocol.pipeline.StageTimers.report.foreach(println)
     // Whether the PVM actually ran natively: a missing library or a rejected program silently runs interpreted.
     locally {
-      import io.forge.jam.protocol.accumulation.NativeRunner
+      import io.forge.jam.protocol.pvmhost.NativeRunner
       println(
         s"RESULT native runs=${NativeRunner.nativeCount} compiled=${NativeRunner.compileCount} " +
           s"deopt=${NativeRunner.deoptCount} reasons=${NativeRunner.deoptReasons.mkString(",")}"

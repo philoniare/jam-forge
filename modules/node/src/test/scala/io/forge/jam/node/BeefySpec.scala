@@ -113,7 +113,7 @@ class BeefySpec extends AnyFunSuite with Matchers:
       // Validator 5's tampered commitments were rejected, so 0-4 aggregate exactly 0-4.
       services.take(5).map(_.proof(parent).get.signerIndices).distinct shouldBe Seq(List(0, 1, 2, 3, 4))
       services.head.latestProof.map(_.block) shouldBe Some(parent)
-      node.chain.meta("beefy:latest").flatMap(decodeProof(_).toOption).map(_.block) shouldBe Some(parent)
+      node.chain.meta.beefyLatest.flatMap(decodeProof(_).toOption).map(_.block) shouldBe Some(parent)
 
       // The head is not finalized yet, so nobody signed it.
       services.head.proof(head.hash) shouldBe None

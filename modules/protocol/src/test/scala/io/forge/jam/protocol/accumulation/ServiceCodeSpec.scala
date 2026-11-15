@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.ServiceCode
 import io.forge.jam.core.JamBytes
 import io.forge.jam.pvm.{InterruptKind, MemoryResult}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}

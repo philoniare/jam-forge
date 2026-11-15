@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{InterpretedInstanceWrapper, NativeInstanceWrapper}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.{JumpTable, ProgramBlob}

@@ -4,7 +4,7 @@ import io.forge.jam.core.{ChainConfig, Parallel}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
 
 /** The single ImportBlock state transition shared by the fuzz socket server
   * ([[ProtocolHandler]]) and the in-process vector runner

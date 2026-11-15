@@ -1,4 +1,4 @@
-package io.forge.jam.protocol.traces
+package io.forge.jam.protocol.state
 
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Hash, Ed25519PublicKey}

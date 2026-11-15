@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import io.forge.jam.core.{ChainConfig, JamBytes}
@@ -11,7 +13,7 @@ import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.ExecutionMode
 import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.pvm.program.{JumpTable, ProgramBlob}
-import io.forge.jam.protocol.accumulation.{HostCall, HostCallResult, NativeRunner, PvmInstance}
+import io.forge.jam.protocol.pvmhost.{HostCall, HostCallResult, NativeRunner, PvmInstance}
 import spire.math.UShort
 
 import java.nio.file.{Files, Path}
@@ -143,7 +145,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
   }
 
   test("NativeRunner.run executes an otherwise native-eligible program natively, with no deopt") {
-    import io.forge.jam.protocol.accumulation.NativeRunner
+    import io.forge.jam.protocol.pvmhost.NativeRunner
 
     if !canRunNative then
       cancel("recompiler unavailable on this host (AArch64 dylib required) — nothing would run natively")
@@ -164,7 +166,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
     else
       import io.forge.jam.pvm.engine.InterpretedInstance
       import io.forge.jam.pvm.types.ProgramCounter
-      import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
+      import io.forge.jam.protocol.pvmhost.{InterpretedInstanceWrapper, NativeRunner}
 
       val module = moduleOf(ecalliThenHaltCode, ecalliThenHaltBitmask)
 
@@ -220,13 +222,13 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
     def dispatch(hostCallId: Int, instance: PvmInstance): Unit =
       hostCallId match
         case HostCall.GROW_HEAP =>
-          io.forge.jam.protocol.accumulation.GrowHeapHostCall.handle(instance)
+          io.forge.jam.protocol.pvmhost.GrowHeapHostCall.handle(instance)
         case _ => instance.setReg(7, HostCallResult.WHAT.signed)
 
   test("a program containing Ecalli(GROW_HEAP) runs NATIVELY and matches the interpreter") {
     import io.forge.jam.pvm.engine.InterpretedInstance
     import io.forge.jam.pvm.types.ProgramCounter
-    import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
+    import io.forge.jam.protocol.pvmhost.{InterpretedInstanceWrapper, NativeRunner}
 
     val module = moduleOf(growHeapThenHaltCode, ecalliThenHaltBitmask)
 
@@ -310,7 +312,7 @@ class ExecutionModeSpec extends AnyFunSuite with Matchers:
     else
       import io.forge.jam.pvm.engine.InterpretedInstance
       import io.forge.jam.pvm.types.ProgramCounter
-      import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, NativeRunner}
+      import io.forge.jam.protocol.pvmhost.{InterpretedInstanceWrapper, NativeRunner}
 
       // `moduleOf` builds every module with no RW data, so the heap starts empty
       // and `grow_heap` has to map its pages from nothing. The region table seeds

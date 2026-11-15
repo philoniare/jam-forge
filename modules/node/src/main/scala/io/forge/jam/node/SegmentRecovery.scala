@@ -49,7 +49,7 @@ object ExportIndex:
   * segments-root. Blocks on the network: runs on I/O threads.
   */
 final class SegmentRecovery(
-    chain: ChainManager,
+    chain: ChainReader,
     shards: ShardService,
     exports: ExportIndex,
     peers: () => Iterable[JamnpConnection]

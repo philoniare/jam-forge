@@ -7,6 +7,9 @@ import java.security.SecureRandom
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
+import io.forge.jam.crypto.BandersnatchVrf
+import io.forge.jam.db.RocksDbMemory
+import io.forge.jam.pvm.PvmSettings
 
 /** CLI entry point:
   * {{{
@@ -58,7 +61,13 @@ object Main extends LazyLogging:
         e.printStackTrace()
         sys.exit(1)
 
+  private def installProcessSettings(): Unit =
+    PvmSettings.process.install(PvmSettings.process.fromSystemProperties)
+    RocksDbMemory.Settings.process.install(RocksDbMemory.Settings.process.fromSystemProperties)
+    BandersnatchVrf.baseDir.install(BandersnatchVrf.baseDir.fromSystemProperties)
+
   private def run(args: Array[String]): Unit =
+    installProcessSettings()
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
     val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
     val opts = parseArgs(rest, Map.empty)

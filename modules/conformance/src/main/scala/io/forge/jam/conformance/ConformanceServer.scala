@@ -1,6 +1,8 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.ChainConfig
+import io.forge.jam.crypto.BandersnatchVrf
+import io.forge.jam.pvm.PvmSettings
 import java.nio.file.{Path, Paths}
 import scala.util.control.NonFatal
 
@@ -71,6 +73,9 @@ object ServerConfig:
 object ConformanceServerApp:
 
   def main(args: Array[String]): Unit =
+    PvmSettings.process.install(PvmSettings.process.fromSystemProperties)
+    BandersnatchVrf.baseDir.install(BandersnatchVrf.baseDir.fromSystemProperties)
+
     // Install JVM-level uncaught exception handler so crashes are always visible
     Thread.setDefaultUncaughtExceptionHandler { (thread, throwable) =>
       throwable match

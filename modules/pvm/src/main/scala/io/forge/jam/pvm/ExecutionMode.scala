@@ -1,7 +1,7 @@
 package io.forge.jam.pvm
 import com.typesafe.scalalogging.StrictLogging
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Files
 
 enum ExecutionMode:
   case Interpreted, Recompiled
@@ -19,24 +19,28 @@ object ExecutionMode extends StrictLogging:
   /** Whether this process can run guest code natively: the recompiler library is named by
     * `-Djam.pvm.recompiler.lib`, the file is there, and the host is one it emits code for.
     */
-  def nativeAvailable: Boolean =
+  def nativeAvailable: Boolean = nativeAvailable(PvmSettings.current)
+
+  def nativeAvailable(settings: PvmSettings): Boolean =
     val arch = System.getProperty("os.arch", "").toLowerCase
     val os = System.getProperty("os.name", "").toLowerCase
     val hostSupported =
       (arch == "aarch64" || arch == "arm64" || arch == "amd64" || arch == "x86_64") &&
         (os.contains("mac") || os.contains("linux"))
-    hostSupported && Option(System.getProperty("jam.pvm.recompiler.lib")).exists(p => Files.exists(Path.of(p)))
+    hostSupported && settings.recompilerLib.exists(Files.exists(_))
 
   /** `-Djam.pvm.executionMode=interpreted|recompiled` when given; otherwise recompiled wherever the library is
     * available, and the interpreter elsewhere.
     */
   val default: ExecutionMode =
-    Option(System.getProperty("jam.pvm.executionMode")).filter(_.nonEmpty) match
+    val settings = PvmSettings.current
+    settings.executionMode match
       case Some(value) =>
         val resolved = fromProperty(Some(value))
         logger.info(s"ExecutionMode.default is $resolved (-Djam.pvm.executionMode=$value)")
         resolved
       case None =>
-        val resolved = if nativeAvailable then Recompiled else Interpreted
-        logger.info(s"ExecutionMode.default is $resolved (recompiler library ${if nativeAvailable then "found" else "not available"})")
+        val available = nativeAvailable(settings)
+        val resolved = if available then Recompiled else Interpreted
+        logger.info(s"ExecutionMode.default is $resolved (recompiler library ${if available then "found" else "not available"})")
         resolved

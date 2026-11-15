@@ -12,7 +12,9 @@ import io.forge.jam.protocol.benchmark.{BlockGenerator, DevKeyStore}
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleErrorCode, SafroleInput, TicketsOrKeys}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.traces.{BlockImporter, Genesis, ImportResult, RawState}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.traces.Genesis
+import io.forge.jam.protocol.state.RawState
 import io.forge.jam.vrfs.BandersnatchWrapper
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -169,9 +171,6 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
   test("GP: an offenders mark holding the new offenders' keys is accepted (§10.3)") {
     val key = io.forge.jam.core.primitives.Ed25519PublicKey(Array.fill[Byte](32)(7))
     val block = fixture.block.copy(header = fixture.block.header.copy(offendersMark = List(offender)))
-    val ctx = PipelineContext(config, block, new EncodedHeader(block.header, config), 0L, disputeOffendersMark = List(key))
-    // The step reads only the context.
-    IntermediateSteps.validateOffendersMark.run((null, ctx)).isRight shouldBe true
-    val wrong = ctx.copy(disputeOffendersMark = Nil)
-    IntermediateSteps.validateOffendersMark.run((null, wrong)) shouldBe Left(PipelineError.InvalidOffendersMark)
+    HeaderChecks.offendersMark(block, List(key)).isRight shouldBe true
+    HeaderChecks.offendersMark(block, Nil) shouldBe Left(PipelineError.InvalidOffendersMark)
   }

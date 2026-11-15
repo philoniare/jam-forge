@@ -1,13 +1,11 @@
-package io.forge.jam.protocol.refine
+package io.forge.jam.protocol.pvmhost
 
 import io.forge.jam.protocol.pipeline.StageTimers
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.InstanceMemoryBudget
-import io.forge.jam.protocol.accumulation.NativeRunner
 import io.forge.jam.pvm.types.ProgramCounter
-import io.forge.jam.protocol.accumulation.{InterpretedInstanceWrapper, PvmInstance}
 
 /** Host-call dispatch surface consumed by [[PvmRunner]] (implemented by the
   * refine and is-authorized dispatchers).
@@ -17,6 +15,8 @@ trait HostCallDispatcher:
   def dispatch(hostCallId: Int, instance: PvmInstance): Unit
 
 object PvmRunner:
+
+  val trace: Boolean = java.lang.Boolean.getBoolean("jam.trace.refine")
 
   /** Outcome of a PVM run.
     *
@@ -76,7 +76,7 @@ object PvmRunner:
   ): (PvmExit, Long, Array[Byte]) =
     // Recompiled: run straight from the module, with no interpreter instance to build, describe and copy back
     // from. Step tracing needs the interpreter, and a run the native path declines takes the long way below.
-    if executionMode == ExecutionMode.Recompiled && !RefineHostCalls.trace then
+    if executionMode == ExecutionMode.Recompiled && !trace then
       val regs = new Array[Long](13)
       regs(0) = RA_INIT
       regs(1) = SP_INIT
@@ -100,7 +100,7 @@ object PvmRunner:
       InterpretedInstance.fromModule(
         module,
         inputData,
-        forceStepTracing = RefineHostCalls.trace
+        forceStepTracing = trace
       )
     )
     val recent = new java.util.ArrayDeque[String]()
@@ -169,7 +169,7 @@ object PvmRunner:
                 continueExecution = false
 
         case Right(InterruptKind.Segfault(fault)) =>
-          if RefineHostCalls.trace then System.err.println(s"[refine] page fault $fault")
+          if trace then System.err.println(s"[refine] page fault $fault")
           exit = PvmExit.PageFault
           continueExecution = false
 
@@ -182,7 +182,7 @@ object PvmRunner:
           exit = PvmExit.Panic
           continueExecution = false
 
-    if RefineHostCalls.trace then
+    if trace then
       recent.forEach(l => System.err.println(s"[refine]   step $l"))
       System.err.println(s"[refine] exit $exit pc=${instance.programCounter} regs=${(0 to 12).map(i => f"0x${instance.reg(i)}%x").mkString(",")}")
     val finalGas = instance.gas

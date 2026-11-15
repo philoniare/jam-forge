@@ -1,6 +1,8 @@
 package io.forge.jam.protocol.accumulation.hostcalls
 
 import io.forge.jam.protocol.accumulation._
+import io.forge.jam.protocol.pvmhost.*
+import io.forge.jam.protocol.state.*
 import spire.math.ULong
 
 class HostCallGasCostSpec extends HostCallTestBase:

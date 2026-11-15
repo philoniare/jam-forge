@@ -3,7 +3,8 @@ package io.forge.jam.conformance
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
 import io.forge.jam.conformance.ConformanceCodecs.encode
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
-import io.forge.jam.protocol.traces.{BlockImporter, ImportResult, RawState, StateMerklization}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
+import io.forge.jam.protocol.state.{RawState, StateMerklization}
 
 import java.io.File
 import java.nio.file.{Files, Path}

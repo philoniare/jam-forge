@@ -80,7 +80,7 @@ class LeavesSpec extends AnyFunSuite with Matchers:
       val block2bHash = nodeB.chain.headerHashOf(block2b)
       nodeA.chain.importBlock(block2bBytes).isLeft shouldBe true
 
-      def triples(heads: List[ChainManager#Head]) = heads.map(h => (h.hash, h.slot, h.stateRoot)).toSet
+      def triples(heads: List[ChainHead]) = heads.map(h => (h.hash, h.slot, h.stateRoot)).toSet
       val leavesBefore = triples(nodeA.chain.leaves)
       val bestBefore = nodeA.chain.best
       leavesBefore.map(_._1) shouldBe Set(headA2.hash, block2bHash)

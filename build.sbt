@@ -20,8 +20,20 @@ ThisBuild / coverageFailOnMinimum := false
 ThisBuild / coverageHighlighting := true
 ThisBuild / coverageExcludedPackages := ".*benchmark.*"
 
-// Common dependency versions
-val catsVersion = "2.10.0"
+val spire = "org.typelevel" %% "spire" % "0.18.0"
+val bouncyCastleVersion = "1.77"
+val bcprov = "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion
+val bcpkix = "org.bouncycastle" % "bcpkix-jdk18on" % bouncyCastleVersion
+val circeVersion = "0.14.6"
+val circeCore = "io.circe" %% "circe-core" % circeVersion
+val circeParser = "io.circe" %% "circe-parser" % circeVersion
+val scalaLogging = "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
+val logback = "ch.qos.logback" % "logback-classic" % "1.4.11"
+val scalatest = "org.scalatest" %% "scalatest" % "3.2.17" % Test
+val scalacheck = Seq(
+  "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
+  "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test
+)
 
 // Detect OS for native library paths
 val osName = System.getProperty("os.name").toLowerCase
@@ -48,6 +60,21 @@ def commonSettings = Seq(
   publish / skip := true,
   // Main sources must compile without warnings; test sources may still warn.
   Compile / compile / scalacOptions += "-Werror"
+)
+
+def fatJarSettings = Seq(
+  assembly / assemblyMergeStrategy := {
+    // Discard signature files from signed JARs (e.g., Bouncy Castle)
+    case x if x.endsWith(".SF") => MergeStrategy.discard
+    case x if x.endsWith(".DSA") => MergeStrategy.discard
+    case x if x.endsWith(".RSA") => MergeStrategy.discard
+    case PathList("META-INF", "versions", _*) => MergeStrategy.first
+    case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
+    case PathList("META-INF", _*) => MergeStrategy.first
+    case "module-info.class" => MergeStrategy.discard
+    case x if x.endsWith(".class") => MergeStrategy.first
+    case _ => MergeStrategy.first
+  }
 )
 
 val hasNativeRecompiler = (osName.contains("mac") || osName.contains("linux")) && {
@@ -109,14 +136,13 @@ lazy val core = (project in file("modules/core"))
     commonSettings,
     name := "jam-core",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
-      "io.circe" %% "circe-core" % "0.14.6",
-      "io.circe" %% "circe-parser" % "0.14.6",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      spire,
+      bcprov,
+      circeCore,
+      circeParser,
+      scalaLogging,
+      logback % Test,
+      scalatest
     ),
     scalacOptions ++= commonScalacOptions
   )
@@ -127,11 +153,10 @@ lazy val crypto = (project in file("modules/crypto"))
     commonSettings,
     name := "jam-crypto",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      spire,
+      scalaLogging,
+      logback % Test,
+      scalatest
     ),
     scalacOptions ++= commonScalacOptions,
     buildNativeLib := {
@@ -182,16 +207,13 @@ lazy val pvm = (project in file("modules/pvm"))
     commonSettings,
     name := "jam-pvm",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test,
-      "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
-      "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test,
-      "io.circe" %% "circe-core" % "0.14.6" % Test,
-      "io.circe" %% "circe-parser" % "0.14.6" % Test
-    ),
+      spire,
+      scalaLogging,
+      logback % Test,
+      scalatest,
+      circeCore % Test,
+      circeParser % Test
+    ) ++ scalacheck,
     scalacOptions ++= commonScalacOptionsHK,
     buildPvmRecompilerLib := {
       val baseDir = (ThisBuild / baseDirectory).value
@@ -218,17 +240,14 @@ lazy val protocol = (project in file("modules/protocol"))
     commonSettings,
     name := "jam-protocol",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "io.circe" %% "circe-core" % "0.14.6",
-      "io.circe" %% "circe-parser" % "0.14.6",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test,
-      "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
-      "org.scalatestplus" %% "scalacheck-1-17" % "3.2.17.0" % Test
-    ),
+      spire,
+      bcprov,
+      scalaLogging,
+      logback % Test,
+      circeCore,
+      circeParser,
+      scalatest
+    ) ++ scalacheck,
     scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
     Test / baseDirectory := (ThisBuild / baseDirectory).value,
@@ -245,11 +264,10 @@ lazy val db = (project in file("modules/db"))
     serialTestSettings,
     name := "jam-db",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
       "org.rocksdb" % "rocksdbjni" % "10.10.1",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      scalaLogging,
+      logback % Test,
+      scalatest
     ),
     scalacOptions ++= commonScalacOptions,
     Test / fork := true,
@@ -263,18 +281,16 @@ lazy val network = (project in file("modules/network"))
     serialTestSettings,
     name := "jam-network",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
       // JAMNP-S transport: QUIC via the Netty incubator codec (BoringSSL),
       // which supports TLS 1.3 mutual auth with Ed25519 certificates.
       "io.netty.incubator" % "netty-incubator-codec-classes-quic" % nettyQuicVersion,
       "io.netty.incubator" % "netty-incubator-codec-native-quic" % nettyQuicVersion classifier quicNativeClassifier,
       // Ed25519 self-signed certificate generation
-      "org.bouncycastle" % "bcprov-jdk18on" % "1.77",
-      "org.bouncycastle" % "bcpkix-jdk18on" % "1.77",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      bcprov,
+      bcpkix,
+      scalaLogging,
+      logback % Test,
+      scalatest
     ),
     scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
@@ -288,13 +304,12 @@ lazy val node = (project in file("modules/node"))
     serialTestSettings,
     name := "jam-node",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "io.circe" %% "circe-core" % "0.14.6",
-      "io.circe" %% "circe-parser" % "0.14.6",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      spire,
+      circeCore,
+      circeParser,
+      scalaLogging,
+      logback,
+      scalatest
     ),
     scalacOptions ++= commonScalacOptionsHK,
     Compile / mainClass := Some("io.forge.jam.node.Main"),
@@ -307,18 +322,7 @@ lazy val node = (project in file("modules/node"))
     Test / javaOptions ++= sys.props.get("jam.bench.jvmOpts").toSeq.flatMap(_.trim.split("\\s+")).filter(_.nonEmpty),
     assembly / mainClass := Some("io.forge.jam.node.Main"),
     assembly / assemblyJarName := "jam-node.jar",
-    assembly / assemblyMergeStrategy := {
-      // Discard signature files from signed JARs (e.g., Bouncy Castle)
-      case x if x.endsWith(".SF") => MergeStrategy.discard
-      case x if x.endsWith(".DSA") => MergeStrategy.discard
-      case x if x.endsWith(".RSA") => MergeStrategy.discard
-      case PathList("META-INF", "versions", _*) => MergeStrategy.first
-      case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
-      case PathList("META-INF", _*) => MergeStrategy.first
-      case "module-info.class" => MergeStrategy.discard
-      case x if x.endsWith(".class") => MergeStrategy.first
-      case _ => MergeStrategy.first
-    }
+    fatJarSettings
   )
 
 lazy val conformance = (project in file("modules/conformance"))
@@ -327,13 +331,12 @@ lazy val conformance = (project in file("modules/conformance"))
     commonSettings,
     name := "jam-conformance",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "spire" % "0.18.0",
-      "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
+      spire,
+      scalaLogging,
+      logback,
       // CRaC for checkpoint/restore (instant JVM warmup)
       "org.crac" % "crac" % "1.4.0",
-      "org.scalatest" %% "scalatest" % "3.2.17" % Test
+      scalatest
     ),
     scalacOptions ++= commonScalacOptionsHK,
     Test / fork := true,
@@ -348,16 +351,5 @@ lazy val conformance = (project in file("modules/conformance"))
     // Assembly settings for creating fat JAR
     assembly / mainClass := Some("io.forge.jam.conformance.ConformanceServerApp"),
     assembly / assemblyJarName := "jam-conformance.jar",
-    assembly / assemblyMergeStrategy := {
-      // Discard signature files from signed JARs (e.g., Bouncy Castle)
-      case x if x.endsWith(".SF") => MergeStrategy.discard
-      case x if x.endsWith(".DSA") => MergeStrategy.discard
-      case x if x.endsWith(".RSA") => MergeStrategy.discard
-      case PathList("META-INF", "versions", _*) => MergeStrategy.first
-      case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
-      case PathList("META-INF", _*) => MergeStrategy.first
-      case "module-info.class" => MergeStrategy.discard
-      case x if x.endsWith(".class") => MergeStrategy.first
-      case _ => MergeStrategy.first
-    }
+    fatJarSettings
   )

@@ -1,5 +1,8 @@
 package io.forge.jam.protocol.accumulation
 
+
+import io.forge.jam.protocol.pvmhost.{HostCall, HostCallResult}
+import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.{InMemoryTrieBackend, StateTrie}
@@ -116,10 +119,12 @@ class UpgradedCodeVisibilitySpec extends AnyFunSuite with Matchers:
       round1: Calls => Unit
   ): (UpgradeThenRunExecutor, AccumulationTransition.OuterAccumulationResult) =
     val executor = new UpgradeThenRunExecutor(parallel, round1)
-    if withView then
-      val trie = StateTrie.empty(new InMemoryTrieBackend())
-      if preBlock.nonEmpty then trie.update(preBlock.map((k, v) => (k, Some(v))))
-      executor.setStorageView(Some(new ServiceStorageView(trie)))
+    val storageView =
+      if withView then
+        val trie = StateTrie.empty(new InMemoryTrieBackend())
+        if preBlock.nonEmpty then trie.update(preBlock.map((k, v) => (k, Some(v))))
+        Some(new ServiceStorageView(trie))
+      else None
     val state = PartialState(
       accounts = Map(S -> account),
       stagingSet = mutable.ListBuffer.empty,
@@ -140,7 +145,8 @@ class UpgradedCodeVisibilitySpec extends AnyFunSuite with Matchers:
       timeslot = slot,
       entropy = JamBytes.zeros(32),
       executor = executor,
-      config = config
+      config = config,
+      storageView = storageView
     )
     (executor, result)
 

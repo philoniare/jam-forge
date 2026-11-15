@@ -26,31 +26,24 @@ JamForge is a functional-first implementation of the JAM (Join-Accumulate Machin
 
 ## Module Structure
 
-The codebase is organized into five main modules with clear dependencies:
+Eight sbt modules, with no cycles:
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  jam-conformance                    │
-│         (Conformance Server & Testing)              │
-└─────────────────┬───────────────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────────────┐
-│                  jam-protocol                       │
-│   (State Transition Functions & Block Pipeline)     │
-└─────────┬───────────────┬───────────────────────────┘
-          │               │
-┌─────────▼──────┐  ┌────▼────────────────────────────┐
-│   jam-crypto   │  │          jam-pvm                │
-│  (Cryptography)│  │    (PolkaVM Execution)          │
-└────────┬───────┘  └────┬────────────────────────────┘
-         │               │
-         └───────┬───────┘
-                 │
-         ┌───────▼──────────────────────────────────┐
-         │           jam-core                       │
-         │  (Types, Encoding, Constants)            │
-         └──────────────────────────────────────────┘
-```
+| Module | Depends on | Role |
+|---|---|---|
+| `jam-core` | | Types, codec, state trie and its backend interface, configuration |
+| `jam-crypto` | core | Bandersnatch VRF, Ed25519, BLS and erasure coding over native libraries |
+| `jam-pvm` | core | PolkaVM: interpreter, memory, native recompiler interface |
+| `jam-protocol` | core, crypto, pvm | State transition functions, block pipeline, refinement |
+| `jam-db` | core | RocksDB: state trie backend, block store, shard store |
+| `jam-network` | core, crypto | JAMNP-S over QUIC |
+| `jam-node` | core, crypto, protocol, network, db | The node: chain, sync, validator roles |
+| `jam-conformance` | core, crypto, protocol | Fuzz target and trace runner |
+
+`jam-node` and `jam-conformance` are the two applications. Each resolves the PVM settings
+(`-Djam.pvm.*`), the RocksDB memory budget (`-Djam.db.*`) and the repository base directory (`-Djam.base.dir`)
+once at startup and installs them (`ProcessSettings`); the libraries read the installed values. Tests and tools
+that install nothing get the same values from the system properties at first use. The logging backend (logback)
+is a dependency of the applications only; libraries have it for their tests.
 
 ### jam-core
 
@@ -107,43 +100,73 @@ Native libraries are automatically built by sbt during compilation using Cargo.
 
 **Dependencies:**
 - jam-core
-- Cats (functional abstractions)
 
 ### jam-protocol
 
-**Purpose:** State transition functions (STFs) and block import pipeline.
+**Purpose:** State transition functions (STFs), the block import pipeline, and work-package refinement.
 
-**Key Components:**
-- **State Transition Functions:**
-  - Safrole (block production)
-  - Assurances (availability attestation)
-  - Authorizations (service authorization)
-  - Reports (work report processing)
-  - Disputes (validator disagreements)
-  - History (block ancestry tracking)
-  - Preimages (data storage)
-  - Statistics (validator metrics)
-  - Accumulation (work result finalization)
-
-- **Block Pipeline**: End-to-end block import and validation
-- **State Management**: Full JAM state representation and merklization
-
-**Package:** `io.forge.jam.protocol`
+**Packages** (under `io.forge.jam.protocol`):
+- `safrole`, `dispute`, `assurance`, `report`, `accumulation`, `history`, `authorization`, `preimage`,
+  `statistics`: one STF each. An STF has a pure `stfInternal` on its own case-class state (what the test vectors
+  exercise) and a `stfView` that runs it against the trie-backed state.
+- `pipeline`: `BlockPipeline`, which applies the STFs to a block in order, and the header checks.
+- `importing`: `BlockImporter`, which runs the pipeline on a state and commits the result to the trie.
+- `state`: the trie-backed state view (`TrieBackedJamState`), service storage staging, state keys and the full-state
+  codec.
+- `pvmhost`: what accumulation, refinement and is-authorized share to run guest code: the instance interface, the
+  interpreter and native runners, host-call numbers, gas costs and result codes.
+- `refine`: work-package validation, refinement and report computation.
+- `traces`: the models of recorded traces (`TraceStep`, `Genesis`).
 
 **Dependencies:**
 - jam-core
 - jam-crypto
 - jam-pvm
 
-### jam-conformance
+### jam-db
 
-**Purpose:** Protocol conformance testing and validation server.
+**Purpose:** Persistence on RocksDB.
 
 **Key Components:**
-- **Conformance Server**: Unix domain socket server for protocol testing
-- **Block Importer**: Processes test vectors and validates state transitions
-- **State Codec**: Encoding/decoding of full JAM state
-- **Fuzzing Support**: Integration with jam-conformance fuzzing tools
+- `RocksDbTrieBackend`: the state trie's nodes and values (implements `StateTrieBackend` from jam-core), with
+  per-block journals so replaced state can be pruned
+- `BlockStore`: blocks, headers, the parent-to-children index and chain metadata, written in atomic batches
+- `ShardStore`: erasure-coded shard custody
+- `RocksDbMemory`: one memory budget shared by the stores of a process
+
+**Package:** `io.forge.jam.db`
+
+### jam-network
+
+**Purpose:** JAMNP-S transport: QUIC (Netty incubator codec) with TLS 1.3 mutual authentication on Ed25519
+certificates, and the UP/CE stream kinds.
+
+**Package:** `io.forge.jam.network`
+
+### jam-node
+
+**Purpose:** The node: chain management, sync, and the validator roles.
+
+**Key Components:**
+- `ChainManager`: owns the canonical chain (import, side branches and reorgs, finality). It delegates to
+  `ForkChoice` (branch weight, equivocation and validity marks), `HistoryPruner` (pruning behind finality),
+  `UnverifiedBlocks` (caps on side-branch blocks whose seal cannot be checked) and `ChainMeta` (every metadata key
+  in the block store and its encoding).
+- `ChainReader`: the read-only view of the chain that the roles depend on.
+- Roles: `BlockAuthor`, `GuarantorService`, `AssurerService`, `AuditorService`, `TicketService`,
+  `PreimageService`; finality: `GrandpaService`, `BeefyService`; `SyncService`.
+- `JamNode`: wires the above to the network and the slot clock; `PeerConnectivity` keeps its connections.
+
+**Package:** `io.forge.jam.node`
+
+### jam-conformance
+
+**Purpose:** Protocol conformance testing: the fuzz target and the trace runner.
+
+**Key Components:**
+- **Fuzz server**: Unix domain socket server speaking the conformance protocol (`FuzzServer`, `ProtocolHandler`)
+- **Trace runner**: replays JSON and binary traces and checks every state root
+- **Warmup**: JVM warmup over recorded traces, with CRaC checkpoint/restore
 
 **Package:** `io.forge.jam.conformance`
 
@@ -151,8 +174,7 @@ Native libraries are automatically built by sbt during compilation using Cargo.
 - jam-core
 - jam-crypto
 - jam-protocol
-- FS2 (streaming and Unix socket IO)
-- Cats Effect (async/effect management)
+- CRaC (checkpoint/restore)
 
 ## Data Flow
 
@@ -167,30 +189,34 @@ Native libraries are automatically built by sbt during compilation using Cargo.
    - Check block ancestry
    - Validate VRF proofs (Safrole)
 
-3. **State Transition Execution**
+3. **State Transition Execution** (`BlockPipeline.execute`)
    ```
-   Initial State
+   Prior state
         ↓
-   Safrole STF (block production)
+   Safrole: epoch step, then the header's seal and markers against it, then tickets
         ↓
-   Disputes STF (validator disputes)
+   Disputes
         ↓
-   Assurances STF (availability)
+   Assurances
         ↓
-   Reports STF (work reports)
+   Reports
         ↓
-   Accumulation STF (finalization)
+   Accumulation
         ↓
-   History STF (ancestry)
+   History
         ↓
-   Authorizations STF (service auth)
+   Authorizations
         ↓
-   Preimages STF (data storage)
+   Preimages
         ↓
-   Statistics STF (metrics)
+   Statistics
         ↓
-   Final State
+   Posterior state
    ```
+   The pipeline is plain sequential code over one mutable state view: a step that finds the block invalid ends it
+   with that step's error. Signature checks that decide only validity (seal, entropy VRF, ticket proofs, guarantee
+   and assurance signatures) run on a shared pool while the steps continue, and are awaited before the import
+   succeeds.
 
 4. **State Root Verification**
    - Compute state merklization
@@ -283,11 +309,7 @@ JAM state is represented as an immutable case class (`FullJamState`) containing:
 Each STF is a function from its pre-state to its post-state; block import applies them to a trie-backed state view (`TrieBackedJamState`) that re-encodes only the components a block changed:
 
 ```scala
-val updatedState = SafroleTransition.transition(
-  currentState,
-  newBlock,
-  config
-)
+val result: Either[PipelineError, BlockPipelineResult] = BlockPipeline.execute(block, view)
 ```
 
 ### State Merklization
@@ -338,12 +360,6 @@ yield newState
 - Zero-copy data passing where possible
 - Batch operations for VRF and erasure coding
 
-### Future Optimizations
-
-- Parallel STF execution where independent
-- Incremental state merklization
-- Caching of frequently accessed state
-
 ## Design Decisions
 
 ### Why Scala 3?
@@ -366,13 +382,3 @@ yield newState
 - Easier reasoning about state transitions
 - Natural fit with functional programming
 - Simplified testing and debugging
-
-## Future Architecture Evolution
-
-### Planned Improvements
-
-1. **Parallel STF Execution**: Execute independent STFs concurrently
-2. **Incremental Merklization**: Only recompute changed state components
-3. **Storage Abstraction**: Pluggable storage backends (RocksDB)
-4. **Network Layer**: P2P networking for full node operation
-5. **RPC Interface**: JSON-RPC API for client applications

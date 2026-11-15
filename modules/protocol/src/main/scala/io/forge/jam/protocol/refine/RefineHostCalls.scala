@@ -1,5 +1,7 @@
 package io.forge.jam.protocol.refine
 
+
+import io.forge.jam.protocol.pvmhost.{HostCallDispatcher, PvmRunner}
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, LittleEndian}
 import io.forge.jam.core.constants
 import io.forge.jam.core.constants.Csegmentsize
@@ -8,7 +10,7 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
-import io.forge.jam.protocol.accumulation.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
+import io.forge.jam.protocol.pvmhost.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
 import io.forge.jam.pvm.InterruptKind
 import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
 import io.forge.jam.pvm.memory.GuestRam
@@ -477,7 +479,7 @@ class RefineHostCalls(
 
 object RefineHostCalls:
   /** `-Djam.trace.refine=true`: print every refine host call with its argument registers and result. Diagnostics. */
-  val trace: Boolean = java.lang.Boolean.getBoolean("jam.trace.refine")
+  val trace: Boolean = PvmRunner.trace
 
   /** Inner-VM limit of Omega_M: machine returns FULL once 63 exist. */
   val MaxInnerPvms: Int = 63

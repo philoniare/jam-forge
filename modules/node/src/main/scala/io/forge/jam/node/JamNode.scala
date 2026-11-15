@@ -4,8 +4,7 @@ import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.protocol.traces.ImportError
-import io.forge.jam.core.JamBytes
+import io.forge.jam.protocol.importing.ImportError
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
@@ -132,14 +131,14 @@ final class JamNode(
     pools,
     distribution,
     egress,
-    forwardTargets = () => connectivity.map(v => connectionsTo(v.current)).getOrElse(Nil),
+    forwardTargets = () => peers.currentValidatorConnections,
     inbound = inbound
   )
   val preimages = new PreimageService(
     chain,
     pools,
     egress,
-    gossipTargets = () => distribution.peers.filter(c => announcementWanted(c.peerKey))
+    gossipTargets = () => distribution.peers.filter(c => peers.announcementWanted(c.peerKey))
   )
 
   val slotClock = new SlotClock(
@@ -155,56 +154,31 @@ final class JamNode(
     JamnpConfig(genesisHashPrefix = spec.alpnPrefix, reusePort = nodeConfig.reusePort)
   )
 
-  /** Peers this node keeps a connection to (bootnodes and `--peer`s): a lost
-    * connection is redialed with backoff, so a node cut off for longer than
-    * the QUIC idle timeout rejoins once the network heals.
-    */
-  private final class DialTarget(val address: InetSocketAddress, val key: Option[Array[Byte]]):
-    @volatile var connection: JamnpConnection = null
-    @volatile var nextAttemptMillis: Long = 0L
-    @volatile var backoffMillis: Long = nodeConfig.redialMillis
-    @volatile var lastFailure: String = ""
-
-  private val dialTargets = new java.util.concurrent.CopyOnWriteArrayList[DialTarget]()
-
-  /** Validator connectivity in force: the previous, current and next sets of
-    * the epoch whose connectivity changes have been applied (JAMNP-S
-    * "Required connectivity", "Epoch transitions").
-    */
-  private final case class ValidatorView(
-      epoch: Long,
-      appliedSlot: Long,
-      validators: Set[JamBytes],
-      current: Set[JamBytes],
-      neighbours: Set[JamBytes],
-      endpoints: Map[JamBytes, InetSocketAddress]
+  private val peers = new PeerConnectivity(
+    identity,
+    network,
+    chain,
+    sync,
+    distribution,
+    spec,
+    nodeConfig,
+    currentSlot = () => currentSlot,
+    upkeep = () =>
+      if author.isDefined then maybeSendTickets(currentSlot)
+      // A node that runs no GRANDPA voter (a follower, as on jamtoaster) takes its finality from its peers' UP 0
+      // announcements. A voter takes it from GRANDPA only: unauthenticated peer claims must not move it.
+      if !nodeConfig.grandpa then sync.followPeerFinality(peerFinalityQuorum): Unit
   )
-  @volatile private var connectivity: Option[ValidatorView] = None
 
-  /** A validator this node must stay connected to, dialed from its metadata
-    * endpoint.
-    */
-  private final class ValidatorDial(val key: Array[Byte], val address: InetSocketAddress):
-    /** Since when no connection to the validator has been seen. */
-    @volatile var disconnectedSince: Long = System.currentTimeMillis()
-    @volatile var nextAttemptMillis: Long = 0L
-    @volatile var backoffMillis: Long = nodeConfig.redialMillis
-    @volatile var inFlight: Boolean = false
-
-  private val validatorDials = new java.util.concurrent.ConcurrentHashMap[JamBytes, ValidatorDial]()
-  private val dialer = java.util.concurrent.Executors.newCachedThreadPool { r =>
-    val t = new Thread(r, "jam-dial"); t.setDaemon(true); t
-  }
   @volatile private var assuranceTimer: java.util.concurrent.ScheduledExecutorService = null
   @volatile private var ticketsSentGeneration: Int = 0
-  @volatile private var redialer: java.util.concurrent.ScheduledExecutorService = null
 
   val telemetry: Option[Telemetry] = nodeConfig.telemetry.map { address =>
     new Telemetry(
       address,
       () =>
         Telemetry.nodeInformation(
-          jamParameters = io.forge.jam.protocol.accumulation.ConstantsBlob.build(spec.config),
+          jamParameters = io.forge.jam.protocol.pvmhost.ConstantsBlob.build(spec.config),
           genesisHash = spec.genesisHeaderHash,
           peerId = identity.publicKeyBytes,
           listenPort = listenPort,
@@ -340,14 +314,14 @@ final class JamNode(
   /** Attempt to author for `slot`; on success the block is imported and
     * announced
     */
-  def authorSlot(slot: Long): Option[ChainManager#Head] =
+  def authorSlot(slot: Long): Option[ChainHead] =
     if shuttingDown then return None
     // On the clock the ring proofs are made off this thread, which must author by the slot's deadline; a node
     // driven slot by slot (no clock, as in tests) makes them here, so this slot's block already carries them.
     if nodeConfig.slotTicking then tickets.generateInBackground(slot) else tickets.maybeGenerate(slot): Unit
-    updateConnectivity(slot)
+    peers.update(slot)
     maybeSendTickets(slot)
-    connectivity.filter(_.epoch == slot / chain.config.epochLength).foreach(v => tickets.releaseForwards(slot, v.appliedSlot))
+    peers.appliedSlotOf(slot / chain.config.epochLength).foreach(applied => tickets.releaseForwards(slot, applied))
     author.flatMap { a =>
       a.tryAuthor(slot).flatMap { block =>
         val authoring = telemetry.flatMap(_.authoring(slot, block.header.parent))
@@ -358,7 +332,7 @@ final class JamNode(
           case Left(ChainError.ImportFailed(error, _)) if error != ImportError.UnknownError && hasContent(block) =>
             // The contents were checked against the state transitions before sealing, so this should not happen.
             // Should it, the block's own items go, guarantees first, then the rest, and disputes are left out.
-            def retry(): Option[ChainManager#Head] =
+            def retry(): Option[ChainHead] =
               a.tryAuthor(slot, withDisputes = false)
                 .flatMap(b => importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))).toOption)
             val x = block.extrinsic
@@ -388,7 +362,7 @@ final class JamNode(
     val epoch = slot / e
     val fin = chain.finalized.slot
     val entropyFinal = finalityRunning && fin >= epoch * e && fin / e == epoch && chain.best.slot / e == epoch
-    val step1Due = connectivity.exists(v => v.epoch == epoch && slot >= v.appliedSlot + math.max(e / 60, 1))
+    val step1Due = peers.appliedSlotOf(epoch).exists(applied => slot >= applied + math.max(e / 60, 1))
     // A ticket reaching the author at slot index Y − 1 or later misses the lottery (polkajam rejects it).
     val inLottery = slot % e < chain.config.ticketCutoff - 1
     val generation = tickets.generation
@@ -418,7 +392,7 @@ final class JamNode(
   private def importAuthored(
       block: io.forge.jam.core.types.block.Block,
       authoring: Option[Telemetry.EventRef]
-  ): Either[ChainError, ChainManager#Head] =
+  ): Either[ChainError, ChainHead] =
     val bytes = chain.encodeBlock(block)
     telemetry.foreach { t =>
       val x = block.extrinsic
@@ -454,7 +428,7 @@ final class JamNode(
     chain.initializeOrRestore(spec)
 
     // Validators of the sets around the head keep their inbound slots whoever else connects.
-    network.setPriorityPeers(key => connectivity.exists(_.validators.contains(JamBytes(key))))
+    network.setPriorityPeers(peers.isValidator)
 
     if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
@@ -501,7 +475,7 @@ final class JamNode(
         // Accepted peers are reachable for CE traffic whether or not they
         // open UP 0 to us (UP 0 is limited to grid neighbours).
         if !conn.initiator then distribution.trackConnection(conn)
-        dropDuplicateConnections(conn)
+        peers.dropDuplicateConnections(conn)
       else
         logger.info(s"peer disconnected ($side) $peer$where")
         distribution.untrackConnection(conn)
@@ -543,20 +517,7 @@ final class JamNode(
     telemetry.foreach(_.start())
     submitServer = nodeConfig.submitPort.map(p => new SubmitServer(p, preimages).start())
 
-    spec.bootnodes.foreach(bn => dialTargets.add(new DialTarget(bn.address, Some(bn.ed25519Key))))
-    dialTargets.forEach(t => dial(t, initial = true))
-    redialer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
-      val t = new Thread(r, "jam-redial"); t.setDaemon(true); t
-    }
-    redialer.scheduleWithFixedDelay(() => redialLost(), 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
-    redialer.scheduleWithFixedDelay(
-      () =>
-        try maintainConnectivity()
-        catch case e: Exception => logger.warn(s"connectivity upkeep failed: ${e.getMessage}"),
-      500,
-      500,
-      java.util.concurrent.TimeUnit.MILLISECONDS
-    )
+    peers.start()
 
     if nodeConfig.slotTicking then
       slotTicker = slotClock.scheduleSlotTicks { slot =>
@@ -572,156 +533,14 @@ final class JamNode(
 
   /** Keep a connection to `address` (redialed when lost), as for a bootnode. */
   def addPeer(address: InetSocketAddress, expectedEd25519: Option[Array[Byte]] = None): Unit =
-    val target = new DialTarget(address, expectedEd25519)
-    dialTargets.add(target)
-    dial(target, initial = true)
-
-  /** Dial targets whose connection is missing or closed, once their backoff
-    * has passed. Runs on the redial thread.
-    */
-  private def redialLost(): Unit =
-    if shuttingDown then return
-    val now = System.currentTimeMillis()
-    dialTargets.forEach { t =>
-      // A connection the peer dialed to us (or one kept over ours as the
-      // preferred initiator's) counts as live too.
-      val live = (t.connection != null && t.connection.isOpen) || t.key.exists(k => liveConnectionTo(k).nonEmpty)
-      if !live && now >= t.nextAttemptMillis then dial(t, initial = false)
-    }
-
-  /** An open connection to the peer with Ed25519 key `key`. */
-  private def liveConnectionTo(key: Array[Byte]): Option[JamnpConnection] =
-    distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
-
-  private def connectionsTo(keys: Set[JamBytes]): List[JamnpConnection] =
-    distribution.peers.filter(c => keys.contains(JamBytes(c.peerKey)))
+    peers.addPeer(address, expectedEd25519)
 
   private def currentSlot: Long =
     if nodeConfig.slotTicking then slotClock.currentSlot else chain.best.slot
 
-  /** Devnet quorum finality counts the best heads peers announce on UP 0,
-    * so UP 0 stays open to every peer while it runs; the grid restriction
-    * applies otherwise, and always under GRANDPA, which needs no peer bests.
-    */
-  private def gridRestrictsAnnouncements: Boolean =
-    nodeConfig.grandpa || !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
-
   /** Peers whose announced finality we follow: with this node they make the finality quorum (2V/3+1). */
   private def peerFinalityQuorum: Int =
     nodeConfig.finalityPeers.map(math.max(_, 1)).getOrElse(math.max(spec.finalityQuorum - 1, 1))
-
-  /** Whether UP 0 should be open to `peer` (JAMNP-S UP 0). */
-  private def announcementWanted(peer: Array[Byte]): Boolean =
-    !gridRestrictsAnnouncements || connectivity.forall(v =>
-      Connectivity.wantsBlockAnnouncements(v.validators, v.neighbours, identity.publicKeyBytes, peer)
-    )
-
-  /** Apply the validator connectivity of the epoch `Connectivity.appliedEpoch`
-    * names once our head has reached it.
-    */
-  private def updateConnectivity(slot: Long): Unit = synchronized {
-    val e = spec.config.epochLength
-    val headEpoch = chain.best.slot / e
-    val applied = Connectivity.appliedEpoch(slot, e, chain.finalized.slot, spec.devnetFinalityDepth > 0)
-    val stale = connectivity.forall(_.epoch < applied)
-    if stale && (connectivity.isEmpty || applied == headEpoch) then
-      val view = chain.stateView()
-      val sets = Seq(view.validators.previous, view.validators.current, view.validators.nextEpoch)
-      val keySets = sets.map(_.map(_.ed25519.bytes.toArray))
-      val endpoints = sets.flatten.flatMap { vk =>
-        Connectivity.endpoint(vk.metadata.toArray).map(JamBytes(vk.ed25519.bytes.toArray) -> _)
-      }.toMap
-      val appliedSlot = math.max(slot, headEpoch * e + Connectivity.transitionDelay(e))
-      val v = ValidatorView(
-        headEpoch,
-        appliedSlot,
-        keySets.flatten.map(JamBytes(_)).toSet,
-        keySets(1).map(JamBytes(_)).toSet,
-        Connectivity.gridNeighbours(keySets, identity.publicKeyBytes),
-        endpoints
-      )
-      connectivity = Some(v)
-      val self = JamBytes(identity.publicKeyBytes)
-      // Only validators keep connections to all other validators.
-      val wanted = if v.validators.contains(self) then v.endpoints - self else Map.empty
-      validatorDials.keySet.removeIf(k => !wanted.contains(k))
-      wanted.foreach { case (k, address) =>
-        val existing = validatorDials.get(k)
-        if existing == null || existing.address != address then
-          validatorDials.put(k, new ValidatorDial(k.toArray, address))
-      }
-      logger.info(
-        s"validator connectivity for epoch $headEpoch applied at slot $slot: " +
-          s"${v.validators.size} validators, ${wanted.size} endpoints, ${v.neighbours.size} grid neighbours"
-      )
-  }
-
-  private val connectedAt = new java.util.concurrent.ConcurrentHashMap[JamnpConnection, java.lang.Long]()
-
-  /** Dial validators we lack a connection to, as preferred initiator at once
-    * and otherwise after the grace period (JAMNP-S "Required connectivity"),
-    * and open or close UP 0 streams on our dialed connections to follow the
-    * grid. Runs on the redial thread.
-    */
-  private def maintainConnectivity(): Unit =
-    if shuttingDown then return
-    updateConnectivity(currentSlot)
-    if author.isDefined then maybeSendTickets(currentSlot)
-    // A node that runs no GRANDPA voter (a follower) takes its finality from its peers' UP 0
-    // announcements. A voter takes it from GRANDPA only: unauthenticated peer claims must not move it.
-    if !nodeConfig.grandpa then sync.followPeerFinality(peerFinalityQuorum)
-    val now = System.currentTimeMillis()
-    val self = identity.publicKeyBytes
-    validatorDials.values.forEach { d =>
-      if liveConnectionTo(d.key).nonEmpty then d.disconnectedSince = now
-      else if !d.inFlight && now >= d.nextAttemptMillis &&
-        (Connectivity.isPreferredInitiator(self, d.key) ||
-          now - d.disconnectedSince >= Connectivity.PreferredInitiatorGraceMillis)
-      then
-        d.inFlight = true
-        dialer.execute { () =>
-          try
-            connectPeer(d.address, Some(d.key))
-            d.backoffMillis = nodeConfig.redialMillis
-          catch
-            case e: Exception =>
-              logger.debug(s"validator ${JamNode.hex(d.key).take(16)} at ${d.address} unreachable: ${e.getMessage}")
-              d.nextAttemptMillis = System.currentTimeMillis() + d.backoffMillis
-              d.backoffMillis = math.min(d.backoffMillis * 2, JamNode.MaxRedialMillis)
-          finally d.inFlight = false
-        }
-    }
-    // UP 0 may be opened by either side. A connection kept after a duplicate was closed, or an accepted one whose
-    // peer never opened UP 0, gets one from us after a grace period.
-    distribution.peers.foreach { c =>
-      val wanted = announcementWanted(c.peerKey)
-      val open = sync.hasAnnouncementStream(c)
-      val since = connectedAt.computeIfAbsent(c, _ => now)
-      if wanted && !open && (c.initiator || now - since >= JamNode.UpZeroGraceMillis) then
-        connectedAt.put(c, now)
-        dialer.execute(() =>
-          try sync.openAnnouncementStream(c): Unit
-          catch case e: Exception => logger.debug(s"UP0 open failed: ${e.getMessage}")
-        )
-      else if gridRestrictsAnnouncements && !wanted && open && c.initiator then sync.closeAnnouncementStream(c)
-    }
-    connectedAt.keySet.removeIf(c => !c.isOpen)
-
-  /** When a peer is reached over two connections, one dialed by each side,
-    * keep the one opened by the preferred initiator P(a, b) and close the
-    * other. Both sides apply the same rule, so they close the same one.
-    */
-  private def dropDuplicateConnections(conn: JamnpConnection): Unit =
-    val key = conn.peerKey
-    val same = (conn :: distribution.peers).distinct.filter(c =>
-      c.isOpen && java.util.Arrays.equals(c.peerKey, key)
-    )
-    if same.exists(_.initiator) && same.exists(!_.initiator) then
-      val weInitiate = Connectivity.isPreferredInitiator(identity.publicKeyBytes, key)
-      same.filter(_.initiator != weInitiate).foreach { c =>
-        logger.info(s"closing duplicate connection to ${JamNode.hex(key).take(16)}")
-        c.close()
-      }
 
   /** Run a CE 141 distribution about 2 s before the next slot (JAMNP-S CE
     * 141), or at once without slot ticking.
@@ -736,27 +555,11 @@ final class JamNode(
         try timer.schedule((() => f()): Runnable, delay, java.util.concurrent.TimeUnit.MILLISECONDS): Unit
         catch case _: java.util.concurrent.RejectedExecutionException => ()
 
-  private def dial(t: DialTarget, initial: Boolean): Unit =
-    val where = s"${t.address.getHostString}:${t.address.getPort}"
-    try
-      t.connection = connectPeer(t.address, t.key)
-      t.backoffMillis = nodeConfig.redialMillis
-      t.lastFailure = ""
-      logger.info(s"${if initial then "connected" else "reconnected"} peer $where")
-    catch
-      case e: Exception =>
-        val why = Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
-        // Log the first failure of a streak and changes, not every retry.
-        if initial || why != t.lastFailure then logger.warn(s"peer $where unreachable: $why; retrying")
-        t.lastFailure = why
-        t.nextAttemptMillis = System.currentTimeMillis() + t.backoffMillis
-        t.backoffMillis = math.min(t.backoffMillis * 2, JamNode.MaxRedialMillis)
-
   /** Drop pooled tickets that `block` included (whoever authored it) and,
     * at an epoch change, every ticket entered for an earlier epoch: their
     * proofs are bound to that epoch's η_2 and γ_z (GP 0.8.0 §safrole).
     */
-  private def pruneTickets(head: ChainManager#Head, block: io.forge.jam.core.types.block.Block): Unit =
+  private def pruneTickets(head: ChainHead, block: io.forge.jam.core.types.block.Block): Unit =
     val ids = block.extrinsic.tickets.flatMap(t =>
       io.forge.jam.crypto.BandersnatchVrf.ringVrfOutput(t.signature.toArray).map(Hash(_))
     )
@@ -793,27 +596,10 @@ final class JamNode(
   def connectPeer(
       address: InetSocketAddress,
       expectedEd25519: Option[Array[Byte]] = None
-  ): JamnpConnection =
-    val conn = network.connect(address).get(10, java.util.concurrent.TimeUnit.SECONDS)
-    expectedEd25519.foreach { expected =>
-      JamNode.verifyPeerKey(expected, conn.peerKey) match
-        case Left(msg) =>
-          conn.close()
-          throw new SecurityException(msg)
-        case Right(()) => ()
-    }
-    val expectedAlpn = network.config.alpn
-    if conn.negotiatedAlpn != expectedAlpn then
-      conn.close()
-      throw new SecurityException(
-        s"ALPN mismatch: expected $expectedAlpn, got ${conn.negotiatedAlpn}"
-      )
-    if announcementWanted(conn.peerKey) then sync.openAnnouncementStream(conn): Unit
-    distribution.trackConnection(conn)
-    conn
+  ): JamnpConnection = peers.connectPeer(address, expectedEd25519)
 
   /** Import a locally produced or externally obtained block and announce it. */
-  def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainManager#Head] =
+  def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainHead] =
     chain.importBlock(blockBytes).map { head =>
       chain.decodeBlock(blockBytes).foreach { b =>
         sync.announce(chain.headerCodec.encode(b.header))
@@ -850,14 +636,14 @@ final class JamNode(
 
   def shutdown(): Unit =
     shuttingDown = true
+    peers.beginShutdown()
     submitServer.foreach(_.stop())
     grandpaService.foreach(_.shutdown())
     beefyService.foreach(_.shutdown())
     auditor.foreach(_.shutdown())
     assurer.foreach(_.shutdown()) // before the shard store closes
     shards.shutdown()
-    if redialer != null then redialer.shutdownNow()
-    dialer.shutdownNow()
+    peers.shutdown()
     if assuranceTimer != null then assuranceTimer.shutdownNow()
     telemetry.foreach(_.shutdown())
     if slotTicker != null then slotTicker.close() // waits for in-flight tick
