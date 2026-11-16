@@ -16,6 +16,10 @@ object BackendOp:
 
 trait StateTrieBackend:
   def readNode(hash: Hash): Option[TrieNode]
+
+  def readsInBulk: Boolean = false
+
+  def prefetchNodes(hashes: IndexedSeq[Hash]): Unit = ()
   def readRawValue(hash: Hash): Option[JamBytes]
   def batchUpdate(ops: Seq[BackendOp]): Unit
   def gc(): Unit

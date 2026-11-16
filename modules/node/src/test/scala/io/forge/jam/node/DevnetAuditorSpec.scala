@@ -65,8 +65,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       // none may pile up, and the honest announcements and judgments below must still get through.
       AuditFlood.run(auditorA, nodeA.pools, devKeys)
 
-      val connAtoB =
-        nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
+      nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
 
       nodeA.authorSlot(1).isDefined shouldBe true
       nodeA.authorSlot(2).isDefined shouldBe true
@@ -104,12 +103,30 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
           )
         )
       )
-      // Builder (node A) submits via CE 133: core index (2 LE) ++ package, then the (empty) extrinsic-data
-      // message, then FIN. B refines it for real (NULL Authorizer is-authorized, service 0's refine in the PVM).
-      val stream = connAtoB.openStream(StreamKind.WorkPackageSubmission).get(10, TimeUnit.SECONDS)
-      stream.send(Array[Byte](0, 0) ++ wp.encode.toArray)
-      stream.send(Array.emptyByteArray)
-      stream.finish()
+      val b64 = (bytes: Array[Byte]) => java.util.Base64.getEncoder.encodeToString(bytes)
+      val packageHash = Hashing.blake2b256(wp.encode.toArray)
+      def rpc(node: JamNode, method: String, params: String*): io.circe.Json =
+        val request = s"""{"jsonrpc":"2.0","id":1,"method":"$method","params":[${params.mkString(",")}]}"""
+        node.rpcApi.handle(request, new RpcSession(_ => ())).getOrElse(fail(s"$method: no response"))
+      def quoted(bytes: Array[Byte]) = "\"" + b64(bytes) + "\""
+      def status(node: JamNode, at: Hash) =
+        rpc(node, "workPackageStatus", quoted(at.bytes.toArray), quoted(packageHash.bytes.toArray), quoted(anchor.headerHash.bytes.toArray))
+          .hcursor.downField("result")
+      status(nodeA, nodeA.chain.best.hash).downField("Reportable").get[Int]("remaining_blocks") shouldBe Right(7)
+      rpc(nodeB, "submitWorkPackage", "9", quoted(wp.encode.toArray), "[]").hcursor.downField("error").get[Int]("code") shouldBe Right(0)
+      rpc(nodeB, "submitWorkPackage", "0", quoted(Array[Byte](1, 2, 3)), "[]").hcursor.downField("error").get[Int]("code") shouldBe Right(0)
+      rpc(nodeB, "submitWorkPackageBundle", "0", quoted(Array[Byte](1, 2, 3))).hcursor.downField("error").get[Int]("code") shouldBe Right(0)
+      val none = wp.items.map(_ => IndexedSeq.empty).toIndexedSeq
+      val bundle = io.forge.jam.protocol.refine.WorkPackageBundle(wp, none, none, none)
+      val lookup = Map(Hash(Array.fill[Byte](32)(4)) -> Hash(Array.fill[Byte](32)(5)), Hash(Array.fill[Byte](32)(1)) -> Hash(Array.fill[Byte](32)(2)))
+      val messages = GuarantorService.bundleSubmissionMessages(1, lookup, bundle)
+      messages.size shouldBe 5
+      Array.concat(messages.drop(1)*).toSeq shouldBe bundle.encode.toSeq
+      val Right((core, backLookup, backPackage, _, _, _)) =
+        nodeB.guarantorService.get.decodeBundleSubmission(messages.toIndexedSeq): @unchecked
+      (core, backLookup) shouldBe (1, lookup)
+      Hashing.blake2b256(backPackage.encode.toArray) shouldBe packageHash
+      rpc(nodeB, "submitWorkPackage", "0", quoted(wp.encode.toArray), "[]").hcursor.downField("result").focus shouldBe Some(io.circe.Json.Null)
 
       val poolDeadline = System.currentTimeMillis() + 30000
       while nodeA.pools.guaranteeCount == 0 && System.currentTimeMillis() < poolDeadline do
@@ -129,6 +146,14 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       // The report is pending on core 0 (awaiting assurances).
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
       val reportHash = Hashing.blake2b256(report.encode.toArray)
+      val reportedIn = nodeA.chain.best.hash
+      val reported = status(nodeA, reportedIn).downField("Reported")
+      reported.downField("reported_in").get[String]("header_hash") shouldBe Right(b64(reportedIn.bytes.toArray))
+      reported.downField("reported_in").get[Long]("slot") shouldBe Right(3L)
+      reported.get[Int]("core") shouldBe Right(0)
+      reported.get[String]("report_hash") shouldBe Right(b64(reportHash.bytes.toArray))
+      rpc(nodeA, "workReport", quoted(reportHash.bytes.toArray)).hcursor.get[String]("result") shouldBe Right(b64(report.encode.toArray))
+      rpc(nodeA, "workReport", quoted(new Array[Byte](32))).hcursor.downField("error").get[Int]("code") shouldBe Right(2)
       auditorA.verdictFor(reportHash) shouldBe None // included, not yet available
       // B now serves a wrong bundle of the right length on CE 147: A must not judge on it, but rebuild the bundle
       // from erasure-coded shards and judge that.
@@ -147,6 +172,10 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       val block4 =
         nodeA.chain.decodeBlock(nodeA.chain.blockStore.getBlock(available.hash).get).toOption.get
       block4.extrinsic.assurances.size should be >= 5
+      val ready = status(nodeA, available.hash).downField("Ready")
+      ready.downField("ready_in").get[String]("header_hash") shouldBe Right(b64(available.hash.bytes.toArray))
+      ready.downField("reported_in").get[String]("header_hash") shouldBe Right(b64(reportedIn.bytes.toArray))
+      status(nodeA, reportedIn).downField("Reported").succeeded shouldBe true
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe false
       awaitSync(nodeA, nodeB)
       nodeB.chain.best.stateRoot shouldBe nodeA.chain.best.stateRoot
@@ -172,7 +201,9 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
         System.currentTimeMillis() < deadline
       do Thread.sleep(100)
       auditorA.isAudited(available.hash) shouldBe true
+      auditorA.auditedStateConsistent shouldBe true
       auditorB.isAudited(available.hash) shouldBe true
+      auditorB.auditedStateConsistent shouldBe true
       auditorA.judgesOf(reportHash)._1 should contain allOf (0, 1, 3)
       auditorA.bufferSizes._1 shouldBe 1 // judgments are recorded for the one report being audited
 
@@ -198,6 +229,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
           Thread.sleep(100)
         auditorA.announcementsFor(reportHash) shouldBe 3
         auditorA.isAudited(available.hash) shouldBe false
+        auditorA.auditedStateConsistent shouldBe true
 
         // Later tranches. Validators 4 and 5 announce in tranche 0 as well, so three validators (2, 4, 5) have
         // announced and not judged. Validator 3 joins tranche 1 for them: with three no-shows of six validators
@@ -282,6 +314,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       announcedBefore shouldBe 6 // every validator has announced it by now
       judgesBefore shouldBe (Set(0, 1, 2, 3, 4), Set(5))
       auditorA.isAudited(available.hash) shouldBe true
+      auditorA.auditedStateConsistent shouldBe true
       val stopped = nodeA
       nodeA.shutdown()
       // An assurer and auditor that had work: every pool of the node ended before its stores closed.
@@ -302,6 +335,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       restarted.verdictFor(reportHash) shouldBe Some(true) // its own judgment stands: no second re-execution
       restarted.judgesOf(reportHash) shouldBe judgesBefore
       restarted.isAudited(available.hash) shouldBe true
+      restarted.auditedStateConsistent shouldBe true
 
       // Once the block is finalized nothing of its audit is kept on disk.
       nodeA.chain.blockStore.scanMeta("role:audit:") should not be empty
@@ -336,12 +370,16 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       val early = node.authorSlot(1).getOrElse(fail("slot 1 not authored"))
       val auditor = node.enableAuditing(devKeys.take(1))
       auditor.isAudited(node.chain.finalized.hash) shouldBe true
+      auditor.auditedStateConsistent shouldBe true
       auditor.isAudited(Hash.zero) shouldBe false
+      auditor.auditedStateConsistent shouldBe true
       auditor.isAudited(early.hash) shouldBe false
+      auditor.auditedStateConsistent shouldBe true
       // It made no report available, so it is audited once looked at.
       val deadline = System.currentTimeMillis() + 10000
       while !auditor.isAudited(early.hash) && System.currentTimeMillis() < deadline do Thread.sleep(20)
       auditor.isAudited(early.hash) shouldBe true
+      auditor.auditedStateConsistent shouldBe true
     finally
       if node != null then node.shutdown()
       cleanup(dir)

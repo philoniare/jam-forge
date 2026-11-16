@@ -157,6 +157,7 @@ object Main extends LazyLogging:
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
+    opts.get("rpc-port").foreach(p => node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1")))
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized

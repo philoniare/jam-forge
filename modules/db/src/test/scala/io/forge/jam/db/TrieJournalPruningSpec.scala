@@ -164,3 +164,125 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
       backend.close()
       cleanup(dir)
   }
+
+  test("only a node that a later save brings back gets a birth record, and that record keeps it through pruning") {
+    val dir = Files.createTempDirectory("jam-trie-journal-reborn")
+    val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    try
+      def save(parent: Hash, name: String, height: Long, updates: Seq[(JamBytes, Option[JamBytes])]): Hash =
+        backend.withJournal(label(name), height) {
+          val trie = StateTrie.at(backend, parent)
+          trie.update(updates)
+          trie.save()
+          trie.rootHash
+        }
+      val (first, second) = (JamBytes(Array.fill[Byte](80)(1)), JamBytes(Array.fill[Byte](80)(2)))
+      val g = save(Hash.zero, "g", 1L, (0 until 40).map(i => key(i) -> Some(first)))
+      val b1 = save(g, "b1", 2L, Seq(key(7) -> Some(second)))
+      val replaced = backend.journalOf(label("b1"))
+      replaced should not be empty
+      replaced.foreach(n => backend.nodeBornAt(n) shouldBe 0L)
+      backend.nodeBornAt(b1) shouldBe 0L
+
+      val b2 = save(b1, "b2", 3L, Seq(key(7) -> Some(first)))
+      b2 shouldBe g
+      replaced.foreach(n => withClue(s"node ${n.toHex.take(12)}: ") { backend.nodeBornAt(n) shouldBe 3L })
+
+      backend.pruneJournal(label("b1"), 2L) shouldBe ((0, 0))
+      val kept = StateTrie.at(backend, b2)
+      (0 until 40).foreach(i => kept.read(key(i)) shouldBe Some(first))
+      val (nodes, values) = backend.pruneJournal(label("b2"), 3L)
+      nodes should be > 0
+      values shouldBe 1 // `second` is no leaf's value any more
+      (0 until 40).foreach(i => StateTrie.at(backend, b2).read(key(i)) shouldBe Some(first))
+      backend.readNode(b1) shouldBe None
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("pruning on another thread while blocks are saved loses nothing a kept state reaches") {
+    val rng = new Random(11)
+    val dir = Files.createTempDirectory("jam-trie-journal")
+    val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    val pruner = java.util.concurrent.Executors.newSingleThreadExecutor()
+    try
+      val keys = 24
+      val genesisModel: Model = (0 until keys).map(i => key(i) -> value(rng)).toMap
+      val genesisRoot = backend.withJournal(label("genesis"), 0L) {
+        val t = StateTrie.at(backend, Hash.zero)
+        t.update(genesisModel.toSeq.map((k, v) => k -> Some(v)))
+        t.save()
+        t.rootHash
+      }
+      val chain = mutable.ArrayBuffer(State(label("genesis"), 0L, genesisRoot, genesisModel))
+      val window = 3
+      val pending = mutable.ArrayBuffer[java.util.concurrent.Future[?]]()
+      for h <- 1 to 1500 do
+        chain += step(backend, chain.last, s"c$h", h.toLong, rng, keys)
+        if h > window then
+          val floor = chain(h - window)
+          backend.schedulePrune(floor.label, floor.height)
+          pending += pruner.submit((() => backend.pruneJournal(floor.label, floor.height): Unit): Runnable)
+        if h % 100 == 0 then
+          (h - window to h).foreach(i => check(backend, chain(i), keys, s"while pruning, at block $h"))
+      pending.foreach(_.get())
+      backend.scheduledPrunes shouldBe Nil
+      (chain.length - 1 - window until chain.length).foreach(i => check(backend, chain(i), keys, "after pruning"))
+      val (nodes, _) = backend.storedCounts
+      nodes should be < 400L
+    finally
+      pruner.shutdownNow()
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("a prune that was asked for is remembered across a reopen until it is done") {
+    val rng = new Random(3)
+    val dir = Files.createTempDirectory("jam-trie-journal")
+    var backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    try
+      val keys = 30
+      val genesis = State(label("genesis"), 0L, Hash.zero, Map.empty)
+      val a = step(backend, genesis, "a", 1L, rng, keys)
+      val b = step(backend, a, "b", 2L, rng, keys)
+      val c = step(backend, b, "c", 3L, rng, keys)
+      backend.schedulePrune(c.label, 3L)
+      backend.schedulePrune(b.label, 2L)
+      backend.close()
+      backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+      backend.scheduledPrunes shouldBe List(b.label -> 2L, c.label -> 3L)
+      backend.scheduledPrunes.foreach((l, h) => backend.pruneJournal(l, h))
+      backend.scheduledPrunes shouldBe Nil
+      check(backend, c, keys, "after the remembered prunes")
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("a large save that brings back thousands of nodes records every one of them") {
+    val dir = Files.createTempDirectory("jam-trie-journal")
+    val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    try
+      val keys = 2000
+      def save(name: String, height: Long, parent: Hash, fill: Byte): Hash =
+        backend.withJournal(label(name), height) {
+          val t = StateTrie.at(backend, parent)
+          t.update((0 until keys).map(i => key(i) -> Some(JamBytes(Array.fill(8)(fill)))))
+          t.save()
+          t.rootHash
+        }
+      val first = save("one", 1L, Hash.zero, 1)
+      val second = save("two", 2L, first, 2)
+      val third = save("three", 3L, second, 1)
+      third shouldBe first
+      backend.journalOf(label("two")).size should be > 2 * keys
+      backend.journalOf(label("two")).foreach(h => backend.nodeBornAt(h) shouldBe 3L)
+      backend.pruneJournal(label("two"), 2L) shouldBe ((0, 0))
+      val t = StateTrie.at(backend, third)
+      (0 until keys).foreach(i => t.read(key(i)) shouldBe Some(JamBytes(Array.fill(8)(1.toByte))))
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+

@@ -163,6 +163,21 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
       // The report is now pending on core 0.
       nodeA.chain.stateView().cores.reports(0).isDefined shouldBe true
 
+      val erasureRoot = guarantee.report.packageSpec.erasureRoot
+      val current = nodeA.chain.stateView().validators.current
+      val signers = guarantee.signatures.map(s => current(s.validatorIndex.toInt).ed25519).toSet
+      signers should not be empty
+      val indexDeadline = System.currentTimeMillis() + 10000
+      while nodeA.guarantorIndex.guarantorsOf(erasureRoot).isEmpty && System.currentTimeMillis() < indexDeadline do
+        Thread.sleep(20)
+      nodeA.guarantorIndex.guarantorsOf(erasureRoot) should contain allElementsOf signers
+      val none: Byte => Option[io.forge.jam.network.PeerStreamHandler] = _ => None
+      val stranger = Array.fill[Byte](32)(0x55)
+      val toStranger = io.forge.jam.network.Loopback.pair(stranger, stranger, none, none)._1
+      val toGuarantor = io.forge.jam.network.Loopback.pair(stranger, signers.head.bytes.toArray, none, none)._1
+      nodeA.guarantorIndex.first(erasureRoot, List(toStranger, toGuarantor)) shouldBe List(toGuarantor, toStranger)
+      nodeA.guarantorIndex.first(Hash(Array.fill[Byte](32)(0x77)), List(toStranger, toGuarantor)) shouldBe List(toStranger, toGuarantor)
+
       // Assurers distribute CE 141 assurances anchored at the new head.
       buildAssurances(nodeA.chain.best.hash).foreach { a =>
         nodeB.distribution.distributeAssurance(connBtoA, a)

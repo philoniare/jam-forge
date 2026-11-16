@@ -16,6 +16,37 @@ import io.forge.jam.protocol.authorization.AuthorizationTransition
  */
 class AuthorizationTest extends AnyFunSuite with Matchers:
 
+  test("pools follow the plain formula on random states, uniform pools and repeated queues included") {
+    val rng = new scala.util.Random(5)
+    def hash() = hashFilled(1 + rng.nextInt(3)) // few values, so pools are often of a single authorizer
+    for round <- 1 to 300 do
+      val cores = 1 + rng.nextInt(4)
+      val pools = List.fill(cores)(List.fill(rng.nextInt(9))(if rng.nextBoolean() then hashFilled(1) else hash()))
+      val queues = List.fill(cores)(if rng.nextBoolean() then List.fill(80)(hashFilled(1)) else List.fill(80)(hash()))
+      var state = AuthState(pools, queues)
+      for step <- 0 until 12 do
+        val slot = rng.nextInt(1000).toLong
+        val auths = (0 until cores).toList.flatMap(c =>
+          if rng.nextInt(3) == 0 then List.fill(1 + rng.nextInt(2))(Auth(CoreIndex(c), hash())) else Nil
+        )
+        val expected = state.authPools.zipWithIndex.map { (pool, c) =>
+          val left = auths.filter(_.core.toInt == c).foldLeft(pool) { (p, a) =>
+            val i = p.indexOf(a.authHash)
+            if i >= 0 then p.patch(i, Nil, 1) else p
+          }
+          (left :+ state.authQueues(c)((slot % 80).toInt)).takeRight(8)
+        }
+        val post = AuthorizationTransition.stfInternal(AuthInput(slot, auths), state)
+        post.authPools shouldBe expected withClue s"round $round step $step"
+        post.authQueues shouldBe state.authQueues
+        state = post
+  }
+
+  test("a queue of the wrong length is refused") {
+    val state = AuthState(List(Nil), List(List.fill(79)(hashFilled(1))))
+    an[IllegalArgumentException] should be thrownBy AuthorizationTransition.stfInternal(AuthInput(1L, Nil), state)
+  }
+
   test("authorization consumption from pool") {
     // Create a simple state with one core
     val pool = List(hashFilled(1), hashFilled(2), hashFilled(3))

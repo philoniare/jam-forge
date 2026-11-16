@@ -204,9 +204,11 @@ final class JamNode(
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
+  private lazy val segmentRecovery = new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)
 
   /** Erasure roots of recently included reports with exports, by segments-root. */
   private[node] val exportIndex = new ExportIndex(store = roleStore)
+  private[node] val guarantorIndex = new GuarantorIndex()
 
   /** PVM-heavy work of the guarantor and auditor roles: audits first, then co-signing, then new submissions. */
   private lazy val refinePool = new RefinePool("jam-refine", owner = threads)
@@ -245,10 +247,12 @@ final class JamNode(
       segments,
       ownNetworkKey = Some(identity.publicKeyBytes),
       sharedRefinePool = Some(refinePool),
-      segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)),
+      segmentRecovery = Some(segmentRecovery),
       tamperReports = nodeConfig.tamperReports,
       fromValidator = c => recentValidatorKeys._3.contains(JamBytes(c.peerKey)),
       fromCoGuarantor = isGuarantorOf,
+      exportersFirst = (segmentsRoot, peers) =>
+        exportIndex.get(segmentsRoot).fold(peers)(e => guarantorIndex.first(e.erasureRoot, peers)),
       // Our own custody only: a request must not make us fetch shards from the network on the requester's behalf.
       localBundle = root =>
         exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
@@ -283,7 +287,17 @@ final class JamNode(
   def enableAssuring(keys: Seq[ValidatorKeySet]): Unit =
     if nodeConfig.slotTicking && assuranceTimer == null then
       assuranceTimer = threads.scheduled("jam-assurance")
-    val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances, threads)
+    val a = new AssurerService(
+      chain,
+      distribution,
+      pools,
+      keys,
+      shards,
+      shardStore,
+      scheduleAssurances,
+      guarantorsFirst = guarantorIndex.first,
+      threads = threads
+    )
     assurer = Some(a)
     chain.onImported((head, _) => if !catchingUp then a.onImported(head))
 
@@ -306,6 +320,7 @@ final class JamNode(
       sharedRefinePool = Some(refinePool),
       store = roleStore,
       inbound = inbound,
+      guarantorsFirst = guarantorIndex.first,
       threads = threads
     )
     a.onDisregard(h =>
@@ -479,6 +494,9 @@ final class JamNode(
       if block.extrinsic.guarantees.nonEmpty then
         pools.recordCredentials(block.header.parent, head.slot, block.extrinsic.guarantees)
         exportIndex.record(block.extrinsic.guarantees)
+        chain.stateViewAt(block.header.parent).foreach { parent =>
+          guarantorIndex.record(List(parent.validators.current, parent.validators.previous), block.extrinsic.guarantees)
+        }
     )
     // Custody units are kept for 28 days (672 epochs) after they were last stored, as exported-segment shards
     // must be; bundle shards share the unit and so are kept as long, which is more than required.
@@ -590,6 +608,50 @@ final class JamNode(
         (current, previous, (current.iterator ++ previous.iterator).map(v => JamBytes(v.ed25519.bytes.toArray)).toSet)
 
   @volatile private var currentValidatorKeys: (AnyRef, Set[JamBytes]) = (null, Set.empty)
+
+  private def submitWorkPackage(core: Int, packageBytes: Array[Byte], extrinsics: Seq[Array[Byte]]): Either[String, Unit] =
+    val blob = Array.concat(extrinsics*)
+    if core < 0 || core >= spec.config.coresCount then Left(s"there is no core $core")
+    else
+      guarantor.filter(_.guarantees(core)) match
+        case Some(g) => g.submit(core, packageBytes, blob)
+        case None =>
+          val first = Array((core & 0xff).toByte, ((core >> 8) & 0xff).toByte) ++ packageBytes
+          handToGuarantors(core, StreamKind.WorkPackageSubmission, Seq(first, blob))
+
+  private def submitWorkPackageBundle(core: Int, bundleBytes: Array[Byte]): Either[String, Unit] =
+    if core < 0 || core >= spec.config.coresCount then Left(s"there is no core $core")
+    else
+      guarantor.filter(_.guarantees(core)) match
+        case Some(g) => g.submitBundle(core, bundleBytes)
+        case None =>
+          for
+            bundle <- io.forge.jam.protocol.refine.WorkPackageBundle.decode(bundleBytes).left.map(e => s"Codec error: $e")
+            reported = chain.stateView().beta.history.flatMap(_.reported).map(r => r.hash -> r.exportsRoot).toMap
+            resolved <- io.forge.jam.protocol.refine.ImportResolver.resolve(bundle.workPackage, reported)
+            _ <- handToGuarantors(
+              core,
+              StreamKind.WorkPackageBundleSubmission,
+              GuarantorService.bundleSubmissionMessages(core, resolved._2, bundle)
+            )
+          yield ()
+
+  private def handToGuarantors(core: Int, kind: Byte, messages: Seq[Array[Byte]]): Either[String, Unit] =
+    val (cores, validators) = GuarantorService.assignments(chain.stateView(), chain.nextBlockSlot, spec.config)
+    val assigned = validators.zip(cores).collect { case (v, c) if c == core => JamBytes(v.ed25519.bytes.toArray) }.toSet
+    val guarantors = distribution.peers.filter(c => assigned.contains(JamBytes(c.peerKey))).distinctBy(_.peerPublicKey)
+    if guarantors.isEmpty then Left(s"no connection to a guarantor of core $core")
+    else
+      val taken = guarantors.count(conn => StreamRequest.exchange(conn, kind, messages, 5_000, () => 10_000).isRight)
+      logger.info(s"RPC ${StreamKind.name(kind)} for core $core handed to $taken of ${guarantors.size} connected guarantor(s)")
+      if taken > 0 then Right(()) else Left(s"no guarantor of core $core took the work-package")
+
+  private def fetchSegments(segmentsRoot: Hash, indices: Seq[Int]): Option[IndexedSeq[Array[Byte]]] =
+    segments.get(segmentsRoot, indices).orElse {
+      segmentRecovery.recover(segmentsRoot, indices).flatMap { found =>
+        Option.when(indices.forall(found.contains))(indices.map(found(_)._1).toIndexedSeq)
+      }
+    }
 
   /** Whether the peer's key is a guarantor of `core` now or in the rotation before (CE 134). */
   private def isGuarantorOf(conn: PeerConnection, core: Int): Boolean =
@@ -718,6 +780,26 @@ final class JamNode(
     g
 
   @volatile private var grandpaService: Option[GrandpaService] = None
+  @volatile private var rpcServer: Option[RpcServer] = None
+
+  def enableRpc(port: Int, host: String = "127.0.0.1"): RpcServer =
+    val server = new RpcServer(new java.net.InetSocketAddress(host, port), rpcApi, threads).start()
+    rpcServer = Some(server)
+    server
+
+  private[node] lazy val rpcApi: RpcApi =
+    new RpcApi(
+      chain,
+      spec.genesisHeaderHash,
+      peerCount = () => distribution.peerCount,
+      syncing = () => held,
+      submitPreimage = preimages.submit,
+      submitWorkPackage = submitWorkPackage,
+      submitBundle = submitWorkPackageBundle,
+      knownReport = distribution.knownReport,
+      fetchSegments = fetchSegments,
+      slow = threads.fixed("jam-rpc-slow", 2, numbered = true)
+    )
   @volatile private var submitServer: Option[SubmitServer] = None
 
   /** Port of the local submission endpoint, when it runs. */
@@ -740,6 +822,7 @@ final class JamNode(
     shuttingDown = true
     peers.beginShutdown()
     submitServer.foreach(_.stop())
+    rpcServer.foreach(_.stop())
     grandpaService.foreach(_.shutdown())
     beefyService.foreach(_.shutdown())
     auditor.foreach(_.shutdown())

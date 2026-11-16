@@ -59,16 +59,12 @@ object StatisticsTransition:
       if idx >= 0 && idx < daggerArr.length then
         val s = daggerArr(idx)
         daggerArr(idx) = s.copy(assurances = s.assurances + 1)
-    val dagger = daggerArr.toList
 
-    // pi_ddagger / pi_L'
-    val (baseStats, lastStats) =
+    val (statsArr, lastStats): (Array[StatCount], List[StatCount]) =
       if postEpoch > preEpoch then
-        (List.fill(preState.currValidators.size)(StatCount.zero), dagger)
+        (Array.fill(preState.currValidators.size)(StatCount.zero), daggerArr.toList)
       else
-        (dagger, preState.valsLastStats)
-
-    val statsArr: Array[StatCount] = baseStats.toArray
+        (daggerArr, preState.valsLastStats)
 
     // Update author's stats
     val authorIdx = input.authorIndex.toInt
@@ -101,10 +97,15 @@ object StatisticsTransition:
     }.toSet
 
     // Update guarantees - for each validator v, check if their Ed25519 key is in reporters
-    for ((validator, idx) <- preState.currValidators.zipWithIndex) do
-      if idx < statsArr.length && reporters.contains(validator.ed25519) then
-        val s = statsArr(idx)
-        statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
+    if reporters.nonEmpty then
+      val validators = preState.currValidators
+      val n = math.min(validators.size, statsArr.length)
+      var idx = 0
+      while idx < n do
+        if reporters.contains(validators(idx).ed25519) then
+          val s = statsArr(idx)
+          statsArr(idx) = s.copy(guarantees = s.guarantees + 1)
+        idx += 1
 
     val postState = StatState(
       valsCurrStats = statsArr.toList,

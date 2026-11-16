@@ -38,6 +38,8 @@ final class AuditorService(
     sharedRefinePool: Option[RefinePool] = None,
     store: RoleStore = RoleStore.none,
     inbound: InboundWork = InboundWork.direct,
+    guarantorsFirst: (Hash, List[PeerConnection]) => List[PeerConnection] =
+      GuarantorIndex.unordered,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
@@ -63,6 +65,13 @@ final class AuditorService(
   ):
     /** A_n(w): validators announcing each report, per tranche. */
     val announced = mutable.Map.empty[(Hash, Int), mutable.Set[Int]]
+
+    val announcedByReport = mutable.Map.empty[Hash, mutable.Map[Int, mutable.Set[Int]]]
+
+    val reportSet: Set[Hash] = reportHashes.flatten.toSet
+
+    val unaudited = mutable.Set.empty[Hash]
+    var auditedAt: Int = Int.MinValue
 
     /** The announcement each validator sent in each tranche (for no-show evidence). */
     val announcements = mutable.Map.empty[(Int, Int), Announcement]
@@ -328,7 +337,9 @@ final class AuditorService(
   private def remember(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
     t.announcements.put((n, v), a)
     a.items.foreach { (_, h) =>
-      t.announced.getOrElseUpdate((h, n), mutable.Set.empty) += v
+      val announcers = t.announced.getOrElseUpdate((h, n), mutable.Set.empty)
+      announcers += v
+      t.announcedByReport.getOrElseUpdate(h, mutable.Map.empty).update(n, announcers)
       announcementCounts.computeIfAbsent(h, _ => ConcurrentHashMap.newKeySet[Integer]()).add(v)
     }
 
@@ -352,7 +363,7 @@ final class AuditorService(
                 exec.execute(() =>
                   guarded {
                     inFlight -= reportHash
-                    tracked.values.filter(_.reportHashes.contains(Some(reportHash))).foreach(judge(_, reportHash, valid))
+                    tracked.values.filter(_.reportSet(reportHash)).foreach(judge(_, reportHash, valid))
                   }
                 )
               case None =>
@@ -361,7 +372,7 @@ final class AuditorService(
                   (() =>
                     guarded {
                       inFlight -= reportHash
-                      tracked.values.find(_.reportHashes.contains(Some(reportHash))).foreach(startAudit(_, reportHash))
+                      tracked.values.find(_.reportSet(reportHash)).foreach(startAudit(_, reportHash))
                     }
                   ): Runnable,
                   AuditSelection.TrancheSeconds.toLong,
@@ -405,19 +416,28 @@ final class AuditorService(
       val judged = (if valid then positive else negative).get(reportHash).exists(_.contains(v))
       if announcedIt && !judged then publishJudgment(reportHash, t.epoch, v, keys, valid)
     }
-    updateAudited(t, t.lastTranche)
+    updateAudited(t, t.lastTranche, List(reportHash))
 
-  private def updateAudited(t: Tracked, n: Int): Unit =
+  private def updateAudited(t: Tracked, n: Int, touched: Iterable[Hash] = null): Unit =
     val v = t.validators.size
-    val reports = t.available.map(_._3)
-    val ok = reports.forall { h =>
-      val byTranche = t.announced.collect { case ((rh, tr), set) if rh == h => tr -> set.toSet }.toMap
-      audited(byTranche, positive.getOrElse(h, Set.empty).toSet, negative.getOrElse(h, Set.empty).toSet, v, n)
+    val recheck: Iterable[Hash] =
+      if touched == null || n != t.auditedAt then t.reportSet else touched.filter(t.reportSet)
+    recheck.foreach { h =>
+      val ok = audited(
+        t.announcedByReport.getOrElse(h, AuditorService.NoAnnouncements),
+        positive.getOrElse(h, AuditorService.NoOne),
+        negative.getOrElse(h, AuditorService.NoOne),
+        v,
+        n
+      )
+      if ok then t.unaudited -= h else t.unaudited += h
     }
+    t.auditedAt = n
+    val ok = t.unaudited.isEmpty
     val was = isAudited(t.hash)
     auditedBlocks.put(t.hash, AuditorService.Mark(t.slot, ok))
     if ok && !was then logger.info(s"block ${t.hash.toHex.take(18)} slot=${t.slot} audited")
-    if reports.exists(h => disregards(negative.getOrElse(h, Set.empty).toSet, v)) && disregarded.add(t.hash) then
+    if recheck.exists(h => disregards(negative.getOrElse(h, AuditorService.NoOne), v)) && disregarded.add(t.hash) then
       logger.warn(s"block ${t.hash.toHex.take(18)} has a report judged invalid by a third of validators; disregarding")
       disregard(t.hash)
 
@@ -437,7 +457,7 @@ final class AuditorService(
     */
   def auditOutcome(report: WorkReport): Option[Boolean] =
     val spec = report.packageSpec
-    val direct = fetchBundleDirect(spec.erasureRoot, distribution.peers)
+    val direct = fetchBundleDirect(spec.erasureRoot, guarantorsFirst(spec.erasureRoot, distribution.peers))
       .filter(_.length.toLong == spec.length.toLong)
       .map(bytes => evaluate(report, bytes))
     direct match
@@ -661,7 +681,7 @@ final class AuditorService(
       if signed && known && selected then
         recordAnnouncement(t, v, n, a)
         logger.debug(s"audit announcement from validator $v, tranche $n, ${a.items.size} report(s)")
-        updateAudited(t, t.lastTranche)
+        updateAudited(t, t.lastTranche, a.items.map(_._2))
       else
         logger.warn(s"rejected CE144 from validator $v (signature $signed, reports $known, selection $selected)")
         logger.debug(s"CE144 rejected: key=${JamNode.hex(peer)} head=${JamNode.hex(head)} evidence=${JamNode.hex(evidence)}")
@@ -708,7 +728,7 @@ final class AuditorService(
         .array()
       store.write(
         tracked.values
-          .filter(t => t.epoch == epoch && t.reportHashes.contains(Some(reportHash)))
+          .filter(t => t.epoch == epoch && t.reportSet(reportHash))
           .map(t => AuditorService.tallyKey(t.slot, t.hash, reportHash, v) -> record)
           .toList
       )
@@ -753,10 +773,10 @@ final class AuditorService(
       if genuine then
         intake.tryExecute(exec, msg.length.toLong, source) {
           guarded {
-            val holders = tracked.values.filter(_.reportHashes.contains(Some(reportHash))).toList
+            val holders = tracked.values.filter(_.reportSet(reportHash)).toList
             if holders.nonEmpty then
               recordJudgment(reportHash, epoch, idx, valid, signature, tally = holders.exists(_.epoch == epoch))
-              holders.foreach(t => updateAudited(t, t.lastTranche))
+              holders.foreach(t => updateAudited(t, t.lastTranche, List(reportHash)))
             else keepJudgment(reportHash, epoch, idx, valid, signature)
           }
         }
@@ -786,6 +806,24 @@ final class AuditorService(
           pendingJudgments.valuesIterator.map(_.size).sum,
           pendingAnnouncements.valuesIterator.map(_.size).sum
         )
+      )
+      .get(30, TimeUnit.SECONDS)
+
+  private[node] def auditedStateConsistent: Boolean =
+    exec
+      .submit(() =>
+        tracked.values.forall { t =>
+          t.auditedAt == Int.MinValue || t.reportSet.forall { h =>
+            val fresh = audited(
+              t.announcedByReport.getOrElse(h, AuditorService.NoAnnouncements),
+              positive.getOrElse(h, AuditorService.NoOne),
+              negative.getOrElse(h, AuditorService.NoOne),
+              t.validators.size,
+              t.auditedAt
+            )
+            fresh == !t.unaudited(h)
+          }
+        }
       )
       .get(30, TimeUnit.SECONDS)
 
@@ -882,6 +920,9 @@ object AuditorService extends LazyLogging:
     * still being imported or for later-tranche picks.
     */
   val PendingJudgmentsPerValidator: Int = 2 * AuditSelection.InitialCores
+
+  private val NoOne: scala.collection.Set[Int] = Set.empty[Int]
+  private val NoAnnouncements: scala.collection.Map[Int, scala.collection.Set[Int]] = Map.empty
 
   /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. */
   private[node] def fetchBundleDirect(

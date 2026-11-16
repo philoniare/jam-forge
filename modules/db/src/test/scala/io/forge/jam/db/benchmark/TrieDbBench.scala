@@ -123,6 +123,10 @@ object TrieDbBench:
     result(s"${name}_block_${p.dirty}_dirty_p50", percentile(sortedBlocks, 0.5), "ms")
     result(s"${name}_block_${p.dirty}_dirty_p99", percentile(sortedBlocks, 0.99), "ms")
     result(s"${name}_block_update_mean", mean(updateMs), "ms")
+    val sortedUpdates = updateMs.drop(skip).sorted.toIndexedSeq
+    result(s"${name}_block_update_p50", percentile(sortedUpdates, 0.5), "ms")
+    result(s"${name}_block_update_p90", percentile(sortedUpdates, 0.9), "ms")
+
     result(s"${name}_block_save_mean", mean(saveMs), "ms")
     result(s"${name}_block_${mode.reclaimName}_mean", mean(gcMs), "ms")
 

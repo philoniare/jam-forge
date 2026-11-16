@@ -307,6 +307,7 @@ lazy val node = (project in file("modules/node"))
       spire,
       circeCore,
       circeParser,
+      "io.netty" % "netty-codec-http" % "4.1.131.Final",
       scalaLogging,
       logback,
       scalatest

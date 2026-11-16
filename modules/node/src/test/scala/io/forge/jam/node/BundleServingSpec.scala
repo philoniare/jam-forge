@@ -428,17 +428,17 @@ class BundleServingSpec extends AnyFunSuite with Matchers with NodeFixture:
       import io.forge.jam.protocol.refine.ImportResolver.Import
       val wanted = IndexedSeq(IndexedSeq(Import(root, 3), Import(root, 0)), IndexedSeq(Import(root, 4)))
 
-      val fetched = new ImportFetcher(new SegmentPool(), () => Seq(toLiar, toHonest)).fetch(wanted)
+      val fetched = new ImportFetcher(new SegmentPool(), _ => Seq(toLiar, toHonest)).fetch(wanted)
       val Right((got, proofs)) = fetched: @unchecked
       got.map(_.map(_.toList)) shouldBe IndexedSeq(IndexedSeq(segs(3).toList, segs(0).toList), IndexedSeq(segs(4).toList))
       for (item, i) <- wanted.zipWithIndex; (imp, j) <- item.zipWithIndex do
         io.forge.jam.protocol.refine.ImportResolver.verify(root, imp.index, got(i)(j), proofs(i)(j)) shouldBe true
 
-      new ImportFetcher(new SegmentPool(), () => Seq(toLiar)).fetch(wanted).isLeft shouldBe true
+      new ImportFetcher(new SegmentPool(), _ => Seq(toLiar)).fetch(wanted).isLeft shouldBe true
       // Segments we exported ourselves need no peer.
       val local = new SegmentPool()
       local.put(root, segs)
-      new ImportFetcher(local, () => Nil).fetch(wanted).isRight shouldBe true
+      new ImportFetcher(local, _ => Nil).fetch(wanted).isRight shouldBe true
     finally
       nodes.foreach(_.shutdown())
       cleanup(dirA)

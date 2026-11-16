@@ -23,6 +23,8 @@ final class AssurerService(
       * slot when the node keeps slot time, at once otherwise.
       */
     scheduleDistribution: (() => Unit) => Unit = f => f(),
+    guarantorsFirst: (Hash, List[io.forge.jam.network.PeerConnection]) => List[io.forge.jam.network.PeerConnection] =
+      GuarantorIndex.unordered,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
@@ -142,8 +144,7 @@ final class AssurerService(
   private def acquireCustody(erasureRoot: Hash, shardIndex: Int, peers: List[io.forge.jam.network.PeerConnection]): Boolean =
     if shardStore.has(erasureRoot, shardIndex) then true
     else
-      // Several peers at a time: the report's guarantors hold the shard, the rest refuse at once.
-      shards.firstFrom(peers)(shards.fetchShards(_, erasureRoot, shardIndex, AssurerService.CustodyTimeoutMillis)) match
+      shards.firstFrom(guarantorsFirst(erasureRoot, peers))(shards.fetchShards(_, erasureRoot, shardIndex, AssurerService.CustodyTimeoutMillis)) match
         case Some(s) =>
           shardStore.put(erasureRoot, shardIndex, s.encode)
           true

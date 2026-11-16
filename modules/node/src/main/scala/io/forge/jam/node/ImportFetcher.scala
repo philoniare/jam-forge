@@ -18,7 +18,7 @@ import io.forge.jam.protocol.refine.ImportResolver.Import
   */
 final class ImportFetcher(
     segments: SegmentPool,
-    peers: () => Iterable[PeerConnection],
+    peers: Hash => Iterable[PeerConnection],
     timeoutMs: Long = ImportFetcher.TimeoutMillis,
     maxPeers: Int = ImportFetcher.MaxPeersAsked,
     /** Last resort: rebuild the segments from erasure-coded shards (CE 139/140), verified. */
@@ -48,7 +48,7 @@ final class ImportFetcher(
           indices.zip(found).forall { case (i, (seg, proof)) => ImportResolver.verify(root, i, seg, proof) }
       )(indices.zip(found).toMap)
     segments.getWithProofs(root, indices).flatMap(verified).orElse {
-      peers().iterator.filter(_.isOpen).take(maxPeers).map { conn =>
+      peers(root).iterator.filter(_.isOpen).take(maxPeers).map { conn =>
         StreamRequest
           .collect(conn, StreamKind.SegmentRequest, ImportFetcher.encodeRequest(root, indices), timeoutMs)
           .flatMap(ImportFetcher.decodeResponse(_, indices.size))

@@ -77,21 +77,21 @@ object AuditSelection:
     * audited before any announcement arrives (inferred reading).
     */
   def audited(
-      announcedBy: Map[Int, Set[Int]],
-      positive: Set[Int],
-      negative: Set[Int],
+      announcedBy: scala.collection.Map[Int, scala.collection.Set[Int]],
+      positive: scala.collection.Set[Int],
+      negative: scala.collection.Set[Int],
       validatorCount: Int,
       currentTranche: Int
   ): Boolean =
     val supermajority = 3 * positive.size > 2 * validatorCount
     val someTrancheDone = (0 to currentTranche).exists { n =>
-      val a = announcedBy.getOrElse(n, Set.empty)
+      val a = announcedBy.getOrElse(n, Set.empty[Int])
       if a.isEmpty then n == 0 && currentTranche > 0 else a.subsetOf(positive)
     }
     supermajority || (negative.isEmpty && someTrancheDone)
 
   /** A block whose accumulated report at least a third of validators judge invalid is disregarded. */
-  def disregards(negative: Set[Int], validatorCount: Int): Boolean = 3 * negative.size >= validatorCount
+  def disregards(negative: scala.collection.Set[Int], validatorCount: Int): Boolean = 3 * negative.size >= validatorCount
 
   // ---------------------------------------------------------------------------
   // CE 144 wire format (jam-np simple.md "CE 144: Audit announcement"; upstream jam-np#23 will replace it)

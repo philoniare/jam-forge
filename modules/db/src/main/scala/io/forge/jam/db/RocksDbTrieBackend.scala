@@ -60,11 +60,15 @@ final class RocksDbTrieBackend private (
   // A save made inside [[withJournal]] belongs to one block at one height. Two things are recorded with it, in the
   // same atomic write:
   //   - journal(block): the nodes the save replaced, i.e. those in the parent's trie and not in the block's;
-  //   - born(node): the greatest height of any save that added the node (a "max" merge, so no read is needed).
+  //   - born(node), for each node the save added that was already stored: the greatest height of any save that
+  //     added it again (a "max" merge). A node written for the first time gets no record, and that is nearly all
+  //     of them, so a block's save and the pruning of its journal each touch `born` for a handful of nodes.
   // When the block's parent state is no longer wanted, [[pruneJournal]] deletes each journalled node that no save
   // above the block's height has added again. Nodes are content-addressed, so a later block (on any branch) can
-  // bring a replaced node back; `born` is what tells. A save made outside a journal marks its nodes as never
-  // deletable. A deleted regular leaf releases one reference to its raw value, which goes when none is left: the
+  // bring a replaced node back; `born` is what tells. A node with no record was added once, by the save that
+  // created it. That save is below any block that replaced the node, unless it was on a branch the pruned block
+  // is not on: a branch whose states are, by [[pruneJournal]]'s contract, no longer wanted. A save made outside a
+  // journal marks every node it adds as never deletable. A deleted regular leaf releases one reference to its raw value, which goes when none is left: the
   // value count is one per leaf node ever written and is only ever too high, never too low.
   // ---------------------------------------------------------------------------------------------------------
 
@@ -108,56 +112,102 @@ final class RocksDbTrieBackend private (
   /** Forget block `label`'s journal without acting on it (a block that was never on the finalized chain). */
   def dropJournal(label: Hash): Unit = db.delete(journalCf, key(label))
 
+  private val saveLock = new Object
+  private var saves = 0L // guarded by saveLock
+
+  private def pruneMark(label: Hash): Array[Byte] = RocksDbTrieBackend.PruneMarkPrefix ++ key(label)
+
+  def schedulePrune(label: Hash, height: Long): Unit = db.put(journalCf, pruneMark(label), encodeBE8(height))
+
+  def scheduledPrunes: List[(Hash, Long)] =
+    val prefix = RocksDbTrieBackend.PruneMarkPrefix
+    val it = db.newIterator(journalCf)
+    try
+      val found = mutable.ListBuffer[(Hash, Long)]()
+      it.seek(prefix)
+      while it.isValid && it.key().length >= prefix.length && it.key().take(prefix.length).sameElements(prefix) do
+        if it.key().length == prefix.length + 32 && it.value().length == 8 then
+          found += Hash.wrap(it.key().drop(prefix.length)) -> java.nio.ByteBuffer.wrap(it.value()).getLong
+        it.next()
+      found.toList.sortBy(_._2)
+    finally it.close()
+
   /** The state before block `label` (at `height`) is no longer wanted: delete the nodes its save replaced that
     * nothing above `height` added again, with the raw values that leaves no leaf for. Returns (nodes, values)
-    * deleted. Must run on the thread that saves, and only for a block every retained state descends from.
+    * deleted. Only for a block every retained state descends from. May run beside saves, on another thread: the
+    * reading is done unlocked, and only the write waits for a save in progress (and is worked out again, under the
+    * lock, when a save came in between).
     */
   def pruneJournal(label: Hash, height: Long): (Int, Int) =
     val journalled = journalOf(label).toIndexedSeq
     if journalled.isEmpty then
-      dropJournal(label)
-      (0, 0)
-    else
       val batch = new WriteBatch()
       try
-        val deletedNodes = mutable.ArrayBuffer[Hash]()
-        val valueDeltas = mutable.LinkedHashMap[Hash, Long]()
-        val born = readMany(nodeBornCf, journalled)
-        val prunable = journalled.indices.collect {
-          case i if (if born(i) == null || born(i).length != 8 then 0L else java.nio.ByteBuffer.wrap(born(i)).getLong) <= height =>
-            journalled(i)
-        }
-        val cached = prunable.map(nodeCache.get)
-        val missed = prunable.indices.filter(cached(_) == null)
-        val stored = readMany(nodesCf, missed.map(prunable))
-        val fetched = new Array[TrieNode](prunable.length)
-        missed.indices.foreach(m => if stored(m) != null then fetched(missed(m)) = TrieNode.decodeArray(stored(m)))
-        prunable.indices.foreach { i =>
-          val h = prunable(i)
-          val node = if cached(i) != null then cached(i) else fetched(i)
-          if node != null then
-            if node.nodeType == TrieNodeType.RegularLeaf then
-              val v = Hash.wrap(node.right.toArrayUnsafe)
-              valueDeltas.update(v, valueDeltas.getOrElse(v, 0L) - 1)
-            batch.delete(nodesCf, key(h))
-            if tracksGarbage then batch.delete(nodeRefsCf, key(h))
-            batch.delete(nodeBornCf, key(h))
-            deletedNodes += h
-        }
-        var deletedValues = 0
-        val values = valueDeltas.keys.toIndexedSeq
-        readCounts(valueRefsCf, values).lazyZip(values).foreach { (stored, v) =>
-          if stored + valueDeltas(v) <= 0 then
-            batch.delete(valuesCf, key(v))
-            batch.delete(valueRefsCf, key(v))
-            deletedValues += 1
-          else batch.merge(valueRefsCf, key(v), encodeLE8(valueDeltas(v)))
-        }
         batch.delete(journalCf, key(label))
+        batch.delete(journalCf, pruneMark(label))
         db.write(writeOptions, batch)
-        deletedNodes.foreach(nodeCache.remove)
-        (deletedNodes.size, deletedValues)
       finally batch.close()
+      (0, 0)
+    else
+      val seen = saveLock.synchronized(saves)
+      var plan = planPrune(label, height, journalled)
+      try
+        saveLock.synchronized {
+          if saves != seen then
+            plan.batch.close()
+            plan = planPrune(label, height, journalled)
+          db.write(writeOptions, plan.batch)
+          plan.nodes.foreach(nodeCache.remove)
+        }
+        (plan.nodes.size, plan.values)
+      finally plan.batch.close()
+
+  private final class PrunePlan(val batch: WriteBatch, val nodes: IndexedSeq[Hash], val values: Int)
+
+  private def planPrune(label: Hash, height: Long, journalled: IndexedSeq[Hash]): PrunePlan =
+    val batch = new WriteBatch()
+    try
+      val deletedNodes = mutable.ArrayBuffer[Hash]()
+      val valueDeltas = mutable.LinkedHashMap[Hash, Long]()
+      val born = readMany(nodeBornCf, journalled)
+      val recorded = journalled.indices.iterator.filter(born(_) != null).map(journalled).toSet
+      val prunable = journalled.indices.collect {
+        case i if (if born(i) == null || born(i).length != 8 then 0L else java.nio.ByteBuffer.wrap(born(i)).getLong) <= height =>
+          journalled(i)
+      }
+      val cached = prunable.map(nodeCache.get)
+      val missed = prunable.indices.filter(cached(_) == null)
+      val stored = readMany(nodesCf, missed.map(prunable))
+      val fetched = new Array[TrieNode](prunable.length)
+      missed.indices.foreach(m => if stored(m) != null then fetched(missed(m)) = TrieNode.decodeArray(stored(m)))
+      prunable.indices.foreach { i =>
+        val h = prunable(i)
+        val node = if cached(i) != null then cached(i) else fetched(i)
+        if node != null then
+          if node.nodeType == TrieNodeType.RegularLeaf then
+            val v = Hash.wrap(node.right.toArrayUnsafe)
+            valueDeltas.update(v, valueDeltas.getOrElse(v, 0L) - 1)
+          batch.delete(nodesCf, key(h))
+          if tracksGarbage then batch.delete(nodeRefsCf, key(h))
+          if recorded.contains(h) then batch.delete(nodeBornCf, key(h))
+          deletedNodes += h
+      }
+      var deletedValues = 0
+      val values = valueDeltas.keys.toIndexedSeq
+      readCounts(valueRefsCf, values).lazyZip(values).foreach { (stored, v) =>
+        if stored + valueDeltas(v) <= 0 then
+          batch.delete(valuesCf, key(v))
+          batch.delete(valueRefsCf, key(v))
+          deletedValues += 1
+        else batch.merge(valueRefsCf, key(v), encodeLE8(valueDeltas(v)))
+      }
+      batch.delete(journalCf, key(label))
+      batch.delete(journalCf, pruneMark(label))
+      PrunePlan(batch, deletedNodes.toIndexedSeq, deletedValues)
+    catch
+      case e: Throwable =>
+        batch.close()
+        throw e
 
   private def readCount(cf: ColumnFamilyHandle, h: Hash): Long =
     val bytes = db.get(cf, key(h))
@@ -187,6 +237,22 @@ final class RocksDbTrieBackend private (
         nodeCache.put(hash, node)
         Some(node)
 
+  override def readsInBulk: Boolean = true
+
+  override def prefetchNodes(hashes: IndexedSeq[Hash]): Unit =
+    val missing = hashes.filter(h => nodeCache.get(h) == null)
+    def load(chunk: IndexedSeq[Hash]): Unit =
+      val got = db.multiGetAsList(java.util.Collections.nCopies(chunk.size, nodesCf), chunk.map(key).asJava)
+      chunk.indices.foreach { i =>
+        val bytes = got.get(i)
+        if bytes != null then nodeCache.put(chunk(i), TrieNode.decodeArray(bytes))
+      }
+    if missing.size < 2 * RocksDbTrieBackend.PrefetchChunk then
+      if missing.nonEmpty then load(missing)
+    else
+      val chunks = missing.grouped(RocksDbTrieBackend.PrefetchChunk).toIndexedSeq
+      java.util.stream.IntStream.range(0, chunks.size).parallel().forEach(i => load(chunks(i)))
+
   def readRawValue(hash: Hash): Option[JamBytes] =
     Option(db.get(valuesCf, key(hash))).map(JamBytes.wrap)
 
@@ -197,6 +263,7 @@ final class RocksDbTrieBackend private (
     // Outside a journal the height is unknown: such nodes are marked as added "at the end of time" and never pruned.
     val born = encodeBE8(if label == null then Long.MaxValue else journalHeight)
     val replaced = new java.io.ByteArrayOutputStream()
+    val added = mutable.ArrayBuffer[Hash]()
     try
       ops.foreach {
         case BackendOp.WriteNode(node) =>
@@ -208,18 +275,33 @@ final class RocksDbTrieBackend private (
           if tracksGarbage then
             batch.merge(nodeRefsCf, key(h), encodeLE8(d))
             if d < 0 then deadNodeCandidates.add(h)
-          if d > 0 then batch.merge(nodeBornCf, key(h), born)
+          if d > 0 then
+            if label == null then batch.merge(nodeBornCf, key(h), born) else added += h
           else if d < 0 && label != null then replaced.write(key(h))
         case BackendOp.RawValueRefDelta(h, d) =>
           batch.merge(valueRefsCf, key(h), encodeLE8(d))
           if d < 0 && tracksGarbage then deadValueCandidates.add(h)
       }
-      if label != null && replaced.size > 0 then
-        // A block saves once; if it ever saved twice, the second save's replaced nodes are added to the first's.
-        val earlier = db.get(journalCf, key(label))
-        batch.put(journalCf, key(label), if earlier == null then replaced.toByteArray else earlier ++ replaced.toByteArray)
-      db.write(writeOptions, batch)
-      written.foreach(n => nodeCache.put(n.hash, n))
+      saveLock.synchronized {
+        val stored = new Array[Boolean](added.size)
+        def ask(i: Int): Unit =
+          val h = added(i)
+          stored(i) = nodeCache.get(h) != null || db.keyMayExist(nodesCf, key(h), null)
+        if added.size < 2 * RocksDbTrieBackend.ExistsChunk then added.indices.foreach(ask)
+        else
+          val chunk = RocksDbTrieBackend.ExistsChunk
+          java.util.stream.IntStream
+            .range(0, (added.size + chunk - 1) / chunk)
+            .parallel()
+            .forEach(c => (c * chunk until math.min(added.size, (c + 1) * chunk)).foreach(ask))
+        added.indices.foreach(i => if stored(i) then batch.merge(nodeBornCf, key(added(i)), born))
+        if label != null && replaced.size > 0 then
+          val earlier = db.get(journalCf, key(label))
+          batch.put(journalCf, key(label), if earlier == null then replaced.toByteArray else earlier ++ replaced.toByteArray)
+        db.write(writeOptions, batch)
+        written.foreach(n => nodeCache.put(n.hash, n))
+        saves += 1
+      }
     finally batch.close()
 
   /**
@@ -305,6 +387,8 @@ final class RocksDbTrieBackend private (
     v
 
 object RocksDbTrieBackend:
+  private val PruneMarkPrefix: Array[Byte] = "toprune:".getBytes("US-ASCII")
+
   private val CfNames =
     Seq("trie-nodes", "trie-values", "trie-node-refs", "trie-value-refs", "trie-journal", "trie-node-born")
 
@@ -315,6 +399,10 @@ object RocksDbTrieBackend:
   private val NodeCacheSlots = 1 << 20
 
   private val MultiGetChunk = 4096
+
+  private val PrefetchChunk = 64
+
+  private val ExistsChunk = 256
 
   private val UntrackedMarker = "trie-garbage-untracked".getBytes("UTF-8")
 

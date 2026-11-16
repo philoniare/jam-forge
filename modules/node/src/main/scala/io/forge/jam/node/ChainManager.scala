@@ -108,6 +108,24 @@ final class ChainManager(
 
   private val leafMap = new java.util.concurrent.ConcurrentHashMap[Hash, ChainHead]()
 
+  private val statePruning = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = new Thread(r, "jam-state-prune")
+    t.setDaemon(true)
+    t
+  }
+
+  private def pruneStateOf(block: Hash, height: Long): Unit =
+    synchronized(())
+    try
+      val (nodes, values) = trieBackend.pruneJournal(block, height)
+      logger.debug(s"deleted $nodes state node(s) and $values value(s) below height $height")
+    catch case e: Exception => logger.warn(s"state pruning below height $height failed: ${e.getMessage}")
+
+  private def resumeStatePruning(): Unit =
+    trieBackend.scheduledPrunes.foreach((block, height) => statePruning.execute(() => pruneStateOf(block, height)))
+
+  private[node] def awaitStatePruning(): Unit = statePruning.submit((() => ()): Runnable).get()
+
   private val pruner = new HistoryPruner(
     config,
     blockStore,
@@ -116,6 +134,9 @@ final class ChainManager(
     headers,
     pruneFinalizedHistory = pruneFinalizedHistory,
     pruneOldState = pruneOldState,
+    pruneState = (block, height) =>
+      trieBackend.schedulePrune(block, height)
+      statePruning.execute(() => pruneStateOf(block, height)),
     header = h => header(h),
     forget = h =>
       unverified.untrack(h)
@@ -148,7 +169,11 @@ final class ChainManager(
     }
   )
 
-  def shutdown(): Unit = postImportBus.close()
+  def shutdown(): Unit =
+    postImportBus.close()
+    statePruning.shutdownNow()
+    if !statePruning.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS) then
+      logger.warn("state pruning still running at shutdown")
 
   def best: ChainHead = bestHead
 
@@ -435,6 +460,7 @@ final class ChainManager(
             )
           )
         rebuildLeaves(genesisHash)
+        resumeStatePruning()
         if !meta.hasFinalizedRoot then
           blockStore.getHead(BlockStore.FinalizedHead).flatMap(blockRoot).foreach { finalizedRoot =>
             meta.finalizedRoot = finalizedRoot
@@ -594,7 +620,9 @@ final class ChainManager(
   private[node] def pruneFloorHeight: Long = pruner.floorHeight
 
   /** State trie nodes and raw values on disk (a full scan; for tests and diagnostics). */
-  private[node] def storedStateCounts: (Long, Long) = trieBackend.storedCounts
+  private[node] def storedStateCounts: (Long, Long) =
+    awaitStatePruning()
+    trieBackend.storedCounts
 
   /** Import a block: extends the best head directly, or is stored as a side
     * branch and adopted via reorg when its branch becomes strictly heavier

@@ -130,6 +130,8 @@ final class DistributionService(
   def recordReport(report: WorkReport): Unit =
     knownReports.put(Hashing.blake2b256(report.encode.toArray), report)
 
+  def knownReport(hash: Hash): Option[WorkReport] = Option(knownReports.get(hash))
+
   /** CE 136: Work-Report Hash (32) -> Work-Report; reset when unknown. */
   def reportRequestHandler: PeerStreamHandler = new PeerStreamHandler:
     def onStream(connection: PeerConnection, stream: MessageStream): Unit =

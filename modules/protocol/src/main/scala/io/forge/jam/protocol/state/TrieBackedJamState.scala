@@ -493,6 +493,7 @@ object TrieBackedJamState:
   private val decodedSafrole =
     new DecodedOnce[(IndexedSeq[ValidatorKey], JamBytes, TicketsOrKeys, List[TicketMark])](slots = 2)
   private val decodedAuthQueues = new DecodedOnce[List[List[Hash]]](slots = 2)
+  private val decodedAuthPools = new DecodedOnce[List[List[Hash]]](slots = 2)
 
   private final class DecodedOnce[A](slots: Int):
     private final case class Entry(hash: Hash, shape: Any, value: A)
@@ -522,10 +523,11 @@ object TrieBackedJamState:
       trie: StateTrie,
       config: ChainConfig
   ): List[List[Hash]] =
-    trie.read(StateKeys.simpleKey(StateKeys.CORE_AUTHORIZATION_POOL)) match
-      case None    => List.fill(config.coresCount)(List.empty)
-      case Some(v) =>
-        FullJamStateCodecs.decodeAuthPools(v.toArray, config.coresCount)
+    decodedAuthPools
+      .read(trie, StateKeys.CORE_AUTHORIZATION_POOL, config.coresCount) { v =>
+        FullJamStateCodecs.decodeAuthPools(v.toArrayUnsafe, config.coresCount)
+      }
+      .getOrElse(List.fill(config.coresCount)(List.empty))
 
   private def readAuthQueues(
       trie: StateTrie,

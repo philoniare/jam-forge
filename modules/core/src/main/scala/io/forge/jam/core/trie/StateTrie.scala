@@ -54,7 +54,35 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
   def update(updates: Seq[(JamBytes, Option[JamBytes])]): Unit =
     if updates.nonEmpty then
       val batch = StateTrie.sortedBatch(updates)
+      if backend.readsInBulk && batch.length >= StateTrie.PrefetchFrom then prefetch(batch)
       currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
+
+  private def prefetch(batch: Array[StateTrie.Update]): Unit =
+    var hashes = Array(currentRoot)
+    var ranges = Array(0, batch.length)
+    var depth = 0
+    while hashes.nonEmpty do
+      backend.prefetchNodes(scala.collection.immutable.ArraySeq.unsafeWrapArray(hashes))
+      val nextHashes = new scala.collection.mutable.ArrayBuilder.ofRef[Hash]
+      val nextRanges = new scala.collection.mutable.ArrayBuilder.ofInt
+      var i = 0
+      while i < hashes.length do
+        val (lo, hi) = (ranges(2 * i), ranges(2 * i + 1))
+        getNode(hashes(i)) match
+          case Some(node) if node.nodeType == TrieNodeType.Branch =>
+            val mid = StateTrie.firstWithBit(batch, lo, hi, depth)
+            def descend(child: Hash, from: Int, to: Int): Unit =
+              if from < to && child != Hash.zero then
+                nextHashes += child
+                nextRanges += from
+                nextRanges += to
+            descend(Hash.wrapUnchecked(node.left.toArrayUnsafe), lo, mid)
+            descend(Hash.wrapUnchecked(node.right.toArrayUnsafe), mid, hi)
+          case _ => ()
+        i += 1
+      hashes = nextHashes.result()
+      ranges = nextRanges.result()
+      depth += 1
 
   /** Writes the queued nodes and values with all ref deltas in one backend batch. */
   def save(): Unit =
@@ -418,6 +446,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     else (data(byteIndex) & (1 << bitIndex)) != 0
 
 object StateTrie:
+  private val PrefetchFrom = 16
+
 
   /** One key of a batch: an update (`existing` null; `value` None deletes) or a kept leaf being rebuilt around. */
   private[trie] final class Update(

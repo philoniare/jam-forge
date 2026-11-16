@@ -153,3 +153,53 @@ class StateTrieBatchSpec extends AnyFlatSpec with Matchers:
     val trie = StateTrie.empty(new InMemoryTrieBackend)
     an[IllegalArgumentException] should be thrownBy trie.update(Seq((JamBytes(new Array[Byte](30)), None)))
   }
+
+  private final class BulkBackend(val inner: InMemoryTrieBackend) extends StateTrieBackend:
+    val fetched = mutable.Set[Hash]()
+    val read = mutable.ArrayBuffer[Hash]()
+    var fetches = 0
+    override def readsInBulk: Boolean = true
+    override def prefetchNodes(hashes: IndexedSeq[Hash]): Unit =
+      fetches += 1
+      fetched ++= hashes
+    def readNode(hash: Hash): Option[TrieNode] =
+      read += hash
+      inner.readNode(hash)
+    def readRawValue(hash: Hash): Option[JamBytes] = inner.readRawValue(hash)
+    def batchUpdate(ops: Seq[BackendOp]): Unit = inner.batchUpdate(ops)
+    def gc(): Unit = inner.gc()
+    def clear(): Unit = inner.clear()
+
+  "An update on a backend that reads in bulk" should "ask for each level's nodes ahead, and read no node it did not ask for" in {
+    val rng = new Random(11)
+    def key() = JamBytes(rng.nextBytes(31))
+    def value() = JamBytes(rng.nextBytes(40))
+    val store = new InMemoryTrieBackend
+    val initial = Vector.fill(2000)(key() -> value())
+    val base = StateTrie.empty(store)
+    base.update(initial.map((k, v) => k -> Some(v)))
+    base.save()
+
+    val updates = rng.shuffle(initial).take(300).zipWithIndex.map { case ((k, _), i) => k -> Option.when(i % 3 != 0)(value()) } ++
+      Vector.fill(100)(key() -> Some(value()))
+    val plain = StateTrie.at(store, base.rootHash)
+    plain.update(updates)
+
+    val bulk = new BulkBackend(store)
+    val trie = StateTrie.at(bulk, base.rootHash)
+    trie.update(updates)
+    trie.rootHash shouldBe plain.rootHash
+    bulk.fetches should be > 5 // level by level, not node by node
+    bulk.fetches should be < 64
+    val unasked = bulk.read.filterNot(bulk.fetched)
+    unasked.size should be <= 200
+    bulk.read.size should be > 1000
+  }
+
+  it should "leave a backend that does not read in bulk alone" in {
+    val store = new InMemoryTrieBackend
+    val trie = StateTrie.empty(store)
+    trie.update(Vector.tabulate(50)(i => JamBytes(Array.fill[Byte](31)(i.toByte)) -> Some(JamBytes(Array[Byte](1)))))
+    store.readsInBulk shouldBe false
+  }
+

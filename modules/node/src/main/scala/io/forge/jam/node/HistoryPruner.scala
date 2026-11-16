@@ -25,6 +25,7 @@ private[node] final class HistoryPruner(
     headers: StoredHeaders,
     pruneFinalizedHistory: Boolean,
     pruneOldState: Boolean,
+    pruneState: (Hash, Long) => Unit,
     header: Hash => Option[Header],
     forget: Hash => Unit
 ) extends LazyLogging:
@@ -70,8 +71,6 @@ private[node] final class HistoryPruner(
       val genesis = blockStore.getHead(BlockStore.GenesisHead)
       var pruned = 0
       var forks = 0
-      var stateNodes = 0
-      var stateValues = 0
       var more = true
       while more && pruned < ChainManager.MaxPrunedPerFinalization do
         // The floor goes once the block after it is itself outside the window; the finalized block always stays.
@@ -91,9 +90,7 @@ private[node] final class HistoryPruner(
             // The old floor's state goes: every state still kept descends from `n`, so the nodes `n` replaced
             // are unreachable unless a later block brought them back.
             if pruneOldState then
-              val (nodes, values) = trieBackend.pruneJournal(n, oldestHeight + 1)
-              stateNodes += nodes
-              stateValues += values
+              pruneState(n, oldestHeight + 1)
             else trieBackend.dropJournal(n)
             oldest = n
             oldestHeight += 1
@@ -102,7 +99,7 @@ private[node] final class HistoryPruner(
       if pruned > 0 then
         logger.info(
           s"pruned ${if pruneFinalizedHistory then pruned else 0} finalized block(s), $forks side-branch block(s), " +
-            s"$stateNodes state node(s) and $stateValues value(s) of $pruned state(s) more than ${config.maxLookupAnchorAge} slots behind finalized slot " +
+            s"${if pruneOldState then pruned else 0} state(s) more than ${config.maxLookupAnchorAge} slots behind finalized slot " +
             s"$finalizedSlot; oldest kept at height $oldestHeight"
         )
 

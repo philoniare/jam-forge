@@ -144,6 +144,7 @@ final class GuarantorService(
     fromValidator: PeerConnection => Boolean = _ => true,
     /** CE 134: whether the peer is a guarantor of the core it shares a package for ([[GuarantorService.guarantorsOf]]). */
     fromCoGuarantor: (PeerConnection, Int) => Boolean = (_, _) => true,
+    exportersFirst: (Hash, List[PeerConnection]) => List[PeerConnection] = GuarantorIndex.unordered,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
@@ -480,7 +481,7 @@ final class GuarantorService(
     * of its optional second message. `None`-shaped errors surface as `Left`
     * for the caller to log; nothing here throws.
     */
-  private def decodeBundleSubmission(messages: IndexedSeq[Array[Byte]]): Either[
+  private[node] def decodeBundleSubmission(messages: IndexedSeq[Array[Byte]]): Either[
     String,
     (
         Int,
@@ -554,6 +555,39 @@ final class GuarantorService(
       if offset != blob.length then Left("trailing extrinsic bytes")
       else Right(out)
 
+  def guarantees(coreIndex: Int): Boolean = ownAssignedKeys(chain.nextBlockSlot, coreIndex).nonEmpty
+
+  def submit(coreIndex: Int, packageBytes: Array[Byte], extrinsicBlob: Array[Byte]): Either[String, Unit] =
+    if packageBytes.length > GuarantorService.MaxWorkPackageBytes then
+      Left(s"work-package of ${packageBytes.length} bytes exceeds ${GuarantorService.MaxWorkPackageBytes}")
+    else if packageBytes.length.toLong + extrinsicBlob.length > maxSubmissionBytes then
+      Left(s"submission exceeds $maxSubmissionBytes bytes")
+    else
+      decodeWorkPackage(packageBytes).left.map(e => s"Codec error: $e").flatMap { wp =>
+        val bytes = packageBytes.length.toLong + extrinsicBlob.length
+        val admitted = admission.tryExecute(refinePool.at(RefinePool.Priority.Submission), bytes, GuarantorService.Local) {
+          try onWorkPackage(coreIndex, wp, extrinsicBlob)
+          catch case e: Exception => logger.error("local work-package submission failed", e)
+        }
+        if admitted then Right(()) else Left("too many submissions are waiting to be refined")
+      }
+
+  def submitBundle(coreIndex: Int, bundleBytes: Array[Byte]): Either[String, Unit] =
+    if bundleBytes.length > maxSubmissionBytes then Left(s"bundle of ${bundleBytes.length} bytes exceeds $maxSubmissionBytes")
+    else
+      WorkPackageBundle.decode(bundleBytes).left.map(e => s"Codec error: $e").flatMap { b =>
+        val admitted =
+          admission.tryExecute(refinePool.at(RefinePool.Priority.Submission), bundleBytes.length.toLong, GuarantorService.Local) {
+            try
+              verifyBuilderImports(b.workPackage, Map.empty, b.extrinsicData, b.importSegments, b.justifications) match
+                case Left(err) => logger.warn(s"local bundle submission: imports refused: $err")
+                case Right(lookup) =>
+                  guaranteeWorkPackage(coreIndex, b.workPackage, b.extrinsicData, b.importSegments, b.justifications, lookup)
+            catch case e: Exception => logger.error("local bundle submission failed", e)
+          }
+        if admitted then Right(()) else Left("too many submissions are waiting to be refined")
+      }
+
   /** Guarantee a submitted work package: refine, sign, pool and distribute.
     * CE 133 has no cross-package imports on hand, so it always calls this
     * with empty imports/justifications and an empty segments-root lookup;
@@ -618,7 +652,7 @@ final class GuarantorService(
 
   private val importFetcher = new ImportFetcher(
     segments,
-    () => distribution.peers,
+    root => exportersFirst(root, distribution.peers),
     recover = (root, indices) => segmentRecovery.flatMap(_.recover(root, indices))
   )
 
@@ -1045,6 +1079,29 @@ object GuarantorService:
     * (JAMNP-S CE 133 and CE 146: `200 * 1024` bytes).
     */
   val MaxWorkPackageBytes: Int = 200 * 1024
+
+  def bundleSubmissionMessages(coreIndex: Int, lookup: Map[Hash, Hash], bundle: WorkPackageBundle): Seq[Array[Byte]] =
+    val head = new java.io.ByteArrayOutputStream(3 + 64 * lookup.size)
+    head.write(LittleEndian.encode(coreIndex.toLong, 2))
+    head.write(JamCodecs.encodeCompactInteger(lookup.size.toLong))
+    lookup.toSeq.sortBy(_._1.toHex).foreach { (wp, root) =>
+      head.write(wp.bytes.toArray)
+      head.write(root.bytes.toArray)
+    }
+    val justifications = new java.io.ByteArrayOutputStream()
+    bundle.justifications.foreach(_.foreach { path =>
+      justifications.write(JamCodecs.encodeCompactInteger(path.length.toLong))
+      path.foreach(justifications.write)
+    })
+    Seq(
+      head.toByteArray,
+      RefineFetch.encodeWorkPackage(bundle.workPackage),
+      Array.concat(bundle.extrinsicData.flatten*),
+      Array.concat(bundle.importSegments.flatten*),
+      justifications.toByteArray
+    )
+
+  private val Local = new Object
 
   /** Most segments one CE 148 stream may request: W_M = 3072 (GP 0.8.0). */
   val MaxSegmentsPerRequest: Int = 3072
