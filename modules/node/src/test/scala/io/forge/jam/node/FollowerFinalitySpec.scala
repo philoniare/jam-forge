@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.TimeUnit
 
 import io.circe.Decoder
@@ -16,10 +16,8 @@ import org.scalatest.matchers.should.Matchers
 /** A node that runs no GRANDPA voter follows the finality its peers announce. An announcement is a claim, not a
   * proof, so by default only the chain's validators count towards the quorum: anyone can open connections.
   */
-class FollowerFinalitySpec extends AnyFunSuite with Matchers:
+class FollowerFinalitySpec extends AnyFunSuite with Matchers with NodeFixture:
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
   private def eventually(what: String, seconds: Int = 20)(cond: => Boolean): Unit =
@@ -49,8 +47,37 @@ class FollowerFinalitySpec extends AnyFunSuite with Matchers:
     up.send(SyncCodec.encodeHandshake(finalized, Nil))
     peer
 
-  private def withFollower(config: Path => NodeConfig)(test: (JamNode, ChainSpec, SyncCodec.HashSlot) => Unit): Unit =
-    val chainSpec = spec()
+  /** A peer that announces `finalized` and answers CE 130 for it with `justification`. */
+  private def justifier(
+      chainSpec: ChainSpec,
+      node: JamNode,
+      finalized: SyncCodec.HashSlot,
+      justification: GrandpaMessages.Justification
+  ): JamnpNode =
+    val peer = new JamnpNode(NodeIdentity.generate(), JamnpConfig(genesisHashPrefix = chainSpec.alpnPrefix))
+    peer.registerPeerHandler(
+      StreamKind.GrandpaJustificationRequest,
+      (_, stream) =>
+        stream.onMessage { _ =>
+          stream.send(GrandpaMessages.encodeJustification(justification))
+          stream.finish()
+        }
+    )
+    val conn = peer.connect(new InetSocketAddress("127.0.0.1", node.listenPort)).get(10, TimeUnit.SECONDS)
+    val up = conn.openStream(StreamKind.BlockAnnouncement).get(10, TimeUnit.SECONDS)
+    up.onMessage(_ => ())
+    up.send(SyncCodec.encodeHandshake(finalized, Nil))
+    peer
+
+  /** A round 1, set 0 justification of `target`, precommitted by the first `signers` dev validators. */
+  private def justificationOf(node: JamNode, target: SyncCodec.HashSlot, signers: Int): GrandpaMessages.Justification =
+    import GrandpaMessages.*
+    val vote = Vote(target.hash, node.chain.postStateRoot(target.hash).get, target.slot)
+    Justification(1L, 0L, Commit(vote, devKeys.take(signers).map(k => sign(Precommit, vote, 1L, 0L, k)).toList), Nil)
+
+  private def withFollower(config: Path => NodeConfig, chainSpec: ChainSpec = spec())(
+      test: (JamNode, ChainSpec, SyncCodec.HashSlot) => Unit
+  ): Unit =
     val dir = Files.createTempDirectory("jam-follower-finality")
     var node: JamNode = null
     try
@@ -94,5 +121,92 @@ class FollowerFinalitySpec extends AnyFunSuite with Matchers:
       val bootnode = announcer(NodeIdentity.generate(), chainSpec, node, target)
       try eventually("finality to follow the trusted peer")(node.chain.finalized.hash == target.hash)
       finally bootnode.shutdown()
+    }
+  }
+
+  private def observing(dir: Path) = NodeConfig(dataDir = dir, slotTicking = false, grandpa = true)
+
+  test("a follower that observes GRANDPA is not moved by validators announcing a finalized block") {
+    withFollower(observing) { (node, chainSpec, target) =>
+      node.enableGrandpa(None)
+      val validators = devKeys.take(5).map(k => announcer(NodeIdentity.fromSeed(k.ed25519Secret), chainSpec, node, target))
+      try
+        eventually("the announcements to arrive")(node.sync.peerFinalized.size == 5)
+        Thread.sleep(5000) // two passes of the voter's two-second look at its peers
+        node.chain.finalized.slot shouldBe 0L
+      finally validators.foreach(_.shutdown())
+    }
+  }
+
+  test("a follower that observes GRANDPA finalizes a block any peer proves with a supermajority's justification") {
+    withFollower(observing) { (node, chainSpec, target) =>
+      node.enableGrandpa(None)
+      val stranger = justifier(chainSpec, node, target, justificationOf(node, target, signers = 5))
+      try eventually("finality to follow the justification")(node.chain.finalized.hash == target.hash)
+      finally stranger.shutdown()
+    }
+  }
+
+  test("a justification signed by fewer than a supermajority does not move a follower that observes GRANDPA") {
+    withFollower(observing) { (node, chainSpec, target) =>
+      node.enableGrandpa(None)
+      val stranger = justifier(chainSpec, node, target, justificationOf(node, target, signers = 4))
+      try
+        eventually("the announcement to arrive")(node.sync.peerFinalized.size == 1)
+        Thread.sleep(5000)
+        node.chain.finalized.slot shouldBe 0L
+      finally stranger.shutdown()
+    }
+  }
+
+  /** A peer that announces `best` as its only leaf. */
+  private def holder(identity: NodeIdentity, chainSpec: ChainSpec, node: JamNode, best: SyncCodec.HashSlot): JamnpNode =
+    val peer = new JamnpNode(identity, JamnpConfig(genesisHashPrefix = chainSpec.alpnPrefix))
+    val conn = peer.connect(new InetSocketAddress("127.0.0.1", node.listenPort)).get(10, TimeUnit.SECONDS)
+    val up = conn.openStream(StreamKind.BlockAnnouncement).get(10, TimeUnit.SECONDS)
+    up.onMessage(_ => ())
+    up.send(SyncCodec.encodeHandshake(SyncCodec.HashSlot(chainSpec.genesisHeaderHash, 0L), List(best)))
+    peer
+
+  private def depthFinality(peerKeys: Seq[NodeIdentity])(check: JamNode => Unit): Unit =
+    withFollower(dir => NodeConfig(dataDir = dir, slotTicking = false), spec().copy(devnetFinalityDepth = 1)) {
+      (node, chainSpec, _) =>
+        val best = SyncCodec.HashSlot(node.chain.best.hash, node.chain.best.slot)
+        val peers = peerKeys.map(holder(_, chainSpec, node, best))
+        try
+          eventually("the peers' bests to arrive")(node.sync.peerBests.size == peerKeys.size)
+          val block = new BlockAuthor(node.chain, devKeys).tryAuthor(4L).getOrElse(fail("author slot 4"))
+          node.chain.importBlock(node.chain.encodeBlock(block)).isRight shouldBe true
+          check(node)
+        finally peers.foreach(_.shutdown())
+    }
+
+  test("the devnet depth rule does not count the announced best of peers that are not validators") {
+    depthFinality((1 to 5).map(_ => NodeIdentity.generate())) { node =>
+      Thread.sleep(500)
+      node.chain.finalized.slot shouldBe 0L
+    }
+  }
+
+  test("the devnet depth rule counts validators that announce a best on our chain") {
+    depthFinality(devKeys.take(4).map(k => NodeIdentity.fromSeed(k.ed25519Secret))) { node =>
+      eventually("depth finality with the validators' support")(node.chain.finalized.slot == 3L)
+    }
+  }
+
+  test("a node started without validator keys observes GRANDPA unless the operator asks for announced finality") {
+    Main.grandpaWanted(asked = false, validator = false, unsignedFinality = false) shouldBe true
+    Main.grandpaWanted(asked = false, validator = false, unsignedFinality = true) shouldBe false
+    Main.grandpaWanted(asked = true, validator = false, unsignedFinality = true) shouldBe true
+    Main.grandpaWanted(asked = false, validator = true, unsignedFinality = true) shouldBe true
+  }
+
+  test("a follower that observes GRANDPA asks for the justification of a block one ahead of its own finality") {
+    withFollower(observing) { (node, chainSpec, second) =>
+      node.enableGrandpa(None)
+      val first = SyncCodec.HashSlot(node.chain.parentHash(second.hash).get, 1L)
+      val stranger = justifier(chainSpec, node, first, justificationOf(node, first, signers = 5))
+      try eventually("finality to reach the next block")(node.chain.finalized.hash == first.hash)
+      finally stranger.shutdown()
     }
   }

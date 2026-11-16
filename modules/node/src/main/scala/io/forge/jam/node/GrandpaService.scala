@@ -99,7 +99,8 @@ final class GrandpaService(
       roundSince = now - 4 * gossipMillis
       votesSentTo.clear()
       stalled = true
-    if stalled && now - lastCatchUpAsk > 30 * gossipMillis then
+    // An observer has no round to complete: it follows by justification (CE 130), and voters refuse it a catch-up.
+    if stalled && keys.isDefined && now - lastCatchUpAsk > 30 * gossipMillis then
       // A voter back from a restart hears nothing from peers that never resend: ask them.
       val heard = voter.votersHeard
       val asked = voterPeers.filterNot(c => heard.contains(c.peerPublicKey))
@@ -209,6 +210,11 @@ final class GrandpaService(
         logger.debug(s"GRANDPA commit for ${c.target.short} rejected: $err")
         false
 
+  /** Slots a peer's finality may be ahead before we ask for its justification. A voter is sent each commit (CE 150)
+    * and waits one slot for it; an observer is sent none, so every block ahead is asked for.
+    */
+  private val commitsExpected = if keys.isDefined then 1 else 0
+
   /** Ask a voter whose UP 0 finality is ahead of ours for its justification (CE 130). */
   private def followPeers(): Unit =
     val ours = chain.finalized.slot
@@ -216,7 +222,7 @@ final class GrandpaService(
     justificationRequests.retain((_, slot) => slot > ours)
     // Any peer will do, voter or not: a justification is checked against the voter set, not against who sent it.
     distribution.peers.distinctBy(_.peerPublicKey).foreach { conn =>
-      sync.peerFinal(conn).filter(f => f.slot > ours + 1).foreach { f =>
+      sync.peerFinal(conn).filter(f => f.slot > ours + commitsExpected).foreach { f =>
         // A node that joined late is voter sets behind: the peer's justification is signed by a set we have not
         // reached, so the set changes in between are asked for first (CE 153) and applied in order.
         val ourSet = voter.voterSet.setId
