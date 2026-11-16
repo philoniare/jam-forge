@@ -38,7 +38,9 @@ final class DistributionService(
     /** Where received guarantees and assurances are checked (signatures, state reads): off the network threads. */
     inbound: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    askOrder: List[PeerConnection] => List[PeerConnection] = identity
 ) extends LazyLogging:
 
   // Open connections only: a connection leaves on its connection-down callback ([[untrackConnection]]), so the set
@@ -61,7 +63,7 @@ final class DistributionService(
 
   /** Currently tracked open peer connections. */
   def peers: List[PeerConnection] =
-    connections.asScala.filter(_.isOpen).toList
+    askOrder(connections.asScala.filter(_.isOpen).toList)
 
   /** Connections held, open or not: equals the open ones once the close callbacks have run. */
   private[node] def trackedConnectionCount: Int = connections.size
@@ -91,6 +93,7 @@ final class DistributionService(
             if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE135 payload: $err")
+            misbehaved(conn, Offence.Malformed)
             stream.reset()
       }
 
@@ -171,6 +174,7 @@ final class DistributionService(
             if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE141 payload: $err")
+            misbehaved(conn, Offence.Malformed)
             stream.reset()
       }
 

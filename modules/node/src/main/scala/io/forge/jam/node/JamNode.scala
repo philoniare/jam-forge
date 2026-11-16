@@ -39,6 +39,7 @@ final case class NodeConfig(
       * nothing reads it.
       */
     pruneOldState: Boolean = true,
+    syncFrom: Option[Hash] = None,
     /** FAULT INJECTION, `--fault-tamper-reports`: guarantee deliberately wrong reports, to test disputes. Never on a
       * real network: the node's guarantors become culprits.
       */
@@ -114,7 +115,47 @@ final class JamNode(
     )
   /** CE 128 / CE 129 requests are answered here, not on the network event loops. */
   private[node] val serving: InboundWork = InboundWork.serving(threads)
-  val sync = new SyncService(chain, serving, announcing, threads)
+  private[node] val scores: PeerScores = new PeerScores(
+    isValidator = key => peers.isValidator(key),
+    onBan = key => network.closeConnectionsOf(key)
+  )
+
+  private def reportFault(key: Array[Byte], offence: Offence): Unit =
+    scores.report(key, offence)
+    if offence != Offence.Unanswered then telemetry.foreach(_.peerMisbehaved(key, offence.toString))
+  private val misbehaved: (PeerConnection, Offence) => Unit = (conn, offence) => reportFault(conn.peerKey, offence)
+
+  private val importTelemetry = new SyncService.ImportObserver:
+    def importing(blockBytes: Array[Byte]): AnyRef | Null =
+      telemetry.flatMap { t =>
+        chain.decodeBlock(blockBytes).toOption.filterNot(b => chain.hasBlock(chain.headerHashOf(b))).map { block =>
+          val x = block.extrinsic
+          t.importing(
+            block.header.slot.toLong,
+            Telemetry.blockOutline(
+              blockBytes.length,
+              chain.headerHashOf(block),
+              x.tickets.size,
+              x.preimages.size,
+              x.preimages.map(_.blob.length.toLong).sum,
+              x.guarantees.size,
+              x.assurances.size,
+              x.disputes.verdicts.size
+            )
+          )
+        }
+      }.orNull
+    def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit =
+      (handle, telemetry) match
+        case (ref: Option[?], Some(t)) =>
+          val importing = ref.collect { case r: Telemetry.EventRef => r }
+          outcome match
+            case Right(_)                           => t.blockVerified(importing)
+            case Left(e: ChainError.InvalidBlock)   => t.blockVerificationFailed(importing, e.message)
+            case Left(e: ChainError.ImportFailed)   => t.blockExecutionFailed(importing, e.message)
+            case Left(_)                            => () // kept on a side branch, or not ours to judge yet
+        case _ => ()
+  val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry)
   private val roleStore = RoleStore.over(blockStore)
   val pools = new ExtrinsicPools(store = roleStore)
   val distribution = new DistributionService(
@@ -124,9 +165,11 @@ final class JamNode(
     assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray),
     admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check,
     inbound = inbound,
-    threads = threads
+    threads = threads,
+    misbehaved = misbehaved,
+    askOrder = scores.leastFaultedFirst(_)(_.peerKey)
   )
-  val shards = new ShardService(shardStore, spec.config, inbound, threads)
+  val shards = new ShardService(shardStore, spec.config, inbound, threads, misbehaved)
   val segments = new SegmentPool()
   val tickets = new TicketService(
     chain,
@@ -135,7 +178,8 @@ final class JamNode(
     egress,
     forwardTargets = () => peers.currentValidatorConnections,
     inbound = inbound,
-    threads = threads
+    threads = threads,
+    misbehaved = misbehaved
   )
   val preimages = new PreimageService(
     chain,
@@ -144,7 +188,8 @@ final class JamNode(
     gossipTargets = () => distribution.peers.filter(c => peers.announcementWanted(c.peerKey)),
     inbound = inbound,
     serving = serving,
-    threads = threads
+    threads = threads,
+    misbehaved = misbehaved
   )
 
   val slotClock = new SlotClock(
@@ -189,7 +234,7 @@ final class JamNode(
           genesisHash = spec.genesisHeaderHash,
           peerId = identity.publicKeyBytes,
           listenPort = listenPort,
-          recompiler = false,
+          recompiler = io.forge.jam.pvm.ExecutionMode.default == io.forge.jam.pvm.ExecutionMode.Recompiled,
           implementationVersion = JamNode.ImplementationVersion,
           grayPaperVersion = JamNode.GrayPaperVersion,
           note = s"chain=${spec.id}"
@@ -257,7 +302,8 @@ final class JamNode(
       localBundle = root =>
         exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
       serving = serving,
-      threads = threads
+      threads = threads,
+      misbehaved = misbehaved
     )
     guarantor = Some(g)
     network.registerPeerHandler(
@@ -321,6 +367,7 @@ final class JamNode(
       store = roleStore,
       inbound = inbound,
       guarantorsFirst = guarantorIndex.first,
+      misbehaved = reportFault,
       threads = threads
     )
     a.onDisregard(h =>
@@ -404,7 +451,32 @@ final class JamNode(
     new SyncGate(JamNode.SyncLagSlots, JamNode.SyncPatienceSlots * spec.config.slotDuration * 1000L)
   @volatile private var held = false
 
+  @volatile private var checkpointSyncing = false
+  private[node] def syncingFromCheckpoint: Boolean = checkpointSyncing
+
+  private def startCheckpointSync(checkpoint: Hash): Unit =
+    if !chain.atGenesis then
+      logger.info(s"--sync-from ${checkpoint.toHex.take(18)} ignored: this node already has blocks")
+    else
+      checkpointSyncing = true
+      sync.hold()
+      val job = new CheckpointSync(chain, sync, checkpoint, () => distribution.peers, misbehaved)
+      threads.single("jam-checkpoint-sync").execute { () =>
+        try
+          while checkpointSyncing do
+            job.attempt() match
+              case Right(_) =>
+                checkpointSyncing = false
+                if !chain.atGenesis then grandpaService.foreach(_.restartAtFinalized())
+                sync.release()
+              case Left(why) =>
+                logger.debug(s"checkpoint sync not yet possible: $why")
+                Thread.sleep(JamNode.CheckpointRetryMillis)
+        catch case _: InterruptedException => ()
+      }
+
   private def catchingUp: Boolean =
+    if checkpointSyncing then return true
     val claimed = sync.peerBestSlots
     val peerBests =
       if nodeConfig.slotTicking then claimed.filter(_ <= slotClock.currentSlot + ChainManager.FutureSlotTolerance)
@@ -473,6 +545,7 @@ final class JamNode(
 
   def start(): JamNode =
     chain.initializeOrRestore(spec)
+    nodeConfig.syncFrom.foreach(startCheckpointSync)
 
     // Validators of the sets around the head keep their inbound slots whoever else connects.
     network.setPriorityPeers(peers.isValidator)
@@ -522,12 +595,17 @@ final class JamNode(
     }
     telemetry.foreach(_ => chain.onImported((_, _) => reportHeads()))
 
+    network.onConnectionChange((conn, up) => if up && scores.banned(conn.peerKey) then conn.close())
     network.onConnectionChange { (conn, up) =>
       val peer = try JamNode.hex(conn.peerKey).take(16) catch case _: Exception => "?"
       val side = if conn.initiator then "dialed" else "accepted"
       val where = conn.remoteAddress.map(a => s" $a").getOrElse("")
       if up then
         logger.info(s"peer connected ($side) $peer$where")
+        telemetry.foreach(t =>
+          try if conn.initiator then t.connectedOut(conn.peerKey, conn.remoteAddress) else t.connectedIn(conn.remoteAddress, conn.peerKey)
+          catch case _: Exception => ()
+        )
         // Accepted peers are reachable for CE traffic whether or not they
         // open UP 0 to us (UP 0 is limited to grid neighbours).
         if !conn.initiator then distribution.trackConnection(conn)
@@ -570,7 +648,12 @@ final class JamNode(
       s"node up: chain=${spec.id} alpn=${JamnpConfig(spec.alpnPrefix).alpn} " +
         s"port=$listenPort identity=${identity.altName}"
     )
-    telemetry.foreach(_.start())
+    telemetry.foreach { t =>
+      t.start()
+      threads
+        .scheduled("jam-telemetry-status")
+        .scheduleWithFixedDelay(() => reportStatus(t), 2, 2, java.util.concurrent.TimeUnit.SECONDS)
+    }
     submitServer = nodeConfig.submitPort.map(p => new SubmitServer(p, preimages).start())
 
     peers.start()
@@ -728,6 +811,28 @@ final class JamNode(
         t.finalizedBlockChanged(fin.slot, fin.hash)
     }
 
+  private def reportStatus(t: Telemetry): Unit =
+    try
+      val connected = distribution.peers
+      val byCore = new Array[Byte](spec.config.coresCount)
+      pools.pendingGuarantees.foreach { g =>
+        val core = g.report.coreIndex.toInt
+        if core >= 0 && core < byCore.length && (byCore(core) & 0xff) < 255 then byCore(core) = (byCore(core) + 1).toByte
+      }
+      val (shardUnits, shardBytes) = shardStore.estimatedUnitsAndBytes
+      val pending = pools.pendingPreimages
+      t.status(
+        peers = connected.map(c => JamBytes(c.peerKey)).distinct.size,
+        validatorPeers = connected.map(c => JamBytes(c.peerKey)).distinct.count(k => peers.isValidator(k.toArray)),
+        announcingPeers = connected.count(sync.hasAnnouncementStream),
+        guaranteesByCore = byCore,
+        shards = shardUnits,
+        shardBytes = shardBytes,
+        preimages = pending.size,
+        preimageBytes = pending.map(_.blob.length.toLong).sum
+      )
+    catch case e: Exception => logger.debug(s"telemetry status failed: ${e.getMessage}")
+
   /** JIP-3 event 13: in sync while the best head is within one epoch's
     * ticket-submission lag (two slots) of the wall-clock slot and we have
     * at least one peer.
@@ -766,7 +871,8 @@ final class JamNode(
       keys,
       audited = h => auditor.forall(_.isAudited(h)),
       serving = serving,
-      threads = threads
+      threads = threads,
+      misbehaved = misbehaved
     )
     // Start the voter before taking CE 149-153 streams, so no message finds it unset.
     // Set 0 is the genesis validators whatever the node's best state is now: a follower restarted as a voter after
@@ -856,6 +962,8 @@ final class JamNode(
     trieBackend.close()
 
 object JamNode:
+
+  val CheckpointRetryMillis: Long = 2000L
 
   /** How long shard custody units are kept: 672 complete epochs (28 days at the full configuration). */
   def shardRetentionSeconds(config: io.forge.jam.core.ChainConfig): Long =

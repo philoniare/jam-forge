@@ -111,6 +111,12 @@ final class ShardStore private (
     finally it.close()
 
   /** Bytes held in write buffers not yet flushed to disk. */
+  def estimatedUnitsAndBytes: (Long, Long) =
+    (
+      db.getLongProperty(shardsCf, "rocksdb.estimate-num-keys"),
+      db.getLongProperty(shardsCf, "rocksdb.estimate-live-data-size")
+    )
+
   def memTableBytes: Long = db.getLongProperty(shardsCf, "rocksdb.cur-size-all-mem-tables")
 
   def delete(erasureRoot: Hash, validatorIndex: Int): Unit =

@@ -153,6 +153,53 @@ final class GrandpaVoter(
   private[node] def futureCommitSets: List[Long] = futureCommits.keys.toList
 
   def voterSet: VoterSet = set
+
+  def restartAt(newSet: VoterSet): Unit =
+    set = newSet
+    lastSyncedFinal = Hash.zero
+    futureVotes.clear()
+    futureCommits.clear()
+    rounds.clear()
+    current = new RoundState(1, clock())
+    rounds.put(1, current)
+    onSetAdopted(set)
+    onProgress(set.setId, 1, Nil)
+    logger.info(
+      s"GRANDPA restarted at ${set.base.short} with ${set.size} voters, set " +
+        (if set.setId == GrandpaVoter.UnknownSet then "not yet known" else set.setId.toString)
+    )
+
+  private def inCurrentRange(target: Vote): Boolean =
+    val f = chain.finalized
+    var cursor = chain.parentOf(target.hash)
+    var ok = target.slot > f.slot
+    while ok && !cursor.contains(f.hash) do
+      cursor match
+        case Some(h) if chain.slotOf(h).exists(_ > f.slot) && chain.epochMarkerKeys(h).isEmpty => cursor = chain.parentOf(h)
+        case _                                                                              => ok = false
+    ok
+
+  private def learnSetId(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]]): Either[String, Option[Hash]] =
+    val unknown = set
+    if setId < 0 then Left("no set id")
+    else
+      set = unknown.copy(setId = setId)
+      val proven =
+        if chain.slotOf(c.target.hash).isEmpty then verifyCommitSignatures(round, setId, c).map(_ => false)
+        else if !inCurrentRange(c.target) then Left("not for a block the set at our finalized block votes on")
+        else verifyCommit(round, setId, c, ancestries).map(_ => true)
+      proven match
+        case Right(true) =>
+          logger.info(s"GRANDPA set $setId learned from the commit for ${c.target.short}")
+          onSetAdopted(set)
+          onProgress(set.setId, current.round, Nil)
+          onCommit(round, setId, c, ancestries)
+        case Right(false) =>
+          set = unknown
+          Right(Some(c.target.hash)) // signed by our voters; whether it is ours to learn from needs the block
+        case Left(why) =>
+          set = unknown
+          Left(s"set not yet known; $why")
   def round: Long = current.round
   private[node] def roundState: RoundState = current
   def roundState(r: Long): Option[RoundState] = rounds.get(r)
@@ -379,7 +426,7 @@ final class GrandpaVoter(
     */
   def adoptFinalizedSetChanges(): Boolean =
     val f = chain.finalized
-    if f.slot <= set.base.slot || f.hash == lastSyncedFinal then false
+    if set.setId == GrandpaVoter.UnknownSet || f.slot <= set.base.slot || f.hash == lastSyncedFinal then false
     else
       lastSyncedFinal = f.hash
       val markers = pathToBase(f.hash, set.base).reverse.filter((h, _) => chain.epochMarkerKeys(h).isDefined)
@@ -425,6 +472,7 @@ final class GrandpaVoter(
 
   /** Advance the current round as far as the votes and timers allow. */
   def step(): Unit =
+    if set.setId == GrandpaVoter.UnknownSet then return // nothing can be signed for a set we cannot name
     adoptFinalizedSetChanges()
     val r = current
     val now = clock()
@@ -574,7 +622,7 @@ final class GrandpaVoter(
       if twice.exists(vs => vs.size > 2 || vs(0).vote == vs(1).vote) then Left("duplicate precommit signer")
       else if !bySigner.keys.forall(set.members.contains) then Left("precommit by a non-voter")
       else if bySigner.size < set.threshold then Left(s"${bySigner.size} precommits, need ${set.threshold}")
-      else if !c.precommits.forall(p => verify(Precommit, p, round, setId)) then Left("bad precommit signature")
+      else if !c.precommits.forall(p => verify(Precommit, p, round, setId)) then Left(GrandpaVoter.BadPrecommitSignature)
       else if !consistentRoot(c.target) then Left("target names a state root other than ours")
       else if !singles.forall(p => descends(c.target, p.vote.hash)) then Left("precommit not on the target's chain")
       else
@@ -584,7 +632,8 @@ final class GrandpaVoter(
 
   /** CE 150 or a fetched justification. Returns the block to fetch when the target is not stored yet. */
   def onCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]] = Nil): Either[String, Option[Hash]] =
-    if setId > set.setId then
+    if set.setId == GrandpaVoter.UnknownSet then learnSetId(round, setId, c, ancestries)
+    else if setId > set.setId then
       val kept = keepFutureCommit(round, setId, c, ancestries)
       Left(s"set $setId, expected ${set.setId}; ${if kept then "kept for later" else "not kept"}")
     else if c.target.slot <= chain.finalized.slot then
@@ -605,7 +654,7 @@ final class GrandpaVoter(
     if setId != set.setId then Left(s"set $setId, expected ${set.setId}")
     else if c.precommits.map(_.signerKey).distinct.count(set.members.contains) < set.threshold then
       Left("not enough voters")
-    else if !c.precommits.forall(p => verify(Precommit, p, round, setId)) then Left("bad precommit signature")
+    else if !c.precommits.forall(p => verify(Precommit, p, round, setId)) then Left(GrandpaVoter.BadPrecommitSignature)
     else Right(())
 
   /** CE 152 response: adopt a later round's votes and move past it. */
@@ -642,6 +691,10 @@ final class GrandpaVoter(
     peerSetId == set.setId && peerRound > current.round + 1
 
 object GrandpaVoter:
+
+  val UnknownSet: Long = -1L
+
+  val BadPrecommitSignature = "bad precommit signature"
 
   /** Votes this many rounds ahead of ours are kept, so that a restarted voter can join the others' round. */
   val MaxRoundsAhead: Long = 256

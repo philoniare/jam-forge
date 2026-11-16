@@ -45,7 +45,8 @@ final class PreimageService(
     inbound: InboundWork = InboundWork.direct,
     serving: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
 ) extends LazyLogging:
 
   private val announcedMeta =
@@ -103,6 +104,7 @@ final class PreimageService(
             try
               if msg.length != 32 then
                 logger.warn(s"CE143: expected 32-byte hash, got ${msg.length}")
+                misbehaved(connection, Offence.Malformed)
                 None
               else lookupBlob(Hash(msg))
             catch
@@ -191,7 +193,9 @@ final class PreimageService(
               // Validators announce a preimage they obtained to their grid
               // neighbours (JAMNP-S CE 142), but not back to its source.
               announce(serviceId, blob, gossipTargets().filterNot(_ eq conn))
-            else logger.warn(s"CE143 response invalid for ${hash.toHex.take(18)}")
+            else
+              logger.warn(s"CE143 response invalid for ${hash.toHex.take(18)}")
+              if blob != null then misbehaved(conn, Offence.BadProof)
           catch case e: Exception => logger.warn(s"CE143 fetch failed: ${e.getMessage}")
           finally fetchingHashes.remove(hash)
     }

@@ -146,7 +146,8 @@ final class GuarantorService(
     fromCoGuarantor: (PeerConnection, Int) => Boolean = (_, _) => true,
     exportersFirst: (Hash, List[PeerConnection]) => List[PeerConnection] = GuarantorIndex.unordered,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
 ) extends LazyLogging:
 
   /** The report this guarantor signs: the computed one, or with `tamperReports` a wrong one (auth gas used + 1),
@@ -653,7 +654,8 @@ final class GuarantorService(
   private val importFetcher = new ImportFetcher(
     segments,
     root => exportersFirst(root, distribution.peers),
-    recover = (root, indices) => segmentRecovery.flatMap(_.recover(root, indices))
+    recover = (root, indices) => segmentRecovery.flatMap(_.recover(root, indices)),
+    lied = misbehaved(_, Offence.BadProof)
   )
 
   /** Fetches of imported segments: a few at once, a bounded number waiting. */

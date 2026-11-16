@@ -446,3 +446,46 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     net.voters(1).ourVotes.foreach(restarted.onVote)
     restarted.votersHeard shouldBe Set(keys(1).ed25519Key)
   }
+
+  test("after a checkpoint start the set id is learned only from a commit our voters alone could have signed") {
+    val markerKeys = Some(keys.map(_.ed25519Public).toList)
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    val b2 = blocks.add("b2", 2, marker = markerKeys)
+    val b3 = blocks.add("b3", 3)
+    val b4 = blocks.add("b4", 4)
+    val b5 = blocks.add("b5", 5, marker = markerKeys)
+    val b6 = blocks.add("b6", 6)
+    val chain = new FakeChain(blocks)
+    chain.finalizedHash = b3 // the block the chain was started at
+    var adopted = List.empty[Long]
+    val observer = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = fail("nothing is voted while the set is not known")
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public)), None, onSetAdopted = s => adopted ::= s.setId)
+    observer.restartAt(VoterSet(GrandpaVoter.UnknownSet, blocks.vote(b2), keys.map(_.ed25519Public)))
+    observer.step()
+
+    def commit(target: Hash, signedSet: Long, signers: Int = 3) =
+      Commit(blocks.vote(target), keys.take(signers).map(k => sign(Precommit, blocks.vote(target), 4L, signedSet, k)).toList)
+
+    observer.onCommit(4L, 3L, commit(blocks.byHash(b2).parent, 3L)).isLeft shouldBe true // an earlier set's
+    observer.onCommit(4L, 9L, commit(b6, 9L)).isLeft shouldBe true // a later set's, past the marker
+    observer.onCommit(4L, 7L, commit(b4, 7L, signers = 2)).isLeft shouldBe true // no supermajority
+    observer.onCommit(4L, 7L, commit(b4, 6L)).isLeft shouldBe true // signed over another id than claimed
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+    chain.finalizedHash shouldBe b3
+    val unknownBlock = Vote(h("elsewhere"), h("r"), 4L)
+    observer.onCommit(4L, 7L, Commit(unknownBlock, keys.take(3).map(k => sign(Precommit, unknownBlock, 4L, 7L, k)).toList)) shouldBe
+      Right(Some(unknownBlock.hash))
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+
+    observer.onCommit(4L, 7L, commit(b4, 7L)) shouldBe Right(None)
+    observer.voterSet.setId shouldBe 7L
+    chain.finalizedHash shouldBe b4
+    observer.onCommit(5L, 7L, commit(b5, 7L).copy(precommits = keys.take(3).map(k => sign(Precommit, blocks.vote(b5), 5L, 7L, k)).toList)) shouldBe Right(None)
+    chain.finalizedHash shouldBe b5
+    observer.voterSet.setId shouldBe 8L
+    adopted.reverse shouldBe List(GrandpaVoter.UnknownSet, 7L, 8L)
+  }

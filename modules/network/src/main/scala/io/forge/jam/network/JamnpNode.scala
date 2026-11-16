@@ -14,7 +14,6 @@ import io.netty.handler.ssl.ClientAuth
 import io.netty.handler.ssl.util.{SimpleKeyManagerFactory, SimpleTrustManagerFactory}
 import io.netty.incubator.codec.quic.{
   BoringSSLContextOption,
-  InsecureQuicTokenHandler,
   QuicChannel,
   QuicClientCodecBuilder,
   QuicServerCodecBuilder,
@@ -575,6 +574,9 @@ final class JamnpNode(
         fireConnectionChange(conn, false)
       ctx.fireChannelInactive()
 
+  def closeConnectionsOf(key: Array[Byte]): Unit =
+    connections.forEach(c => if java.util.Arrays.equals(c.peerKey, key) then c.close())
+
   @volatile private var priorityPeer: Array[Byte] => Boolean = _ => false
 
   /** Tell the node which peers (by Ed25519 key) are validators it must stay reachable for: they are admitted ahead
@@ -664,7 +666,7 @@ final class JamnpNode(
       .initialMaxStreamDataBidirectionalLocal(InitialMaxStreamData)
       .initialMaxStreamDataBidirectionalRemote(InitialMaxStreamData)
       .initialMaxStreamsBidirectional(MaxConcurrentStreams)
-      .tokenHandler(InsecureQuicTokenHandler.INSTANCE)
+      .tokenHandler(new SignedQuicTokenHandler())
       .handler(new ConnectionTracker())
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =

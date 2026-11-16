@@ -22,7 +22,8 @@ final class ImportFetcher(
     timeoutMs: Long = ImportFetcher.TimeoutMillis,
     maxPeers: Int = ImportFetcher.MaxPeersAsked,
     /** Last resort: rebuild the segments from erasure-coded shards (CE 139/140), verified. */
-    recover: (Hash, Seq[Int]) => Option[Map[Int, (Array[Byte], List[Array[Byte]])]] = (_, _) => None
+    recover: (Hash, Seq[Int]) => Option[Map[Int, (Array[Byte], List[Array[Byte]])]] = (_, _) => None,
+    lied: PeerConnection => Unit = _ => ()
 ) extends LazyLogging:
 
   type Fetched = (IndexedSeq[IndexedSeq[Array[Byte]]], IndexedSeq[IndexedSeq[List[Array[Byte]]]])
@@ -54,6 +55,7 @@ final class ImportFetcher(
           .flatMap(ImportFetcher.decodeResponse(_, indices.size))
           .flatMap { found =>
             val ok = verified(found)
+            if ok.isEmpty then lied(conn)
             if ok.isEmpty then logger.warn(s"CE148: peer ${JamNode.hex(conn.peerKey).take(16)} sent segments of ${root.toHex.take(18)} that do not verify")
             ok
           }

@@ -22,7 +22,8 @@ final class ShardService(
     config: ChainConfig,
     work: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
 ) extends LazyLogging:
   import ShardService.*
 
@@ -186,14 +187,20 @@ final class ShardService(
     request(conn, StreamKind.ShardDistribution, encodeShardRequest(erasureRoot, shardIndex), timeoutMs)
       .flatMap {
         case List(bundle, segments, justification) if segments.length % segmentShardSize == 0 =>
-          decodeJustification(justification, segmentShardSize).map { j =>
+          val decoded = decodeJustification(justification, segmentShardSize).map { j =>
             ValidatorShards(shardIndex, bundle, segments.grouped(segmentShardSize).toIndexedSeq, j)
           }
-        case _ => None
+          if decoded.isEmpty then misbehaved(conn, Offence.Malformed)
+          decoded
+        case _ =>
+          misbehaved(conn, Offence.Malformed)
+          None
       }
       .filter { shards =>
         val ok = DaShards.verify(erasureRoot, config.validatorCount, shards)
-        if !ok then logger.warn(s"shard $shardIndex failed verification against ${erasureRoot.toHex.take(18)}")
+        if !ok then
+          logger.warn(s"shard $shardIndex failed verification against ${erasureRoot.toHex.take(18)}")
+          misbehaved(conn, Offence.BadProof)
         ok
       }
 

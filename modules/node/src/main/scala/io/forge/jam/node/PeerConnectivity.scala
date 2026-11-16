@@ -179,6 +179,19 @@ private[node] final class PeerConnectivity(
       )
   }
 
+  private val upkeeper = threads.single("jam-upkeep")
+  private val upkeepRunning = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private def runUpkeep(): Unit =
+    if upkeepRunning.compareAndSet(false, true) then
+      try
+        upkeeper.execute { () =>
+          try upkeep()
+          catch case e: Exception => logger.warn(s"upkeep failed: ${e.getMessage}")
+          finally upkeepRunning.set(false)
+        }
+      catch case _: java.util.concurrent.RejectedExecutionException => upkeepRunning.set(false) // shutting down
+
   /** Dial validators we lack a connection to, as preferred initiator at once
     * and otherwise after the grace period (JAMNP-S "Required connectivity"),
     * and open or close UP 0 streams on our dialed connections to follow the
@@ -187,7 +200,7 @@ private[node] final class PeerConnectivity(
   private def maintain(): Unit =
     if stopping then return
     update(currentSlot())
-    upkeep()
+    runUpkeep()
     val now = System.currentTimeMillis()
     val self = identity.publicKeyBytes
     validatorDials.values.forEach { d =>

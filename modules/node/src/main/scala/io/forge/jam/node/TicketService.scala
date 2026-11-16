@@ -35,7 +35,8 @@ final class TicketService(
     /** Where received tickets are verified (a ring proof each): off the network threads. */
     inbound: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
 ) extends LazyLogging:
 
   /** Tickets accepted as proxy (or generated for ourselves as proxy) and
@@ -218,6 +219,7 @@ final class TicketService(
     def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val asProxy = stream.kind == StreamKind.TicketDistributionStep1
+        if TicketCodec.decode(msg).isLeft then misbehaved(connection, Offence.Malformed)
         val admitted = inbound.submit(connection, msg.length.toLong) {
           if receive(msg, asProxy, peerLabel(connection)) then stream.finish() else stream.reset()
         }

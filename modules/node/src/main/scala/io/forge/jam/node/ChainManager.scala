@@ -499,6 +499,83 @@ final class ChainManager(
         )
         true
 
+
+  def atGenesis: Boolean = synchronized(blockStore.getHead(BlockStore.GenesisHead).contains(bestHead.hash))
+
+  def downloadState(
+      target: Hash,
+      height: Long,
+      stateRoot: Hash,
+      peers: Iterable[io.forge.jam.network.PeerConnection],
+      ask: (io.forge.jam.network.PeerConnection, io.forge.jam.core.JamBytes) => Option[
+        (List[Array[Byte]], IndexedSeq[(io.forge.jam.core.JamBytes, io.forge.jam.core.JamBytes)])
+      ],
+      lied: io.forge.jam.network.PeerConnection => Unit = _ => ()
+  ): Either[String, Long] =
+    new StateDownload(
+      target,
+      stateRoot,
+      trieBackend,
+      ask,
+      save => synchronized(trieBackend.withJournal(target, height)(save())),
+      lied
+    ).run(peers)
+
+  def startAt(targetBytes: Array[Byte], stateRoot: Hash, ancestors: List[Array[Byte]]): Either[String, ChainHead] =
+    commit {
+      for
+        block <- decodeBlock(targetBytes)
+        hash = headerHashOf(block)
+        _ <- Either.cond(atGenesis, (), "the chain has already left genesis")
+        _ <- Either.cond(
+          stateRoot == Hash.zero || trieBackend.readNode(stateRoot).isDefined,
+          (),
+          s"state ${stateRoot.toHex.take(18)} is not in the store"
+        )
+        older <- ancestors.foldLeft[Either[String, (Hash, List[(Hash, Block)])]](Right((block.header.parent, Nil))) {
+          case (Right((expected, acc)), bytes) =>
+            decodeBlock(bytes).flatMap { b =>
+              val h = headerHashOf(b)
+              Either.cond(h == expected, (b.header.parent, (h, b) :: acc), s"ancestor ${h.toHex.take(18)} is not the parent expected")
+            }
+          case (left, _) => left
+        }.map(_._2.reverse)
+      yield
+        val slot = block.header.slot.toLong
+        val height = slot
+        older.foreach { (h, b) =>
+          if !blockStore.hasBlock(h) then storeBlock(h, b.header.parent, headerCodec.encode(b.header), Array.emptyByteArray)
+        }
+        storeBlock(hash, block.header.parent, headerCodec.encode(block.header), targetBytes)
+        headerLinks.advance(slot)
+        trieStore.markCommitted(stateRoot)
+        blockStore.setHead(BlockStore.BestHead, hash)
+        blockStore.setHead(BlockStore.FinalizedHead, hash)
+        meta.stateRoot = stateRoot
+        meta.bestSlot = slot
+        meta.finalizedSlot = slot
+        meta.finalizedRoot = stateRoot
+        meta.putBlockRoot(hash, stateRoot)
+        meta.putHeight(hash, height)
+        meta.pruneFloor = hash
+        meta.putFinalizedAt(height, hash)
+        bestHead = ChainHead(hash, slot, stateRoot)
+        val ticketed = stateView().gamma.st match
+          case io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets(_) => true
+          case _                                                                => false
+        val epoch = slot / config.epochLength
+        val marked = (block :: older.map(_._2)).exists(b =>
+          b.header.slot.toLong / config.epochLength == epoch && b.header.ticketsMark.isDefined
+        )
+        meta.putForkChoice(hash, ticketed, marked, weight = 0L)
+        leafMap.clear()
+        leafMap.put(hash, bestHead)
+        logger.info(
+          s"chain started at ${hash.toHex.take(18)} slot=$slot root=${stateRoot.toHex.take(18)} with ${older.size} ancestor header(s)"
+        )
+        bestHead
+    }
+
   def decodeBlock(bytes: Array[Byte]): Either[String, Block] =
     blockCodec.decodeAt(bytes, 0) match
       case Right((value, used)) if used == bytes.length =>

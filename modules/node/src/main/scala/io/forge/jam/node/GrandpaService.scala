@@ -25,7 +25,8 @@ final class GrandpaService(
     audited: Hash => Boolean = _ => true,
     serving: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
 ) extends LazyLogging:
 
   private val exec: ScheduledExecutorService = threads.scheduled("jam-grandpa")
@@ -220,6 +221,32 @@ final class GrandpaService(
     pendingCommits.take(imported).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None): Unit)
 
   /** True when the voter took the commit. */
+  def restartAtFinalized(): Unit =
+    exec.execute(() =>
+      guarded {
+        val f = chain.finalized
+        chain.stateViewAt(f.hash).foreach { view =>
+          val epoch = f.slot / chain.config.epochLength
+          var base = f.hash
+          var cursor: Option[Hash] = Some(f.hash)
+          var found = false
+          while !found && cursor.isDefined do
+            chain.header(cursor.get) match
+              case Some(h) if h.slot.toLong / chain.config.epochLength == epoch =>
+                if h.epochMark.isDefined then
+                  base = cursor.get
+                  found = true
+                else cursor = Some(h.parent)
+              case _ => cursor = None
+          if !found then
+            logger.warn("GRANDPA: the block that began the checkpoint's epoch is not held; the next voter set may be wrong")
+          val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(f.slot))
+          pendingCommits.prune(Long.MaxValue, Long.MaxValue)
+          voter.restartAt(VoterSet(GrandpaVoter.UnknownSet, baseVote, view.validators.current.map(_.ed25519.bytes)))
+        }
+      }
+    )
+
   private def applyCommit(
       round: Long,
       setId: Long,
@@ -237,6 +264,7 @@ final class GrandpaService(
       case Right(None) => true
       case Left(err) =>
         logger.debug(s"GRANDPA commit for ${c.target.short} rejected: $err")
+        if err == GrandpaVoter.BadPrecommitSignature then from.foreach(misbehaved(_, Offence.BadSignature))
         false
 
   /** Slots a peer's finality may be ahead before we ask for its justification. A voter is sent each commit (CE 150)
@@ -256,13 +284,28 @@ final class GrandpaService(
         // reached, so the set changes in between are asked for first (CE 153) and applied in order.
         val ourSet = voter.voterSet.setId
         warpRequests.retain(_ >= ourSet)
-        if chain.hasBlock(f.hash) && warpRequests.tryStart(ourSet, conn.peerPublicKey) then
+        if ourSet != GrandpaVoter.UnknownSet && chain.hasBlock(f.hash) && warpRequests.tryStart(ourSet, conn.peerPublicKey) then
           logger.debug(s"GRANDPA: peer final slot ${f.slot} is ahead of ours ($ours); asking for set changes from $ourSet")
           requestWarpSync(conn, ourSet)
         if justificationRequests.tryStart((f.hash, f.slot), conn.peerPublicKey) then
           requestJustification(conn, f.hash, f.slot)
+        if ourSet == GrandpaVoter.UnknownSet then
+          firstMarkerAbove(chain.finalized).filter(_._2 <= f.slot).foreach { (h, slot) =>
+            if justificationRequests.tryStart((h, slot), conn.peerPublicKey) then requestJustification(conn, h, slot)
+          }
       }
     }
+
+  private def firstMarkerAbove(finalized: ChainHead): Option[(Hash, Long)] =
+    var found: Option[(Hash, Long)] = None
+    var cursor: Option[Hash] = Some(chain.best.hash)
+    while cursor.exists(_ != finalized.hash) do
+      chain.header(cursor.get) match
+        case Some(h) if h.slot.toLong > finalized.slot =>
+          if h.epochMark.isDefined then found = Some(cursor.get -> h.slot.toLong)
+          cursor = Some(h.parent)
+        case _ => cursor = None
+    found
 
   // ---------------------------------------------------------------------------
   // handlers
@@ -303,7 +346,9 @@ final class GrandpaService(
             voter.onVote(m)
           }
         }
-      case Left(err) => logger.warn(s"bad CE149 payload: $err")
+      case Left(err) =>
+        logger.warn(s"bad CE149 payload: $err")
+        misbehaved(conn, Offence.Malformed)
   }
 
   /** CE 150. */
@@ -317,7 +362,9 @@ final class GrandpaService(
             applyCommit(round, setId, c, Nil, Some(conn))
           }
         }
-      case Left(err)                => logger.warn(s"bad CE150 payload: $err")
+      case Left(err) =>
+        logger.warn(s"bad CE150 payload: $err")
+        misbehaved(conn, Offence.Malformed)
   }
 
   /** CE 151. */
@@ -420,7 +467,9 @@ final class GrandpaService(
           if applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn)) then
             justificationRequests.succeeded((hash, slot))
         case Right(_)  => logger.warn("CE130 justification for another block")
-        case Left(err) => logger.warn(s"bad CE130 response: $err")
+        case Left(err) =>
+          logger.warn(s"bad CE130 response: $err")
+          misbehaved(conn, Offence.Malformed)
     }
 
   private def requestCatchUp(conn: PeerConnection, round: Long, setId: Long, onApplied: () => Unit = () => ()): Unit =
@@ -440,7 +489,9 @@ final class GrandpaService(
             applyCommit(j.round, j.setId, j.commit, j.ancestries, Some(conn))
           }
           if applied.contains(true) then warpRequests.succeeded(fromSet)
-        case Left(err) => logger.warn(s"bad CE153 response: $err")
+        case Left(err) =>
+          logger.warn(s"bad CE153 response: $err")
+          misbehaved(conn, Offence.Malformed)
     }
 
 object GrandpaService:

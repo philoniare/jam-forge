@@ -153,10 +153,12 @@ object SyncCodec:
     val out = mutable.ArrayBuffer[(JamBytes, JamBytes)]()
     var offset = 0
     while offset < bytes.length do
+      if bytes.length - offset < 32 then throw new IllegalArgumentException("state pairs: truncated key")
       val key = JamBytes(java.util.Arrays.copyOfRange(bytes, offset, offset + 31))
       offset += 31
       val (len, consumed) = JamCodecs.decodeCompactInteger(bytes, offset)
       offset += consumed
+      if len < 0 || len > bytes.length - offset then throw new IllegalArgumentException("state pairs: truncated value")
       val value = JamBytes(java.util.Arrays.copyOfRange(bytes, offset, offset + len.toInt))
       offset += len.toInt
       out += ((key, value))
@@ -184,7 +186,9 @@ final class SyncService(
     serving: InboundWork = InboundWork.direct,
     announcements: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    observer: SyncService.ImportObserver = SyncService.ImportObserver.none
 ) extends LazyLogging:
   import SyncCodec.*
 
@@ -192,6 +196,16 @@ final class SyncService(
   private val announceStreams = ConcurrentHashMap.newKeySet[MessageStream]()
 
   private val peerFinals = new ConcurrentHashMap[PeerConnection, HashSlot]()
+
+  @volatile private var held = false
+  def hold(): Unit = held = true
+
+  def release(): Unit =
+    held = false
+    peerFinals.keySet.forEach(conn => catchUp(conn))
+
+  private[node] def fetchBlocks(conn: PeerConnection, from: Hash, maxBlocks: Int, ascending: Boolean = false)
+      : Option[List[Array[Byte]]] = exchange(conn, from, maxBlocks, ascending)
 
   /** The latest `Final` announced by the peer on `conn`, if any handshake or
     * announcement has been received from it yet.
@@ -344,6 +358,7 @@ final class SyncService(
     val waiting = new AnnouncementMailbox(SyncService.MaxWaitingAnnouncements)
     def malformed(reason: String): Unit =
       logger.debug(s"UP0: bad message from $side peer: $reason")
+      misbehaved(conn, Offence.Malformed)
       stream.reset()
     def handle(first: Boolean, msg: Array[Byte]): Unit =
       try
@@ -477,6 +492,9 @@ final class SyncService(
       onDone: () => Unit = () => (),
       ascending: Boolean = false
   ): Unit =
+    if held then
+      onDone()
+      return
     val request = new FetchQueue.Request(conn, from, maxBlocks, onDone, ascending)
     val dropped = fetches.offer(request)
     dropped.foreach(_.onDone())
@@ -573,6 +591,7 @@ final class SyncService(
     ) match
       case Left(failure) =>
         logger.warn(s"block request failed: ${failure.message}")
+        if failure == StreamRequest.Failure.TimedOut then misbehaved(conn, Offence.Unanswered)
         None
       case Right(messages) =>
         Some(messages.flatMap { m =>
@@ -580,6 +599,7 @@ final class SyncService(
             case Right(bs) => bs
             case Left(err) =>
               logger.warn(s"CE128 response undecodable: $err")
+              misbehaved(conn, Offence.Malformed)
               Nil
         })
 
@@ -590,7 +610,10 @@ final class SyncService(
     var unknownParent = false
     val ordered = if ascending then blocks else blocks.reverse
     ordered.foreach { blockBytes =>
-      chain.importBlock(blockBytes, Some(conn.peerPublicKey)) match
+      val watched = observer.importing(blockBytes)
+      val outcome = chain.importBlock(blockBytes, Some(conn.peerPublicKey))
+      observer.imported(watched, outcome)
+      outcome match
         case Right(_) =>
           imported += 1
           chain.decodeBlock(blockBytes).foreach { b =>
@@ -598,6 +621,8 @@ final class SyncService(
           }
         case Left(err) =>
           if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
+          if err.isInstanceOf[ChainError.InvalidBlock] || err == ChainError.PreviouslyInvalid then
+            misbehaved(conn, Offence.InvalidBlock)
           if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
           logger.debug(s"sync import skipped: $err")
     }
@@ -657,6 +682,15 @@ final class SyncService(
       }
 
 object SyncService:
+
+  trait ImportObserver:
+    def importing(blockBytes: Array[Byte]): AnyRef | Null
+    def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit
+
+  object ImportObserver:
+    val none: ImportObserver = new ImportObserver:
+      def importing(blockBytes: Array[Byte]): AnyRef | Null = null
+      def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit = ()
   /** Block fetches that may wait for the import thread: per peer (the newest are kept) and in total. */
   val MaxPendingFetchesPerPeer: Int = 8
   val MaxPendingFetches: Int = 2048

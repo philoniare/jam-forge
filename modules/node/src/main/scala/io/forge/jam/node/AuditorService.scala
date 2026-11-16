@@ -40,6 +40,7 @@ final class AuditorService(
     inbound: InboundWork = InboundWork.direct,
     guarantorsFirst: (Hash, List[PeerConnection]) => List[PeerConnection] =
       GuarantorIndex.unordered,
+    misbehaved: (Array[Byte], Offence) => Unit = (_, _) => (),
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
@@ -684,6 +685,7 @@ final class AuditorService(
         updateAudited(t, t.lastTranche, a.items.map(_._2))
       else
         logger.warn(s"rejected CE144 from validator $v (signature $signed, reports $known, selection $selected)")
+        if !signed then misbehaved(peer, Offence.BadSignature)
         logger.debug(s"CE144 rejected: key=${JamNode.hex(peer)} head=${JamNode.hex(head)} evidence=${JamNode.hex(evidence)}")
 
   // =========================================================================
@@ -781,7 +783,11 @@ final class AuditorService(
           }
         }
         logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
-      else logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
+      else
+        logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
+        source match
+          case conn: PeerConnection if signer.isDefined => misbehaved(conn.peerKey, Offence.BadSignature)
+          case _                                        => ()
     else logger.warn(s"bad CE145 length ${msg.length}")
 
   /** Keep a genuine judgment whose report no tracked block holds: the block that makes the report available may

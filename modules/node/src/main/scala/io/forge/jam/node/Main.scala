@@ -145,7 +145,14 @@ object Main extends LazyLogging:
       tamperReports = flags.contains("--fault-tamper-reports"),
       finalityPeers = opts.get("finality-peers").map(_.toInt),
       telemetry = opts.get("telemetry").map(parseHostPort),
-      submitPort = opts.get("submit-port").map(_.toInt)
+      submitPort = opts.get("submit-port").map(_.toInt),
+      syncFrom = opts.get("sync-from").map { hex =>
+        val bytes =
+          try io.forge.jam.core.JamBytes.fromHexUnsafe(hex.stripPrefix("0x")).toArray
+          catch case _: Exception => fail(s"--sync-from: not a hex header hash: $hex")
+        if bytes.length != 32 then fail(s"--sync-from: a header hash is 32 bytes, got ${bytes.length}")
+        io.forge.jam.core.primitives.Hash(bytes)
+      }
     )
 
     val node = new JamNode(spec, config).start()
@@ -219,10 +226,13 @@ object Main extends LazyLogging:
   /** A 32-byte key given as hex, or as the path of a file holding the hex. */
   private def readKey(option: String, hexOrPath: String): Array[Byte] =
     val (hex, from) =
-      if hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then (hexOrPath, s"--$option")
+      if hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then
+        System.err.println(s"warning: --$option given as hex is visible in the process list; give the path of a file instead")
+        (hexOrPath, s"--$option")
       else
         val path = Paths.get(hexOrPath)
         if !Files.exists(path) then fail(s"$path: no such file (expected a 32-byte hex key or the path of one)")
+        warnIfExposed(path)
         (Files.readString(path).trim, path.toString)
     val key = JamBytes.fromHex(hex).fold(e => fail(s"$from: not hex: $e"), _.toArray)
     if key.length != 32 then fail(s"$from: expected a 32-byte hex key, got ${key.length} bytes")
@@ -231,6 +241,7 @@ object Main extends LazyLogging:
   /** The 32-byte seed in `path` (hex), or a new random one written there, readable by the owner only. */
   private def loadOrCreateSeed(path: Path): Array[Byte] =
     if Files.exists(path) then
+      warnIfExposed(path)
       val seed = JamBytes.fromHexUnsafe(Files.readString(path).trim).toArray
       if seed.length != 32 then fail(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
       seed
@@ -243,6 +254,19 @@ object Main extends LazyLogging:
       catch case _: UnsupportedOperationException => Files.createFile(path)
       Files.writeString(path, JamBytes(seed).toHex + "\n")
       seed
+
+  private[node] def exposedTo(path: Path): Option[String] =
+    try
+      val perms = Files.getPosixFilePermissions(path)
+      import java.nio.file.attribute.PosixFilePermission.*
+      val who = List(GROUP_READ -> "its group", OTHERS_READ -> "everyone").collect { case (p, w) if perms.contains(p) => w }
+      Option.when(who.nonEmpty)(who.mkString(" and "))
+    catch case _: UnsupportedOperationException => None
+
+  private def warnIfExposed(path: Path): Unit =
+    exposedTo(path).foreach(who =>
+      System.err.println(s"warning: $path holds a secret key and is readable by $who; restrict it with: chmod 600 $path")
+    )
 
   private def parseHostPort(s: String): InetSocketAddress =
     val colon = s.lastIndexOf(':')

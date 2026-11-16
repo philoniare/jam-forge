@@ -13,9 +13,11 @@ import io.forge.jam.core.primitives.Hash
 /** Telemetry client: when enabled, the node opens
   * a TCP connection to `--telemetry HOST:PORT` carrying length-prefixed
   * messages (u32 LE size ++ content), the node information message first,
-  * then events. Emitted: 11 best block changed, 12 finalized block changed,
-  * 13 sync status changed, 27 disconnected, 40 authoring, 41 authoring
-  * failed, 42 authored.
+  * then events. Emitted: 10 status, 11 best block changed, 12 finalized block changed,
+  * 13 sync status changed, 21/23 connected in, 24/26 connected out, 27 disconnected, 28 peer misbehaved,
+  * 40 authoring, 41 authoring failed, 42 authored, 43 importing, 44 block verification failed, 45 block
+  * verified, 46 block execution failed. Not emitted: 47 block executed (the accumulate costs it carries are not
+  * collected) and the events of block distribution, tickets, guaranteeing, availability, recovery and preimages.
   *
   * Events queue on a bounded buffer and a single sender thread writes them;
   * when the server is unreachable they are dropped and the connection is
@@ -81,6 +83,45 @@ final class Telemetry(
     emit(27, peer ++ Array(0.toByte) ++ string(reason, 128))
     ()
 
+  def status(
+      peers: Int,
+      validatorPeers: Int,
+      announcingPeers: Int,
+      guaranteesByCore: Array[Byte],
+      shards: Long,
+      shardBytes: Long,
+      preimages: Int,
+      preimageBytes: Long
+  ): Unit =
+    emit(
+      10,
+      u32(peers.toLong) ++ u32(validatorPeers.toLong) ++ u32(announcingPeers.toLong) ++ guaranteesByCore ++
+        u32(math.min(shards, 0xffffffffL)) ++ u64(shardBytes) ++ u32(preimages.toLong) ++
+        u32(math.min(preimageBytes, 0xffffffffL))
+    )
+    ()
+
+  def connectedIn(address: Option[java.net.SocketAddress], peer: Array[Byte]): Unit =
+    idOnCurrentConnection(emit(21, peerAddress(address))).foreach(id => emit(23, u64(id) ++ peer))
+
+  def connectedOut(peer: Array[Byte], address: Option[java.net.SocketAddress]): Unit =
+    idOnCurrentConnection(emit(24, peer ++ peerAddress(address))).foreach(id => emit(26, u64(id)))
+
+  def peerMisbehaved(peer: Array[Byte], reason: String): Unit =
+    emit(28, peer ++ string(reason, 128))
+    ()
+
+  def importing(slot: Long, outline: Array[Byte]): Option[EventRef] = emit(43, u32(slot) ++ outline)
+
+  def blockVerificationFailed(importing: Option[EventRef], reason: String): Unit =
+    idOnCurrentConnection(importing).foreach(id => emit(44, u64(id) ++ string(reason, 128)))
+
+  def blockVerified(importing: Option[EventRef]): Unit =
+    idOnCurrentConnection(importing).foreach(id => emit(45, u64(id)))
+
+  def blockExecutionFailed(importing: Option[EventRef], reason: String): Unit =
+    idOnCurrentConnection(importing).foreach(id => emit(46, u64(id) ++ string(reason, 128)))
+
   def authoring(slot: Long, parent: Hash): Option[EventRef] =
     emit(40, u32(slot) ++ parent.bytes.toArray)
 
@@ -141,6 +182,16 @@ object Telemetry:
   /** JIP-3 Timestamp: microseconds since the start of the JAM Common Era. */
   def timestampMicros(): Long =
     System.currentTimeMillis() * 1000L - SlotClock.JamCommonEraSeconds * 1000000L
+
+  def peerAddress(address: Option[java.net.SocketAddress]): Array[Byte] =
+    address match
+      case Some(a: InetSocketAddress) if a.getAddress != null =>
+        val ip = a.getAddress.getAddress
+        val v6 =
+          if ip.length == 16 then ip
+          else Array.fill[Byte](10)(0) ++ Array[Byte](0xff.toByte, 0xff.toByte) ++ ip
+        v6 ++ u16(a.getPort.toLong)
+      case _ => new Array[Byte](18)
 
   def u16(v: Long): Array[Byte] = LittleEndian.encode(v, 2)
   def u32(v: Long): Array[Byte] = LittleEndian.encode(v, 4)
