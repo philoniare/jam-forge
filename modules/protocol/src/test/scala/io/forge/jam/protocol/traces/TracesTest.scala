@@ -518,9 +518,9 @@ class TracesTest extends AnyFunSuite with Matchers:
       new BlockImporter(config).importBlock(step.block, step.preState) match
         case ImportResult.Success(root, _) =>
           root shouldBe step.postState.stateRoot withClue s"Post-state root mismatch in $traceName step $stepName"
-        case ImportResult.Failure(error, message, _) =>
+        case rejected =>
           step.postState.stateRoot shouldBe step.preState.stateRoot withClue
-            s"$traceName step $stepName rejected ($error: $message) but a state change was expected"
+            s"$traceName step $stepName rejected ($rejected) but a state change was expected"
 
   // These traces carry preimages, whose extrinsic-hash term is (E_4(s), H(d))
   for traceName <- Seq("preimages", "preimages_light", "fuzzy", "fuzzy_light") do

@@ -3,7 +3,7 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, CountDownLatch, ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
-import io.forge.jam.network.{JamnpStream, StreamKind}
+import io.forge.jam.network.{MessageStream, StreamKind}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -19,7 +19,7 @@ class EgressSendSpec extends AnyFunSuite with Matchers:
     try
       val dist = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
 
-      val never = new CompletableFuture[JamnpStream]()
+      val never = new CompletableFuture[MessageStream]()
       val runThread = new AtomicReference[String]()
       val opened = new CountDownLatch(1)
 

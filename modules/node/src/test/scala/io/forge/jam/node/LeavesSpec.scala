@@ -1,13 +1,9 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs.encode
-import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -17,22 +13,7 @@ import org.scalatest.matchers.should.Matchers
   * tickets, node B forks bare); the leaf set across a fork and a reorg is
   * checked in `ForkChoiceSpec` itself.
   */
-class LeavesSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir =
-    sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath =
-    baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def tempDir(p: String): Path = Files.createTempDirectory(p)
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class LeavesSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 

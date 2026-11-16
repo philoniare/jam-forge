@@ -137,10 +137,15 @@ object AssuranceTransition:
     input: AssuranceInput,
     state: AssuranceState
   ): Set[Int] =
+    assuredCores(input.assurances, state.availAssignments.size, state.currValidators.size)
+
+  /** The cores, of `coresCount`, that more than two thirds of `validatorCount` validators assure in `assurances`
+    * (GP eq:availableworkreports). Whether a core holds a report is the caller's to check.
+    */
+  def assuredCores(assurances: Iterable[AssuranceExtrinsic], coresCount: Int, validatorCount: Int): Set[Int] =
     // For each core, count how many validators have assured it
-    val coresCount = state.availAssignments.size
     val counts = new Array[Int](coresCount)
-    for assurance <- input.assurances do
+    for assurance <- assurances do
       val bitfieldBytes = assurance.bitfield.toArray
       var coreIndex = 0
       while coreIndex < coresCount do
@@ -151,7 +156,7 @@ object AssuranceTransition:
     val result = scala.collection.mutable.Set[Int]()
     var coreIndex = 0
     while coreIndex < coresCount do
-      if 3 * counts(coreIndex) > 2 * state.currValidators.size then result += coreIndex
+      if 3 * counts(coreIndex) > 2 * validatorCount then result += coreIndex
       coreIndex += 1
     result.toSet
 

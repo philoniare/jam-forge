@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.TimeUnit
 
 import io.circe.Decoder
@@ -21,14 +21,9 @@ import spire.math.UShort
   * resolves it through recent history, gets the segment and its proof, refines with it, and the report carries the
   * segment-root lookup that the chain accepts.
   */
-class DevnetImportSpec extends AnyFunSuite with Matchers:
+class DevnetImportSpec extends AnyFunSuite with Matchers with NodeFixture:
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   test("an import of an earlier package's export, by package hash, is resolved, fetched, verified and reported") {
     given Decoder[Genesis] = Genesis.decoder

@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.{
   CompletableFuture,
   ConcurrentLinkedQueue,
@@ -16,13 +16,13 @@ import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
-import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, JamnpStream, NodeIdentity, StreamKind}
+import io.forge.jam.network.{JamnpConfig, PeerConnection, JamnpNode, MessageStream, NodeIdentity, StreamKind}
 import io.forge.jam.protocol.traces.TraceStep
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** Queues a peer can fill stay bounded under a flood, and work that must not be lost still runs. */
-class WorkLimitsSpec extends AnyFunSuite with Matchers:
+class WorkLimitsSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def daemon(name: String): java.util.concurrent.ThreadFactory = r =>
     val t = new Thread(r, name); t.setDaemon(true); t
@@ -118,7 +118,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
             // The first send holds the egress thread (a send does not wait there for its stream, so the open
             // itself is made to block); the rest fail at once.
             if i == 1 then release.await()
-            CompletableFuture.failedFuture[JamnpStream](new RuntimeException("no peer")),
+            CompletableFuture.failedFuture[MessageStream](new RuntimeException("no peer")),
           StreamKind.AssuranceDistribution,
           Array[Byte](1)
         )
@@ -151,7 +151,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
       // A one-shot send still goes out at once.
       val sent = new CountDownLatch(1)
       dist.submitSend(
-        () => { sent.countDown(); CompletableFuture.failedFuture[JamnpStream](new RuntimeException("no peer")) },
+        () => { sent.countDown(); CompletableFuture.failedFuture[MessageStream](new RuntimeException("no peer")) },
         StreamKind.AssuranceDistribution,
         Array[Byte](1)
       )
@@ -165,7 +165,6 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
   // --- sync fetch queue, end to end ------------------------------------------------------------------------------
 
   private given io.circe.Decoder[TraceStep] = TraceStep.decoder(using summon[io.circe.Decoder[Block]])
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir = baseDir.resolve("jam-conformance/fuzz-reports/0.8.0/traces")
 
   private def anyStep(): Option[TraceStep] =
@@ -177,9 +176,6 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
         .take(10)
         .map(p => decode[TraceStep](Files.readString(p)))
         .collectFirst { case Right(step) => step }
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
 
   test("sync serving: a flood of CE 128 and CE 129 requests is answered or refused off the event loops, and the node still serves") {
     val step = anyStep().getOrElse(cancel("no fuzz trace available (jam-conformance corpus not present)"))
@@ -251,10 +247,10 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers:
       // The peer answers no block request until told to, so the node's import thread is held on the first fetch.
       val requested = new ConcurrentLinkedQueue[Hash]()
       val answer = new CountDownLatch(1)
-      val held = new ConcurrentLinkedQueue[JamnpStream]()
-      peer.registerHandler(
+      val held = new ConcurrentLinkedQueue[MessageStream]()
+      peer.registerPeerHandler(
         StreamKind.BlockRequest,
-        (_: JamnpConnection, stream: JamnpStream) =>
+        (_: PeerConnection, stream: MessageStream) =>
           stream.onMessage { msg =>
             requested.add(Hash(java.util.Arrays.copyOfRange(msg, 0, 32)))
             if answer.getCount == 0 then stream.reset() else held.add(stream)

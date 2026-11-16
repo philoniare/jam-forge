@@ -5,7 +5,7 @@ import io.forge.jam.core.LittleEndian
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.constants.Csegmentsize
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.network.{JamnpConnection, StreamKind}
+import io.forge.jam.network.{PeerConnection, StreamKind}
 import io.forge.jam.protocol.refine.ImportResolver
 import io.forge.jam.protocol.refine.ImportResolver.Import
 
@@ -18,7 +18,7 @@ import io.forge.jam.protocol.refine.ImportResolver.Import
   */
 final class ImportFetcher(
     segments: SegmentPool,
-    peers: () => Iterable[JamnpConnection],
+    peers: () => Iterable[PeerConnection],
     timeoutMs: Long = ImportFetcher.TimeoutMillis,
     maxPeers: Int = ImportFetcher.MaxPeersAsked,
     /** Last resort: rebuild the segments from erasure-coded shards (CE 139/140), verified. */

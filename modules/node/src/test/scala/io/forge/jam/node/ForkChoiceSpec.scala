@@ -1,13 +1,10 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -20,22 +17,7 @@ import org.scalatest.matchers.should.Matchers
   * B skips slot 2 and produces 3' and 4'. Feeding 3' to A parks it on a side
   * branch (equal height); 4' makes B's branch longer and A reorgs onto it.
   */
-class ForkChoiceSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir =
-    sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath =
-    baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def tempDir(p: String): Path = Files.createTempDirectory(p)
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
@@ -117,10 +99,16 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers:
       leavesAfterFork.map(_.hash).toSet shouldBe Set(headA2.hash, block2bHash)
 
       // ...and 4' makes the branch longer → reorg onto B's chain.
+      val left = scala.collection.mutable.ListBuffer.empty[(List[Hash], List[Hash])]
+      nodeA.chain.onAbandoned((abandoned, adopted) =>
+        left += ((abandoned.map(nodeA.chain.headerHashOf), adopted.map(nodeA.chain.headerHashOf)))
+      )
       val reorged = nodeA.chain.importBlock(block3bBytes)
       withClue(s"reorg result: $reorged") {
         reorged.isRight shouldBe true
       }
+      // A's block 2 was left behind for 3' and 4', whose extrinsics the pools must not take back.
+      left.toList shouldBe List((List(headA2.hash), List(block2bHash, nodeB.chain.best.hash)))
       nodeA.chain.best.hash shouldBe nodeB.chain.best.hash
       nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
       nodeA.chain.best.slot shouldBe 4L

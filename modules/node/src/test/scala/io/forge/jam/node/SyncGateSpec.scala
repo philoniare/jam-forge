@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.TimeUnit
 
 import io.circe.Decoder
@@ -9,7 +9,7 @@ import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, LittleEndian}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.network.{JamnpConfig, JamnpNode, JamnpStream, NodeIdentity, StreamKind}
+import io.forge.jam.network.{JamnpConfig, JamnpNode, MessageStream, NodeIdentity, StreamKind}
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -17,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 /** A validator that is still catching up with its peers holds its duties: what it would author, guarantee or assure
   * is built on a head the network has moved past.
   */
-class SyncGateSpec extends AnyFunSuite with Matchers:
+class SyncGateSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val second = 1000L
 
@@ -67,8 +67,6 @@ class SyncGateSpec extends AnyFunSuite with Matchers:
     gate.holding(ourBest = 10, peerBests = List(40), nowMillis = 13 * second) shouldBe true
   }
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
   private def eventually(what: String, seconds: Int = 20)(cond: => Boolean): Unit =
@@ -97,7 +95,7 @@ class SyncGateSpec extends AnyFunSuite with Matchers:
     val dir: Path = Files.createTempDirectory("jam-sync-gate")
     var node: JamNode = null
     val peer = new JamnpNode(NodeIdentity.generate(), JamnpConfig(genesisHashPrefix = spec.alpnPrefix))
-    peer.registerHandler(StreamKind.BlockRequest, (_, stream: JamnpStream) => stream.onMessage(_ => ()))
+    peer.registerPeerHandler(StreamKind.BlockRequest, (_, stream: MessageStream) => stream.onMessage(_ => ()))
     try
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false)).start()
       node.enableAuthoring(devKeys)

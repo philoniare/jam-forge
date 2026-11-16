@@ -38,6 +38,8 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     def stateRootOf(x: Hash): Option[Hash] = blocks.byHash.get(x).map(_.root)
     def headerBytes(x: Hash): Option[Array[Byte]] = None
     def epochMarkerKeys(x: Hash): Option[List[Array[Byte]]] = blocks.byHash.get(x).flatMap(_.marker)
+    var genesisNext: Option[List[Array[Byte]]] = None
+    override def genesisNextKeys: Option[List[Array[Byte]]] = genesisNext
     def finalizeBlock(x: Hash): Either[String, Unit] =
       if !isAncestor(finalizedHash, x) then Left("not a descendant of the finalized block")
       else
@@ -225,6 +227,111 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     net.run(20_000, (from, to) => from != 0 && to != 0)
     net.chains(1).finalizedHash shouldBe h("b5")
     net.chains(cutOff).finalizedHash shouldBe h("b5")
+  }
+
+  // polkajam v0.8.0, six validators on a genesis whose staging set swaps three of them: the set that follows the
+  // first epoch marker still finalizes with all six, and the one after the second marker cannot.
+  test("the set after an epoch marker is that epoch's validators; the marker's keys take over one marker later") {
+    val incoming = (4 until 8).map(ValidatorKeySet.dev)
+    val nextEpoch = Some(incoming.map(_.ed25519Public).toList)
+    val blocks = new Blocks
+    blocks.add("b1", 1, marker = nextEpoch)
+    blocks.add("b2", 2)
+    blocks.add("b3", 3, marker = nextEpoch)
+    blocks.add("b4", 4)
+    val net = new Net(blocks, keys)
+    net.run(40_000)
+    // Set 1 began at b1 with the genesis validators, who finalized up to the next marker.
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b3"))
+    net.voters.map(_.voterSet.setId).distinct shouldBe Seq(2L)
+    net.voters(0).voterSet.members shouldBe incoming.map(_.ed25519Key).toSet
+  }
+
+  test("the first epoch marker brings in the genesis state's next-epoch validators") {
+    val incoming = (4 until 8).map(ValidatorKeySet.dev)
+    val blocks = new Blocks
+    blocks.add("b1", 1, marker = Some(keys.map(_.ed25519Public).toList))
+    blocks.add("b2", 2)
+    val net = new Net(blocks, keys)
+    net.chains.foreach(_.genesisNext = Some(incoming.map(_.ed25519Public).toList))
+    net.run(20_000)
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b1"))
+    net.voters(0).voterSet.members shouldBe incoming.map(_.ed25519Key).toSet
+  }
+
+  test("a voter following finality across markers takes each set's keys from the marker before it") {
+    val incoming = (4 until 8).map(ValidatorKeySet.dev)
+    val blocks = new Blocks
+    blocks.add("b1", 1, marker = Some(incoming.map(_.ed25519Public).toList))
+    blocks.add("b2", 2)
+    val net = new Net(blocks, keys)
+    val cutOff = 3
+    net.run(20_000, (from, to) => from != cutOff && to != cutOff)
+    net.chains(0).finalizedHash shouldBe h("b2")
+    net.chains(cutOff).finalizedHash = h("b2")
+    net.voters(cutOff).step()
+    net.voters(cutOff).voterSet.setId shouldBe 1L
+    net.voters(cutOff).voterSet.members shouldBe keys.map(_.ed25519Key).toSet
+  }
+
+  private def observerOf(blocks: Blocks): (GrandpaVoter, FakeChain) =
+    val chain = new FakeChain(blocks)
+    val quiet = new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = ()
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    (new GrandpaVoter(chain, quiet, VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public)), None, clock = () => 0L), chain)
+
+  private def vote(kind: Int, block: Vote, by: Int, round: Long = 1L): VoteMessage =
+    VoteMessage(round, 0L, SignedMessage(kind, sign(kind, block, round, 0L, keys(by))))
+
+  test("an equivocating voter counts towards every block, and both its votes are kept") {
+    val blocks = new Blocks
+    (1 to 2).foreach(i => blocks.add(s"b$i", i.toLong))
+    val (voter, _) = observerOf(blocks)
+    val (b1, b2) = (blocks.vote(h("b1")), blocks.vote(h("b2")))
+    voter.onVote(vote(Prevote, b2, by = 1))
+    voter.onVote(vote(Prevote, b2, by = 2))
+    voter.onVote(vote(Prevote, b1, by = 3))
+    voter.prevoteGhost(voter.roundState).map(_.hash) shouldBe Some(h("b1"))
+    // Voter 3 prevotes again, differently: it can no longer be held to b1, so b2 has 3 of 4.
+    voter.onVote(vote(Prevote, b2, by = 3))
+    voter.prevoteGhost(voter.roundState).map(_.hash) shouldBe Some(h("b2"))
+    voter.roundState.prevoteEquivocations.get(keys(3).ed25519Key).map((a, b) => (a.vote, b.vote)) shouldBe Some((b1, b2))
+    // A third vote changes nothing, and the pair is relayed as evidence.
+    voter.onVote(vote(Prevote, blocks.vote(blocks.genesis), by = 3))
+    voter.roundState.prevoteEquivocations.size shouldBe 1
+    voter.roundVotes.count(_.message.signed.signerKey == keys(3).ed25519Key) shouldBe 2
+  }
+
+  test("an equivocator's precommits finalize with two honest ones, and the commit carrying both verifies") {
+    val blocks = new Blocks
+    (1 to 2).foreach(i => blocks.add(s"b$i", i.toLong))
+    val (voter, chain) = observerOf(blocks)
+    val (b1, b2) = (blocks.vote(h("b1")), blocks.vote(h("b2")))
+    val pair = List(sign(Precommit, b1, 1L, 0L, keys(3)), sign(Precommit, blocks.vote(blocks.genesis), 1L, 0L, keys(3)))
+    val honest = List(sign(Precommit, b2, 1L, 0L, keys(1)), sign(Precommit, b2, 1L, 0L, keys(2)))
+    voter.verifyCommit(1L, 0L, Commit(b2, honest ++ pair)) shouldBe Right(())
+    // The same vote twice is not an equivocation, three votes are not a commit, and one honest vote is too few.
+    voter.verifyCommit(1L, 0L, Commit(b2, honest ++ List(pair.head, pair.head))).isLeft shouldBe true
+    voter.verifyCommit(1L, 0L, Commit(b2, honest ++ pair :+ sign(Precommit, b2, 1L, 0L, keys(3)))).isLeft shouldBe true
+    voter.verifyCommit(1L, 0L, Commit(b2, honest.take(1) ++ pair)).isLeft shouldBe true
+    (honest ++ pair).foreach(p => voter.onVote(VoteMessage(1L, 0L, SignedMessage(Precommit, p))))
+    chain.finalizedHash shouldBe h("b2")
+  }
+
+  test("a commit is refused when its target or too many precommits name a state root other than ours") {
+    val blocks = new Blocks
+    (1 to 2).foreach(i => blocks.add(s"b$i", i.toLong))
+    val (voter, _) = observerOf(blocks)
+    val b2 = blocks.vote(h("b2"))
+    val forged = b2.copy(stateRoot = h("another root"))
+    val good = (0 until 3).map(i => sign(Precommit, b2, 1L, 0L, keys(i))).toList
+    voter.verifyCommit(1L, 0L, Commit(b2, good)) shouldBe Right(())
+    voter.verifyCommit(1L, 0L, Commit(forged, good)).isLeft shouldBe true
+    // A precommit for another root is a vote for another block: 2 of 4 are left for b2.
+    voter.verifyCommit(1L, 0L, Commit(b2, good.take(2) :+ sign(Precommit, forged, 1L, 0L, keys(2)))).isLeft shouldBe true
+    voter.verifyCommit(1L, 0L, Commit(b2, good :+ sign(Precommit, forged, 1L, 0L, keys(3)))) shouldBe Right(())
   }
 
   test("a restarted voter joins the round that f + 1 voters are in") {

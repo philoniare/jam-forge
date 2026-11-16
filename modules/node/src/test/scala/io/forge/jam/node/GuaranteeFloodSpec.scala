@@ -1,9 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, constants}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, Hash, Timeslot, ValidatorIndex}
@@ -13,26 +10,12 @@ import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.Ed25519ZebraWrapper
-import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import spire.math.{UInt, UShort}
 
 /** CE 135 guarantees enter the pool only with credentials the Reports STF would accept, and the pool is capped. */
-class GuaranteeFloodSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def tempDir(p: String): Path = Files.createTempDirectory(p)
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class GuaranteeFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val config = ChainConfig.TINY
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)

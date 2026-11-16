@@ -314,7 +314,10 @@ object ReportTransition:
     val indices = guarantee.signatures.map(_.validatorIndex.toInt)
     for
       _ <- ensure(indices.length >= 2 && indices.length <= 3, ReportErrorCode.InsufficientGuarantees)
-      _ <- ensure(ctx.reportRotation >= ctx.currentRotation - 1, ReportErrorCode.ReportEpochBeforeLast)
+      _ <- ensure(
+        GuarantorAssignment.rotationInWindow(guarantee.slot.toLong, currentSlot, config),
+        ReportErrorCode.ReportEpochBeforeLast
+      )
       _ <- ensure(indices.forall(i => i >= 0 && i < validators.length), ReportErrorCode.BadValidatorIndex)
       _ <- validateGuarantorSignatureOrder(guarantee)
     yield

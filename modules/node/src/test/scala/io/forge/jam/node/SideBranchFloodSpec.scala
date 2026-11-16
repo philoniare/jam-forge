@@ -1,16 +1,15 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash, Timeslot}
 import io.forge.jam.core.types.block.Block
+import io.forge.jam.core.types.tickets.TicketMark
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import spire.math.UByte
 
 import scala.util.chaining.*
 
@@ -21,20 +20,7 @@ import scala.util.chaining.*
   *
   * Chain: A holds 1-2-3. B holds 1-4'-5'-6' (TINY: epoch 12 slots, ticket cutoff 10).
   */
-class SideBranchFloodSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def tempDir(p: String): Path = Files.createTempDirectory(p)
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
@@ -191,6 +177,75 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers:
       // Sending the stored block again changes nothing either.
       chainA.importBlock(forgedBytes, Some(peer(2))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       chainA.meta.equivocated(25L) shouldBe false
+      chainA.best shouldBe best
+    finally
+      if nodeA != null then nodeA.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("side-branch blocks whose seal could not be checked add no ticket weight and set no winning-tickets mark") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val chainSpec = spec(genesis)
+    val dirA = tempDir("jam-sideweight-a")
+    val dirB = tempDir("jam-sideweight-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(chainSpec, NodeConfig(dataDir = dirA, slotTicking = false))
+      nodeB = new JamNode(chainSpec, NodeConfig(dataDir = dirB, slotTicking = false))
+      nodeA.chain.initializeOrRestore(chainSpec)
+      nodeB.chain.initializeOrRestore(chainSpec)
+      val chainA = nodeA.chain
+      val chainB = nodeB.chain
+      def author(chain: ChainManager, slot: Long): (Block, Array[Byte]) =
+        val block = new BlockAuthor(chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+        val bytes = chain.encodeBlock(block)
+        chain.importBlock(bytes).isRight shouldBe true
+        (block, bytes)
+
+      // Shared 1..10; B's 12' is a seal-checked side block on A; A's own chain runs on from 13 to 26 (height 25,
+      // no equivocation at slot 12).
+      for slot <- 1L to 10L do
+        val (_, bytes) = author(chainA, slot)
+        chainB.importBlock(bytes).isRight shouldBe true
+      author(chainA, 11)
+      val (b12, b12Bytes) = author(chainB, 12)
+      chainA.importBlock(b12Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      val hash12 = chainA.headerHashOf(b12)
+      (13L to 26L).foreach(slot => author(chainA, slot))
+      val best = chainA.best
+      val bestWeight = chainA.weightOf(best.hash)
+
+      // A forged branch on 12', one block per epoch from epoch 2 on, each claiming a winning-tickets marker that
+      // would make the next one ticket-sealed. No seal can be checked (block 10 is the validated ancestor), and
+      // the branch stays far shorter than A's chain: only claimed weight could make it look heavier.
+      val mark = TicketMark(JamBytes(Array.fill(32)(7.toByte)), UByte(0))
+      val forged = (0 until 5).scanLeft(Option.empty[Block] -> hash12) { case ((_, parent), i) =>
+        val f = forge(b12, parent, 25 + 12L * i, 1 + i)
+          .pipe(f => f.copy(header = f.header.copy(ticketsMark = Some(List.fill(ChainConfig.TINY.epochLength)(mark)))))
+        val bytes = chainA.encodeBlock(f)
+        val r = chainA.importBlock(bytes, Some(peer(1)))
+        withClue(s"forged block at slot ${f.header.slot.toLong}: $r") {
+          r.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+        }
+        Some(f) -> chainA.headerHashOf(f)
+      }.drop(1).map((f, h) => (f.get, h))
+      chainA.unverifiedCount shouldBe 5
+      chainA.best shouldBe best
+      forged.foreach { (_, h) =>
+        chainA.meta.marked(h) shouldBe false
+        chainA.weightOf(h) shouldBe chainA.weightOf(hash12)
+      }
+      chainA.weightOf(forged.last._2) should be <= bestWeight
+
+      // Sending the stored blocks again changes nothing either.
+      forged.foreach { (f, _) =>
+        chainA.importBlock(chainA.encodeBlock(f), Some(peer(2))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      }
+      forged.foreach((_, h) => chainA.meta.marked(h) shouldBe false)
+      chainA.weightOf(forged.last._2) shouldBe chainA.weightOf(hash12)
       chainA.best shouldBe best
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()

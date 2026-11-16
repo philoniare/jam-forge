@@ -3,6 +3,7 @@ package io.forge.jam.node
 import io.forge.jam.core.{Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.types.block.Extrinsic
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.protocol.preimage.PreimageTransition
@@ -272,6 +273,18 @@ final class ExtrinsicPools(
     }
     // Assurances only ever anchor at the parent of the next block: drop stale.
     assurances.keySet.asScala.filterNot(_._2 == newBestHash).toList.foreach(assurances.remove)
+
+  /** Pool again the guarantees and preimages of blocks a reorg left behind, except those the adopted blocks hold:
+    * otherwise they are lost unless their sender submits them again. Assurances are not taken back (they are for
+    * one parent only), nor tickets (their identifiers would need the ring proofs checked again).
+    */
+  def restoreAbandoned(abandoned: Iterable[Extrinsic], adopted: Iterable[Extrinsic]): Unit =
+    val reported = adopted.iterator.flatMap(_.guarantees).map(reportHashOf).toSet
+    val provided = adopted.iterator.flatMap(_.preimages).map(preimageKey).toSet
+    abandoned.iterator.flatMap(_.guarantees).filterNot(g => reported(reportHashOf(g))).foreach(addGuarantee)
+    abandoned.iterator.flatMap(_.preimages).filterNot(p => provided(preimageKey(p))).foreach(addPreimage)
+
+  private def preimageKey(p: Preimage): (Long, Hash) = (p.requester.toLong, Hashing.blake2b256(p.blob.toArray))
 
   def clearGuarantees(): Unit = guarantees.clear()
 

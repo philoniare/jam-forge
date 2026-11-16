@@ -3,7 +3,7 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorService, RejectedExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
-import io.forge.jam.network.JamnpStream
+import io.forge.jam.network.MessageStream
 
 /** A one-shot send: open a stream, write the messages, finish. The egress thread only starts the open; the
   * messages are written when the peer grants the stream, so a peer that is slow to grant one holds up nobody
@@ -49,7 +49,7 @@ object OneShotSend:
   def submit(
       egress: ExecutorService,
       peer: AnyRef,
-      open: () => CompletableFuture[JamnpStream],
+      open: () => CompletableFuture[? <: MessageStream],
       messages: Seq[Array[Byte]],
       failed: String => Unit,
       rejected: () => Unit = () => (),

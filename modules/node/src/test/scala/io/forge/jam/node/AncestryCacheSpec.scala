@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Files
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.primitives.Hash
@@ -38,10 +38,7 @@ object AncestryOracle:
 /** The ancestor set A of `ChainManager.ancestorsOf` (used by the lookup-anchor check), served from the
   * in-memory header cache with the block store as fallback.
   */
-class AncestryCacheSpec extends AnyFunSuite with Matchers:
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class AncestryCacheSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def withChain[A](config: ChainConfig)(f: ChainManager => A): A =
     val dir = Files.createTempDirectory("jam-ancestry")

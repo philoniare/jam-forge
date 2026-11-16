@@ -2,10 +2,8 @@ package io.forge.jam.node
 
 import java.io.DataInputStream
 import java.net.{DatagramSocket, InetSocketAddress, ServerSocket}
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, JamBytes, LittleEndian}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
@@ -65,18 +63,9 @@ class TicketPoolSpec extends AnyFunSuite with Matchers:
 /** Node start-up and networking resilience: data directory creation, the
   * committed devnet spec, redialing lost peers, and JIP-3 telemetry.
   */
-class NodeResilienceSpec extends AnyFunSuite with Matchers:
+class NodeResilienceSpec extends AnyFunSuite with Matchers with NodeFixture:
 
-  private val baseDir =
-    sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
   private val interopSpecPath = baseDir.resolve("scripts/interop/jam-forge-devnet-spec.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
 
   private def specFor(id: String, genesis: Genesis): ChainSpec =
     ChainSpec(
@@ -87,11 +76,6 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers:
       genesisState = genesis.state.keyvals,
       bootnodes = Nil
     )
-
-  private def tempDir(p: String): Path = Files.createTempDirectory(p)
-  private def cleanup(dir: Path): Unit =
-    if Files.exists(dir) then
-      Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   private def freeUdpPort(): Int =
     val s = new DatagramSocket(0)

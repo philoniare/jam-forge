@@ -104,10 +104,10 @@ class StressTestHarness(config: StressTestConfig):
           case ImportResult.Success(_, _) =>
             currentRoot = importer.currentTrieRoot
             slot += 1
-          case ImportResult.Failure(err, msg, _) =>
+          case other =>
             errors += 1
             if errors <= 5 then
-              System.err.println(s"  Block $blockNum (slot $slot) failed: $err - $msg")
+              System.err.println(s"  Block $blockNum (slot $slot) failed: $other")
             // Skip this slot
             slot += 1
       catch

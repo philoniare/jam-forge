@@ -22,7 +22,9 @@ final class AssurerService(
     /** Runs a distribution at its JAMNP-S time: about 2 s before the next
       * slot when the node keeps slot time, at once otherwise.
       */
-    scheduleDistribution: (() => Unit) => Unit = f => f()
+    scheduleDistribution: (() => Unit) => Unit = f => f(),
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   /** Assurances made at the latest import, not yet sent on CE 141. A newer
@@ -38,16 +40,10 @@ final class AssurerService(
     * assurance is anchored at the head), so a head that arrives while an older one is in hand replaces any waiting.
     */
   private val latest = new java.util.concurrent.atomic.AtomicReference[ChainHead](null)
-  private val worker = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
-    val t = new Thread(r, "jam-assurer"); t.setDaemon(true); t
-  }
+  private val worker = threads.single("jam-assurer")
 
   /** Custody lookups of one head run side by side on these. */
-  private val custodyPool = java.util.concurrent.Executors.newFixedThreadPool(
-    AssurerService.CustodyLookupsAtOnce,
-    r =>
-      val t = new Thread(r, "jam-assurer-custody"); t.setDaemon(true); t
-  )
+  private val custodyPool = threads.fixed("jam-assurer-custody", AssurerService.CustodyLookupsAtOnce)
 
   /** Import listener: acquire custody, then assure held cores, off the caller's thread. */
   def onImported(head: ChainHead): Unit =
@@ -96,7 +92,15 @@ final class AssurerService(
           if shardStore.has(root, shardIndex) then java.util.concurrent.CompletableFuture.completedFuture(true)
           else custodyPool.submit(() => acquireCustody(root, shardIndex, peers))
         (core, idx) -> held
-    val custody: Map[(Int, Int), Boolean] = lookups.map((k, f) => k -> f.get()).toMap
+    // An assurance sent after its slot is of no use, so the lookups share one slot's time: a unit not held by then
+    // is not assured (its lookup may still finish, for a later head).
+    val deadline = System.currentTimeMillis() + chain.config.slotDuration * 1000L
+    val custody: Map[(Int, Int), Boolean] = lookups.map { (k, f) =>
+      val held =
+        try f.get(math.max(0L, deadline - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS)
+        catch case _: java.util.concurrent.TimeoutException => false
+      k -> held
+    }.toMap
 
     val batch = List.newBuilder[AssuranceExtrinsic]
     var produced = 0
@@ -135,7 +139,7 @@ final class AssurerService(
   /** True when verified shards for (erasure-root, shard index) are in
     * custody, pulling them from peers via CE 137 when absent.
     */
-  private def acquireCustody(erasureRoot: Hash, shardIndex: Int, peers: List[io.forge.jam.network.JamnpConnection]): Boolean =
+  private def acquireCustody(erasureRoot: Hash, shardIndex: Int, peers: List[io.forge.jam.network.PeerConnection]): Boolean =
     if shardStore.has(erasureRoot, shardIndex) then true
     else
       // Several peers at a time: the report's guarantors hold the shard, the rest refuse at once.

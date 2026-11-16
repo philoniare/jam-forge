@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{ScheduledExecutorService, TimeUnit}
 
 /** Wall-clock slot timing. Slots are `slotSeconds` long, numbered from the
   * JAM common era start (default: 2025-01-01T12:00:00Z per the graypaper).
@@ -32,13 +32,11 @@ final class SlotClock(
     * an in-flight tick to finish so callers can safely tear down resources
     * the tick may be using.
     */
-  def scheduleSlotTicks(onSlot: Long => Unit): AutoCloseable =
-    val executor: ScheduledExecutorService =
-      Executors.newSingleThreadScheduledExecutor { r =>
-        val t = new Thread(r, "jam-slot-clock")
-        t.setDaemon(true)
-        t
-      }
+  def scheduleSlotTicks(onSlot: Long => Unit): AutoCloseable = scheduleSlotTicks(new NodeThreads)(onSlot)
+
+  /** As above, with the ticking thread made by `threads`. */
+  def scheduleSlotTicks(threads: NodeThreads)(onSlot: Long => Unit): AutoCloseable =
+    val executor: ScheduledExecutorService = threads.scheduled("jam-slot-clock")
 
     def scheduleNext(): Unit =
       val next = currentSlot + 1

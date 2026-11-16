@@ -22,6 +22,10 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
   def heavier(weight: Long, height: Long, bestWeight: Long, bestHeight: Long): Boolean =
     weight > bestWeight || (weight == bestWeight && height > bestHeight)
 
+  /** A block whose seal was not checked may claim anything in its header, so it is credited with nothing of its
+    * own: no ticket-sealed weight, no winning-tickets marker of its own and no slot author. It still passes on what
+    * its parent established, and is weighed again when a replay validates it.
+    */
   def record(hash: Hash, block: Block, sealChecked: Boolean): Option[Long] =
     val parent = block.header.parent
     val slot = block.header.slot.toLong
@@ -30,8 +34,10 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
     val ticketed =
       if epoch == parentEpoch then meta.ticketed(parent)
       else epoch == parentEpoch + 1 && meta.marked(parent)
-    val marked = block.header.ticketsMark.isDefined || (epoch == parentEpoch && meta.marked(parent))
-    meta.putForkChoice(hash, ticketed, marked, meta.weight(parent) + (if ticketed then 1L else 0L))
+    val marked =
+      (sealChecked && block.header.ticketsMark.isDefined) || (epoch == parentEpoch && meta.marked(parent))
+    val credit = if ticketed && sealChecked then 1L else 0L
+    meta.putForkChoice(hash, ticketed, marked, meta.weight(parent) + credit)
     if sealChecked then recordSlotAuthor(hash, slot, block.header.authorIndex.toInt) else None
 
   def recordGenesis(genesisHash: Hash, ticketed: Boolean): Unit =

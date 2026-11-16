@@ -41,7 +41,7 @@ object ColdStartBenchmark:
         try
           importer.importBlock(step.block, step.preState) match
             case _: ImportResult.Success => true
-            case _: ImportResult.Failure => false
+            case _                       => false
         catch case _: Throwable => false
       val t1 = System.nanoTime()
       if times != null then times(i) = (t1 - t0) / 1e6

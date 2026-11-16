@@ -7,7 +7,7 @@ import io.forge.jam.core.{JamBytes, LittleEndian}
 import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash}
 import io.forge.jam.core.types.tickets.{RingVrfSignatureSize, TicketEnvelope}
 import io.forge.jam.crypto.BandersnatchVrf
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
 import spire.math.UByte
 
 import java.util.concurrent.ConcurrentHashMap
@@ -31,9 +31,11 @@ final class TicketService(
     distribution: DistributionService,
     egress: ExecutorService,
     /** CE 132 recipients: the current validators (JAMNP-S CE 131/132). */
-    forwardTargets: () => Iterable[JamnpConnection] = () => Nil,
+    forwardTargets: () => Iterable[PeerConnection] = () => Nil,
     /** Where received tickets are verified (a ring proof each): off the network threads. */
-    inbound: InboundWork = InboundWork.direct
+    inbound: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   /** Tickets accepted as proxy (or generated for ourselves as proxy) and
@@ -81,9 +83,7 @@ final class TicketService(
   @volatile private var generatedForEntropy: Hash = Hash.zero
 
   /** Where [[generateInBackground]] makes the ring proofs: one thread, so at most one generation at a time. */
-  private lazy val generator = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
-    val t = new Thread(r, "jam-tickets"); t.setDaemon(true); t
-  }
+  private lazy val generator = threads.single("jam-tickets")
   private val generating = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** [[maybeGenerate]] on a thread of its own, unless one is already running: ring-VRF proofs for an epoch take far
@@ -214,8 +214,8 @@ final class TicketService(
   /** Inbound CE 131/132: verify the ring proof, pool the ticket, and — when we
     * are the ticket's proxy (CE 131) — forward it to all validators on CE 132.
     */
-  def ticketHandler: StreamHandler = new StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def ticketHandler: PeerStreamHandler = new PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val asProxy = stream.kind == StreamKind.TicketDistributionStep1
         val admitted = inbound.submit(connection, msg.length.toLong) {
@@ -292,7 +292,7 @@ final class TicketService(
         if epoch == currentEpoch && !accept(epoch, env, asProxy, from) then
           logger.debug(s"deferred ticket for epoch $epoch rejected")
 
-  private def peerLabel(conn: JamnpConnection): String =
+  private def peerLabel(conn: PeerConnection): String =
     try JamBytes(conn.peerKey).toHex.take(16)
     catch case _: Exception => "?"
 
@@ -399,8 +399,8 @@ final class TicketService(
   def hasTicketsFor(epoch: Long): Boolean = readyEpoch == epoch
 
   def distributeTickets(
-      peers: Iterable[JamnpConnection],
-      byValidatorIndex: Int => Option[JamnpConnection]
+      peers: Iterable[PeerConnection],
+      byValidatorIndex: Int => Option[PeerConnection]
   ): Unit =
     if ownTicketEnvelopes.isEmpty then return
     val view = chain.stateView()
@@ -441,7 +441,7 @@ final class TicketService(
     }
 
   private[node] def submitSend(
-      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
       kind: Byte,
       payload: Array[Byte],
       peer: AnyRef = null

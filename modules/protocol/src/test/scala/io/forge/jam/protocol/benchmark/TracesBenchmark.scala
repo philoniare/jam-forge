@@ -174,7 +174,7 @@ object TracesBenchmark:
                 try
                   fullImporter.importBlock(step.block, step.preState) match
                     case _: ImportResult.Success => true
-                    case _: ImportResult.Failure => false
+                    case _                       => false
                 catch case _: Throwable => false
               if ok then processedSteps += 1 else errors += 1
 

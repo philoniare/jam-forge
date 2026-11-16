@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
 import io.circe.Decoder
 import io.circe.parser.decode
@@ -11,10 +11,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** The ancestor set used for lookup anchors, and following the finality that peers announce. */
-class PeerFinalitySpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
+class PeerFinalitySpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def spec(id: String): ChainSpec =
     if !Files.exists(genesisPath) then cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
@@ -28,9 +25,6 @@ class PeerFinalitySpec extends AnyFunSuite with Matchers:
       genesisState = genesis.state.keyvals,
       bootnodes = Nil
     )
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 

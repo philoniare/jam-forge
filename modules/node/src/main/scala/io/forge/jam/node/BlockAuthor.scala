@@ -301,10 +301,9 @@ object BlockAuthor:
       config: io.forge.jam.core.ChainConfig
   ): Boolean =
     val ctx = g.report.context
-    val rotation = g.slot.toLong / config.rotationPeriod
-    val current = slot / config.rotationPeriod
     val lookupSlot = ctx.lookupAnchorSlot.toLong
-    rotation >= current - 1 && g.slot.toLong <= slot &&
+    io.forge.jam.protocol.report.GuarantorAssignment.rotationInWindow(g.slot.toLong, slot, config) &&
+    g.slot.toLong <= slot &&
     recent.contains(ctx.anchor) &&
     slot - lookupSlot <= config.maxLookupAnchorAge &&
     ancestors.exists(a => a.headerHash == ctx.lookupAnchor && a.slot == lookupSlot)

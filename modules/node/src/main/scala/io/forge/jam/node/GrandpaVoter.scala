@@ -15,8 +15,15 @@ trait GrandpaChain:
   def stateRootOf(h: Hash): Option[Hash]
   def headerBytes(h: Hash): Option[Array[Byte]]
 
-  /** Ed25519 keys of the epoch marker in block `h`'s header, when it has one. */
+  /** Ed25519 keys of the epoch marker in block `h`'s header, when it has one: the validators of the epoch after the
+    * one `h` begins (γ_P'), not of `h`'s own.
+    */
   def epochMarkerKeys(h: Hash): Option[List[Array[Byte]]]
+
+  /** Ed25519 keys of the genesis state's next-epoch validators (γ_P), active from the first epoch change. None: the
+    * genesis validators stay.
+    */
+  def genesisNextKeys: Option[List[Array[Byte]]] = None
   def finalizeBlock(h: Hash): Either[String, Unit]
 
   /** isAudited: a block may be voted for only once audited. */
@@ -60,6 +67,12 @@ final case class VoterSet(setId: Long, base: Vote, keys: IndexedSeq[Array[Byte]]
 final class RoundState(val round: Long, val startedAt: Long):
   val prevotes = mutable.LinkedHashMap.empty[Ed25519PublicKey, SignedVote]
   val precommits = mutable.LinkedHashMap.empty[Ed25519PublicKey, SignedVote]
+
+  /** Voters that cast two different prevotes (precommits) in this round, with both votes: the evidence. Such a voter
+    * is not in `prevotes` (`precommits`).
+    */
+  val prevoteEquivocations = mutable.LinkedHashMap.empty[Ed25519PublicKey, (SignedVote, SignedVote)]
+  val precommitEquivocations = mutable.LinkedHashMap.empty[Ed25519PublicKey, (SignedVote, SignedVote)]
   var primaryProposal: Option[Vote] = None
   var proposed = false
   var prevoted = false
@@ -67,7 +80,8 @@ final class RoundState(val round: Long, val startedAt: Long):
 
 /** GRANDPA voting (GP 0.8.0 §grandpa, after Stewart 2020) over the JAMNP-S wire format. Not thread safe: the
   * caller runs every method on one thread. Votes for a set stop at the first unfinalized block carrying an epoch
-  * marker; finalizing that block moves to the next set, whose keys come from the marker.
+  * marker; finalizing that block moves to the next set: the validators of the epoch the block begins (its κ'), which
+  * are the keys of the marker before it. The block's own marker names the validators one epoch later.
   *
   * @param gossipMillis
   *   T: prevote at round start + 2T, precommit at + 4T at the latest
@@ -81,7 +95,7 @@ final class GrandpaVoter(
     gossipMillis: Long = 1000L,
     /** Called with each block GRANDPA finalized, its justification and whether it ended a voter set. */
     onFinalized: (Vote, Justification, Boolean) => Unit = (_, _, _) => (),
-    /** Called with each voter set adopted from the finalized chain rather than from our own justification. */
+    /** Called with each voter set we move to, by our own justification or from the finalized chain. */
     onSetAdopted: VoterSet => Unit = _ => (),
     /** Called with our set, round and votes in it whenever they change, to persist them. */
     onProgress: (Long, Long, List[VoteMessage]) => Unit = (_, _, _) => (),
@@ -90,6 +104,15 @@ final class GrandpaVoter(
 ) extends LazyLogging:
 
   private var set: VoterSet = initialSet
+
+  /** The set that follows `of` once the epoch-marker block `base` is finalized. Its voters are the validators of the
+    * epoch `base` begins: those the marker before it named, which is `of`'s own base (at genesis, the genesis
+    * state's next-epoch validators).
+    */
+  private def successor(of: VoterSet, base: Vote): VoterSet =
+    val named =
+      chain.epochMarkerKeys(of.base.hash).orElse(if of.setId == 0 then chain.genesisNextKeys else None)
+    VoterSet(of.setId + 1, base, named.fold(of.keys)(_.toIndexedSeq))
   private var lastSyncedFinal: Hash = Hash.zero
   private var current: RoundState = new RoundState(resume.fold(1L)(_._1), clock())
   private val rounds = mutable.TreeMap(current.round -> current)
@@ -131,6 +154,7 @@ final class GrandpaVoter(
 
   def voterSet: VoterSet = set
   def round: Long = current.round
+  private[node] def roundState: RoundState = current
   def roundState(r: Long): Option[RoundState] = rounds.get(r)
 
   private def ourKey: Option[Ed25519PublicKey] = keys.map(_.ed25519Key).filter(set.members.contains)
@@ -206,23 +230,28 @@ final class GrandpaVoter(
     if h == set.base.hash then Some(set.base)
     else chain.stateRootOf(h).map(Vote(h, _, slot))
 
-  /** The highest block with a supermajority of `votes` (the GHOST); the set base when nothing above has one. */
-  private def ghost(votes: Iterable[SignedVote], threshold: Int = set.threshold): Option[Vote] =
-    if votes.size < threshold then None
+  /** The highest block with a supermajority of `votes` (the GHOST); the set base when nothing above has one.
+    * `equivocators` voters voted twice: they count towards every block (Stewart 2020, §2.3), since neither vote
+    * binds them.
+    */
+  private def ghost(votes: Iterable[SignedVote], threshold: Int = set.threshold, equivocators: Int = 0): Option[Vote] =
+    if votes.size + equivocators < threshold then None
     else
       val counts = support(votes, set.base)
-      val best = counts.filter(_._2._2 >= threshold).maxByOption(_._2._1)
+      val best = counts.filter(_._2._2 + equivocators >= threshold).maxByOption(_._2._1)
       best match
         case Some((h, (slot, _))) => voteFor(h, slot)
         case None                 => Some(set.base)
 
-  def prevoteGhost(r: RoundState): Option[Vote] = ghost(r.prevotes.values)
-  def precommitGhost(r: RoundState): Option[Vote] = ghost(r.precommits.values)
+  def prevoteGhost(r: RoundState): Option[Vote] = ghost(r.prevotes.values, equivocators = r.prevoteEquivocations.size)
+  def precommitGhost(r: RoundState): Option[Vote] =
+    ghost(r.precommits.values, equivocators = r.precommitEquivocations.size)
 
   /** The highest ancestor of the prevote GHOST that can still reach a precommit supermajority. */
   def estimate(r: RoundState): Option[Vote] =
     prevoteGhost(r).orElse(precommitGhost(r)).map { g =>
       val counts = support(r.precommits.values, set.base)
+      // Voters yet to precommit and equivocators (in no vote map) may both still count towards any block.
       val missing = set.size - r.precommits.size
       val path = pathToBase(g.hash, set.base)
       path
@@ -239,7 +268,7 @@ final class GrandpaVoter(
         else
           val counts = support(r.precommits.values, set.base)
           val missing = set.size - r.precommits.size
-          r.precommits.size >= set.threshold && !counts.exists { case (h, (slot, n)) =>
+          r.precommits.size + r.precommitEquivocations.size >= set.threshold && !counts.exists { case (h, (slot, n)) =>
             slot > g.slot && n + missing >= set.threshold && descends(h, g)
           }
       case _ => false
@@ -295,15 +324,23 @@ final class GrandpaVoter(
     case _         => "primary propose"
 
   private def record(r: RoundState, kind: Int, sv: SignedVote): Boolean =
-    val votes = if kind == Prevote then r.prevotes else r.precommits
-    votes.get(sv.signerKey) match
-      case Some(existing) =>
-        if existing.vote != sv.vote then
-          logger.warn(s"GRANDPA equivocation in round ${r.round} by ${hexKey(sv.signer)}; keeping the first vote")
-        false
-      case None =>
-        votes.put(sv.signerKey, sv)
-        true
+    val (votes, equivocations) =
+      if kind == Prevote then (r.prevotes, r.prevoteEquivocations) else (r.precommits, r.precommitEquivocations)
+    if equivocations.contains(sv.signerKey) then false
+    else
+      votes.get(sv.signerKey) match
+        case Some(existing) if existing.vote != sv.vote =>
+          logger.warn(
+            s"GRANDPA equivocation in round ${r.round} by ${hexKey(sv.signer)}: ${kindName(kind)}s for " +
+              s"${existing.vote.short} and ${sv.vote.short}"
+          )
+          votes.remove(sv.signerKey)
+          equivocations.put(sv.signerKey, (existing, sv))
+          true
+        case Some(_) => false
+        case None =>
+          votes.put(sv.signerKey, sv)
+          true
 
   private def hexKey(k: Array[Byte]): String = k.take(6).map(b => f"${b & 0xff}%02x").mkString
 
@@ -312,9 +349,15 @@ final class GrandpaVoter(
     */
   def roundVotes: List[VoteMessage] =
     val r = current
-    (r.prevotes.values.map(Prevote -> _) ++ r.precommits.values.map(Precommit -> _)).toList.map { (kind, v) =>
+    (allPrevotes(r).map(Prevote -> _) ++ allPrecommits(r).map(Precommit -> _)).map { (kind, v) =>
       VoteMessage(r.round, set.setId, SignedMessage(kind, v))
     }
+
+  /** A round's votes with both votes of each equivocator, so that every voter we send them to counts as we do. */
+  private def allPrevotes(r: RoundState): List[SignedVote] =
+    r.prevotes.values.toList ++ r.prevoteEquivocations.values.flatMap((a, b) => List(a, b))
+  private def allPrecommits(r: RoundState): List[SignedVote] =
+    r.precommits.values.toList ++ r.precommitEquivocations.values.flatMap((a, b) => List(a, b))
 
   private val heard = mutable.Set.empty[Ed25519PublicKey]
 
@@ -339,9 +382,9 @@ final class GrandpaVoter(
     if f.slot <= set.base.slot || f.hash == lastSyncedFinal then false
     else
       lastSyncedFinal = f.hash
-      val markers = pathToBase(f.hash, set.base).reverse.flatMap((h, slot) => chain.epochMarkerKeys(h).map((h, slot, _)))
-      markers.foreach { (h, slot, markerKeys) =>
-        set = VoterSet(set.setId + 1, Vote(h, chain.stateRootOf(h).getOrElse(Hash.zero), slot), markerKeys.toIndexedSeq)
+      val markers = pathToBase(f.hash, set.base).reverse.filter((h, _) => chain.epochMarkerKeys(h).isDefined)
+      markers.foreach { (h, slot) =>
+        set = successor(set, Vote(h, chain.stateRootOf(h).getOrElse(Hash.zero), slot))
         logger.info(s"GRANDPA adopted set ${set.setId} at ${set.base.short} from the finalized chain")
         onSetAdopted(set)
       }
@@ -418,7 +461,11 @@ final class GrandpaVoter(
     val setId = set.setId
     val justified = rounds.values.toList.reverse.flatMap { r =>
       precommitGhost(r).filter(_.slot > chain.finalized.slot).map { g =>
-        val commit = Commit(g, r.precommits.values.filter(p => chain.isAncestor(g.hash, p.vote.hash)).toList)
+        val direct = r.precommits.values.filter(p => chain.isAncestor(g.hash, p.vote.hash)).toList
+        // Equivocators' precommits are added only when the others fall short: the pairs are what proves their weight.
+        val pairs =
+          if direct.size >= set.threshold then Nil else r.precommitEquivocations.values.flatMap((a, b) => List(a, b)).toList
+        val commit = Commit(g, direct ++ pairs)
         Justification(r.round, setId, commit, ancestriesFor(commit))
       }
     }
@@ -450,11 +497,12 @@ final class GrandpaVoter(
         None
       case Right(()) =>
         logger.info(s"GRANDPA finalized ${target.short} in round ${j.round} of set ${j.setId}")
-        val change = chain.epochMarkerKeys(target.hash)
-        onFinalized(target, j, change.isDefined)
+        val change = chain.epochMarkerKeys(target.hash).isDefined
+        onFinalized(target, j, change)
         change match
-          case Some(markerKeys) =>
-            set = VoterSet(set.setId + 1, target, markerKeys.toIndexedSeq)
+          case true =>
+            set = successor(set, target)
+            onSetAdopted(set)
             rounds.clear()
             current = new RoundState(1, clock())
             rounds.put(1, current)
@@ -463,7 +511,7 @@ final class GrandpaVoter(
             onProgress(set.setId, 1, Nil)
             replayFuture()
             Some(true)
-          case None => Some(false)
+          case false => Some(false)
 
   // ---------------------------------------------------------------------------
   // inbound
@@ -506,8 +554,11 @@ final class GrandpaVoter(
         case kind => record(r, kind, sv)
       true
 
-  /** Checks a commit against the current set: valid distinct precommits, a supermajority, all at or above the
-    * target. Ancestry headers route precommits for blocks we do not store.
+  /** Checks a commit against the current set: validly signed precommits, one per voter and at or above the target,
+    * or two different ones from a voter (an equivocation, which counts whatever it names), and a supermajority of
+    * voters among them. A target or precommit naming a state root other than ours for a block we hold is for another
+    * block: the commit is refused, the precommit not counted. Ancestry headers route precommits for blocks we do not
+    * store.
     */
   def verifyCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]] = Nil): Either[String, Unit] =
     val routed = ancestries.flatMap(h => GrandpaVoter.headerLink(h)).map(l => l.hash -> l).toMap
@@ -517,13 +568,19 @@ final class GrandpaVoter(
       else depth < routed.size && routed.get(h).exists(l => descends(target, l.parent, depth + 1))
     if setId != set.setId then Left(s"set $setId, expected ${set.setId}")
     else
-      val signers = c.precommits.map(_.signerKey)
-      if signers.distinct.size != signers.size then Left("duplicate precommit signer")
-      else if !signers.forall(set.members.contains) then Left("precommit by a non-voter")
-      else if c.precommits.size < set.threshold then Left(s"${c.precommits.size} precommits, need ${set.threshold}")
+      val bySigner = c.precommits.groupBy(_.signerKey)
+      val (single, twice) = bySigner.values.toList.partition(_.size == 1)
+      val singles = single.flatten
+      if twice.exists(vs => vs.size > 2 || vs(0).vote == vs(1).vote) then Left("duplicate precommit signer")
+      else if !bySigner.keys.forall(set.members.contains) then Left("precommit by a non-voter")
+      else if bySigner.size < set.threshold then Left(s"${bySigner.size} precommits, need ${set.threshold}")
       else if !c.precommits.forall(p => verify(Precommit, p, round, setId)) then Left("bad precommit signature")
-      else if !c.precommits.forall(p => descends(c.target, p.vote.hash)) then Left("precommit not on the target's chain")
-      else Right(())
+      else if !consistentRoot(c.target) then Left("target names a state root other than ours")
+      else if !singles.forall(p => descends(c.target, p.vote.hash)) then Left("precommit not on the target's chain")
+      else
+        val counted = singles.count(p => consistentRoot(p.vote)) + twice.size
+        if counted < set.threshold then Left(s"$counted precommits for the target, need ${set.threshold}")
+        else Right(())
 
   /** CE 150 or a fetched justification. Returns the block to fetch when the target is not stored yet. */
   def onCommit(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]] = Nil): Either[String, Option[Hash]] =
@@ -577,7 +634,7 @@ final class GrandpaVoter(
     if setId != set.setId then None
     else
       rounds.get(current.round - 1).filter(r => r.round >= round && completable(r)).map { r =>
-        CatchUp(r.round, r.prevotes.values.toList, r.precommits.values.toList, lastFinalizedInSet)
+        CatchUp(r.round, allPrevotes(r), allPrecommits(r), lastFinalizedInSet)
       }
 
   /** CE 151: a voter more than a round ahead in our set warrants a catch-up request. */

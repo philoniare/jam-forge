@@ -9,7 +9,7 @@ import io.forge.jam.crypto.Ed25519
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic}
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
 import io.forge.jam.core.codec.Codec
 
 import scala.jdk.CollectionConverters.*
@@ -36,29 +36,31 @@ final class DistributionService(
     assurerKeys: () => Seq[Array[Byte]] = () => Nil,
     admitGuarantee: GuaranteeExtrinsic => Either[String, Unit] = _ => Left("no guarantee verifier configured"),
     /** Where received guarantees and assurances are checked (signatures, state reads): off the network threads. */
-    inbound: InboundWork = InboundWork.direct
+    inbound: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   // Open connections only: a connection leaves on its connection-down callback ([[untrackConnection]]), so the set
   // is bounded by the transport's connection limit however often peers reconnect.
   private val connections =
-    java.util.concurrent.ConcurrentHashMap.newKeySet[JamnpConnection]()
+    java.util.concurrent.ConcurrentHashMap.newKeySet[PeerConnection]()
 
   /** Track an open peer connection for outgoing distribution. A connection that already closed is not kept: its
     * connection-down callback has fired, so nothing would remove it.
     */
-  def trackConnection(conn: JamnpConnection): Unit =
+  def trackConnection(conn: PeerConnection): Unit =
     if conn.isOpen then
       connections.add(conn)
       // Closed between the check and the add: the down callback may have run before the add.
       if !conn.isOpen then connections.remove(conn): Unit
 
   /** Forget a connection that closed. */
-  def untrackConnection(conn: JamnpConnection): Unit =
+  def untrackConnection(conn: PeerConnection): Unit =
     connections.remove(conn): Unit
 
   /** Currently tracked open peer connections. */
-  def peers: List[JamnpConnection] =
+  def peers: List[PeerConnection] =
     connections.asScala.filter(_.isOpen).toList
 
   /** Connections held, open or not: equals the open ones once the close callbacks have run. */
@@ -71,8 +73,8 @@ final class DistributionService(
   // CE 135 — guaranteed work-report distribution
   // =========================================================================
 
-  def workReportHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def workReportHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage { msg =>
         decodeItem[GuaranteeExtrinsic](msg) match
           case Right(g) =>
@@ -106,7 +108,7 @@ final class DistributionService(
       }
 
   /** Send a signed guarantee to a peer (typically the upcoming author). */
-  def distributeGuarantee(conn: JamnpConnection, g: GuaranteeExtrinsic): Unit =
+  def distributeGuarantee(conn: PeerConnection, g: GuaranteeExtrinsic): Unit =
     sendItem(conn, StreamKind.WorkReportDistribution, g.encode.toArray)
 
   def distributeGuaranteeToAll(g: GuaranteeExtrinsic): Unit =
@@ -129,8 +131,8 @@ final class DistributionService(
     knownReports.put(Hashing.blake2b256(report.encode.toArray), report)
 
   /** CE 136: Work-Report Hash (32) -> Work-Report; reset when unknown. */
-  def reportRequestHandler: StreamHandler = new StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def reportRequestHandler: PeerStreamHandler = new PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val report =
           if msg.length == 32 then Option(knownReports.get(Hash(msg)))
@@ -146,8 +148,8 @@ final class DistributionService(
   // CE 141 — assurance distribution
   // =========================================================================
 
-  def assuranceHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def assuranceHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage { msg =>
         DistributionService.decodeAssurance(msg, coresCount) match
           case Right((anchor, bitfield, signature)) =>
@@ -176,7 +178,7 @@ final class DistributionService(
     * gets no signature check at all: looking for its signer would cost one check per validator.
     */
   private def assurerIndex(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       anchor: Hash,
       bitfield: JamBytes,
       signature: Ed25519Signature
@@ -187,7 +189,7 @@ final class DistributionService(
     val byPeer = keys.indices.find(i => java.util.Arrays.equals(keys(i), conn.peerKey))
     byPeer.flatMap(own => Some(own).filter(verifies).orElse(keys.indices.find(verifies)))
 
-  def distributeAssurance(conn: JamnpConnection, a: AssuranceExtrinsic): Unit =
+  def distributeAssurance(conn: PeerConnection, a: AssuranceExtrinsic): Unit =
     sendItem(conn, StreamKind.AssuranceDistribution, DistributionService.encodeAssurance(a))
 
   def distributeAssuranceToAll(a: AssuranceExtrinsic): Unit =
@@ -197,11 +199,11 @@ final class DistributionService(
   // helpers
   // =========================================================================
 
-  private def sendItem(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
+  private def sendItem(conn: PeerConnection, kind: Byte, payload: Array[Byte]): Unit =
     submitSend(() => conn.openStream(kind), kind, payload, conn)
 
   private[node] def submitSend(
-      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
       kind: Byte,
       payload: Array[Byte],
       peer: AnyRef = null
@@ -220,17 +222,15 @@ final class DistributionService(
     * assurance, ticket, vote and judgment behind it. When more wait than the queue holds, the oldest gives way: its
     * caller asks again on its own schedule.
     */
-  private val requests = new java.util.concurrent.ThreadPoolExecutor(
+  private val requests = threads.own("jam-request")(factory => new java.util.concurrent.ThreadPoolExecutor(
     DistributionService.RequestThreads,
     DistributionService.RequestThreads,
     30L,
     java.util.concurrent.TimeUnit.SECONDS,
     new java.util.concurrent.ArrayBlockingQueue[Runnable](DistributionService.MaxQueuedRequests),
-    { r =>
-      val t = new Thread(r, "jam-request"); t.setDaemon(true); t
-    },
+    factory,
     new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
-  )
+  ))
   requests.allowCoreThreadTimeOut(true)
 
   /** Requests waiting for a request thread. */

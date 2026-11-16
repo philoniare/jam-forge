@@ -1,12 +1,12 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{ScheduledExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.crypto.Bls
-import io.forge.jam.network.{JamnpConnection, JamnpNode, StreamHandler}
+import io.forge.jam.network.{PeerConnection, JamnpNode, PeerStreamHandler}
 import io.forge.jam.node.BeefyMessages.*
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 
@@ -22,12 +22,12 @@ final class BeefyService(
     distribution: DistributionService,
     keys: Option[ValidatorKeySet],
     pollMillis: Long = 500L,
-    outbound: Option[SignedCommitment => Unit] = None
+    outbound: Option[SignedCommitment => Unit] = None,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
-  private val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
-    val t = new Thread(r, "jam-beefy"); t.setDaemon(true); t
-  }
+  private val exec: ScheduledExecutorService = threads.scheduled("jam-beefy")
 
   /** At most this many newly finalized blocks are signed per step (finality can jump after a stall). */
   private val MaxSignPerStep = 16
@@ -50,7 +50,7 @@ final class BeefyService(
     * keeps the connection for [[ProbeMillis]] takes it, one that drops it is never sent BEEFY again.
     */
   private val speaks = mutable.Map.empty[Ed25519PublicKey, Boolean]
-  private val probes = mutable.Map.empty[Ed25519PublicKey, (JamnpConnection, Long)]
+  private val probes = mutable.Map.empty[Ed25519PublicKey, (PeerConnection, Long)]
   private val ProbeMillis = 3000L
 
   @volatile private var latest: Option[BeefyProof] = None
@@ -68,7 +68,7 @@ final class BeefyService(
   def shutdown(): Unit = exec.shutdownNow()
 
   def register(network: JamnpNode): Unit =
-    network.registerHandler(StreamKind, handler)
+    network.registerPeerHandler(StreamKind, handler)
     ()
 
   /** Peers' commitments waiting for the BEEFY thread are bounded; one over the limit is dropped (commitments are
@@ -76,7 +76,7 @@ final class BeefyService(
     */
   private val intake = new WorkGate("beefy intake", 4096, 16L * 1024 * 1024)
 
-  def handler: StreamHandler = (conn, stream) =>
+  def handler: PeerStreamHandler = (conn, stream) =>
     stream.onMessage { msg =>
       stream.finish()
       decode(msg) match

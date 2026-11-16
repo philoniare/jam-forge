@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 
 import io.circe.parser.decode
 import io.forge.jam.core.ChainConfig
@@ -15,11 +15,10 @@ import org.scalatest.matchers.should.Matchers
   * from the same genesis, connects over JAMNP-S, learns A's leaf from the
   * UP 0 handshake, fetches the block via CE 128 and imports it.
   */
-class TwoNodeSyncSpec extends AnyFunSuite with Matchers:
+class TwoNodeSyncSpec extends AnyFunSuite with Matchers with NodeFixture:
   private given io.circe.Decoder[TraceStep] =
     TraceStep.decoder(using summon[io.circe.Decoder[Block]])
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir =
     baseDir.resolve("jam-conformance/fuzz-reports/0.8.0/traces")
 
@@ -46,11 +45,6 @@ class TwoNodeSyncSpec extends AnyFunSuite with Matchers:
       .collectFirst {
         case Right(step) if step.postState.stateRoot != step.preState.stateRoot => step
       }
-
-  private def tempDir(prefix: String): Path = Files.createTempDirectory(prefix)
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
 
   test("node B syncs a real trace block from node A over JAMNP") {
     val step = findImportableStep().getOrElse(

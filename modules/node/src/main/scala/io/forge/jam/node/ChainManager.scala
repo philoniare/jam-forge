@@ -9,7 +9,7 @@ import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.pipeline.BlockPipeline
 import io.forge.jam.protocol.report.ReportTypes.AncestorHeader
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
-import io.forge.jam.protocol.importing.{BlockImporter, ImportError, ImportResult}
+import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
 import io.forge.jam.protocol.state.RawState
 
 import scala.collection.mutable
@@ -129,6 +129,16 @@ final class ChainManager(
 
   def onImported(listener: (ChainHead, Block) => Unit): Unit =
     importListeners.add(listener)
+    ()
+
+  private val abandonListeners = new java.util.concurrent.CopyOnWriteArrayList[(List[Block], List[Block]) => Unit]()
+
+  /** Called when a reorg leaves best-chain blocks behind, with those blocks (newest first) and the blocks adopted
+    * in their place (oldest first), before any import listener sees the adopted ones. It runs inside the chain
+    * change, so a listener must be quick and must not call back into the chain.
+    */
+  def onAbandoned(listener: (List[Block], List[Block]) => Unit): Unit =
+    abandonListeners.add(listener)
     ()
 
   private val postImportBus = new PostImportBus[ChainHead, Block]((head, block) =>
@@ -667,10 +677,10 @@ final class ChainManager(
     // longer kept (see pruneHistory).
     val journalHeight = blockHeight(parent).getOrElse(0L) + 1
     trieBackend.withJournal(headerHashOf(block), journalHeight)(importer.importBlock(block, preState, ancestry)) match
-      case ImportResult.Failure(error, message, _) =>
-        // An exception of ours (UnknownError) says nothing about the block: it may import on a later try.
-        if error != ImportError.UnknownError then meta.markInvalid(headerHashOf(block))
-        Left(ChainError.ImportFailed(error, message))
+      case ImportResult.Invalid(error, message, _) =>
+        meta.markInvalid(headerHashOf(block))
+        Left(ChainError.InvalidBlock(error, message))
+      case ImportResult.Failed(message, _) => Left(ChainError.ImportFailed(message))
       case ImportResult.Success(postRoot, _) =>
         val hash = headerHashOf(block)
         val slot = block.header.slot.toLong
@@ -750,6 +760,7 @@ final class ChainManager(
     val previousBest = bestHead
     // Abandoned main-chain blocks (best back to ancestor) lose main status.
     val abandoned = mutable.ListBuffer.empty[Hash]
+    val abandonedBlocks = mutable.ListBuffer.empty[Block]
     var back = previousBest.hash
     while back != ancestor do
       abandoned += back
@@ -761,8 +772,10 @@ final class ChainManager(
           )
         )
       decodeBlock(backBytes) match
-        case Right(b) => back = b.header.parent
-        case Left(e)  => return Left(ChainError.Undecodable(s"reorg: undecodable main block: $e"))
+        case Right(b) =>
+          abandonedBlocks += b
+          back = b.header.parent
+        case Left(e) => return Left(ChainError.Undecodable(s"reorg: undecodable main block: $e"))
 
     logger.info(
       s"reorg: rewinding ${abandoned.size} block(s) to ${ancestor.toHex.take(18)}, " +
@@ -777,11 +790,14 @@ final class ChainManager(
     bestHead = ChainHead(ancestor, ancestorSlot, ancestorRoot)
 
     val replayed = mutable.ListBuffer.empty[Hash]
+    val adoptedBlocks = mutable.ListBuffer.empty[Block]
     boundary:
       branch.foreach { bytes =>
-        decodeBlock(bytes).left.map(ChainError.Undecodable(_)).flatMap(b => importOnBest(b, bytes, events)) match
+        val decoded = decodeBlock(bytes).left.map(ChainError.Undecodable(_))
+        decoded.flatMap(b => importOnBest(b, bytes, events)) match
           case Right(head) =>
             replayed += head.hash
+            decoded.foreach(adoptedBlocks += _)
           case Left(err) =>
             replayed.foreach(meta.dropBlockRoot)
             trieStore.markCommitted(previousBest.stateRoot)
@@ -795,6 +811,11 @@ final class ChainManager(
         meta.dropBlockRoot(h)
         Option(leafMap.get(h)).foreach(head => leafMap.put(h, head.copy(stateRoot = Hash.zero)))
       }
+      if abandonedBlocks.nonEmpty then
+        abandonListeners.forEach { l =>
+          try l(abandonedBlocks.toList, adoptedBlocks.toList)
+          catch case e: Exception => logger.error("abandoned-block listener failed", e)
+        }
       Right(bestHead)
 
   def hasBlock(hash: Hash): Boolean = blockStore.hasBlock(hash)

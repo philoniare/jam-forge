@@ -1,31 +1,17 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 
-import io.circe.Decoder
-import io.circe.parser.decode
-import io.forge.jam.core.{ChainConfig, JamBytes}
+import io.forge.jam.core.ChainConfig
 import io.forge.jam.core.codec.JamCodecs.encode
-import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** What joining a running network needs: a chain spec of a size that is none of the built-in ones, catching up
   * from far behind, and following the finality the peers announce.
   */
-class TestnetJoinSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
+class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def eventually(what: String, seconds: Int = 60)(cond: => Boolean): Unit =
     val deadline = System.currentTimeMillis() + seconds * 1000L

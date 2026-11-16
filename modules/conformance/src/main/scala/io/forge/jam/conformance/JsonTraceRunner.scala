@@ -166,7 +166,10 @@ class JsonTraceRunner(
               keyvalDiffs
             )
 
-        case ImportResult.Failure(error, message, _) =>
+        case rejected: (ImportResult.Invalid | ImportResult.Failed) =>
+          val (error, message) = rejected match
+            case ImportResult.Invalid(error, message, _) => (error.toString, message)
+            case ImportResult.Failed(message, _)         => ("import failure", message)
           // If post_state == pre_state, the test expects block rejection (no state change)
           // In this case, a "failure" with unchanged state is actually correct
           if traceStep.postState.stateRoot == traceStep.preState.stateRoot then

@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
 import io.circe.Decoder
 import io.circe.parser.decode as jsonDecode
@@ -14,7 +14,7 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.collection.mutable
 
-class BeefySpec extends AnyFunSuite with Matchers:
+class BeefySpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
   private val peak = Hashing.blake2b256("peak".getBytes("UTF-8"))
@@ -56,12 +56,6 @@ class BeefySpec extends AnyFunSuite with Matchers:
     verifyProof(p.copy(signers = Array(0x3e.toByte)), keys) shouldBe false
     verifyProof(p, keys.reverse) shouldBe false
   }
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   test("six validators sign finalized blocks and aggregate a proof over the block's super-peak") {
     val genesis =

@@ -1,13 +1,13 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{ConcurrentHashMap, Executors, LinkedBlockingQueue, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, ScheduledExecutorService, TimeUnit}
 
 import scala.collection.mutable
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.LittleEndian
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
 import io.forge.jam.node.GrandpaMessages.*
 
 
@@ -23,12 +23,12 @@ final class GrandpaService(
     gossipMillis: Long = 1000L,
     /** We vote only for blocks we judge audited. */
     audited: Hash => Boolean = _ => true,
-    serving: InboundWork = InboundWork.direct
+    serving: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
-  private val exec: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r =>
-    val t = new Thread(r, "jam-grandpa"); t.setDaemon(true); t
-  }
+  private val exec: ScheduledExecutorService = threads.scheduled("jam-grandpa")
 
   /** Peers' votes, commits, state and catch-up requests waiting for the voter thread are bounded; a message over
     * the limit is dropped (votes are resent every gossip period, and a commit can be had again by catch-up). The
@@ -49,12 +49,14 @@ final class GrandpaService(
     def epochMarkerKeys(h: Hash): Option[List[Array[Byte]]] =
       if h == genesisHash then None
       else chain.header(h).flatMap(_.epochMark).map(_.validators.map(_.ed25519.bytes))
+    override def genesisNextKeys: Option[List[Array[Byte]]] = genesisNext
     def finalizeBlock(h: Hash): Either[String, Unit] = chain.finalizeAdopting(h).left.map(_.message).map(_ => ())
     override def isAudited(h: Hash): Boolean = audited(h)
 
   private def toVote(h: ChainHead): Vote = Vote(h.hash, h.stateRoot, h.slot)
 
   @volatile private var genesisHash: Hash = Hash.zero
+  @volatile private var genesisNext: Option[List[Array[Byte]]] = None
 
   private val outbound = new GrandpaOutbound:
     def broadcastVote(m: VoteMessage): Unit = toVoters(StreamKind.GrandpaVote, encodeVoteMessage(m))
@@ -66,7 +68,7 @@ final class GrandpaService(
   @volatile private var voter: GrandpaVoter = null
 
   /** One open connection per voter peer. */
-  private def voterPeers: List[JamnpConnection] =
+  private def voterPeers: List[PeerConnection] =
     val members = Option(voter).map(_.voterSet.members).getOrElse(Set.empty)
     distribution.peers.filter(c => members.contains(c.peerPublicKey)).distinctBy(_.peerPublicKey)
 
@@ -75,7 +77,7 @@ final class GrandpaService(
     if kind == StreamKind.GrandpaVote then peers.foreach(c => votesSentTo.add(c.peerPublicKey))
     peers.foreach(c => send(c, kind, payload))
 
-  private def send(c: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
+  private def send(c: PeerConnection, kind: Byte, payload: Array[Byte]): Unit =
     distribution.submitSend(() => c.openStream(kind), kind, payload, c)
 
   /** Voters that have our current round's votes. */
@@ -128,16 +130,34 @@ final class GrandpaService(
   /** (block, slot) of the peer finality we asked a justification for (CE 130). Touched on the voter thread only. */
   private val justificationRequests = new RequestTracker[(Hash, Long)](retryMillis)
 
-  /** Start voting from the persisted voter set, or set 0 at genesis with the genesis validators. */
-  def start(genesis: Hash, genesisKeys: IndexedSeq[Array[Byte]]): Unit =
+  /** Start voting from the persisted voter set, or set 0 at genesis with the genesis validators.
+    *
+    * @param genesisKeys
+    *   Ed25519 keys of the genesis state's validators (κ): set 0
+    * @param genesisNextKeys
+    *   of its next-epoch validators (γ_P): the set after the first epoch marker
+    */
+  def start(genesis: Hash, genesisKeys: IndexedSeq[Array[Byte]], genesisNextKeys: IndexedSeq[Array[Byte]]): Unit =
     genesisHash = genesis
-    val set = chain.meta.grandpaSet.filter(_.length == 40) match
+    genesisNext = Some(genesisNextKeys.toList)
+    val set = chain.meta.grandpaSet.filter(b => b.length >= 40 && (b.length - 40) % 32 == 0) match
       case Some(b) =>
         val setId = LittleEndian.get(b, 0, 8)
-        val base = Hash(b.drop(8))
-        val markerKeys = adapter.epochMarkerKeys(base).map(_.toIndexedSeq).getOrElse(genesisKeys)
+        val base = Hash(b.slice(8, 40))
+        val stored = b.drop(40).grouped(32).toIndexedSeq
+        // A record written before the keys were kept names only the base: its voters are the validators of the
+        // epoch the base begins, read from its state or from the marker before it.
+        val voters =
+          if stored.nonEmpty then stored
+          else if base == genesis then genesisKeys
+          else
+            chain
+              .stateViewAt(base)
+              .map(_.validators.current.map(_.ed25519.bytes))
+              .orElse(markerBefore(base).map(_.toIndexedSeq))
+              .getOrElse(genesisNextKeys)
         val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(0L))
-        VoterSet(setId, baseVote, markerKeys)
+        VoterSet(setId, baseVote, voters)
       case None =>
         val root = chain.postStateRoot(genesis).getOrElse(chain.finalized.stateRoot)
         VoterSet(0, Vote(genesis, root, adapter.slotOf(genesis).getOrElse(0L)), genesisKeys)
@@ -148,7 +168,8 @@ final class GrandpaService(
       keys,
       gossipMillis = gossipMillis,
       onFinalized = persist,
-      onSetAdopted = s => chain.meta.grandpaSet = LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray,
+      onSetAdopted = s =>
+        chain.meta.grandpaSet = LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray ++ s.keys.flatten,
       onProgress = (setId, round, votes) =>
         chain.meta.grandpaRound =
           LittleEndian.encode(setId, 8) ++ LittleEndian.encode(round, 8) ++ votes.flatMap(encodeVoteMessage),
@@ -174,6 +195,15 @@ final class GrandpaService(
     catch case e: Exception => logger.error("GRANDPA step failed", e)
 
   /** The round and our votes in it persisted for `setId` before a restart. */
+  /** Keys of the nearest epoch marker strictly below `h` on its chain, while the headers are held. */
+  private def markerBefore(h: Hash): Option[List[Array[Byte]]] =
+    Iterator
+      .iterate(adapter.parentOf(h))(_.flatMap(adapter.parentOf))
+      .takeWhile(_.isDefined)
+      .flatten
+      .map(adapter.epochMarkerKeys)
+      .collectFirst { case Some(keys) => keys }
+
   private def storedRound(setId: Long): Option[(Long, List[VoteMessage])] =
     chain.meta.grandpaRound.filter(b => b.length >= 16 && LittleEndian.get(b, 0, 8) == setId).map { b =>
       val votes = b.drop(16).grouped(VoteMessageSize).flatMap(v => decodeVoteMessage(v).toOption).toList
@@ -185,7 +215,6 @@ final class GrandpaService(
     chain.meta.putGrandpaJustification(target.hash, encoded)
     if setChanged then
       chain.headerBytes(target.hash).foreach(h => chain.meta.putGrandpaWarp(j.setId, h ++ encoded))
-      chain.meta.grandpaSet = LittleEndian.encode(j.setId + 1, 8) ++ target.hash.bytes.toArray
 
   private def retryPending(imported: Hash): Unit =
     pendingCommits.take(imported).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None): Unit)
@@ -196,7 +225,7 @@ final class GrandpaService(
       setId: Long,
       c: Commit,
       ancestries: List[Array[Byte]],
-      from: Option[JamnpConnection]
+      from: Option[PeerConnection]
   ): Boolean =
     voter.onCommit(round, setId, c, ancestries) match
       case Right(Some(missing)) =>
@@ -239,8 +268,8 @@ final class GrandpaService(
   // handlers
   // ---------------------------------------------------------------------------
 
-  private def onSingleMessage(f: (JamnpConnection, JamnpStream, Array[Byte]) => Unit): StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) => stream.onMessage(msg => f(conn, stream, msg))
+  private def onSingleMessage(f: (PeerConnection, MessageStream, Array[Byte]) => Unit): PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) => stream.onMessage(msg => f(conn, stream, msg))
 
   /** The set we asked a warp sync from (ours at the time: the request is the same whatever later set the peer names),
     * and the (set, round) pairs we asked a catch-up to. Touched on the voter thread only.
@@ -251,7 +280,7 @@ final class GrandpaService(
   /** A peer in a later set or round than ours: ask it for warp sync (CE 153) or a catch-up (CE 152) once, since some
     * peers never send CE 151 state.
     */
-  private def catchUpWith(conn: JamnpConnection, round: Long, setId: Long): Unit =
+  private def catchUpWith(conn: PeerConnection, round: Long, setId: Long): Unit =
     val ourSet = voter.voterSet.setId
     if setId > ourSet then
       warpRequests.retain(_ >= ourSet)
@@ -264,7 +293,7 @@ final class GrandpaService(
         requestCatchUp(conn, round - 1, setId, () => catchUpRequests.succeeded((setId, round)))
 
   /** CE 149. */
-  def voteHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def voteHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeVoteMessage(msg) match
       case Right(m) =>
@@ -278,7 +307,7 @@ final class GrandpaService(
   }
 
   /** CE 150. */
-  def commitHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def commitHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeCommitMessage(msg) match
       case Right((round, setId, c)) =>
@@ -292,7 +321,7 @@ final class GrandpaService(
   }
 
   /** CE 151. */
-  def stateHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def stateHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     stream.finish()
     decodeState(msg) match
       case Right((round, setId, _)) =>
@@ -303,7 +332,7 @@ final class GrandpaService(
   }
 
   /** CE 152. */
-  def catchUpHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def catchUpHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     decodeCatchUpRequest(msg) match
       case Right((round, setId)) =>
         val admitted = intake.tryExecute(exec, msg.length.toLong, conn) {
@@ -316,7 +345,7 @@ final class GrandpaService(
   }
 
   /** CE 130. */
-  def justificationHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def justificationHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     served(conn, stream, msg) {
       val j = Option.when(msg.length == 32)(Hash(msg)).flatMap(h => chain.meta.grandpaJustification(h))
       j match
@@ -325,7 +354,7 @@ final class GrandpaService(
     }
   }
 
-  private def served(conn: JamnpConnection, stream: JamnpStream, msg: Array[Byte])(answer: => Unit): Unit =
+  private def served(conn: PeerConnection, stream: MessageStream, msg: Array[Byte])(answer: => Unit): Unit =
     val taken = serving.submit(conn, msg.length.toLong) {
       try answer
       catch
@@ -336,11 +365,11 @@ final class GrandpaService(
     if !taken then stream.reset()
 
   /** CE 153. */
-  def warpSyncHandler: StreamHandler = onSingleMessage { (conn, stream, msg) =>
+  def warpSyncHandler: PeerStreamHandler = onSingleMessage { (conn, stream, msg) =>
     served(conn, stream, msg)(answerWarpSync(stream, msg))
   }
 
-  private def answerWarpSync(stream: JamnpStream, msg: Array[Byte]): Unit =
+  private def answerWarpSync(stream: MessageStream, msg: Array[Byte]): Unit =
     val fragments =
       if msg.length != 4 then Nil
       else
@@ -362,12 +391,12 @@ final class GrandpaService(
 
   def register(network: io.forge.jam.network.JamnpNode): Unit =
     network
-      .registerHandler(StreamKind.GrandpaVote, voteHandler)
-      .registerHandler(StreamKind.GrandpaCommit, commitHandler)
-      .registerHandler(StreamKind.GrandpaState, stateHandler)
-      .registerHandler(StreamKind.GrandpaCatchUp, catchUpHandler)
-      .registerHandler(StreamKind.GrandpaJustificationRequest, justificationHandler)
-      .registerHandler(StreamKind.WarpSyncRequest, warpSyncHandler)
+      .registerPeerHandler(StreamKind.GrandpaVote, voteHandler)
+      .registerPeerHandler(StreamKind.GrandpaCommit, commitHandler)
+      .registerPeerHandler(StreamKind.GrandpaState, stateHandler)
+      .registerPeerHandler(StreamKind.GrandpaCatchUp, catchUpHandler)
+      .registerPeerHandler(StreamKind.GrandpaJustificationRequest, justificationHandler)
+      .registerPeerHandler(StreamKind.WarpSyncRequest, warpSyncHandler)
     ()
 
   // ---------------------------------------------------------------------------
@@ -375,31 +404,16 @@ final class GrandpaService(
   // ---------------------------------------------------------------------------
 
   /** Send one request and collect the response, off the voter thread; `f` then runs on it. */
-  private def request(conn: JamnpConnection, kind: Byte, payload: Array[Byte])(f: Array[Byte] => Unit): Unit =
+  private def request(conn: PeerConnection, kind: Byte, payload: Array[Byte])(f: Array[Byte] => Unit): Unit =
     distribution.submitRequest { () =>
-      val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
       // One response message is expected; whatever else the peer sends on the stream is not kept.
-      val received = new LinkedBlockingQueue[Array[Byte]](1)
-      val done = new LinkedBlockingQueue[java.lang.Boolean]()
-      stream.onMessage(received.offer(_): Unit)
-      stream.onClosed(() => done.offer(true))
-      try
-        stream.send(payload)
-        stream.finish()
-        if done.poll(20, TimeUnit.SECONDS) != null then
-          val answer = Option(received.poll())
-          if answer.isEmpty then logger.debug(s"${StreamKind.name(kind)}: the peer closed the stream without an answer")
-          answer.foreach(bytes => exec.execute(() => guarded(f(bytes))))
-        else
-          logger.debug(s"${StreamKind.name(kind)}: no answer in 20 s")
-          stream.reset() // timed out: give the stream up on both sides
-      catch
-        case e: Exception =>
-          stream.reset()
-          throw e
+      StreamRequest.exchange(conn, kind, Seq(payload), 10_000, () => 20_000, maxMessages = 1) match
+        case Right(answer :: _) => exec.execute(() => guarded(f(answer)))
+        case Right(Nil) => logger.debug(s"${StreamKind.name(kind)}: the peer closed the stream without an answer")
+        case Left(failure) => logger.debug(s"${StreamKind.name(kind)}: ${failure.message}")
     }
 
-  private def requestJustification(conn: JamnpConnection, hash: Hash, slot: Long): Unit =
+  private def requestJustification(conn: PeerConnection, hash: Hash, slot: Long): Unit =
     request(conn, StreamKind.GrandpaJustificationRequest, hash.bytes.toArray) { bytes =>
       decodeJustification(bytes, chain.headerCodec) match
         case Right(j) if j.commit.target.hash == hash =>
@@ -409,14 +423,14 @@ final class GrandpaService(
         case Left(err) => logger.warn(s"bad CE130 response: $err")
     }
 
-  private def requestCatchUp(conn: JamnpConnection, round: Long, setId: Long, onApplied: () => Unit = () => ()): Unit =
+  private def requestCatchUp(conn: PeerConnection, round: Long, setId: Long, onApplied: () => Unit = () => ()): Unit =
     request(conn, StreamKind.GrandpaCatchUp, encodeCatchUpRequest(round, setId)) { bytes =>
       decodeCatchUp(bytes).flatMap(voter.onCatchUp(setId, _)) match
         case Right(()) => onApplied()
         case Left(e)   => logger.debug(s"catch-up: $e")
     }
 
-  private def requestWarpSync(conn: JamnpConnection, fromSet: Long): Unit =
+  private def requestWarpSync(conn: PeerConnection, fromSet: Long): Unit =
     request(conn, StreamKind.WarpSyncRequest, LittleEndian.encode(fromSet, 4)) { bytes =>
       decodeWarpFragments(bytes, chain.headerCodec) match
         case Right(fragments) =>

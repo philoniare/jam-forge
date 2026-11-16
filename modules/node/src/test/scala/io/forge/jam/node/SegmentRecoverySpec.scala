@@ -16,13 +16,10 @@ import org.scalatest.matchers.should.Matchers
   * segment shards on CE 140; a node holding none rebuilds the segment and its page's paged proof from R of them,
   * derives its justification and checks it against the segments-root.
   */
-class SegmentRecoverySpec extends AnyFunSuite with Matchers:
+class SegmentRecoverySpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val config = ChainConfig.TINY
   private val netConfig = JamnpConfig(genesisHashPrefix = "deadbeef")
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
 
   test("segments and their justifications are rebuilt from CE 140 shards of R peers, and verify against the segments-root") {
     val exports = 70 // two pages of paged proofs
@@ -42,11 +39,11 @@ class SegmentRecoverySpec extends AnyFunSuite with Matchers:
     val client = new JamnpNode(NodeIdentity.generate(), netConfig)
     try
       servers.zipWithIndex.foreach { (n, k) =>
-        n.registerHandler(StreamKind.SegmentShardRequestVerified, services(k).segmentShardHandler(verified = true))
+        n.registerPeerHandler(StreamKind.SegmentShardRequestVerified, services(k).segmentShardHandler(verified = true))
         n.start(new InetSocketAddress("127.0.0.1", 0))
       }
       val conns = servers.map(n => client.connect(new InetSocketAddress("127.0.0.1", n.boundPort)).get(10, TimeUnit.SECONDS))
-      val holdsOf = conns.zip(holders).toMap
+      val holdsOf = conns.map(c => (c: io.forge.jam.network.PeerConnection)).zip(holders).toMap
       val total = exports + ImportResolver.pagedProofCount(exports)
       val wanted = List(2, 66)
       val pages = wanted.map(i => exports + i / ImportResolver.PageSize).distinct

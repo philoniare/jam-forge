@@ -76,6 +76,32 @@ final case class ChainSpec(
       )
     }
 
+  /** Ed25519 keys of the genesis state's validators (κ, state key 8) and of its next-epoch validators (γ_P, the
+    * first field of state key 4). Empty when the state has no such entry.
+    */
+  def genesisValidatorKeys: (IndexedSeq[Array[Byte]], IndexedSeq[Array[Byte]]) =
+    def chapter(index: Int): Array[Byte] =
+      genesisState
+        .map(kv => kv.key.toArray -> kv.value)
+        .collectFirst { case (k, v) if k.headOption.contains(index.toByte) && k.drop(1).forall(_ == 0) => v.toArray }
+        .getOrElse(Array.emptyByteArray)
+    def compact(value: Array[Byte]): Option[(Int, Int)] =
+      try
+        val (n, used) = io.forge.jam.core.codec.JamCodecs.decodeCompactInteger(value, 0)
+        Option.when(n >= 0 && n <= config.validatorCount)((n.toInt, used))
+      catch case _: Exception => None
+    def entries(value: Array[Byte], offset: Int, count: Int): IndexedSeq[Array[Byte]] =
+      if value.length - offset < count * 336L then IndexedSeq.empty
+      else (0 until count).map(i => value.slice(offset + i * 336 + 32, offset + i * 336 + 64))
+    // A validator list is a compact count before its 336-byte entries (v0.8.0) or V entries with no count; κ, which
+    // is the whole of its value, tells which.
+    val kappa = chapter(8)
+    val counted = compact(kappa).exists((n, used) => kappa.length - used == n * 336L)
+    def ed25519Keys(value: Array[Byte]): IndexedSeq[Array[Byte]] =
+      if counted then compact(value).fold(IndexedSeq.empty)((n, used) => entries(value, used, n))
+      else entries(value, 0, config.validatorCount)
+    (ed25519Keys(chapter(8)), ed25519Keys(chapter(4)))
+
   /** First 8 hex nibbles of the genesis header hash (ALPN suffix). */
   def alpnPrefix: String = genesisHeaderHash.toHex.stripPrefix("0x").take(8)
 

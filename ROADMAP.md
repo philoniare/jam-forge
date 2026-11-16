@@ -38,8 +38,9 @@ Fully conformant and can produce blocks (including networking and off-chain comp
 - [x] CE 148 — segment request (`SegmentPool`)
 - [x] CE 146 — builder bundle submission, accepted into the guarantee pipeline
 - [x] Honest UP 0 fork-tree semantics — `ChainManager` tracks real leaves, pruned at finality
-- [x] Honest UP 0 finality semantics — finalized head carries its real persisted state root; each peer's announced `Final` is tracked; devnet finality depth is a `ChainSpec` knob (a documented GRANDPA stand-in — implementing GRANDPA itself is an explicit non-goal, since jamnp-s defines no finality-vote streams)
-- [ ] CE 131 proxy-send wiring in `JamNode.authorSlot` (currently passes `_ => None` for validator-index→connection lookup; broadcast fallback works, so tickets still reach every peer, but the direct-proxy path is unwired)
+- [x] Honest UP 0 finality semantics — finalized head carries its real persisted state root; each peer's announced `Final` is tracked; devnet finality depth is a `ChainSpec` knob, used when GRANDPA is off
+- [x] CE 131 proxy sending — a ticket goes to its proxy validator of the next epoch when connected (`JamNode.connectionForNextEpochValidator`), else to every peer
+- [x] GRANDPA — voting, commits, catch-up and warp sync on CE 149–153 (`GrandpaVoter`, `GrandpaService`), finalizing with polkajam v0.8.0 in mixed networks
 
 #### 📋 M3: HALF-SPEED (Planned)
 

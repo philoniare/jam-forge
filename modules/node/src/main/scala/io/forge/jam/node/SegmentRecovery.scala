@@ -3,7 +3,7 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
-import io.forge.jam.network.JamnpConnection
+import io.forge.jam.network.PeerConnection
 import io.forge.jam.protocol.refine.{DaShards, ImportResolver}
 
 /** What is needed to rebuild a package's exported segments from the availability layer, by segments-root: the
@@ -111,7 +111,7 @@ final class SegmentRecovery(
     chain: ChainReader,
     shards: ShardService,
     exports: ExportIndex,
-    peers: () => Iterable[JamnpConnection]
+    peers: () => Iterable[PeerConnection]
 ) extends LazyLogging:
 
   /** Segments `indices` of `segmentsRoot` with their proofs, verified against the root; None when they cannot be

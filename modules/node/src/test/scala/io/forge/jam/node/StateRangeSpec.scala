@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 
 import io.circe.parser.decode
@@ -20,11 +20,10 @@ import scala.collection.mutable
   * reads (`chain.readRawState`), matching the `TwoNodeSyncSpec` devnet
   * pattern.
   */
-class StateRangeSpec extends AnyFunSuite with Matchers:
+class StateRangeSpec extends AnyFunSuite with Matchers with NodeFixture:
   private given io.circe.Decoder[TraceStep] =
     TraceStep.decoder(using summon[io.circe.Decoder[Block]])
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir =
     baseDir.resolve("jam-conformance/fuzz-reports/0.8.0/traces")
 
@@ -49,11 +48,6 @@ class StateRangeSpec extends AnyFunSuite with Matchers:
       .collectFirst {
         case Right(step) if step.preState.keyvals.sizeIs >= 3 => step
       }
-
-  private def tempDir(prefix: String): Path = Files.createTempDirectory(prefix)
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
 
   test("node B fetches node A's genesis state range over CE 129") {
     val step = findStepWithState().getOrElse(

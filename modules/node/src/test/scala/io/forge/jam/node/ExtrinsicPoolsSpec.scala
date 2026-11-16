@@ -56,3 +56,42 @@ class ExtrinsicPoolsSpec extends AnyFunSuite with Matchers:
     pools.addPreimage(b)
     pools.takePreimages() shouldBe List(b, a)
   }
+
+  private def guarantee(pkg: String, core: Int = 0): io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic =
+    import io.forge.jam.core.primitives.{CoreIndex, Gas, Hash, Timeslot}
+    import spire.math.{UInt, UShort}
+    val report = io.forge.jam.core.types.workpackage.WorkReport(
+      packageSpec = io.forge.jam.core.types.work.PackageSpec(
+        Hashing.blake2b256(pkg.getBytes("UTF-8")), UInt(0), Hash.zero, UShort(0), Hash.zero, UShort(0)),
+      context = io.forge.jam.core.types.context.Context(Hash.zero, Timeslot(UInt(0)), Hash.zero, Hash.zero, Hash.zero,
+        Timeslot(UInt(0)), Hash.zero, List.empty),
+      coreIndex = CoreIndex(core),
+      authorizerHash = Hash.zero,
+      authGasUsed = Gas(0),
+      authOutput = JamBytes.empty,
+      segmentRootLookup = List.empty,
+      results = List.empty
+    )
+    io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic(report, Timeslot(UInt(5)), List.empty)
+
+  private def extrinsic(
+      preimages: List[Preimage] = Nil,
+      guarantees: List[io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic] = Nil
+  ): io.forge.jam.core.types.block.Extrinsic =
+    io.forge.jam.core.types.block.Extrinsic(
+      Nil, preimages, guarantees, Nil, io.forge.jam.core.types.extrinsic.Dispute(Nil, Nil, Nil))
+
+  test("guarantees and preimages of blocks a reorg left behind are pooled again, unless the new chain has them") {
+    val pools = new ExtrinsicPools
+    val (lost, kept) = (Preimage(ServiceId(1), JamBytes(Array[Byte](1))), Preimage(ServiceId(1), JamBytes(Array[Byte](2))))
+    val (gLost, gKept) = (guarantee("lost"), guarantee("kept", core = 1))
+    pools.restoreAbandoned(
+      abandoned = List(extrinsic(List(lost), List(gLost)), extrinsic(List(kept), List(gKept))),
+      adopted = List(extrinsic(List(kept), List(gKept)))
+    )
+    pools.pendingPreimages shouldBe List(lost)
+    pools.pendingGuarantees shouldBe List(gLost)
+    // Again changes nothing: both are pooled already.
+    pools.restoreAbandoned(List(extrinsic(List(lost), List(gLost))), Nil)
+    (pools.pendingPreimages.size, pools.guaranteeCount) shouldBe ((1, 1))
+  }

@@ -22,29 +22,29 @@ object ImportResult:
       headerHash: Hash
   ) extends ImportResult
 
-  final case class Failure(
+  /** The block was checked and is invalid: importing it again gives the same answer. */
+  final case class Invalid(
       error: ImportError,
       message: String = "",
       cause: Option[PipelineError] = None
   ) extends ImportResult
 
-/** Errors that can occur during block import.
+  /** The import itself failed (an exception of ours). It says nothing about the block, which may import on a later
+    * try.
+    */
+  final case class Failed(message: String, cause: Throwable) extends ImportResult
+
+/** Why a block is invalid.
   */
 enum ImportError:
   case InvalidHeader
-  case InvalidParent
-  case InvalidSlot
   case InvalidStateRoot
   case SafroleError
   case AssuranceError
-  case AuthorizationError
   case DisputeError
-  case HistoryError
   case PreimageError
   case ReportError
   case SignatureError
-  case StatisticsError
-  case UnknownError
 
 /** BlockImporter handles importing blocks and applying all state transitions.
   *
@@ -122,7 +122,7 @@ class BlockImporter(
   ): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
-        return ImportResult.Failure(
+        return ImportResult.Invalid(
           ImportError.InvalidStateRoot,
           "Block's parent_state_root does not match pre-state root"
         )
@@ -130,7 +130,7 @@ class BlockImporter(
       if trieStore.currentRoot != block.header.parentStateRoot then
         backendLock.synchronized(trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value))))
         if trieStore.currentRoot != block.header.parentStateRoot then
-          return ImportResult.Failure(
+          return ImportResult.Invalid(
             ImportError.InvalidStateRoot,
             s"Bootstrapped state root ${trieStore.currentRoot} does not match " +
               s"block parent_state_root ${block.header.parentStateRoot}"
@@ -167,7 +167,7 @@ class BlockImporter(
 
       pipelineResult match
         case Left(error) =>
-          ImportResult.Failure(mapPipelineError(error), error.message, Some(error))
+          ImportResult.Invalid(mapPipelineError(error), error.message, Some(error))
 
         case Right(result) =>
           view.applyStoreUpdates()
@@ -183,10 +183,7 @@ class BlockImporter(
         throw e
       case e: Throwable =>
         logger.error("Unexpected error during block import", e)
-        ImportResult.Failure(
-          ImportError.UnknownError,
-          Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
-        )
+        ImportResult.Failed(Option(e.getMessage).getOrElse(e.getClass.getSimpleName), e)
 
   /** Maps pipeline errors to import errors.
     */

@@ -46,5 +46,7 @@ object ImportBlockStep:
             )
             Right(postStateRoot)
 
-          case failure: ImportResult.Failure =>
-            Left(ImportErrorText(block, parentState.stateRoot, failure))
+          case invalid: ImportResult.Invalid =>
+            Left(ImportErrorText(block, parentState.stateRoot, invalid))
+          case ImportResult.Failed(message, _) =>
+            Left(ImportErrorText.failed(message))

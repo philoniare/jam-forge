@@ -75,8 +75,8 @@ object FuzzSpecTraceGen:
           val step = TraceStep(RawState(root, Nil), block, RawState(postRoot, Nil))
           Files.write(out.resolve(f"$written%08d.bin"), stepCodec.encode(step).toArray)
           root = postRoot
-        case ImportResult.Failure(err, msg, _) =>
-          throw new IllegalStateException(s"own block at slot $slot rejected: $err $msg")
+        case other =>
+          throw new IllegalStateException(s"own block at slot $slot rejected: $other")
       slot += 1
     println(
       s"wrote $written blocks (slots up to ${slot - 1}, epochs ${slot / config.epochLength + 1}), " +

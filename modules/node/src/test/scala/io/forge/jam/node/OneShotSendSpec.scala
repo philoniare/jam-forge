@@ -3,7 +3,7 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
-import io.forge.jam.network.JamnpStream
+import io.forge.jam.network.MessageStream
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -29,13 +29,13 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
       val started = System.nanoTime()
       // Twenty sends to a peer that never grants a stream, then one to another peer.
       for _ <- 1 to 20 do
-        OneShotSend.submit(egress, stuck, () => new CompletableFuture[JamnpStream](), List(Array[Byte](1)), _ => ())
+        OneShotSend.submit(egress, stuck, () => new CompletableFuture[MessageStream](), List(Array[Byte](1)), _ => ())
       OneShotSend.submit(
         egress,
         other,
         () =>
           reached.countDown()
-          new CompletableFuture[JamnpStream](),
+          new CompletableFuture[MessageStream](),
         List(Array[Byte](2)),
         _ => ()
       )
@@ -58,7 +58,7 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
           stuck,
           () =>
             opens.incrementAndGet()
-            new CompletableFuture[JamnpStream](),
+            new CompletableFuture[MessageStream](),
           List(Array[Byte](1)),
           failures.add(_),
           openTimeoutMillis = 500
@@ -71,7 +71,7 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
       failures.size shouldBe 100
 
       // A failed open releases its place at once.
-      val failed = new CompletableFuture[JamnpStream]()
+      val failed = new CompletableFuture[MessageStream]()
       failed.completeExceptionally(new RuntimeException("refused"))
       val why = new ConcurrentLinkedQueue[String]()
       OneShotSend.submit(egress, stuck, () => failed, List(Array[Byte](1)), why.add(_))

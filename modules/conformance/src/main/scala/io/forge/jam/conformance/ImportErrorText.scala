@@ -14,7 +14,7 @@ import io.forge.jam.protocol.importing.{ImportError, ImportResult}
 
 object ImportErrorText:
 
-  def apply(block: Block, parentStateRoot: Hash, failure: ImportResult.Failure)(using config: ChainConfig): String =
+  def apply(block: Block, parentStateRoot: Hash, failure: ImportResult.Invalid)(using config: ChainConfig): String =
     failure.cause match
       case Some(PipelineError.SafroleErr(SafroleErrorCode.BadSlot)) =>
         val headerHash = Hashing.blake2b256(Header.headerCodec(config.epochLength).encode(block.header))
@@ -24,7 +24,10 @@ object ImportErrorText:
       case None if failure.error == ImportError.InvalidStateRoot =>
         s"Local chain error: invalid parent state root (expected: ${short(block.header.parentStateRoot)}, " +
           s"actual: ${short(parentStateRoot)})"
-      case None => s"Local chain error: block execution failure: ${failure.message}"
+      case None => failed(failure.message)
+
+  /** The text for an import that failed on our side. */
+  def failed(message: String): String = s"Local chain error: block execution failure: $message"
 
   private def short(hash: Hash): String = s"0x${hash.toHex.take(16)}..."
 

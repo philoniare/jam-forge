@@ -10,7 +10,10 @@ enum ChainError:
   case PreviouslyInvalid
   case UnknownParent(parent: Hash)
   case StoredOnSideBranch(weight: Long, height: Long, bestWeight: Long, bestHeight: Long)
-  case ImportFailed(error: ImportError, detail: String)
+  /** The block was checked and is invalid. */
+  case InvalidBlock(error: ImportError, detail: String)
+  /** The import failed on our side: not a verdict on the block, which may import on a later try. */
+  case ImportFailed(detail: String)
   case UnknownBlock
   case NotOnMainChain
   case BelowFinalized
@@ -41,7 +44,8 @@ enum ChainError:
     case UnknownParent(p)     => s"unknown parent ${p.toHex.take(18)}"
     case StoredOnSideBranch(w, h, bw, bh) =>
       s"stored on side branch (weight $w height $h vs best $bw/$bh)"
-    case ImportFailed(error, detail) => s"$error: $detail"
+    case InvalidBlock(error, detail) => s"$error: $detail"
+    case ImportFailed(detail)        => s"import failed: $detail"
     case UnknownBlock         => "unknown block"
     case NotOnMainChain       => "cannot finalize a non-main-chain block"
     case BelowFinalized       => "cannot finalize below the finalized head"

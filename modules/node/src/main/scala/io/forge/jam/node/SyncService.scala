@@ -1,13 +1,13 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{ConcurrentHashMap, Executors, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.trie.TrieNode
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, StreamKind}
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -37,18 +37,33 @@ object SyncCodec:
     leaves.foreach(l => out.write(encodeHashSlot(l)))
     out.toByteArray
 
-  def decodeHandshake(bytes: Array[Byte]): (HashSlot, List[HashSlot]) =
-    val finalHead = decodeHashSlot(bytes, 0)
-    val (count, consumed) = JamCodecs.decodeCompactInteger(bytes, 36)
-    if count < 0 || count > SyncService.MaxHandshakeLeaves then
-      throw new IllegalArgumentException(s"handshake names $count leaves")
-    var offset = 36 + consumed
-    val leaves = (0L until count).map { _ =>
-      val l = decodeHashSlot(bytes, offset)
-      offset += 36
-      l
-    }.toList
-    (finalHead, leaves)
+  /** Size of a `HashSlot` on the wire. */
+  private val HashSlotBytes = 36
+
+  /** Bytes a compact integer occupies, read from its first byte: one more than its leading one bits, or 9 for 0xff. */
+  private def compactSize(prefix: Byte): Int =
+    val ones = Integer.numberOfLeadingZeros(~prefix & 0xff) - 24
+    if ones == 8 then 9 else ones + 1
+
+  /** Refuses a message that is short, names more than `SyncService.MaxHandshakeLeaves` leaves, or has bytes after
+    * its last leaf. Never throws.
+    */
+  def decodeHandshake(bytes: Array[Byte]): Either[String, (HashSlot, List[HashSlot])] =
+    if bytes.length < HashSlotBytes + 1 then Left(s"handshake of ${bytes.length} bytes is too short")
+    else
+      val countSize = compactSize(bytes(HashSlotBytes))
+      if bytes.length < HashSlotBytes + countSize then Left("handshake leaf count is truncated")
+      else
+        val (count, consumed) = JamCodecs.decodeCompactInteger(bytes, HashSlotBytes)
+        if count < 0 || count > SyncService.MaxHandshakeLeaves then Left(s"handshake names $count leaves")
+        else
+          val start = HashSlotBytes + consumed
+          val expected = start + count.toInt * HashSlotBytes
+          if bytes.length != expected then
+            Left(s"handshake naming $count leaves should be $expected bytes, got ${bytes.length}")
+          else
+            val leaves = List.tabulate(count.toInt)(i => decodeHashSlot(bytes, start + i * HashSlotBytes))
+            Right((decodeHashSlot(bytes, 0), leaves))
 
   /** Announcement: Header ++ Final. The header is carried as its encoded
     * bytes; the trailing 36 bytes are the announcer's latest finalized block.
@@ -56,9 +71,21 @@ object SyncCodec:
   def encodeAnnouncement(headerBytes: Array[Byte], finalHead: HashSlot): Array[Byte] =
     headerBytes ++ encodeHashSlot(finalHead)
 
-  def decodeAnnouncement(bytes: Array[Byte]): (Array[Byte], HashSlot) =
-    val headerBytes = java.util.Arrays.copyOfRange(bytes, 0, bytes.length - 36)
-    (headerBytes, decodeHashSlot(bytes, bytes.length - 36))
+  /** A header starts with parent hash, state root and extrinsic hash (32 bytes each) and the slot (4 LE): anything
+    * shorter cannot be one.
+    */
+  val MinAnnouncedHeaderBytes: Int = 100
+
+  /** Refuses a message too short to hold a header's fixed fields and a final. The header is opaque here, so bytes
+    * appended to an announcement are not caught: they shift into the header and change its hash, so they name a
+    * block no peer holds. Never throws.
+    */
+  def decodeAnnouncement(bytes: Array[Byte]): Either[String, (Array[Byte], HashSlot)] =
+    if bytes.length < MinAnnouncedHeaderBytes + HashSlotBytes then
+      Left(s"announcement of ${bytes.length} bytes is too short")
+    else
+      val split = bytes.length - HashSlotBytes
+      Right((java.util.Arrays.copyOfRange(bytes, 0, split), decodeHashSlot(bytes, split)))
 
   /** CE 128 request: Header Hash ++ Direction(1) ++ Maximum Blocks(4 LE). */
   def encodeBlockRequest(from: Hash, ascending: Boolean, maxBlocks: Long): Array[Byte] =
@@ -155,31 +182,36 @@ final class SyncService(
     chain: ChainManager,
     /** Where CE 128 and CE 129 requests are answered: off the network event loops, which only hand them over. */
     serving: InboundWork = InboundWork.direct,
-    announcements: InboundWork = InboundWork.direct
+    announcements: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
   import SyncCodec.*
 
   /** UP 0 streams by peer connection, for broadcasting announcements. */
-  private val announceStreams = ConcurrentHashMap.newKeySet[JamnpStream]()
+  private val announceStreams = ConcurrentHashMap.newKeySet[MessageStream]()
 
-  private val peerFinals = new ConcurrentHashMap[JamnpConnection, HashSlot]()
+  private val peerFinals = new ConcurrentHashMap[PeerConnection, HashSlot]()
 
   /** The latest `Final` announced by the peer on `conn`, if any handshake or
     * announcement has been received from it yet.
     */
-  def peerFinal(conn: JamnpConnection): Option[HashSlot] = Option(peerFinals.get(conn))
+  def peerFinal(conn: PeerConnection): Option[HashSlot] = Option(peerFinals.get(conn))
 
   /** Each connected peer's best head as last seen: the newest leaf of its
     * UP 0 handshake, then every block it announces.
     */
-  private val peerBestHeads = new ConcurrentHashMap[JamnpConnection, HashSlot]()
+  private val peerBestHeads = new ConcurrentHashMap[PeerConnection, HashSlot]()
 
   /** Best heads of the peers with a live UP 0 stream, keyed by peer key so a
     * peer reached over two connections counts once.
     */
-  def peerBests: Iterable[Hash] =
+  def peerBests: Iterable[Hash] = peerBests(_ => true)
+
+  /** The best head of each peer that `counts`, one per peer key. */
+  def peerBests(counts: PeerConnection => Boolean): Iterable[Hash] =
     peerBestHeads.asScala.toList
-      .filter(_._1.isOpen)
+      .filter(e => e._1.isOpen && counts(e._1))
       .groupBy(e => JamBytes(e._1.peerKey))
       .values
       .map(_.maxBy(_._2.slot)._2.hash)
@@ -193,7 +225,7 @@ final class SyncService(
       .toList
 
   /** Finalized blocks announced by peers with a live UP 0 stream, one per peer key (the newest). */
-  def peerFinalized: List[(JamnpConnection, HashSlot)] =
+  def peerFinalized: List[(PeerConnection, HashSlot)] =
     peerFinals.asScala.toList
       .filter(_._1.isOpen)
       .groupBy(e => JamBytes(e._1.peerKey))
@@ -202,7 +234,7 @@ final class SyncService(
       .toList
 
   /** Keep to the chain `needed` peers announce as finalized, fetching the agreed block when we lack it. */
-  def followPeerFinality(needed: Int, counts: JamnpConnection => Boolean = _ => true): Unit =
+  def followPeerFinality(needed: Int, counts: PeerConnection => Boolean = _ => true): Unit =
     val finals = peerFinalized.filter((conn, _) => counts(conn))
     chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed) match
       case Left(missing) =>
@@ -213,19 +245,19 @@ final class SyncService(
   private val fetching = ConcurrentHashMap.newKeySet[Hash]()
 
   /** Fetch block `hash` and its missing ancestors from `conn`, once at a time per block. */
-  def fetchBlock(conn: JamnpConnection, hash: Hash): Unit =
+  def fetchBlock(conn: PeerConnection, hash: Hash): Unit =
     if fetching.add(hash) then requestAndImport(conn, hash, onDone = () => fetching.remove(hash))
 
   /** Drop what is held for a connection that closed. Its UP 0 stream's close listener normally does this; a message
     * handled while the stream closes can put an entry back, which nothing else would remove.
     */
-  def forgetConnection(conn: JamnpConnection): Unit =
+  def forgetConnection(conn: PeerConnection): Unit =
     upStreams.remove(conn)
     peerFinals.remove(conn)
     peerBestHeads.remove(conn)
     ()
 
-  private def notePeerBest(conn: JamnpConnection, head: HashSlot): Unit =
+  private def notePeerBest(conn: PeerConnection, head: HashSlot): Unit =
     peerBestHeads.merge(conn, head, (old, nu) => if nu.slot >= old.slot then nu else old)
     ()
 
@@ -236,19 +268,9 @@ final class SyncService(
   private val MaxBlockResponseBytes: Long = 16L * 1024 * 1024
 
   /** Single-threaded import pipeline so block application stays sequential. */
-  private val importExecutor = Executors.newSingleThreadExecutor { r =>
-    val t = new Thread(r, "jam-sync-import")
-    t.setDaemon(true)
-    t
-  }
+  private val importExecutor = threads.single("jam-sync-import")
 
-  private val fetchExecutor = Executors.newFixedThreadPool(
-    SyncService.MaxConcurrentFetches,
-    r =>
-      val t = new Thread(r, "jam-sync-fetch")
-      t.setDaemon(true)
-      t
-  )
+  private val fetchExecutor = threads.fixed("jam-sync-fetch", SyncService.MaxConcurrentFetches)
 
   /** Stop the import pipeline and wait for an in-flight import to finish —
     * must run before the chain's storage closes (a late import reading a
@@ -273,14 +295,14 @@ final class SyncService(
   // =========================================================================
 
   /** The live UP 0 stream on each connection. */
-  private val upStreams = new ConcurrentHashMap[JamnpConnection, JamnpStream]()
+  private val upStreams = new ConcurrentHashMap[PeerConnection, MessageStream]()
 
   /** Handler for peer-opened UP 0 streams (we are the acceptor). */
-  def blockAnnouncementHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) => attachAnnouncementStream(conn, stream, "accepted")
+  def blockAnnouncementHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) => attachAnnouncementStream(conn, stream, "accepted")
 
   /** Open UP 0 to a peer we connected to (we are the initiator). */
-  def openAnnouncementStream(conn: JamnpConnection): JamnpStream =
+  def openAnnouncementStream(conn: PeerConnection): MessageStream =
     val stream = conn
       .openStream(StreamKind.BlockAnnouncement)
       .get(10, TimeUnit.SECONDS)
@@ -288,13 +310,13 @@ final class SyncService(
     stream
 
   /** True when `conn` has an open UP 0 stream. */
-  def hasAnnouncementStream(conn: JamnpConnection): Boolean =
+  def hasAnnouncementStream(conn: PeerConnection): Boolean =
     Option(upStreams.get(conn)).exists(_.isOpen)
 
   /** Close the UP 0 stream on `conn`, if any (e.g. the peer stopped being a
     * grid neighbour at an epoch change).
     */
-  def closeAnnouncementStream(conn: JamnpConnection): Unit =
+  def closeAnnouncementStream(conn: PeerConnection): Unit =
     Option(upStreams.get(conn)).foreach(_.close())
 
   /** Both sides send their handshake as soon as the stream is open (JAMNP-S
@@ -302,7 +324,7 @@ final class SyncService(
     * shows up, the one with the greatest QUIC stream ID is kept and the
     * others reset (JAMNP-S "Protocols and streams").
     */
-  private def attachAnnouncementStream(conn: JamnpConnection, stream: JamnpStream, side: String): Unit =
+  private def attachAnnouncementStream(conn: PeerConnection, stream: MessageStream, side: String): Unit =
     var handshaken = false
     val previous = upStreams.merge(conn, stream, (old, nu) => if old.isOpen && old.id > nu.id then old else nu)
     if previous ne stream then
@@ -320,21 +342,26 @@ final class SyncService(
         peerBestHeads.remove(conn)
     }
     val waiting = new AnnouncementMailbox(SyncService.MaxWaitingAnnouncements)
+    def malformed(reason: String): Unit =
+      logger.debug(s"UP0: bad message from $side peer: $reason")
+      stream.reset()
     def handle(first: Boolean, msg: Array[Byte]): Unit =
       try
         if first then
-          val (peerFinal, peerLeaves) = decodeHandshake(msg)
-          peerFinals.put(conn, peerFinal)
-          logger.info(
-            s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
-              s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
-          )
-          onPeerLeaves(conn, peerLeaves, peerFinal)
-        else onAnnouncement(conn, msg)
-      catch
-        case e: Exception =>
-          logger.debug(s"UP0: bad message from $side peer: ${e.getMessage}")
-          stream.reset()
+          decodeHandshake(msg) match
+            case Left(reason) => malformed(reason)
+            case Right((peerFinal, peerLeaves)) =>
+              peerFinals.put(conn, peerFinal)
+              logger.info(
+                s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
+                  s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
+              )
+              onPeerLeaves(conn, peerLeaves, peerFinal)
+        else
+          decodeAnnouncement(msg) match
+            case Left(reason)                   => malformed(reason)
+            case Right((headerBytes, peerFinal)) => onAnnouncement(conn, headerBytes, peerFinal)
+      catch case e: Exception => malformed(String.valueOf(e.getMessage))
     stream.onMessage { msg =>
       val first = !handshaken
       handshaken = true
@@ -343,9 +370,9 @@ final class SyncService(
     stream.send(ourHandshake)
 
   /** The connection each UP 0 stream belongs to. */
-  private val streamConnection = new ConcurrentHashMap[JamnpStream, JamnpConnection]()
+  private val streamConnection = new ConcurrentHashMap[MessageStream, PeerConnection]()
 
-  private def dropDuplicate(old: JamnpStream): Unit =
+  private def dropDuplicate(old: MessageStream): Unit =
     logger.debug(s"UP0: stream ${old.id} superseded by a newer stream on the same connection; resetting")
     announceStreams.remove(old)
     streamConnection.remove(old)
@@ -356,22 +383,21 @@ final class SyncService(
     val msg = encodeAnnouncement(headerBytes, ourFinal)
     announceStreams.forEach(_.send(msg))
 
-  private def onAnnouncement(conn: JamnpConnection, msg: Array[Byte]): Unit =
-    val (headerBytes, peerFinal) = decodeAnnouncement(msg)
+  /** `headerBytes` holds at least `MinAnnouncedHeaderBytes`, so its parent hash and slot can be read. */
+  private def onAnnouncement(conn: PeerConnection, headerBytes: Array[Byte], peerFinal: HashSlot): Unit =
     peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
-    val slot =
-      if headerBytes.length >= 100 then Some(io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)) else None
-    slot.foreach(s => notePeerBest(conn, HashSlot(headerHash, s)))
+    val slot = io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)
+    notePeerBest(conn, HashSlot(headerHash, slot))
     if !chain.hasBlock(headerHash) then
       // The header starts with its parent's hash: when we hold the parent, the announced block is all we lack.
-      val parentKnown = headerBytes.length >= 32 && chain.hasBlock(Hash(java.util.Arrays.copyOfRange(headerBytes, 0, 32)))
-      val wanted = if parentKnown then 1 else blocksWanted(slot)
+      val parentKnown = chain.hasBlock(Hash(java.util.Arrays.copyOfRange(headerBytes, 0, 32)))
+      val wanted = if parentKnown then 1 else blocksWanted(Some(slot))
       if wanted > 0 then
         logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting $wanted block(s)")
         requestAndImport(conn, headerHash, wanted)
 
-  private def onPeerLeaves(conn: JamnpConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
+  private def onPeerLeaves(conn: PeerConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
     leaves.maxByOption(_.slot).foreach(notePeerBest(conn, _))
     leaves.foreach { leaf =>
       if leaf.slot < peerFinal.slot then
@@ -394,8 +420,8 @@ final class SyncService(
     * holding the block sequence (JAMNP-S CE 128 `<-- [Block]`). A request
     * for an unknown block, or one that can no longer be finalized, is reset.
     */
-  def blockRequestHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def blockRequestHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       var asked = false
       stream.onMessage { msg =>
         // One request per stream; reading up to 256 blocks from the store is not event-loop work.
@@ -445,7 +471,7 @@ final class SyncService(
     * and import them oldest-first. The request waits on a fetch thread; the import runs on the import executor.
     */
   private def requestAndImport(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       from: Hash,
       maxBlocks: Int = SyncService.MaxBlocksPerRequest,
       onDone: () => Unit = () => (),
@@ -457,7 +483,7 @@ final class SyncService(
     if dropped.forall(_ ne request) then schedulePump()
 
   /** Fetches waiting to be sent, and those out with a peer or being imported. */
-  private val fetches = new FetchQueue[JamnpConnection](
+  private val fetches = new FetchQueue[PeerConnection](
     maxInFlight = SyncService.MaxConcurrentFetches,
     maxPerPeer = SyncService.MaxPendingFetchesPerPeer,
     maxPending = SyncService.MaxPendingFetches,
@@ -495,7 +521,7 @@ final class SyncService(
           finish(request, answered = true)
       next = fetches.next()
 
-  private def fetchThenImport(request: FetchQueue.Request[JamnpConnection]): Unit =
+  private def fetchThenImport(request: FetchQueue.Request[PeerConnection]): Unit =
     val answer =
       try exchange(request.peer, request.from, request.maxBlocks, request.ascending)
       catch
@@ -514,7 +540,7 @@ final class SyncService(
       case _: java.util.concurrent.RejectedExecutionException =>
         fetches.finished(request, have = false): Unit // shutting down
 
-  private def finish(request: FetchQueue.Request[JamnpConnection], answered: Boolean): Unit =
+  private def finish(request: FetchQueue.Request[PeerConnection], answered: Boolean): Unit =
     val released = fetches.finished(request, have = chain.hasBlock(request.from), answered = answered)
     released.foreach(_.onDone())
     request.onDone()
@@ -522,46 +548,42 @@ final class SyncService(
   /** Ask `conn` for the blocks after our best head, when its chain is ahead by more than a descending request
     * from its tip can bridge. Repeats (from [[importFetched]]) while blocks keep arriving.
     */
-  private def catchUp(conn: JamnpConnection): Unit = catchUpFrom(conn, chain.best.hash)
+  private def catchUp(conn: PeerConnection): Unit = catchUpFrom(conn, chain.best.hash)
 
   /** Ask `conn` for the blocks after `from`: our best head, the last block of the previous answer, or our finalized
     * head when the peer has nothing after our best head (see [[importFetched]]).
     */
-  private def catchUpFrom(conn: JamnpConnection, from: Hash): Unit =
+  private def catchUpFrom(conn: PeerConnection, from: Hash): Unit =
     if conn.isOpen then requestAndImport(conn, from, SyncService.MaxBlocksPerRequest, ascending = true)
 
   private def exchange(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       from: Hash,
       maxBlocks: Int,
       ascending: Boolean
   ): Option[List[Array[Byte]]] =
-    val stream = conn
-      .openStream(StreamKind.BlockRequest)
-      .get(10, TimeUnit.SECONDS)
     // The response is one message; a peer that keeps sending is not buffered without limit.
-    val received = new LinkedBlockingQueue[Array[Byte]](SyncService.MaxResponseMessages)
-    val done = new LinkedBlockingQueue[java.lang.Boolean]()
-    stream.onMessage(received.offer(_))
-    stream.onClosed(() => done.offer(true))
-    stream.send(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong))
-    stream.finish()
+    StreamRequest.exchange(
+      conn,
+      StreamKind.BlockRequest,
+      Seq(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong)),
+      10_000,
+      () => 20_000,
+      maxMessages = SyncService.MaxResponseMessages
+    ) match
+      case Left(failure) =>
+        logger.warn(s"block request failed: ${failure.message}")
+        None
+      case Right(messages) =>
+        Some(messages.flatMap { m =>
+          chain.splitBlocks(m) match
+            case Right(bs) => bs
+            case Left(err) =>
+              logger.warn(s"CE128 response undecodable: $err")
+              Nil
+        })
 
-    if done.poll(20, TimeUnit.SECONDS) == null then
-      logger.warn("block request timed out")
-      stream.reset() // give the stream up on both sides
-      None
-    else
-      val blocks = mutable.ListBuffer.empty[Array[Byte]]
-      var next = received.poll()
-      while next != null do
-        chain.splitBlocks(next) match
-          case Right(bs) => blocks ++= bs
-          case Left(err) => logger.warn(s"CE128 response undecodable: $err")
-        next = received.poll()
-      Some(blocks.toList)
-
-  private def importFetched(conn: JamnpConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =
+  private def importFetched(conn: PeerConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =
     // Oldest first; skip blocks until one extends our best head.
     var imported = 0
     var stored = 0 // new to us, kept on a side branch
@@ -601,8 +623,8 @@ final class SyncService(
   // =========================================================================
   // CE 129 — state request (trie range)
   // =========================================================================
-  def stateRequestHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def stateRequestHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       var asked = false
       stream.onMessage { msg =>
         // One request per stream; walking up to 16 MiB of the trie is not event-loop work.

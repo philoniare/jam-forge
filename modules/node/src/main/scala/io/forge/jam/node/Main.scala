@@ -19,7 +19,7 @@ import io.forge.jam.pvm.PvmSettings
   *          [--author <validator-index> | --validator-seed <path>]
   *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
   *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
-  *          [--finality-peers N] [--prune-history]
+  *          [--finality-peers N | --announced-finality] [--prune-history]
   *          [--fault-tamper-reports]   (testing only: guarantee wrong reports, to exercise disputes)
   * jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
   *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
@@ -53,6 +53,14 @@ import io.forge.jam.pvm.PvmSettings
   */
 object Main extends LazyLogging:
 
+  /** Whether the node runs GRANDPA. A validator votes. A node without validator keys observes: it finalizes what a
+    * justification signed by a supermajority of the voter set proves (CE 130, CE 153) and nothing else. Only an
+    * operator who asks for it gets finality from unsigned UP 0 announcements instead: `--announced-finality` (a
+    * quorum of the current validators' connections) or `--finality-peers N` (any N peers).
+    */
+  private[node] def grandpaWanted(asked: Boolean, validator: Boolean, unsignedFinality: Boolean): Boolean =
+    asked || validator || !unsignedFinality
+
   def main(args: Array[String]): Unit =
     try run(args)
     catch
@@ -69,7 +77,7 @@ object Main extends LazyLogging:
   private def run(args: Array[String]): Unit =
     installProcessSettings()
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
+    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
     val opts = parseArgs(rest, Map.empty)
 
     if opts.contains("author") && opts.contains("validator-seed") then
@@ -128,7 +136,11 @@ object Main extends LazyLogging:
         .map(_.toLong)
         .getOrElse(SlotClock.JamCommonEraSeconds),
       reusePort = flags.contains("--reuse-port"),
-      grandpa = flags.contains("--grandpa") || authorKeys.nonEmpty,
+      grandpa = grandpaWanted(
+        asked = flags.contains("--grandpa"),
+        validator = authorKeys.nonEmpty,
+        unsignedFinality = opts.contains("finality-peers") || flags.contains("--announced-finality")
+      ),
       pruneFinalizedHistory = flags.contains("--prune-history"),
       tamperReports = flags.contains("--fault-tamper-reports"),
       finalityPeers = opts.get("finality-peers").map(_.toInt),

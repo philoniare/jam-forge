@@ -50,7 +50,7 @@ object Phase0Benchmark:
           try
             importer.importBlock(step.block, step.preState) match
               case _: ImportResult.Success => true
-              case _: ImportResult.Failure => false
+              case _                       => false
           catch case _: Throwable => false
         val t1 = System.nanoTime()
         if ok then { if record then times += (t1 - t0) / 1e6 }

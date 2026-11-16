@@ -18,7 +18,7 @@ import org.scalatest.matchers.should.Matchers
 import io.forge.jam.core.codec.Codec
 import spire.math.{UInt, UShort}
 
-class BundleServingSpec extends AnyFunSuite with Matchers:
+class BundleServingSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val config = JamnpConfig(genesisHashPrefix = "deadbeef")
 
@@ -96,9 +96,6 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
     )
     (guarantor, segments, dir)
 
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
-
   // ===========================================================================
   // CE 136 — work-report request
   // ===========================================================================
@@ -112,7 +109,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -146,7 +143,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -177,7 +174,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -214,7 +211,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -246,7 +243,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -276,7 +273,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -329,11 +326,11 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), serverConfig)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    val accepted = new LinkedBlockingQueue[io.forge.jam.network.JamnpConnection]()
+    val accepted = new LinkedBlockingQueue[io.forge.jam.network.PeerConnection]()
     serverNode.onConnectionChange((c, up) => if up then accepted.offer(c))
     // The same responder on a second kind the server always serves, to probe
     // the connection with afterwards.
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.bundleRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.bundleRequestHandler)
     serve(serverNode, guarantor)
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -372,7 +369,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       budgetMs = 10000,
       serverConfig = config,
       serve = (node, guarantor) =>
-        node.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+        node.registerPeerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
         ()
     )
   }
@@ -389,7 +386,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
       serverConfig = config.copy(streamIdleTimeoutMillis = 500),
       serve = (node, _) =>
         // Accepts the request and never answers.
-        node.registerHandler(StreamKind.BundleRequest, (_, stream) => { stream.onMessage(_ => ()); () })
+        node.registerPeerHandler(StreamKind.BundleRequest, (_, stream) => { stream.onMessage(_ => ()); () })
         ()
     )
   }
@@ -421,8 +418,8 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
     liarPool.put(root, fakeSegments(6).drop(1)) // other segments under the same root: their proofs do not verify
     val nodes = Seq.fill(3)(new JamnpNode(NodeIdentity.generate(), config))
     val Seq(honestNode, liarNode, client) = nodes
-    honestNode.registerHandler(StreamKind.SegmentRequest, honest.segmentRequestHandler)
-    liarNode.registerHandler(StreamKind.SegmentRequest, liar.segmentRequestHandler)
+    honestNode.registerPeerHandler(StreamKind.SegmentRequest, honest.segmentRequestHandler)
+    liarNode.registerPeerHandler(StreamKind.SegmentRequest, liar.segmentRequestHandler)
     try
       honestNode.start(new InetSocketAddress("127.0.0.1", 0))
       liarNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -456,7 +453,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -530,9 +527,9 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
     )
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
-    def ask(kind: Byte, payload: Array[Byte], conn: io.forge.jam.network.JamnpConnection): List[Array[Byte]] =
+    serverNode.registerPeerHandler(StreamKind.BundleRequest, guarantor.bundleRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    def ask(kind: Byte, payload: Array[Byte], conn: io.forge.jam.network.PeerConnection): List[Array[Byte]] =
       val responses = new LinkedBlockingQueue[Array[Byte]]()
       val closed = new LinkedBlockingQueue[Boolean]()
       val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
@@ -574,7 +571,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -606,7 +603,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -636,7 +633,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -674,7 +671,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -717,7 +714,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
+    serverNode.registerPeerHandler(StreamKind.SegmentRequest, guarantor.segmentRequestHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -750,7 +747,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -787,7 +784,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))
@@ -821,7 +818,7 @@ class BundleServingSpec extends AnyFunSuite with Matchers:
 
     val serverNode = new JamnpNode(NodeIdentity.generate(), config)
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
-    serverNode.registerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
+    serverNode.registerPeerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
 
     try
       serverNode.start(new InetSocketAddress("127.0.0.1", 0))

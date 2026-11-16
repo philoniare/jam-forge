@@ -4,7 +4,7 @@ import java.net.InetSocketAddress
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
-import io.forge.jam.network.{JamnpConnection, JamnpNode, NodeIdentity}
+import io.forge.jam.network.{PeerConnection, JamnpNode, NodeIdentity}
 
 private[node] final class PeerConnectivity(
     identity: NodeIdentity,
@@ -15,7 +15,9 @@ private[node] final class PeerConnectivity(
     spec: ChainSpec,
     nodeConfig: NodeConfig,
     currentSlot: () => Long,
-    upkeep: () => Unit
+    upkeep: () => Unit,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   /** Peers this node keeps a connection to (bootnodes and `--peer`s): a lost
@@ -23,10 +25,11 @@ private[node] final class PeerConnectivity(
     * the QUIC idle timeout rejoins once the network heals.
     */
   private final class DialTarget(val address: InetSocketAddress, val key: Option[Array[Byte]]):
-    @volatile var connection: JamnpConnection = null
+    @volatile var connection: PeerConnection = null
     @volatile var nextAttemptMillis: Long = 0L
     @volatile var backoffMillis: Long = nodeConfig.redialMillis
     @volatile var lastFailure: String = ""
+    @volatile var inFlight: Boolean = false
 
   private val dialTargets = new java.util.concurrent.CopyOnWriteArrayList[DialTarget]()
 
@@ -55,20 +58,16 @@ private[node] final class PeerConnectivity(
     @volatile var inFlight: Boolean = false
 
   private val validatorDials = new java.util.concurrent.ConcurrentHashMap[JamBytes, ValidatorDial]()
-  private val dialer = java.util.concurrent.Executors.newCachedThreadPool { r =>
-    val t = new Thread(r, "jam-dial"); t.setDaemon(true); t
-  }
+  private val dialer = threads.cached("jam-dial")
   @volatile private var redialer: java.util.concurrent.ScheduledExecutorService = null
   @volatile private var stopping: Boolean = false
 
-  private val connectedAt = new java.util.concurrent.ConcurrentHashMap[JamnpConnection, java.lang.Long]()
+  private val connectedAt = new java.util.concurrent.ConcurrentHashMap[PeerConnection, java.lang.Long]()
 
   def start(): Unit =
     spec.bootnodes.foreach(bn => dialTargets.add(new DialTarget(bn.address, Some(bn.ed25519Key))))
     dialTargets.forEach(t => dial(t, initial = true))
-    redialer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
-      val t = new Thread(r, "jam-redial"); t.setDaemon(true); t
-    }
+    redialer = threads.scheduled("jam-redial")
     redialer.scheduleWithFixedDelay(() => redialLost(), 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
     redialer.scheduleWithFixedDelay(
       () =>
@@ -96,7 +95,7 @@ private[node] final class PeerConnectivity(
 
   def isValidator(key: Array[Byte]): Boolean = connectivity.exists(_.validators.contains(JamBytes(key)))
 
-  def currentValidatorConnections: List[JamnpConnection] =
+  def currentValidatorConnections: List[PeerConnection] =
     connectivity.map(v => connectionsTo(v.current)).getOrElse(Nil)
 
   /** Dial targets whose connection is missing or closed, once their backoff
@@ -109,14 +108,22 @@ private[node] final class PeerConnectivity(
       // A connection the peer dialed to us (or one kept over ours as the
       // preferred initiator's) counts as live too.
       val live = (t.connection != null && t.connection.isOpen) || t.key.exists(k => liveConnectionTo(k).nonEmpty)
-      if !live && now >= t.nextAttemptMillis then dial(t, initial = false)
+      // Dialed off this thread: a dial waits up to 10 s on an unreachable peer, and the upkeep runs here too.
+      if !live && !t.inFlight && now >= t.nextAttemptMillis then
+        t.inFlight = true
+        try
+          dialer.execute { () =>
+            try dial(t, initial = false)
+            finally t.inFlight = false
+          }
+        catch case _: java.util.concurrent.RejectedExecutionException => t.inFlight = false
     }
 
   /** An open connection to the peer with Ed25519 key `key`. */
-  private def liveConnectionTo(key: Array[Byte]): Option[JamnpConnection] =
+  private def liveConnectionTo(key: Array[Byte]): Option[PeerConnection] =
     distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
 
-  private def connectionsTo(keys: Set[JamBytes]): List[JamnpConnection] =
+  private def connectionsTo(keys: Set[JamBytes]): List[PeerConnection] =
     distribution.peers.filter(c => keys.contains(JamBytes(c.peerKey)))
 
   /** Devnet quorum finality counts the best heads peers announce on UP 0,
@@ -222,7 +229,7 @@ private[node] final class PeerConnectivity(
     * keep the one opened by the preferred initiator P(a, b) and close the
     * other. Both sides apply the same rule, so they close the same one.
     */
-  def dropDuplicateConnections(conn: JamnpConnection): Unit =
+  def dropDuplicateConnections(conn: PeerConnection): Unit =
     val key = conn.peerKey
     val same = (conn :: distribution.peers).distinct.filter(c =>
       c.isOpen && java.util.Arrays.equals(c.peerKey, key)
@@ -260,7 +267,7 @@ private[node] final class PeerConnectivity(
   def connectPeer(
       address: InetSocketAddress,
       expectedEd25519: Option[Array[Byte]] = None
-  ): JamnpConnection =
+  ): PeerConnection =
     val conn = network.connect(address).get(10, java.util.concurrent.TimeUnit.SECONDS)
     expectedEd25519.foreach { expected =>
       JamNode.verifyPeerKey(expected, conn.peerKey) match

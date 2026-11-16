@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
 import io.circe.Decoder
 import io.circe.parser.decode
@@ -14,13 +14,7 @@ import org.scalatest.matchers.should.Matchers
 /** A validator that restarts in the middle of a ticket-sealed epoch still seals its slots: the tickets it made
   * before the restart are no longer in memory, but their ids follow from its keys.
   */
-class RestartAuthoringSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
+class RestartAuthoringSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   test("after a restart in a ticket-sealed epoch every slot is still authored") {
     if !Files.exists(genesisPath) then cancel("dev genesis not available")

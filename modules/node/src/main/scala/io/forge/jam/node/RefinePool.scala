@@ -11,7 +11,8 @@ import com.typesafe.scalalogging.LazyLogging
   * guarantor, and a new submission can wait the longest. Tasks here only compute: fetching a bundle or waiting for
   * co-signatures happens on other threads, so a slow peer never holds a refine thread.
   */
-final class RefinePool(name: String, threads: Int = RefinePool.defaultThreads) extends LazyLogging:
+final class RefinePool(name: String, threads: Int = RefinePool.defaultThreads, owner: NodeThreads = new NodeThreads)
+    extends LazyLogging:
   import RefinePool.*
 
   private val seq = new AtomicLong()
@@ -26,15 +27,8 @@ final class RefinePool(name: String, threads: Int = RefinePool.defaultThreads) e
       val p = Integer.compare(priority.ordinal, o.priority.ordinal)
       if p != 0 then p else java.lang.Long.compare(order, o.order)
 
-  private val exec = new ThreadPoolExecutor(
-    threads,
-    threads,
-    0L,
-    TimeUnit.MILLISECONDS,
-    new PriorityBlockingQueue[Runnable](),
-    { r =>
-      val t = new Thread(r, s"$name-${seq.incrementAndGet()}"); t.setDaemon(true); t
-    }
+  private val exec = owner.own(name, numbered = true)(factory =>
+    new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS, new PriorityBlockingQueue[Runnable](), factory)
   )
 
   /** An executor that queues its tasks at `priority`, for [[WorkGate.tryExecute]]. */

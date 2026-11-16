@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 
 import io.circe.Decoder
 import io.circe.parser.decode
@@ -15,10 +15,7 @@ import org.scalatest.matchers.should.Matchers
   * initiator's, unless the other side dialed long after it, which it does only when that connection never reached
   * it or has died on its side.
   */
-class DuplicateConnectionSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
+class DuplicateConnectionSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def eventually(what: String, seconds: Int = 10)(cond: => Boolean): Unit =
     val deadline = System.currentTimeMillis() + seconds * 1000L

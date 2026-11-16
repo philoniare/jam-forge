@@ -8,7 +8,7 @@ import io.forge.jam.core.{ChainConfig, LittleEndian}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.db.ShardStore
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, StreamKind}
 import io.forge.jam.protocol.refine.{DaShards, ValidatorShards}
 
 import scala.collection.mutable
@@ -20,7 +20,9 @@ import scala.collection.mutable
 final class ShardService(
     store: ShardStore,
     config: ChainConfig,
-    work: InboundWork = InboundWork.direct
+    work: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
   import ShardService.*
 
@@ -30,15 +32,8 @@ final class ShardService(
     * most its timeout; the work queued here is this node's own (reports awaiting assurance or audit), not a peer's.
     */
   private val fetchPool =
-    val n = new AtomicInteger()
-    val pool = new ThreadPoolExecutor(
-      FetchThreads,
-      FetchThreads,
-      30,
-      TimeUnit.SECONDS,
-      new LinkedBlockingQueue[Runnable](),
-      r =>
-        val t = new Thread(r, s"jam-shard-fetch-${n.incrementAndGet()}"); t.setDaemon(true); t
+    val pool = threads.own("jam-shard-fetch", numbered = true)(factory =>
+      new ThreadPoolExecutor(FetchThreads, FetchThreads, 30, TimeUnit.SECONDS, new LinkedBlockingQueue[Runnable](), factory)
     )
     pool.allowCoreThreadTimeOut(true)
     pool
@@ -83,8 +78,8 @@ final class ShardService(
   /** CE 137: `Erasure-Root ++ Shard Index` → bundle shard, the exported and
     * proof segment shards, then the justification, as three messages.
     */
-  def shardDistributionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def shardDistributionHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage { msg =>
         offLoop(conn, stream, msg) {
           withCustody(stream, msg) { shards =>
@@ -95,7 +90,7 @@ final class ShardService(
         }
       }
 
-  private def offLoop(conn: JamnpConnection, stream: JamnpStream, msg: Array[Byte])(serve: => Unit): Unit =
+  private def offLoop(conn: PeerConnection, stream: MessageStream, msg: Array[Byte])(serve: => Unit): Unit =
     val taken = work.submit(conn, msg.length.toLong) {
       try serve
       catch
@@ -109,8 +104,8 @@ final class ShardService(
     * justification with the segment-shard root appended. Served to any node;
     * non-validators are not throttled.
     */
-  def auditShardHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def auditShardHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage { msg =>
         offLoop(conn, stream, msg) {
           withCustody(stream, msg) { shards =>
@@ -124,7 +119,7 @@ final class ShardService(
     * `respond`, then FIN; a malformed request or a shard we don't hold is
     * rejected with a reset.
     */
-  private def withCustody(stream: JamnpStream, msg: Array[Byte])(respond: ValidatorShards => Unit): Unit =
+  private def withCustody(stream: MessageStream, msg: Array[Byte])(respond: ValidatorShards => Unit): Unit =
     val shards =
       if msg.length != 34 then None
       else
@@ -144,11 +139,11 @@ final class ShardService(
     * per shard. Any unknown root, missing index or more than 2·W_M shards
     * rejects the whole request.
     */
-  def segmentShardHandler(verified: Boolean): io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def segmentShardHandler(verified: Boolean): io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage(msg => offLoop(conn, stream, msg)(serveSegmentShards(stream, msg, verified)))
 
-  private def serveSegmentShards(stream: JamnpStream, msg: Array[Byte], verified: Boolean): Unit =
+  private def serveSegmentShards(stream: MessageStream, msg: Array[Byte], verified: Boolean): Unit =
     val served =
       for
         groups <- decodeSegmentShardRequest(msg)
@@ -183,7 +178,7 @@ final class ShardService(
     * None on timeout, rejection, or verification failure.
     */
   def fetchShards(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       erasureRoot: Hash,
       shardIndex: Int,
       timeoutMs: Long = 10000
@@ -204,7 +199,7 @@ final class ShardService(
 
   /** CE 138: fetch and verify bundle shard `shardIndex` from `conn`. */
   def fetchAuditShard(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       erasureRoot: Hash,
       shardIndex: Int,
       timeoutMs: Long = 10000
@@ -224,7 +219,7 @@ final class ShardService(
     * `segmentCount` (exported plus paged-proof segments).
     */
   def fetchSegmentShards(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       erasureRoot: Hash,
       shardIndex: Int,
       segmentIndexes: List[Int],
@@ -265,9 +260,9 @@ final class ShardService(
       erasureRoot: Hash,
       segmentCount: Int,
       indices: List[Int],
-      peers: Iterable[JamnpConnection],
+      peers: Iterable[PeerConnection],
       /** The shard indexes a peer is expected to hold for this report, asked for first. */
-      holds: JamnpConnection => Seq[Int]
+      holds: PeerConnection => Seq[Int]
   ): Either[String, IndexedSeq[Array[Byte]]] =
     val needed = DaShards.recoveryThreshold(config)
     val collected = new ConcurrentHashMap[Int, IndexedSeq[Array[Byte]]]()
@@ -315,9 +310,9 @@ final class ShardService(
   def reconstructBundle(
       erasureRoot: Hash,
       bundleLength: Int,
-      peers: Iterable[JamnpConnection],
+      peers: Iterable[PeerConnection],
       /** The shard indexes a peer is expected to hold for this report, asked for first; empty when unknown. */
-      holds: JamnpConnection => Seq[Int] = _ => Nil
+      holds: PeerConnection => Seq[Int] = _ => Nil
   ): Either[String, Array[Byte]] =
     val needed = DaShards.recoveryThreshold(config)
     val collected = mutable.Map.empty[Int, Array[Byte]]
@@ -335,7 +330,7 @@ final class ShardService(
       val fetched = new ConcurrentHashMap[Int, Array[Byte]]()
       collected.foreach((i, b) => fetched.put(i, b))
       def enough: Boolean = fetched.size >= needed
-      def onAllPeers(work: JamnpConnection => Unit): Unit =
+      def onAllPeers(work: PeerConnection => Unit): Unit =
         val done = peerList.map { conn =>
           try CompletableFuture.runAsync(() => if !enough then work(conn), fetchPool)
           catch
@@ -381,7 +376,7 @@ final class ShardService(
     * until the peer finishes; None on reset (no messages), error or timeout.
     */
   private def request(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       kind: Byte,
       payload: Array[Byte],
       timeoutMs: Long

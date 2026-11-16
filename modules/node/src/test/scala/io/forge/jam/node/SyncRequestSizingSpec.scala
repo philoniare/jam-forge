@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
 
 import io.circe.parser.decode
@@ -9,7 +9,7 @@ import io.forge.jam.core.{ChainConfig, Hashing, LittleEndian}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.db.ShardStore
-import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, JamnpStream, NodeIdentity, StreamKind}
+import io.forge.jam.network.{JamnpConfig, PeerConnection, JamnpNode, MessageStream, NodeIdentity, StreamKind}
 import io.forge.jam.protocol.traces.TraceStep
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -17,10 +17,9 @@ import org.scalatest.matchers.should.Matchers
 /** A block request asks for no more blocks than can be missing, a block announced by several peers is fetched from
   * one of them at a time, and shard lookups ask several peers at once.
   */
-class SyncRequestSizingSpec extends AnyFunSuite with Matchers:
+class SyncRequestSizingSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private given io.circe.Decoder[TraceStep] = TraceStep.decoder(using summon[io.circe.Decoder[Block]])
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
   private val tracesDir = baseDir.resolve("jam-conformance/fuzz-reports/0.8.0/traces")
 
   private def anyStep(): Option[TraceStep] =
@@ -35,9 +34,6 @@ class SyncRequestSizingSpec extends AnyFunSuite with Matchers:
         .map(p => decode[TraceStep](Files.readString(p)))
         .collectFirst { case Right(step) => step }
 
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
-
   private def eventually(what: String, seconds: Int = 20)(cond: => Boolean): Unit =
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds.toLong)
     while !cond && System.nanoTime() < deadline do Thread.sleep(20)
@@ -50,10 +46,10 @@ class SyncRequestSizingSpec extends AnyFunSuite with Matchers:
   private final class Peer(alpn: String):
     val node = new JamnpNode(NodeIdentity.generate(), JamnpConfig(genesisHashPrefix = alpn))
     val asked = new ConcurrentLinkedQueue[Asked]()
-    val held = new ConcurrentLinkedQueue[JamnpStream]()
-    node.registerHandler(
+    val held = new ConcurrentLinkedQueue[MessageStream]()
+    node.registerPeerHandler(
       StreamKind.BlockRequest,
-      (_: JamnpConnection, stream: JamnpStream) =>
+      (_: PeerConnection, stream: MessageStream) =>
         stream.onMessage { msg =>
           asked.add(Asked(Hash(java.util.Arrays.copyOfRange(msg, 0, 32)), LittleEndian.get(msg, 33, 4)))
           held.add(stream)
@@ -61,7 +57,7 @@ class SyncRequestSizingSpec extends AnyFunSuite with Matchers:
         }
         ()
     )
-    private var up: JamnpStream = null
+    private var up: MessageStream = null
     def connect(port: Int, genesis: SyncCodec.HashSlot): Unit =
       val conn = node.connect(new InetSocketAddress("127.0.0.1", port)).get(10, TimeUnit.SECONDS)
       up = conn.openStream(StreamKind.BlockAnnouncement).get(10, TimeUnit.SECONDS)

@@ -2,7 +2,6 @@ package io.forge.jam.node
 
 import java.util.concurrent.{
   ExecutorService,
-  LinkedBlockingQueue,
   TimeUnit
 }
 
@@ -11,7 +10,7 @@ import io.forge.jam.core.{Hashing, JamBytes, LittleEndian}
 import io.forge.jam.core.primitives.{Hash, ServiceId}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.extrinsic.Preimage
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamHandler, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
 import io.forge.jam.protocol.state.StateKey
 
 /** CE 142 wire format (jamnp-s): Service Index (u32 LE) ++ Hash (32) ++
@@ -42,9 +41,11 @@ final class PreimageService(
     /** Peers a newly obtained preimage is announced to: our grid neighbours
       * (JAMNP-S CE 142).
       */
-    gossipTargets: () => Iterable[JamnpConnection] = () => Nil,
+    gossipTargets: () => Iterable[PeerConnection] = () => Nil,
     inbound: InboundWork = InboundWork.direct,
-    serving: InboundWork = InboundWork.direct
+    serving: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   private val announcedMeta =
@@ -56,12 +57,7 @@ final class PreimageService(
     )
 
   private val fetchExecutor: ExecutorService =
-    java.util.concurrent.Executors.newFixedThreadPool(
-      4,
-      (r: Runnable) => {
-        val t = new Thread(r, "jam-preimage-fetch"); t.setDaemon(true); t
-      }
-    )
+    threads.fixed("jam-preimage-fetch", 4)
 
   /** CE 143 fetches are started by peers' announcements and each waits on a peer for up to 20 s: a bounded number
     * may wait, and a preimage is fetched once at a time however many peers announce it.
@@ -72,8 +68,8 @@ final class PreimageService(
   /** Fetches waiting for a fetch thread. */
   private[node] def queuedFetches: Int = fetchGate.queued
 
-  def announceHandler: StreamHandler = new StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def announceHandler: PeerStreamHandler = new PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val taken = inbound.submit(connection, msg.length.toLong) {
           try
@@ -99,8 +95,8 @@ final class PreimageService(
       announcedMeta.put(hash, (p.requester.toLong, p.blob.length.toLong))
     }
 
-  def requestHandler: StreamHandler = new StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def requestHandler: PeerStreamHandler = new PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val taken = serving.submit(connection, msg.length.toLong) {
           val blob =
@@ -150,7 +146,7 @@ final class PreimageService(
         logger.info(s"preimage ${hash.toHex.take(18)} (${blob.length} bytes) for service $serviceId submitted")
         Right(hash)
 
-  def announce(serviceId: Long, blob: Array[Byte], peers: Iterable[JamnpConnection]): Unit =
+  def announce(serviceId: Long, blob: Array[Byte], peers: Iterable[PeerConnection]): Unit =
     val hash = Hashing.blake2b256(blob)
     val length = blob.length.toLong
     announcedMeta.put(hash, (serviceId, length))
@@ -165,7 +161,7 @@ final class PreimageService(
     }
 
   private def requestPreimage(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       serviceId: Long,
       hash: Hash,
       expectedLength: Long
@@ -173,14 +169,20 @@ final class PreimageService(
     if !fetchingHashes.add(hash) then return
     val admitted = fetchGate.tryExecute(fetchExecutor) {
           try
-            val stream = conn.openStream(StreamKind.PreimageRequest).get(10, TimeUnit.SECONDS)
-            val collected = new LinkedBlockingQueue[Array[Byte]](1)
-            stream.onMessage(collected.offer(_))
-            stream.send(hash.bytes)
-            stream.finish()
-            val blob = collected.poll(10, TimeUnit.SECONDS)
-            // No response in time: give the stream up on both sides.
-            if blob == null then stream.reset()
+            // No blob (no response in time, a failed send, the peer closing): the stream is given up on both sides.
+            val blob = StreamRequest
+              .exchange(
+                conn,
+                StreamKind.PreimageRequest,
+                Seq(hash.bytes),
+                10_000,
+                () => 10_000,
+                StreamRequest.Until.FirstMessage,
+                maxMessages = 1
+              )
+              .toOption
+              .flatMap(_.headOption)
+              .orNull
             if blob != null && blob.length.toLong == expectedLength
               && Hashing.blake2b256(blob) == hash
             then
@@ -202,7 +204,7 @@ final class PreimageService(
     fetchExecutor.awaitTermination(10, TimeUnit.SECONDS)
 
   private[node] def submitSend(
-      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
       kind: Byte,
       payload: Array[Byte],
       peer: AnyRef = null

@@ -187,7 +187,7 @@ final class JamnpStream private[network] (
     private[network] val channel: QuicStreamChannel,
     val kind: Byte,
     flow: OutboundFlow = new OutboundFlow(OutboundLimits())
-):
+) extends MessageStream:
   private val pendingOut = new java.util.concurrent.atomic.AtomicLong()
 
   /** Bytes sent on this stream whose write has not completed: what a slow peer keeps in this node's memory. */
@@ -420,7 +420,7 @@ final class JamnpConnection private[network] (
     val initiator: Boolean,
     streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
     outbound: OutboundLimits = OutboundLimits()
-):
+) extends PeerConnection:
   private val flow = JamnpNode.outboundFlow(quic, outbound)
 
   val openedAtMillis: Long = System.currentTimeMillis()
@@ -542,6 +542,12 @@ final class JamnpNode(
   def registerHandler(kind: Byte, handler: StreamHandler): JamnpNode =
     handlers.put(kind, handler)
     this
+
+  /** A handler written against the transport traits, so that it also runs over another transport. */
+  def registerPeerHandler(kind: Byte, handler: PeerStreamHandler): JamnpNode =
+    registerHandler(kind, new StreamHandler:
+      def onStream(connection: JamnpConnection, stream: JamnpStream): Unit = handler.onStream(connection, stream)
+    )
 
   /** Tracks accepted connections */
   @io.netty.channel.ChannelHandler.Sharable

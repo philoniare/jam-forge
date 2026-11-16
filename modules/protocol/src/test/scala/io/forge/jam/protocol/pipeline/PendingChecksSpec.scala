@@ -115,7 +115,7 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
 
   private def failsWith(block: Block, expected: PipelineError): Unit =
     importResult(block) match
-      case ImportResult.Failure(_, message, _) => message shouldBe expected.message
+      case ImportResult.Invalid(_, message, _) => message shouldBe expected.message
       case other                            => fail(s"expected ${expected.message}, got $other")
 
   test("GP: a bad seal is reported as BadSealSignature (eq. 6.16)") {

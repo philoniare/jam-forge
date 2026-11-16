@@ -9,7 +9,7 @@ import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.crypto.{BandersnatchVrf, Ed25519, Ed25519ZebraWrapper}
-import io.forge.jam.network.{JamnpConnection, JamnpStream, StreamKind}
+import io.forge.jam.network.{PeerConnection, MessageStream, StreamKind}
 import io.forge.jam.protocol.refine.{ComputeReport, DaShards, ImportResolver, WorkPackageBundle}
 import io.forge.jam.vrfs.BandersnatchWrapper
 
@@ -37,7 +37,9 @@ final class AuditorService(
     /** Where re-execution runs, shared with the guarantor; None: a pool of this service's own. */
     sharedRefinePool: Option[RefinePool] = None,
     store: RoleStore = RoleStore.none,
-    inbound: InboundWork = InboundWork.direct
+    inbound: InboundWork = InboundWork.direct,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -73,19 +75,12 @@ final class AuditorService(
       q.indices.flatMap(c => q(c).zip(reportHashes(c)).map((w, h) => (c, w, h)))
 
   /** Every access to the tracking state below runs on this thread. */
-  private val exec = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
-    val t = new Thread(r, "jam-audit"); t.setDaemon(true); t
-  }
+  private val exec = threads.scheduled("jam-audit")
   /** Audits fetch their bundle here (network waits, several reports at once); re-execution itself runs on the refine
     * pool at audit priority, ahead of co-signing and new submissions.
     */
-  private val workers = java.util.concurrent.Executors.newFixedThreadPool(
-    AuditorService.FetchThreads,
-    { r =>
-      val t = new Thread(r, "jam-audit-fetch"); t.setDaemon(true); t
-    }
-  )
-  private val refinePool = sharedRefinePool.getOrElse(new RefinePool("jam-audit-exec"))
+  private val workers = threads.fixed("jam-audit-fetch", AuditorService.FetchThreads)
+  private val refinePool = sharedRefinePool.getOrElse(new RefinePool("jam-audit-exec", owner = threads))
 
   /** Peers' announcements and judgments waiting for the audit thread are bounded; the thread's own ticks, import
     * callbacks and audit results are not counted and never dropped.
@@ -235,14 +230,9 @@ final class AuditorService(
       rho: IndexedSeq[Option[io.forge.jam.core.types.workpackage.AvailabilityAssignment]],
       validatorCount: Int
   ): IndexedSeq[Option[WorkReport]] =
-    val counts = new Array[Int](rho.size)
-    block.extrinsic.assurances.foreach { a =>
-      val bits = a.bitfield.toArray
-      rho.indices.foreach { c =>
-        if c / 8 < bits.length && (bits(c / 8) & (1 << (c % 8))) != 0 then counts(c) += 1
-      }
-    }
-    rho.indices.map(c => rho(c).filter(_ => 3 * counts(c) > 2 * validatorCount).map(_.report))
+    val assured = io.forge.jam.protocol.assurance.AssuranceTransition
+      .assuredCores(block.extrinsic.assurances, rho.size, validatorCount)
+    rho.indices.map(c => rho(c).filter(_ => assured(c)).map(_.report))
 
   // ---------------------------------------------------------------------------
   // tranches
@@ -501,11 +491,17 @@ final class AuditorService(
 
   /** [[evaluate]] on the refine pool at audit priority; this thread waits for it. */
   private def evaluate(report: WorkReport, bundleBytes: Array[Byte]): Either[String, Boolean] =
-    try
-      CompletableFuture
-        .supplyAsync(() => reExecute(report, bundleBytes), refinePool.at(RefinePool.Priority.Audit))
-        .get()
-    catch case e: java.util.concurrent.ExecutionException => throw e.getCause
+    val running =
+      CompletableFuture.supplyAsync(() => reExecute(report, bundleBytes), refinePool.at(RefinePool.Priority.Audit))
+    try running.get(AuditorService.ReExecutionWaitMillis, TimeUnit.MILLISECONDS)
+    catch
+      case e: java.util.concurrent.ExecutionException => throw e.getCause
+      case _: java.util.concurrent.TimeoutException =>
+        // No judgment is given and the audit is retried, as when the lookup anchor is not held.
+        running.cancel(false)
+        throw new IllegalStateException(
+          s"re-execution did not finish in ${AuditorService.ReExecutionWaitMillis / 1000} s (refine pool busy or stopped)"
+        )
 
   /** Whether `bundleBytes` re-executes to `report`; Left when it does not decode or re-execution is refused. */
   private def reExecute(report: WorkReport, bundleBytes: Array[Byte]): Either[String, Boolean] =
@@ -542,7 +538,7 @@ final class AuditorService(
   // =========================================================================
   def fetchBundleDirect(
       erasureRoot: Hash,
-      peers: Iterable[JamnpConnection],
+      peers: Iterable[PeerConnection],
       totalBudgetMs: Long = 15000,
       maxPeers: Int = 3
   ): Option[Array[Byte]] =
@@ -555,8 +551,8 @@ final class AuditorService(
   /** CE 144: `Header Hash ++ Tranche ++ Announcement`, then the evidence, then FIN. The announcer is the peer: its
     * connection key is its Ed25519 key in the block's prior set.
     */
-  def auditAnnouncementHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def auditAnnouncementHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       val parts = mutable.ListBuffer.empty[Array[Byte]]
       stream.onMessage { msg =>
         // Two messages make an announcement; anything the peer sends after them is not kept.
@@ -718,8 +714,8 @@ final class AuditorService(
       )
     pools.addJudgment(reportHash, epoch, v, valid, signature)
 
-  def judgmentHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def judgmentHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       stream.onMessage { msg =>
         if inbound.submit(conn, msg.length.toLong)(guarded(receiveJudgment(msg, conn))) then stream.finish()
         else stream.reset()
@@ -812,7 +808,7 @@ final class AuditorService(
   // =========================================================================
 
   /** Two messages then FIN on a fresh stream (CE 144). */
-  private def sendTwo(conn: JamnpConnection, kind: Byte, first: Array[Byte], second: Array[Byte]): Unit =
+  private def sendTwo(conn: PeerConnection, kind: Byte, first: Array[Byte], second: Array[Byte]): Unit =
     OneShotSend.submit(
       egress,
       conn,
@@ -821,11 +817,11 @@ final class AuditorService(
       why => logger.debug(s"send on ${StreamKind.name(kind)} failed: $why")
     )
 
-  private def sendOneShot(conn: JamnpConnection, kind: Byte, payload: Array[Byte]): Unit =
+  private def sendOneShot(conn: PeerConnection, kind: Byte, payload: Array[Byte]): Unit =
     submitSend(() => conn.openStream(kind), kind, payload, conn)
 
   private[node] def submitSend(
-      open: () => java.util.concurrent.CompletableFuture[JamnpStream],
+      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
       kind: Byte,
       payload: Array[Byte],
       peer: AnyRef = null
@@ -840,6 +836,11 @@ final class AuditorService(
     )
 
 object AuditorService extends LazyLogging:
+  /** How long an audit waits for its re-execution on the refine pool, queueing included: several tranches. A pool
+    * that has been stopped never runs it, and the wait must end.
+    */
+  val ReExecutionWaitMillis: Long = 120_000L
+
   /** Audits fetching their bundles at once. */
   val FetchThreads: Int = 4
 
@@ -885,7 +886,7 @@ object AuditorService extends LazyLogging:
   /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. */
   private[node] def fetchBundleDirect(
       erasureRoot: Hash,
-      peers: Iterable[JamnpConnection],
+      peers: Iterable[PeerConnection],
       totalBudgetMs: Long = 15000,
       maxPeers: Int = 3
   ): Option[Array[Byte]] =
@@ -904,23 +905,20 @@ object AuditorService extends LazyLogging:
     * keeps it; with a bundle in hand only the peer's FIN is outstanding.
     */
   private[node] def fetchBundleFrom(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       erasureRoot: Hash,
       deadline: Long
   ): Option[Array[Byte]] =
-    var stream: JamnpStream = null
-    var bundle: Option[Array[Byte]] = None
-    try
-      val openTimeout = deadline - System.currentTimeMillis()
-      if openTimeout > 0 then
-        stream = conn.openStream(StreamKind.BundleRequest).get(openTimeout, TimeUnit.MILLISECONDS)
-        val response = new CompletableFuture[Array[Byte]]()
-        stream.onMessage(response.complete(_))
-        stream.onClosed(() => response.complete(null)) // peer holds nothing / declined
-        stream.send(erasureRoot.bytes.toArray)
-        stream.finish()
-        val respTimeout = deadline - System.currentTimeMillis()
-        if respTimeout > 0 then bundle = Option(response.get(respTimeout, TimeUnit.MILLISECONDS))
-    catch case e: Exception => logger.debug(s"CE147 direct bundle fetch failed: ${e.getMessage}")
-    finally if stream != null && bundle.isEmpty then stream.reset()
-    bundle
+    def left = deadline - System.currentTimeMillis()
+    StreamRequest
+      .exchange(
+        conn,
+        StreamKind.BundleRequest,
+        Seq(erasureRoot.bytes.toArray),
+        left,
+        () => left,
+        StreamRequest.Until.FirstMessage,
+        maxMessages = 1
+      )
+      .toOption
+      .flatMap(_.headOption) // empty: the peer holds nothing, or declined

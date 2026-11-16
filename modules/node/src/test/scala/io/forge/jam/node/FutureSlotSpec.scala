@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 
 import io.circe.Decoder
 import io.circe.parser.decode
@@ -13,12 +13,7 @@ import org.scalatest.matchers.should.Matchers
 /** A block whose slot has not started is not yet valid. On the best chain as on a side branch it is refused
   * without being executed, stored or marked, and imports once the clock reaches its slot.
   */
-class FutureSlotSpec extends AnyFunSuite with Matchers:
-
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
+class FutureSlotSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   test("a best-chain block ahead of our clock is refused for now, and imports when its slot comes") {
     given Decoder[Genesis] = Genesis.decoder

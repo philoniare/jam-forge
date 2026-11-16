@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import io.circe.Decoder
@@ -9,7 +9,7 @@ import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
+import io.forge.jam.network.{JamnpConfig, PeerConnection, JamnpNode, NodeIdentity, StreamKind}
 import io.forge.jam.protocol.traces.Genesis
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -18,14 +18,9 @@ import org.scalatest.matchers.should.Matchers
   * worker pool, not by the network event loop the message arrived on: while the pool's threads are all taken the
   * message waits, and it is handled once one is free.
   */
-class EventLoopWorkSpec extends AnyFunSuite with Matchers:
+class EventLoopWorkSpec extends AnyFunSuite with Matchers with NodeFixture:
 
-  private val baseDir = sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath = baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
 
   private def eventually(what: String, seconds: Int = 10)(cond: => Boolean): Unit =
     val deadline = System.currentTimeMillis() + seconds * 1000L
@@ -46,7 +41,7 @@ class EventLoopWorkSpec extends AnyFunSuite with Matchers:
       if node != null then node.shutdown()
       cleanup(dir)
 
-  private def withPeer(node: JamNode, spec: ChainSpec)(f: JamnpConnection => Unit): Unit =
+  private def withPeer(node: JamNode, spec: ChainSpec)(f: PeerConnection => Unit): Unit =
     val peer = new JamnpNode(NodeIdentity.generate(), JamnpConfig(genesisHashPrefix = spec.alpnPrefix))
     try f(peer.connect(new InetSocketAddress("127.0.0.1", node.listenPort)).get(10, TimeUnit.SECONDS))
     finally peer.shutdown()
@@ -62,7 +57,7 @@ class EventLoopWorkSpec extends AnyFunSuite with Matchers:
     release
 
   /** A request on a fresh stream is not answered while `work` is busy, and its stream ends once it is free. */
-  private def waitsFor(work: InboundWork, threads: Int, conn: JamnpConnection, kind: Byte, request: Array[Byte]): Unit =
+  private def waitsFor(work: InboundWork, threads: Int, conn: PeerConnection, kind: Byte, request: Array[Byte]): Unit =
     val release = occupy(work, threads)
     try
       val ended = new CountDownLatch(1)

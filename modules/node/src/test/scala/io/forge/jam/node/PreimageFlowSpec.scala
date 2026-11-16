@@ -1,10 +1,8 @@
 package io.forge.jam.node
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
 import java.util.concurrent.{Executors, ExecutorService, LinkedBlockingQueue, TimeUnit}
 
-import io.circe.Decoder
-import io.circe.parser.decode
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Hash, ServiceId}
 import io.forge.jam.core.codec.JamCodecs.encode
@@ -12,12 +10,11 @@ import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.network.StreamKind
 import io.forge.jam.protocol.state.StateKey
-import io.forge.jam.protocol.traces.Genesis
 import io.forge.jam.protocol.state.KeyValue
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-class PreimageFlowSpec extends AnyFunSuite with Matchers:
+class PreimageFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
   test("CE142 announcement is serviceId(4) ++ hash(32) ++ length(4) = 40 bytes") {
     val h = Hash(Array.tabulate[Byte](32)(_.toByte))
     val bytes = PreimageCodec.encodeAnnouncement(7L, h, 1000L)
@@ -59,22 +56,6 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers:
       service.shutdown()
       cleanup(dir)
   }
-
-  private val baseDir =
-    sys.props.get("jam.base.dir").map(Paths.get(_)).getOrElse(Paths.get("."))
-  private val genesisPath =
-    baseDir.resolve("jamtestvectors/traces/fuzzy/genesis.json")
-
-  private def loadGenesis(): Option[Genesis] =
-    if !Files.exists(genesisPath) then None
-    else
-      given Decoder[Genesis] = Genesis.decoder
-      decode[Genesis](Files.readString(genesisPath)).toOption
-
-  private def tempDir(prefix: String): Path = Files.createTempDirectory(prefix)
-
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
 
   test("CE142/143: node A announces a pooled preimage and node B fetches + pools it") {
     val genesis = loadGenesis().getOrElse(

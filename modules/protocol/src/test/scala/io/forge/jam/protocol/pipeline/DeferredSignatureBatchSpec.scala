@@ -126,7 +126,7 @@ class DeferredSignatureBatchSpec extends AnyFunSuite with Matchers:
 
   private def failsWith(block: Block, expected: PipelineError): Unit =
     importResult(block) match
-      case ImportResult.Failure(_, _, error) => error shouldBe Some(expected)
+      case ImportResult.Invalid(_, _, error) => error shouldBe Some(expected)
       case other                             => fail(s"expected ${expected.message}, got $other")
 
   test("a block whose assurance signatures verify imports") {
@@ -176,7 +176,7 @@ class DeferredSignatureBatchSpec extends AnyFunSuite with Matchers:
   test("a block with a bad signature batch commits nothing") {
     val importer = new BlockImporter(config)
     val bad = withExtrinsic(_.copy(assurances = List(badAssurance(0))))
-    importer.importBlock(bad, fixture.genesis) shouldBe a[ImportResult.Failure]
+    importer.importBlock(bad, fixture.genesis) shouldBe a[ImportResult.Invalid]
     importer.currentTrieRoot shouldBe fixture.genesis.stateRoot
     // The same importer then imports the untampered block to the root a fresh importer gives.
     importer.importBlock(fixture.block, fixture.genesis) shouldBe importResult(fixture.block)
