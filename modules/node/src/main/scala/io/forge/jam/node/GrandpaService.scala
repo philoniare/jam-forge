@@ -101,9 +101,14 @@ final class GrandpaService(
       stalled = true
     if stalled && now - lastCatchUpAsk > 30 * gossipMillis then
       // A voter back from a restart hears nothing from peers that never resend: ask them.
-      lastCatchUpAsk = now
-      logger.debug(s"GRANDPA round ${voter.round} of set ${voter.voterSet.setId} stalled: asking voters for a catch-up")
-      voterPeers.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
+      val heard = voter.votersHeard
+      val asked = voterPeers.filterNot(c => heard.contains(c.peerPublicKey))
+      if asked.nonEmpty then
+        lastCatchUpAsk = now
+        logger.debug(
+          s"GRANDPA round ${voter.round} of set ${voter.voterSet.setId} stalled: asking ${asked.size} voter(s) not heard from since the start for a catch-up"
+        )
+        asked.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
     val votes = if stalled then voter.roundVotes else voter.ourVotes
     if votes.nonEmpty then
       voterPeers.filterNot(c => votesSentTo.contains(c.peerPublicKey)).foreach { c =>

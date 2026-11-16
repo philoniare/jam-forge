@@ -316,6 +316,10 @@ final class GrandpaVoter(
       VoteMessage(r.round, set.setId, SignedMessage(kind, v))
     }
 
+  private val heard = mutable.Set.empty[Ed25519PublicKey]
+
+  def votersHeard: Set[Ed25519PublicKey] = heard.toSet
+
   /** Our own votes in the current round, to resend to voters that connected after we cast them. */
   def ourVotes: List[VoteMessage] =
     ourKey.toList.flatMap { k =>
@@ -494,6 +498,7 @@ final class GrandpaVoter(
       logger.warn(s"GRANDPA vote with a bad signature from ${hexKey(sv.signer)}")
       false
     else
+      heard += sv.signerKey
       val r = rounds.getOrElseUpdate(m.round, new RoundState(m.round, clock()))
       m.message.kind match
         case PrimaryPropose =>

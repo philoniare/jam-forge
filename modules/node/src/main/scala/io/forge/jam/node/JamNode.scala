@@ -245,6 +245,7 @@ final class JamNode(
       sharedRefinePool = Some(refinePool),
       segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)),
       tamperReports = nodeConfig.tamperReports,
+      fromValidator = c => recentValidatorKeys._3.contains(JamBytes(c.peerKey)),
       // Our own custody only: a request must not make us fetch shards from the network on the requester's behalf.
       localBundle = root =>
         exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
@@ -458,6 +459,9 @@ final class JamNode(
     // Validators of the sets around the head keep their inbound slots whoever else connects.
     network.setPriorityPeers(peers.isValidator)
 
+    noteRecentValidators()
+    chain.onImported((_, _) => noteRecentValidators())
+
     if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
         chain.onImported((_, _) =>
@@ -549,13 +553,16 @@ final class JamNode(
 
     if nodeConfig.slotTicking then
       slotTicker = slotClock.scheduleSlotTicks { slot =>
-        try
-          authorSlot(slot)
-          reportSyncStatus(slot)
-          slotCallback(slot)
+        try slotTick(slot, slotClock.currentSlot)
         catch case e: Exception => logger.error(s"slot $slot handler failed", e)
       }
     this
+
+  private[node] def slotTick(slot: Long, clockSlot: Long): Unit =
+    if syncGate.onTime(slot, clockSlot, slotClock.slotStartMillis(clockSlot + 2)) then authorSlot(slot)
+    else logger.info(s"the tick for slot $slot arrived in slot $clockSlot: skipped, and duties wait for two slots")
+    reportSyncStatus(slot)
+    slotCallback(slot)
 
   def listenPort: Int = network.boundPort
 
@@ -565,6 +572,16 @@ final class JamNode(
 
   private def currentSlot: Long =
     if nodeConfig.slotTicking then slotClock.currentSlot else chain.best.slot
+
+  @volatile private var recentValidatorKeys: (AnyRef, AnyRef, Set[JamBytes]) = (null, null, Set.empty)
+
+  private def noteRecentValidators(): Unit =
+    val validators = chain.stateView().validators
+    val (current, previous) = (validators.current, validators.previous)
+    val memo = recentValidatorKeys
+    if (memo._1 ne current) || (memo._2 ne previous) then
+      recentValidatorKeys =
+        (current, previous, (current.iterator ++ previous.iterator).map(v => JamBytes(v.ed25519.bytes.toArray)).toSet)
 
   @volatile private var currentValidatorKeys: (AnyRef, Set[JamBytes]) = (null, Set.empty)
 

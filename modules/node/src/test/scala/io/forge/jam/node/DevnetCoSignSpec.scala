@@ -64,26 +64,37 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers:
     val dirs = Seq("jam-cosign-a", "jam-cosign-b", "jam-cosign-c").map(tempDir)
     var nodes: Seq[JamNode] = Nil
     try
-      nodes = dirs.map(d => new JamNode(spec, NodeConfig(dataDir = d, slotTicking = false)).start())
-      val Seq(nodeA, nodeB, nodeC) = nodes
+      val nodeA = new JamNode(spec, NodeConfig(dataDir = dirs(0), slotTicking = false)).start()
+      nodes = Seq(nodeA)
       nodeA.enableAuthoring(devKeys)
+      nodeA.authorSlot(1).isDefined shouldBe true
+      nodeA.authorSlot(2).isDefined shouldBe true
+
+      // The report will be signed for slot 3: find the validators assigned
+      // to core 0 then and give one key each to B and C.
+      val assignments = GuarantorService.assignments(nodeA.chain.stateView(), 3L, spec.config)._1
+      val core0Validators = assignments.zipWithIndex.collect { case (0, idx) => idx }
+      core0Validators.size should be >= 2
+
+      // A guarantor's network key is its validator key: CE 134 is taken only from validators, and a guarantor
+      // looks for its co-guarantors among its peers by that key.
+      def guarantorNode(dir: Path, validator: Int): JamNode =
+        val node = new JamNode(
+          spec,
+          NodeConfig(dataDir = dir, slotTicking = false, ed25519Seed = Some(devKeys(validator).ed25519Secret))
+        ).start()
+        nodes = nodes :+ node
+        node
+      val nodeB = guarantorNode(dirs(1), core0Validators(0))
+      val nodeC = guarantorNode(dirs(2), core0Validators(1))
 
       // Mesh: A announces to B and C; B reaches C for CE 134.
       nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
       nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeC.listenPort))
       nodeB.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeC.listenPort))
-
-      nodeA.authorSlot(1).isDefined shouldBe true
-      nodeA.authorSlot(2).isDefined shouldBe true
       awaitSync(nodeA, nodeB)
       awaitSync(nodeA, nodeC)
-
-      // The report will be signed for slot 3: find the validators assigned
-      // to core 0 then and give one key each to B and C.
       val view = nodeB.chain.stateView()
-      val assignments = GuarantorService.assignments(view, 3L, spec.config)._1
-      val core0Validators = assignments.zipWithIndex.collect { case (0, idx) => idx }
-      core0Validators.size should be >= 2
       nodeB.enableGuaranteeing(Seq(devKeys(core0Validators(0))))
       nodeC.enableGuaranteeing(Seq(devKeys(core0Validators(1))))
 

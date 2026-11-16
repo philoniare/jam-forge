@@ -318,3 +318,24 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     net.run(10_000)
     net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b4"))
   }
+
+  test("a voter knows which voters it has heard from since it started; after a restart that is nobody") {
+    val blocks = new Blocks
+    (1 to 3).foreach(i => blocks.add(s"b$i", i.toLong))
+    val net = new Net(blocks, keys)
+    val everyone = keys.map(_.ed25519Key).toSet
+    var waited = 0
+    def others(i: Int) = everyone - keys(i).ed25519Key
+    while net.voters.indices.exists(i => net.voters(i).votersHeard != others(i)) && waited < 30_000 do
+      net.run(250); waited += 250
+    // Each has heard every other voter: where they are in the rounds is known from their votes.
+    net.voters.indices.foreach(i => net.voters(i).votersHeard shouldBe others(i))
+
+    // A restarted voter is back in its round with the votes it had cast, and has heard nobody: whether the
+    // others are still in that round it cannot tell, so they are the ones a stalled round has it ask.
+    val restarted = net.newVoter(3, resume = true)
+    restarted.votersHeard shouldBe Set.empty
+    net.voters(1).ourVotes should not be empty
+    net.voters(1).ourVotes.foreach(restarted.onVote)
+    restarted.votersHeard shouldBe Set(keys(1).ed25519Key)
+  }

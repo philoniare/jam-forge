@@ -38,6 +38,15 @@ object StreamKind:
   val GrandpaCatchUp: Byte = 152.toByte
   val WarpSyncRequest: Byte = 153.toByte
 
+  def maxOpenerMessageBytes(kind: Byte): Int = kind match
+    case BlockRequest | StateRequest | TicketDistributionStep1 | TicketDistributionStep2 | WorkReportRequest |
+        ShardDistribution | AuditShardRequest | SegmentShardRequest | SegmentShardRequestVerified |
+        AssuranceDistribution | PreimageAnnouncement | PreimageRequest | JudgmentPublication | BundleRequest |
+        SegmentRequest | GrandpaJustificationRequest | GrandpaVote | GrandpaState | GrandpaCatchUp | WarpSyncRequest =>
+      64 * 1024
+    case BlockAnnouncement | WorkReportDistribution | AuditAnnouncement | GrandpaCommit => 1024 * 1024
+    case _ => Int.MaxValue
+
   inline def isUp(kind: Byte): Boolean = (kind & 0x80) == 0
   inline def isCe(kind: Byte): Boolean = (kind & 0x80) != 0
 

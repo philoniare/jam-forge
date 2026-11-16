@@ -6,8 +6,18 @@ final class SyncGate(lagSlots: Long, patienceMillis: Long):
   private var lastBest = -1L
   private var progressAt = 0L
 
+  private var pausedUntil = Long.MinValue
+
+  def onTime(slot: Long, clockSlot: Long, resumeAtMillis: Long): Boolean = synchronized {
+    if clockSlot > slot then
+      pausedUntil = math.max(pausedUntil, resumeAtMillis)
+      false
+    else true
+  }
+
   def holding(ourBest: Long, peerBests: Iterable[Long], nowMillis: Long): Boolean = synchronized {
-    if !SyncGate.behind(ourBest, peerBests, lagSlots) then
+    if nowMillis < pausedUntil then true
+    else if !SyncGate.behind(ourBest, peerBests, lagSlots) then
       holdingSince = -1L
       false
     else

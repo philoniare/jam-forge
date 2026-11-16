@@ -319,26 +319,26 @@ final class SyncService(
         peerFinals.remove(conn)
         peerBestHeads.remove(conn)
     }
+    val waiting = new AnnouncementMailbox(SyncService.MaxWaitingAnnouncements)
+    def handle(first: Boolean, msg: Array[Byte]): Unit =
+      try
+        if first then
+          val (peerFinal, peerLeaves) = decodeHandshake(msg)
+          peerFinals.put(conn, peerFinal)
+          logger.info(
+            s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
+              s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
+          )
+          onPeerLeaves(conn, peerLeaves, peerFinal)
+        else onAnnouncement(conn, msg)
+      catch
+        case e: Exception =>
+          logger.debug(s"UP0: bad message from $side peer: ${e.getMessage}")
+          stream.reset()
     stream.onMessage { msg =>
       val first = !handshaken
       handshaken = true
-      val taken = announcements.submit(conn, msg.length.toLong) {
-        try
-          if first then
-            val (peerFinal, peerLeaves) = decodeHandshake(msg)
-            peerFinals.put(conn, peerFinal)
-            logger.info(
-              s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
-                s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
-            )
-            onPeerLeaves(conn, peerLeaves, peerFinal)
-          else onAnnouncement(conn, msg)
-        catch
-          case e: Exception =>
-            logger.debug(s"UP0: bad message from $side peer: ${e.getMessage}")
-            stream.reset()
-      }
-      if !taken then logger.debug(s"UP0: too many messages waiting; dropped one from $side peer")
+      if waiting.offer(first, msg) && !announcements.submit(conn, 0L)(waiting.drain(handle)) then waiting.idle()
     }
     stream.send(ourHandshake)
 
@@ -640,6 +640,8 @@ object SyncService:
   val MaxPendingFetches: Int = 2048
 
   val MaxHandshakeLeaves: Int = 4096
+
+  val MaxWaitingAnnouncements: Int = 16
 
   /** The most blocks one CE 128 request asks for. */
   val MaxBlocksPerRequest: Int = 64

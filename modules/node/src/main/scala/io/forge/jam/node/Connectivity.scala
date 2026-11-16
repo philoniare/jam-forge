@@ -17,6 +17,9 @@ object Connectivity:
    */
   val PreferredInitiatorGraceMillis: Long = 5000L
 
+  def laterDialReplaces(preferredOpenedAtMillis: Long, otherOpenedAtMillis: Long): Boolean =
+    otherOpenedAtMillis - preferredOpenedAtMillis >= PreferredInitiatorGraceMillis
+
   /**
    * True when `self` should open the connection to `other`: it is the
    * JAMNP-S preferred initiator P(self, other).

@@ -207,7 +207,7 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
     val clientNode = new JamnpNode(NodeIdentity.generate(), config)
 
     serverNode.registerHandler(
-      StreamKind.BundleRequest,
+      StreamKind.WorkPackageSubmission,
       (conn: JamnpConnection, stream: JamnpStream) =>
         stream.onMessage { request =>
           stream.send(request) // echo
@@ -225,7 +225,7 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
       new java.util.Random(42).nextBytes(payload)
 
       val responses = new LinkedBlockingQueue[Array[Byte]]()
-      val stream = conn.openStream(StreamKind.BundleRequest).get(10, TimeUnit.SECONDS)
+      val stream = conn.openStream(StreamKind.WorkPackageSubmission).get(10, TimeUnit.SECONDS)
       stream.onMessage(responses.offer(_))
       stream.send(payload)
       stream.finish()

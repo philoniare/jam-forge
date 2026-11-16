@@ -79,3 +79,15 @@ class ConnectivitySpec extends AnyFunSuite with Matchers:
     Connectivity.wantsBlockAnnouncements(validators, neighbours, self, outsider) shouldBe true
     Connectivity.wantsBlockAnnouncements(validators, Set.empty, outsider, far) shouldBe true
   }
+
+  test("two connections to one peer: the preferred initiator's is kept unless the other side dialed after the grace period") {
+    val grace = Connectivity.PreferredInitiatorGraceMillis
+    // Both sides dialed at about the same time: the usual rule.
+    Connectivity.laterDialReplaces(preferredOpenedAtMillis = 1000, otherOpenedAtMillis = 1000) shouldBe false
+    Connectivity.laterDialReplaces(preferredOpenedAtMillis = 1000, otherOpenedAtMillis = 1000 + grace - 1) shouldBe false
+    Connectivity.laterDialReplaces(preferredOpenedAtMillis = 5000, otherOpenedAtMillis = 1000) shouldBe false
+    // The other side dials only after the grace period without a connection: it no longer has the preferred one.
+    Connectivity.laterDialReplaces(preferredOpenedAtMillis = 1000, otherOpenedAtMillis = 1000 + grace) shouldBe true
+    Connectivity.laterDialReplaces(preferredOpenedAtMillis = 1000, otherOpenedAtMillis = 90000) shouldBe true
+  }
+

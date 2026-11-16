@@ -229,7 +229,14 @@ private[node] final class PeerConnectivity(
     )
     if same.exists(_.initiator) && same.exists(!_.initiator) then
       val weInitiate = Connectivity.isPreferredInitiator(identity.publicKeyBytes, key)
-      same.filter(_.initiator != weInitiate).foreach { c =>
+      val (preferred, others) = same.partition(_.initiator == weInitiate)
+      val latest = others.maxBy(_.openedAtMillis)
+      val closing =
+        if Connectivity.laterDialReplaces(preferred.map(_.openedAtMillis).max, latest.openedAtMillis) then
+          logger.info(s"connection to ${JamNode.hex(key).take(16)} replaced by the one its peer dialed since")
+          preferred ++ others.filter(_ ne latest)
+        else others
+      closing.foreach { c =>
         logger.info(s"closing duplicate connection to ${JamNode.hex(key).take(16)}")
         c.close()
       }

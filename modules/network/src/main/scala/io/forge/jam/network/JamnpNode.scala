@@ -73,7 +73,8 @@ final case class JamnpConfig(
       */
     streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
     /** Limits on bytes queued for a peer that is not taking them. */
-    outbound: OutboundLimits = OutboundLimits()
+    outbound: OutboundLimits = OutboundLimits(),
+    inbound: InboundLimits = InboundLimits()
 ):
   private def baseAlpn: String = s"jamnp-s/${JamnpConfig.ProtocolVersion}/$genesisHashPrefix"
 
@@ -118,6 +119,42 @@ object JamnpConfig:
   *   block announcement supersedes the ones dropped)
   * @param stallMillis a connection with bytes waiting of which the peer has taken none for this long is closed
   */
+final case class InboundLimits(
+    maxConnectionBytes: Long = 64L * 1024 * 1024,
+    maxBytes: Long = 1024L * 1024 * 1024
+)
+
+private[network] final class InboundFlow(limits: InboundLimits, total: java.util.concurrent.atomic.AtomicLong):
+  private var held = 0L
+  private var closed = false
+
+  def heldBytes: Long = synchronized(held)
+
+  def hold(bytes: Long): Boolean = synchronized {
+    if closed || held + bytes > limits.maxConnectionBytes then false
+    else if total.addAndGet(bytes) > limits.maxBytes then
+      total.addAndGet(-bytes)
+      false
+    else
+      held += bytes
+      true
+  }
+
+  def release(bytes: Long): Unit = synchronized {
+    if !closed then
+      val freed = math.min(bytes, held)
+      held -= freed
+      total.addAndGet(-freed)
+      ()
+  }
+
+  def close(): Unit = synchronized {
+    if !closed then
+      closed = true
+      total.addAndGet(-held)
+      held = 0L
+  }
+
 final case class OutboundLimits(
     maxStreamPendingBytes: Long = 40L * 1024 * 1024,
     maxConnectionPendingBytes: Long = 64L * 1024 * 1024,
@@ -386,6 +423,8 @@ final class JamnpConnection private[network] (
 ):
   private val flow = JamnpNode.outboundFlow(quic, outbound)
 
+  val openedAtMillis: Long = System.currentTimeMillis()
+
   /** Bytes sent on this connection's streams whose write has not completed. */
   def pendingOutboundBytes: Long = flow.pending.get()
 
@@ -401,6 +440,18 @@ final class JamnpConnection private[network] (
   lazy val peerPublicKey: Ed25519PublicKey = Ed25519PublicKey(peerKey)
 
   def negotiatedAlpn: String = quic.sslEngine().getApplicationProtocol
+
+  def holdInbound(bytes: Long): Boolean =
+    val inbound = JamnpNode.inboundFlow(quic)
+    inbound == null || inbound.hold(bytes)
+
+  def releaseInbound(bytes: Long): Unit =
+    val inbound = JamnpNode.inboundFlow(quic)
+    if inbound != null then inbound.release(bytes)
+
+  def heldInboundBytes: Long =
+    val inbound = JamnpNode.inboundFlow(quic)
+    if inbound == null then 0L else inbound.heldBytes
 
   /** Open a stream of the given kind: sends the kind byte, then messages are
     * framed. UP streams should only be opened by the connection initiator.
@@ -506,6 +557,7 @@ final class JamnpNode(
       if !admitInbound(conn) then
         ctx.close()
         return
+      countInbound(ctx.channel().asInstanceOf[QuicChannel])
       ctx.channel().attr(ConnectionKey).set(conn)
       connections.add(conn)
       fireConnectionChange(conn, true)
@@ -581,6 +633,22 @@ final class JamnpNode(
       .option(BoringSSLContextOption.SIGNATURE_ALGORITHMS, Array("ed25519"))
       .build()
 
+  private val inboundHeld = new java.util.concurrent.atomic.AtomicLong()
+
+  def heldInboundBytes: Long = inboundHeld.get()
+
+  private def countInbound(quic: QuicChannel): Unit =
+    val attr = quic.attr(JamnpNode.InboundFlowKey)
+    if attr.get() == null then
+      val flow = new InboundFlow(config.inbound, inboundHeld)
+      if attr.setIfAbsent(flow) == null then
+        quic
+          .closeFuture()
+          .addListener(new io.netty.channel.ChannelFutureListener {
+            override def operationComplete(f: io.netty.channel.ChannelFuture): Unit = flow.close()
+          })
+        ()
+
   /** Start listening on the given address. */
   def start(bindAddress: InetSocketAddress): JamnpNode =
     val codec = new QuicServerCodecBuilder()
@@ -595,6 +663,7 @@ final class JamnpNode(
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =
           trackStream(ch)
+          countInbound(ch.parent())
           // From the start: a peer that opens a stream and never sends its
           // kind byte must not hold it either.
           addIdleTimeout(ch, config.streamIdleTimeoutMillis)
@@ -661,6 +730,7 @@ final class JamnpNode(
       .streamHandler(new ChannelInitializer[QuicStreamChannel]() {
         override def initChannel(ch: QuicStreamChannel): Unit =
           trackStream(ch)
+          countInbound(ch.parent())
           // From the start: a peer that opens a stream and never sends its
           // kind byte must not hold it either.
           addIdleTimeout(ch, config.streamIdleTimeoutMillis)
@@ -683,6 +753,7 @@ final class JamnpNode(
             else
               val quic = f.getNow
               val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis, config.outbound)
+              countInbound(quic)
               quic.attr(ConnectionKey).set(conn)
               connections.add(conn)
               fireConnectionChange(conn, true)
@@ -728,6 +799,10 @@ object JamnpNode:
       attr.get()
 
   private val OutboundFlowKey = io.netty.util.AttributeKey.valueOf[OutboundFlow]("jamnp-outbound-flow")
+
+  private[network] val InboundFlowKey = io.netty.util.AttributeKey.valueOf[InboundFlow]("jamnp-inbound-flow")
+
+  private[network] def inboundFlow(quic: QuicChannel): InboundFlow = quic.attr(InboundFlowKey).get()
 
   /** The outbound byte count of a connection, shared by all its streams. */
   private[network] def outboundFlow(quic: QuicChannel, limits: OutboundLimits): OutboundFlow =
@@ -825,23 +900,49 @@ object JamnpNode:
     * emits the content as byte arrays.
     */
   private[network] final class FrameDecoder(maxFrame: Int) extends ByteToMessageDecoder:
+    private var counted = 0L
+    private var refused = false
+
+    private def uncount(ctx: ChannelHandlerContext): Unit =
+      if counted != 0L then
+        val flow = inboundFlow(ctx.channel().asInstanceOf[QuicStreamChannel].parent())
+        if flow != null then flow.release(counted)
+        counted = 0L
+
+    override def handlerRemoved0(ctx: ChannelHandlerContext): Unit = uncount(ctx)
+
     override def decode(
         ctx: ChannelHandlerContext,
         in: ByteBuf,
         out: java.util.List[Object]
     ): Unit =
+      if refused then
+        in.skipBytes(in.readableBytes())
+        return
       while in.readableBytes() >= 4 do
         in.markReaderIndex()
         val len = in.readIntLE()
+        val ch = ctx.channel().asInstanceOf[QuicStreamChannel]
         if len < 0 || len > maxFrame then
           // Reset, not close: the rest of the oversized frame is never read.
-          resetStream(ctx.channel().asInstanceOf[QuicStreamChannel])
+          refused = true
+          in.skipBytes(in.readableBytes())
+          resetStream(ch)
           return
         if in.readableBytes() < len then
           in.resetReaderIndex()
+          if counted == 0L && len > 0 then
+            val flow = inboundFlow(ch.parent())
+            if flow != null then
+              if flow.hold(len.toLong) then counted = len.toLong
+              else
+                refused = true
+                in.skipBytes(in.readableBytes())
+                resetStream(ch)
           return
         val content = new Array[Byte](len)
         in.readBytes(content)
+        uncount(ctx)
         out.add(content)
 
   /** Delivers decoded frames and close events to a [[JamnpStream]]. */
@@ -921,7 +1022,11 @@ object JamnpNode:
         "jamnp-dispatch",
         new StreamDispatchHandler(stream)
       )
-      pipeline.addAfter(ctx.name(), "jamnp-frames", new FrameDecoder(maxFrame))
+      pipeline.addAfter(
+        ctx.name(),
+        "jamnp-frames",
+        new FrameDecoder(math.min(maxFrame, StreamKind.maxOpenerMessageBytes(kind)))
+      )
       // Give the handler a chance to attach receivers before any frames flow.
       handler.onStream(conn, stream)
       // Remove ourselves; buffered bytes are replayed into the frame decoder.
