@@ -47,7 +47,7 @@ object ImportErrorText:
     case SafroleErrorCode.BadTicketOrder   => "out-of-order tickets are not allowed"
     case SafroleErrorCode.BadTicketProof   => "invalid ticket signature"
     case SafroleErrorCode.BadTicketAttempt => "invalid ticket attempt"
-    case SafroleErrorCode.Reserved         => "too many tickets"
+    case SafroleErrorCode.UselessTicket    => "too many tickets"
     case SafroleErrorCode.DuplicateTicket  => "duplicate ticket"
 
   private def assurances(code: AssuranceErrorCode): String = code match

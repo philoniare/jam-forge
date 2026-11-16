@@ -174,7 +174,7 @@ object SafroleTypes:
     case BadTicketOrder
     case BadTicketProof
     case BadTicketAttempt
-    case Reserved
+    case UselessTicket
     case DuplicateTicket
 
   object SafroleErrorCode:
@@ -190,7 +190,7 @@ object SafroleTypes:
         case "bad_ticket_order" => SafroleErrorCode.BadTicketOrder
         case "bad_ticket_proof" => SafroleErrorCode.BadTicketProof
         case "bad_ticket_attempt" => SafroleErrorCode.BadTicketAttempt
-        case "reserved" => SafroleErrorCode.Reserved
+        case "useless_ticket" => SafroleErrorCode.UselessTicket
         case "duplicate_ticket" => SafroleErrorCode.DuplicateTicket
       }
     }

@@ -112,8 +112,8 @@ object SafroleTransition extends StrictLogging:
     catch
       case e: SafroleCryptoFailure => throw e
       case e @ (_: io.forge.jam.core.codec.CodecDecodingException | _: IllegalArgumentException) =>
-        logger.error("safrole input/state rejected, reporting Reserved", e)
-        Left(SafroleErrorCode.Reserved)
+        logger.error("safrole input/state rejected, reporting UselessTicket", e)
+        Left(SafroleErrorCode.UselessTicket)
 
   /** Epoch timing context extracted from slot values */
   private case class EpochContext(
@@ -281,7 +281,7 @@ object SafroleTransition extends StrictLogging:
     if phase >= config.ticketCutoff then
       Left(SafroleErrorCode.UnexpectedTicket)
     else if tickets.length > config.maxTicketsPerExtrinsic then
-      Left(SafroleErrorCode.Reserved)
+      Left(SafroleErrorCode.UselessTicket)
     else
       val ids = tickets.map(t =>
         JamBytes(BandersnatchVrf.ringVrfOutput(t.signature.toArray).getOrElse(t.signature.toArray.take(32)))
@@ -343,7 +343,7 @@ object SafroleTransition extends StrictLogging:
   ): Either[SafroleErrorCode, SafroleState] =
     val combined = (postState.gammaA ++ marks).sortBy(_.id).take(config.epochLength)
     val survivingIds = combined.map(_.id).toSet
-    if marks.exists(t => !survivingIds.contains(t.id)) then Left(SafroleErrorCode.Reserved)
+    if marks.exists(t => !survivingIds.contains(t.id)) then Left(SafroleErrorCode.UselessTicket)
     else Right(postState.copy(gammaA = combined))
 
   private def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =

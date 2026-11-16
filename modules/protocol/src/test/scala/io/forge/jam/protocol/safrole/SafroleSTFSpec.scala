@@ -145,6 +145,6 @@ class SafroleSTFSpec extends AnyFunSuite with Matchers:
     val (post, output) = SafroleTransition.stfInternal(input, pre, cfg)
 
     output.isLeft shouldBe true
-    output.left.toOption.get shouldBe SafroleErrorCode.Reserved
+    output.left.toOption.get shouldBe SafroleErrorCode.UselessTicket
     post shouldBe pre
   }
