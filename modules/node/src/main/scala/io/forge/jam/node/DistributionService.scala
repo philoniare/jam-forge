@@ -161,7 +161,7 @@ final class DistributionService(
                   pools.addAssurance(AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(idx), signature))
                   stream.finish()
                 case None =>
-                  logger.warn("CE141: assurance signed by no active validator")
+                  logger.debug("CE141: the sender is not an active validator, or no active validator signed it")
                   stream.reset()
             }
             if !admitted then stream.reset()
@@ -170,10 +170,10 @@ final class DistributionService(
             stream.reset()
       }
 
-  /** The assurer's validator index: the connection's peer key when it is an
-    * active validator whose signature verifies (JAMNP-S expects validators to
-    * use their Ed25519 key as network identity), else any active key the
-    * signature verifies under, for devnet nodes that hold several keys.
+  /** The assurer's validator index, when the peer is an active validator (JAMNP-S expects validators to use their
+    * Ed25519 key as network identity): its own index when the signature verifies under its key, else that of any
+    * active key the signature verifies under, for devnet nodes that hold several keys. A peer that is no validator
+    * gets no signature check at all: looking for its signer would cost one check per validator.
     */
   private def assurerIndex(
       conn: JamnpConnection,
@@ -185,7 +185,7 @@ final class DistributionService(
     val message = constants.JAM_AVAILABLE_BYTES ++ Hashing.blake2b256(anchor.bytes ++ bitfield.toArray).bytes
     def verifies(i: Int) = Ed25519.verify(keys(i), message, signature.bytes)
     val byPeer = keys.indices.find(i => java.util.Arrays.equals(keys(i), conn.peerKey))
-    byPeer.filter(verifies).orElse(keys.indices.find(verifies))
+    byPeer.flatMap(own => Some(own).filter(verifies).orElse(keys.indices.find(verifies)))
 
   def distributeAssurance(conn: JamnpConnection, a: AssuranceExtrinsic): Unit =
     sendItem(conn, StreamKind.AssuranceDistribution, DistributionService.encodeAssurance(a))

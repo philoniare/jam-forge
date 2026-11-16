@@ -147,7 +147,11 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers:
     var nodeB: JamNode = null
     try
       nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
-      nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+      // B sends the validators' assurances (CE 141), which are taken from a validator only: it is validator 1.
+      nodeB = new JamNode(
+        spec,
+        NodeConfig(dataDir = dirB, slotTicking = false, ed25519Seed = Some(devKeys(1).ed25519Secret))
+      ).start()
       nodeA.enableAuthoring(devKeys)
 
       val connBtoA =

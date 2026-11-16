@@ -658,7 +658,7 @@ final class AuditorService(
                 .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
                 .exists(y =>
                   negative.get(h).exists(_.nonEmpty) ||
-                    peerEscalates(y, t.validators.size, noShows.map(_.validator).distinct.size)
+                    peerEscalates(y, t.validators.size, provenNoShows(noShows, h, n, headerHash, t.validators).size)
                 )
             }
           }
@@ -791,6 +791,12 @@ final class AuditorService(
           pendingAnnouncements.valuesIterator.map(_.size).sum
         )
       )
+      .get(30, TimeUnit.SECONDS)
+
+  /** A_n(w) of the blocks being audited: the validators recorded as announcing `reportHash` in `tranche`. */
+  private[node] def announcersOf(reportHash: Hash, tranche: Int): Set[Int] =
+    exec
+      .submit(() => tracked.valuesIterator.flatMap(_.announced.getOrElse((reportHash, tranche), Nil)).toSet)
       .get(30, TimeUnit.SECONDS)
 
   /** Validators recorded as judging `reportHash` valid and invalid. */

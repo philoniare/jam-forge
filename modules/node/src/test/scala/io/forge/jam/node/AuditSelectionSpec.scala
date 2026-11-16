@@ -2,6 +2,7 @@ package io.forge.jam.node
 
 import io.forge.jam.core.Shuffle
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.crypto.Ed25519ZebraWrapper
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -93,6 +94,29 @@ class AuditSelectionSpec extends AnyFunSuite with Matchers:
     msg.slice(47, 49) shouldBe Array[Byte](1, 0)
     msg.takeRight(32) shouldBe h(9).bytes.toArray
     msg.length shouldBe 12 + 1 + 2 * 34 + 32
+  }
+
+  test("a no-show counts only with the validator's own announcement of the report in the tranche before") {
+    val keys = (0 until 6).map(ValidatorKeySet.dev)
+    val validators = keys.map(_.ed25519Public)
+    val (header, report, other) = (h(9), h(1), h(2))
+    def announcement(by: Int, tranche: Int, items: Seq[(Int, Hash)], block: Hash = header): Announcement =
+      Announcement(items, Ed25519ZebraWrapper.sign(keys(by).ed25519Secret, announcementMessage(tranche, items, block)))
+    def count(noShows: NoShow*): Set[Int] = provenNoShows(noShows, report, 2, header, validators)
+
+    val genuine = NoShow(1, announcement(1, 1, Seq(0 -> report)))
+    count(genuine) shouldBe Set(1)
+    count(genuine, genuine, NoShow(2, announcement(2, 1, Seq(3 -> other, 0 -> report)))) shouldBe Set(1, 2)
+
+    // Signed by another validator than the one named, or by nobody.
+    count(NoShow(3, announcement(1, 1, Seq(0 -> report)))) shouldBe Set.empty
+    count(NoShow(1, Announcement(Seq(0 -> report), Array.fill(64)(7.toByte)))) shouldBe Set.empty
+    // An index outside the set.
+    count(NoShow(6, announcement(1, 1, Seq(0 -> report))), NoShow(-1, announcement(1, 1, Seq(0 -> report)))) shouldBe Set.empty
+    // A genuine announcement of another report, another tranche or another block.
+    count(NoShow(1, announcement(1, 1, Seq(0 -> other)))) shouldBe Set.empty
+    count(NoShow(1, announcement(1, 0, Seq(0 -> report)))) shouldBe Set.empty
+    count(NoShow(1, announcement(1, 1, Seq(0 -> report), block = h(8)))) shouldBe Set.empty
   }
 
   test("jam-np CE 144 messages round-trip") {

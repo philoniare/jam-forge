@@ -4,11 +4,10 @@ import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.protocol.importing.ImportError
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend, ShardStore}
 import io.forge.jam.core.JamBytes
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.network.{JamnpConfig, JamnpConnection, JamnpNode, NodeIdentity, StreamKind}
+import io.forge.jam.network.{JamnpConfig, PeerConnection, JamnpNode, NodeIdentity, StreamKind}
 
 /** Node runtime configuration. */
 final case class NodeConfig(
@@ -85,6 +84,9 @@ final class JamNode(
         throw e
 
   private val stores = openStores()
+
+  /** Every pool of the node and its services: closed, newest first and each waited for, before the stores are. */
+  private val threads = new NodeThreads
   private val trieBackend: RocksDbTrieBackend = stores._1
   private val blockStore: BlockStore = stores._2
   val shardStore: ShardStore = stores._3
@@ -94,17 +96,13 @@ final class JamNode(
     * (assurances, tickets, votes, announcements) goes stale first.
     */
   private val egress: WorkLimits.DropOldestExecutor =
-    WorkLimits.dropOldestExecutor(
-      "jam-egress",
-      threads = 1,
-      capacity = WorkLimits.EgressQueueCapacity,
-      r =>
-        val t = new Thread(r, "jam-egress"); t.setDaemon(true); t
+    threads.own("jam-egress")(factory =>
+      WorkLimits.dropOldestExecutor("jam-egress", threads = 1, capacity = WorkLimits.EgressQueueCapacity, factory)
     )
 
   /** Checks of received guarantees, assurances and tickets, kept off the network event loops. */
-  private[node] val inbound: InboundWork = InboundWork.pooled()
-  private[node] val announcing: InboundWork = InboundWork.ordered()
+  private[node] val inbound: InboundWork = InboundWork.pooled(threads)
+  private[node] val announcing: InboundWork = InboundWork.ordered(threads)
 
   val chain =
     new ChainManager(
@@ -115,8 +113,8 @@ final class JamNode(
       pruneOldState = nodeConfig.pruneOldState
     )
   /** CE 128 / CE 129 requests are answered here, not on the network event loops. */
-  private[node] val serving: InboundWork = InboundWork.serving()
-  val sync = new SyncService(chain, serving, announcing)
+  private[node] val serving: InboundWork = InboundWork.serving(threads)
+  val sync = new SyncService(chain, serving, announcing, threads)
   private val roleStore = RoleStore.over(blockStore)
   val pools = new ExtrinsicPools(store = roleStore)
   val distribution = new DistributionService(
@@ -125,9 +123,10 @@ final class JamNode(
     egress,
     assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray),
     admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check,
-    inbound = inbound
+    inbound = inbound,
+    threads = threads
   )
-  val shards = new ShardService(shardStore, spec.config, inbound)
+  val shards = new ShardService(shardStore, spec.config, inbound, threads)
   val segments = new SegmentPool()
   val tickets = new TicketService(
     chain,
@@ -135,7 +134,8 @@ final class JamNode(
     distribution,
     egress,
     forwardTargets = () => peers.currentValidatorConnections,
-    inbound = inbound
+    inbound = inbound,
+    threads = threads
   )
   val preimages = new PreimageService(
     chain,
@@ -143,7 +143,8 @@ final class JamNode(
     egress,
     gossipTargets = () => distribution.peers.filter(c => peers.announcementWanted(c.peerKey)),
     inbound = inbound,
-    serving = serving
+    serving = serving,
+    threads = threads
   )
 
   val slotClock = new SlotClock(
@@ -170,9 +171,10 @@ final class JamNode(
     currentSlot = () => currentSlot,
     upkeep = () =>
       if author.isDefined then maybeSendTickets(currentSlot)
-      // A node that runs no GRANDPA voter (a follower, as on jamtoaster) takes its finality from its peers' UP 0
-      // announcements. A voter takes it from GRANDPA only: unauthenticated peer claims must not move it.
-      if !nodeConfig.grandpa then followPeerFinality()
+      // A node started without GRANDPA takes its finality from its peers' UP 0 announcements, which are claims and
+      // not proofs. With GRANDPA, voting or only observing, finality moves on a verified justification alone.
+      if !nodeConfig.grandpa then followPeerFinality(),
+    threads = threads
   )
 
   @volatile private var assuranceTimer: java.util.concurrent.ScheduledExecutorService = null
@@ -207,7 +209,7 @@ final class JamNode(
   private[node] val exportIndex = new ExportIndex(store = roleStore)
 
   /** PVM-heavy work of the guarantor and auditor roles: audits first, then co-signing, then new submissions. */
-  private lazy val refinePool = new RefinePool("jam-refine")
+  private lazy val refinePool = new RefinePool("jam-refine", owner = threads)
 
   /** The guarantor service when guaranteeing is enabled. */
   private[node] def guarantorService: Option[GuarantorService] = guarantor
@@ -246,29 +248,31 @@ final class JamNode(
       segmentRecovery = Some(new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)),
       tamperReports = nodeConfig.tamperReports,
       fromValidator = c => recentValidatorKeys._3.contains(JamBytes(c.peerKey)),
+      fromCoGuarantor = isGuarantorOf,
       // Our own custody only: a request must not make us fetch shards from the network on the requester's behalf.
       localBundle = root =>
         exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
-      serving = serving
+      serving = serving,
+      threads = threads
     )
     guarantor = Some(g)
-    network.registerHandler(
+    network.registerPeerHandler(
       StreamKind.WorkPackageSubmission,
       unlessCatchingUp(g.workPackageSubmissionHandler)
     )
-    network.registerHandler(
+    network.registerPeerHandler(
       StreamKind.WorkPackageSharing,
       unlessCatchingUp(g.workPackageSharingHandler)
     )
-    network.registerHandler(
+    network.registerPeerHandler(
       StreamKind.BundleRequest,
       g.bundleRequestHandler
     )
-    network.registerHandler(
+    network.registerPeerHandler(
       StreamKind.SegmentRequest,
       g.segmentRequestHandler
     )
-    network.registerHandler(
+    network.registerPeerHandler(
       StreamKind.WorkPackageBundleSubmission,
       unlessCatchingUp(g.bundleSubmissionHandler)
     )
@@ -278,10 +282,8 @@ final class JamNode(
     */
   def enableAssuring(keys: Seq[ValidatorKeySet]): Unit =
     if nodeConfig.slotTicking && assuranceTimer == null then
-      assuranceTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
-        val t = new Thread(r, "jam-assurance"); t.setDaemon(true); t
-      }
-    val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances)
+      assuranceTimer = threads.scheduled("jam-assurance")
+    val a = new AssurerService(chain, distribution, pools, keys, shards, shardStore, scheduleAssurances, threads)
     assurer = Some(a)
     chain.onImported((head, _) => if !catchingUp then a.onImported(head))
 
@@ -303,7 +305,8 @@ final class JamNode(
       trancheOrigin = origin,
       sharedRefinePool = Some(refinePool),
       store = roleStore,
-      inbound = inbound
+      inbound = inbound,
+      threads = threads
     )
     a.onDisregard(h =>
       chain.disregard(h) match
@@ -311,8 +314,8 @@ final class JamNode(
         case Left(why)   => logger.debug(s"disregard ${h.toHex.take(18)}: $why")
     )
     auditor = Some(a)
-    network.registerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
-    network.registerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
+    network.registerPeerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
+    network.registerPeerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
     chain.onImported((head, block) => a.onImported(head, block))
     a
 
@@ -338,7 +341,7 @@ final class JamNode(
           case Right(head) => Some(head)
           // Only a block the pipeline found invalid says anything about its contents. Losing a race (a peer's block
           // got there first: side branch, already imported) or a failure of ours leaves the pools as they are.
-          case Left(ChainError.ImportFailed(error, _)) if error != ImportError.UnknownError && hasContent(block) =>
+          case Left(ChainError.InvalidBlock(error, _)) if hasContent(block) =>
             // The contents were checked against the state transitions before sealing, so this should not happen.
             // Should it, the block's own items go, guarantees first, then the rest, and disputes are left out.
             def retry(): Option[ChainHead] =
@@ -399,7 +402,7 @@ final class JamNode(
       else logger.info(s"caught up (best slot $best): duties resume")
     holding
 
-  private def unlessCatchingUp(handler: io.forge.jam.network.StreamHandler): io.forge.jam.network.StreamHandler =
+  private def unlessCatchingUp(handler: io.forge.jam.network.PeerStreamHandler): io.forge.jam.network.PeerStreamHandler =
     (conn, stream) => if catchingUp then stream.reset() else handler.onStream(conn, stream)
 
   private def finalityRunning: Boolean = nodeConfig.grandpa || spec.devnetFinalityDepth > 0
@@ -408,7 +411,7 @@ final class JamNode(
     * key of validator `index` in the next epoch's set (γ_k), whose ring the
     * tickets were made for.
     */
-  private def connectionForNextEpochValidator(index: Int): Option[JamnpConnection] =
+  private def connectionForNextEpochValidator(index: Int): Option[PeerConnection] =
     chain.stateView().validators.nextEpoch.lift(index).flatMap { vk =>
       val key = vk.ed25519.bytes.toArray
       distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
@@ -465,7 +468,7 @@ final class JamNode(
     if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
         chain.onImported((_, _) =>
-          chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests, spec.finalityQuorum)
+          chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests(countsForFinality), spec.finalityQuorum)
         )
       chain.onImported((_, _) => followPeerFinality())
 
@@ -484,6 +487,8 @@ final class JamNode(
       if deleted > 0 then logger.info(s"expired $deleted shard custody unit(s) older than 28 days")
     }
     chain.onImported((head, block) => pruneTickets(head, block))
+    // A reorg's abandoned blocks give their guarantees and preimages back, for a later block of the new chain.
+    chain.onAbandoned((abandoned, adopted) => pools.restoreAbandoned(abandoned.map(_.extrinsic), adopted.map(_.extrinsic)))
     // Peers' blocks consume pooled extrinsics too, not only our own.
     chain.onImported { (head, block) =>
       pools.pruneAfterImport(
@@ -493,8 +498,9 @@ final class JamNode(
         chain.best.hash
       )
       // A later block takes guarantees of its own rotation or the one before, so older ones are dead.
-      val rotation = chain.config.rotationPeriod
-      pools.pruneGuaranteesBefore((head.slot / rotation - 1) * rotation)
+      pools.pruneGuaranteesBefore(
+        io.forge.jam.protocol.report.GuarantorAssignment.oldestReportableSlot(head.slot, chain.config)
+      )
     }
     telemetry.foreach(_ => chain.onImported((_, _) => reportHeads()))
 
@@ -521,25 +527,25 @@ final class JamNode(
     // Track accepted peers for distribution when they open UP 0 to us.
     val announceHandler = sync.blockAnnouncementHandler
     network
-      .registerHandler(
+      .registerPeerHandler(
         StreamKind.BlockAnnouncement,
         (conn, stream) =>
           distribution.trackConnection(conn)
           announceHandler.onStream(conn, stream)
       )
-      .registerHandler(StreamKind.BlockRequest, sync.blockRequestHandler)
-      .registerHandler(StreamKind.WorkReportDistribution, distribution.workReportHandler)
-      .registerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
-      .registerHandler(StreamKind.AssuranceDistribution, distribution.assuranceHandler)
-      .registerHandler(StreamKind.ShardDistribution, shards.shardDistributionHandler)
-      .registerHandler(StreamKind.AuditShardRequest, shards.auditShardHandler)
-      .registerHandler(StreamKind.SegmentShardRequest, shards.segmentShardHandler(verified = false))
-      .registerHandler(StreamKind.SegmentShardRequestVerified, shards.segmentShardHandler(verified = true))
-      .registerHandler(StreamKind.TicketDistributionStep1, tickets.ticketHandler)
-      .registerHandler(StreamKind.TicketDistributionStep2, tickets.ticketHandler)
-      .registerHandler(StreamKind.PreimageAnnouncement, preimages.announceHandler)
-      .registerHandler(StreamKind.PreimageRequest, preimages.requestHandler)
-      .registerHandler(StreamKind.StateRequest, sync.stateRequestHandler)
+      .registerPeerHandler(StreamKind.BlockRequest, sync.blockRequestHandler)
+      .registerPeerHandler(StreamKind.WorkReportDistribution, distribution.workReportHandler)
+      .registerPeerHandler(StreamKind.WorkReportRequest, distribution.reportRequestHandler)
+      .registerPeerHandler(StreamKind.AssuranceDistribution, distribution.assuranceHandler)
+      .registerPeerHandler(StreamKind.ShardDistribution, shards.shardDistributionHandler)
+      .registerPeerHandler(StreamKind.AuditShardRequest, shards.auditShardHandler)
+      .registerPeerHandler(StreamKind.SegmentShardRequest, shards.segmentShardHandler(verified = false))
+      .registerPeerHandler(StreamKind.SegmentShardRequestVerified, shards.segmentShardHandler(verified = true))
+      .registerPeerHandler(StreamKind.TicketDistributionStep1, tickets.ticketHandler)
+      .registerPeerHandler(StreamKind.TicketDistributionStep2, tickets.ticketHandler)
+      .registerPeerHandler(StreamKind.PreimageAnnouncement, preimages.announceHandler)
+      .registerPeerHandler(StreamKind.PreimageRequest, preimages.requestHandler)
+      .registerPeerHandler(StreamKind.StateRequest, sync.stateRequestHandler)
       .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
 
     logger.info(
@@ -552,7 +558,7 @@ final class JamNode(
     peers.start()
 
     if nodeConfig.slotTicking then
-      slotTicker = slotClock.scheduleSlotTicks { slot =>
+      slotTicker = slotClock.scheduleSlotTicks(threads) { slot =>
         try slotTick(slot, slotClock.currentSlot)
         catch case e: Exception => logger.error(s"slot $slot handler failed", e)
       }
@@ -585,7 +591,24 @@ final class JamNode(
 
   @volatile private var currentValidatorKeys: (AnyRef, Set[JamBytes]) = (null, Set.empty)
 
-  private def isCurrentValidator(conn: JamnpConnection): Boolean =
+  /** Whether the peer's key is a guarantor of `core` now or in the rotation before (CE 134). */
+  private def isGuarantorOf(conn: PeerConnection, core: Int): Boolean =
+    val view = chain.stateView()
+    val v = view.validators
+    GuarantorService
+      .guarantorsOf(
+        view.timeslot,
+        view.entropy.pool,
+        v.previous.toIndexedSeq,
+        v.current.toIndexedSeq,
+        v.nextEpoch.toIndexedSeq,
+        core,
+        chain.nextBlockSlot,
+        spec.config
+      )
+      .exists(k => java.util.Arrays.equals(k.ed25519.bytes.toArray, conn.peerKey))
+
+  private def isCurrentValidator(conn: PeerConnection): Boolean =
     val validators = chain.stateView().validators.current
     var memo = currentValidatorKeys
     if memo._1 ne validators then
@@ -593,9 +616,13 @@ final class JamNode(
       currentValidatorKeys = memo
     memo._2.contains(JamBytes(conn.peerKey))
 
-  private def followPeerFinality(): Unit =
-    if nodeConfig.finalityPeers.isDefined then sync.followPeerFinality(peerFinalityQuorum)
-    else sync.followPeerFinality(peerFinalityQuorum, isCurrentValidator)
+  /** Whose unsigned word counts towards finality on a node without GRANDPA: the current validators, by connection
+    * key, or any peer when the operator named a number of peers to trust (`--finality-peers`).
+    */
+  private def countsForFinality(conn: PeerConnection): Boolean =
+    nodeConfig.finalityPeers.isDefined || isCurrentValidator(conn)
+
+  private def followPeerFinality(): Unit = sync.followPeerFinality(peerFinalityQuorum, countsForFinality)
 
   /** Peers whose announced finality we follow: with this node they make the finality quorum (2V/3+1). */
   private def peerFinalityQuorum: Int =
@@ -655,7 +682,7 @@ final class JamNode(
   def connectPeer(
       address: InetSocketAddress,
       expectedEd25519: Option[Array[Byte]] = None
-  ): JamnpConnection = peers.connectPeer(address, expectedEd25519)
+  ): PeerConnection = peers.connectPeer(address, expectedEd25519)
 
   /** Import a locally produced or externally obtained block and announce it. */
   def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainHead] =
@@ -666,8 +693,8 @@ final class JamNode(
       head
     }
 
-  /** Run GRANDPA, voting with `keys` when they are in the voter set. Set 0's voters are the validators of the state
-    * at start, which is genesis on a fresh node.
+  /** Run GRANDPA, voting with `keys` when they are in the voter set. Set 0's voters are the validators of the genesis
+    * state.
     */
   def enableGrandpa(keys: Option[ValidatorKeySet]): GrandpaService =
     val g = new GrandpaService(
@@ -676,10 +703,16 @@ final class JamNode(
       distribution,
       keys,
       audited = h => auditor.forall(_.isAudited(h)),
-      serving = serving
+      serving = serving,
+      threads = threads
     )
     // Start the voter before taking CE 149-153 streams, so no message finds it unset.
-    g.start(spec.genesisHeaderHash, chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq)
+    // Set 0 is the genesis validators whatever the node's best state is now: a follower restarted as a voter after
+    // the validators rotated must still check set 0's justifications.
+    val (genesisKeys, genesisNextKeys) = spec.genesisValidatorKeys
+    val initial =
+      if genesisKeys.nonEmpty then genesisKeys else chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq
+    g.start(spec.genesisHeaderHash, initial, if genesisNextKeys.nonEmpty then genesisNextKeys else initial)
     g.register(network)
     grandpaService = Some(g)
     g
@@ -692,13 +725,16 @@ final class JamNode(
 
   /** BEEFY prototype: sign finalized blocks with `keys` (when given) and aggregate peers' signatures into proofs. */
   def enableBeefy(keys: Option[ValidatorKeySet]): BeefyService =
-    val b = new BeefyService(chain, distribution, keys)
+    val b = new BeefyService(chain, distribution, keys, threads = threads)
     b.register(network)
     b.start()
     beefyService = Some(b)
     b
 
   @volatile private var beefyService: Option[BeefyService] = None
+
+  /** The thread pools that were still running when the last [[shutdown]] closed the stores; none, normally. */
+  @volatile private[node] var poolsLeftRunning: List[String] = Nil
 
   def shutdown(): Unit =
     shuttingDown = true
@@ -725,6 +761,8 @@ final class JamNode(
     egress.shutdown()
     egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)
     preimages.shutdown() // its own executor for CE143 fetches, drained alongside egress
+    // Several services only interrupt their threads. Wait for every pool, so none reads a store after it closes.
+    poolsLeftRunning = threads.close()
     shutdownStorageOnly()
 
   /** Close only the storage layers (for tests that never start networking). */

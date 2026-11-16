@@ -3,6 +3,7 @@ package io.forge.jam.node
 import io.forge.jam.core.Shuffle
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.primitives.Hash
+import io.forge.jam.crypto.Ed25519
 
 /** The deterministic parts of auditing. */
 object AuditSelection:
@@ -105,6 +106,25 @@ object AuditSelection:
 
   /** A no-show: `Validator Index ++ Announcement` from the previous tranche. */
   final case class NoShow(validator: Int, announcement: Announcement)
+
+  /** The validators that `noShows` proves announced `report` in the tranche before `tranche`: each named by an index
+    * into `validators`, with an announcement of that tranche and block that lists the report and carries that
+    * validator's signature. Anything else is a claim and does not count towards a_n. That the validator has not
+    * judged since cannot be proven, and is taken on the announcer's word (it is the announcer's view, eq:noshows).
+    */
+  def provenNoShows(
+      noShows: Seq[NoShow],
+      report: Hash,
+      tranche: Int,
+      headerHash: Hash,
+      validators: IndexedSeq[Array[Byte]]
+  ): Set[Int] =
+    noShows.iterator.distinctBy(_.validator).collect {
+      case NoShow(i, a)
+          if validators.indices.contains(i) && a.items.exists(_._2 == report) &&
+            Ed25519.verify(validators(i), announcementMessage(tranche - 1, a.items, headerHash), a.signature) =>
+        i
+    }.toSet
 
   /** Message 1: `Header Hash ++ Tranche ++ Announcement`. */
   def encodeHead(headerHash: Hash, tranche: Int, a: Announcement): Array[Byte] =

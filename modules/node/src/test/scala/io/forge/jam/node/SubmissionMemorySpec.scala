@@ -1,19 +1,19 @@
 package io.forge.jam.node
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path}
+import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 
 import io.forge.jam.core.ChainConfig
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
-import io.forge.jam.network.{InboundLimits, JamnpConfig, JamnpConnection, JamnpNode, JamnpStream, NodeIdentity, StreamKind}
+import io.forge.jam.network.{InboundLimits, JamnpConfig, PeerConnection, JamnpNode, MessageStream, NodeIdentity, StreamKind}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** A work-package stream's messages wait in memory until the whole submission has arrived. Until then they count
   * against the sender's connection, so one peer cannot fill the node with submissions nobody has agreed to take.
   */
-class SubmissionMemorySpec extends AnyFunSuite with Matchers:
+class SubmissionMemorySpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val KiB = 1024
   private val Budget = 1024L * KiB
@@ -23,17 +23,16 @@ class SubmissionMemorySpec extends AnyFunSuite with Matchers:
     while !cond && System.currentTimeMillis() < deadline do Thread.sleep(10)
     if !cond then fail(s"timed out waiting for: $what")
 
-  private def cleanup(dir: Path): Unit =
-    Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f => Files.deleteIfExists(f))
-
-  private final class Opened(val stream: JamnpStream):
+  private final class Opened(val stream: MessageStream):
     val ended = new CountDownLatch(1)
     stream.onClosed(() => ended.countDown())
     def wasReset: Boolean = ended.await(5, TimeUnit.SECONDS)
     def stillOpen: Boolean = !ended.await(300, TimeUnit.MILLISECONDS)
 
   /** A guarantor behind a network node whose connections may each hold `Budget` bytes. */
-  private def withGuarantor(fromValidator: Boolean = true)(f: (JamnpNode, JamnpConnection) => Unit): Unit =
+  private def withGuarantor(fromValidator: Boolean = true, sharesCore: Int => Boolean = _ => true)(
+      f: (JamnpNode, PeerConnection) => Unit
+  ): Unit =
     val dir = Files.createTempDirectory("jam-submission-memory")
     val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false)
     val blockStore = BlockStore.open(dir.resolve("blocks"))
@@ -43,15 +42,16 @@ class SubmissionMemorySpec extends AnyFunSuite with Matchers:
       new DistributionService(new ExtrinsicPools, coresCount = 1, egress),
       new ExtrinsicPools,
       Seq.empty,
-      fromValidator = _ => fromValidator
+      fromValidator = _ => fromValidator,
+      fromCoGuarantor = (_, core) => sharesCore(core)
     )
     val config = JamnpConfig(genesisHashPrefix = "deadbeef")
     val server = new JamnpNode(NodeIdentity.generate(), config.copy(inbound = InboundLimits(maxConnectionBytes = Budget)))
     val client = new JamnpNode(NodeIdentity.generate(), config)
     server
-      .registerHandler(StreamKind.WorkPackageSubmission, guarantor.workPackageSubmissionHandler)
-      .registerHandler(StreamKind.WorkPackageSharing, guarantor.workPackageSharingHandler)
-      .registerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
+      .registerPeerHandler(StreamKind.WorkPackageSubmission, guarantor.workPackageSubmissionHandler)
+      .registerPeerHandler(StreamKind.WorkPackageSharing, guarantor.workPackageSharingHandler)
+      .registerPeerHandler(StreamKind.WorkPackageBundleSubmission, guarantor.bundleSubmissionHandler)
     try
       server.start(new InetSocketAddress("127.0.0.1", 0))
       f(server, client.connect(new InetSocketAddress("127.0.0.1", server.boundPort)).get(10, TimeUnit.SECONDS))
@@ -64,13 +64,13 @@ class SubmissionMemorySpec extends AnyFunSuite with Matchers:
       trieBackend.close()
       cleanup(dir)
 
-  private def open(conn: JamnpConnection, kind: Byte, messages: Array[Byte]*): Opened =
+  private def open(conn: PeerConnection, kind: Byte, messages: Array[Byte]*): Opened =
     val opened = new Opened(conn.openStream(kind).get(10, TimeUnit.SECONDS))
     messages.foreach(opened.stream.send)
     opened
 
   /** A second stream cannot add to what the first holds; when the first ends, its bytes are given back. */
-  private def heldUntilTheStreamEnds(server: JamnpNode, conn: JamnpConnection, kind: Byte, messages: Array[Byte]*): Unit =
+  private def heldUntilTheStreamEnds(server: JamnpNode, conn: PeerConnection, kind: Byte, messages: Array[Byte]*): Unit =
     val bytes = messages.map(_.length.toLong).sum
     val first = open(conn, kind, messages*)
     eventually(s"${StreamKind.name(kind)} messages to be counted")(server.heldInboundBytes == bytes)
@@ -113,5 +113,19 @@ class SubmissionMemorySpec extends AnyFunSuite with Matchers:
       val shared = open(conn, StreamKind.WorkPackageSharing, new Array[Byte](64))
       shared.wasReset shouldBe true
       server.heldInboundBytes shouldBe 0L
+    }
+  }
+
+  test("CE 134: a validator not assigned to the package's core is reset on the header, before any bundle is kept") {
+    withGuarantor(sharesCore = _ == 0) { (server, conn) =>
+      val other = open(conn, StreamKind.WorkPackageSharing, GuarantorService.encodeSharingHeader(1, 6, Nil))
+      other.wasReset shouldBe true
+      server.heldInboundBytes shouldBe 0L
+
+      val header = GuarantorService.encodeSharingHeader(0, 6, Nil)
+      val shared = open(conn, StreamKind.WorkPackageSharing, header)
+      shared.stillOpen shouldBe true
+      server.heldInboundBytes shouldBe header.length.toLong
+      shared.stream.finish()
     }
   }

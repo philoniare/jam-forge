@@ -9,7 +9,7 @@ import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.crypto.{Ed25519, Ed25519ZebraWrapper}
-import io.forge.jam.network.{JamnpConnection, JamnpStream}
+import io.forge.jam.network.{PeerConnection, MessageStream}
 import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.protocol.refine.{
   ComputedReport,
@@ -141,7 +141,11 @@ final class GuarantorService(
     localBundle: Hash => Option[Array[Byte]] = _ => None,
     /** Where a CE 147/148 request that has to rebuild from shards is answered, off the network threads. */
     serving: InboundWork = InboundWork.direct,
-    fromValidator: JamnpConnection => Boolean = _ => true
+    fromValidator: PeerConnection => Boolean = _ => true,
+    /** CE 134: whether the peer is a guarantor of the core it shares a package for ([[GuarantorService.guarantorsOf]]). */
+    fromCoGuarantor: (PeerConnection, Int) => Boolean = (_, _) => true,
+    /** Owner of this service's threads: the node's, or its own when made alone. */
+    threads: NodeThreads = new NodeThreads
 ) extends LazyLogging:
 
   /** The report this guarantor signs: the computed one, or with `tamperReports` a wrong one (auth gas used + 1),
@@ -201,8 +205,8 @@ final class GuarantorService(
     * the shards we custody (every validator's, for a report we guaranteed) and cached again: auditors of one report
     * ask at about the same time.
     */
-  def bundleRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def bundleRequestHandler: io.forge.jam.network.PeerStreamHandler = new io.forge.jam.network.PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         if msg.length != 32 then stream.reset()
         else
@@ -236,8 +240,8 @@ final class GuarantorService(
     * unknown root, an out-of-range index or more than W_M segments rejects
     * the whole request with a reset.
     */
-  def segmentRequestHandler: io.forge.jam.network.StreamHandler = new io.forge.jam.network.StreamHandler:
-    def onStream(connection: JamnpConnection, stream: JamnpStream): Unit =
+  def segmentRequestHandler: io.forge.jam.network.PeerStreamHandler = new io.forge.jam.network.PeerStreamHandler:
+    def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val request =
           try decodeSegmentRequest(msg).filter(_.map(_._2.size).sum <= GuarantorService.MaxSegmentsPerRequest)
@@ -256,7 +260,7 @@ final class GuarantorService(
   /** Answer a CE 148 request: every requested segment from the segment cache, else (with `rebuild`) from our own
     * shards; a reset when any cannot be provided.
     */
-  private def answerSegments(stream: JamnpStream, groups: IndexedSeq[(Hash, Seq[Int])], rebuild: Boolean): Unit =
+  private def answerSegments(stream: MessageStream, groups: IndexedSeq[(Hash, Seq[Int])], rebuild: Boolean): Unit =
     val served =
       try
         groups.foldLeft(Option(IndexedSeq.empty[(Array[Byte], List[Array[Byte]])])) { (acc, group) =>
@@ -331,8 +335,8 @@ final class GuarantorService(
   /** CE 133 handler: message 1 = core index (2 bytes LE) ++ work package,
     * message 2 = concatenated extrinsic blobs, then FIN.
     */
-  def workPackageSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def workPackageSubmissionHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       // CE 133 is two messages; a stream sending more, or more bytes than a submission may hold, is dropped.
       val intake = new StreamIntake(2, maxSubmissionBytes, conn.holdInbound, conn.releaseInbound)
       var rejected = false
@@ -406,8 +410,8 @@ final class GuarantorService(
     * accumulation has the same unbounded-buffering shape but is out of
     * scope here — ledgered as a node-level follow-up.
     */
-  def bundleSubmissionHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def bundleSubmissionHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       val messages = mutable.ListBuffer.empty[Array[Byte]]
       var dispatched = false
       var totalBytes = 0L
@@ -585,8 +589,8 @@ final class GuarantorService(
               case _: java.util.concurrent.RejectedExecutionException =>
                 logger.warn("too many work packages waiting for their imports; refused")
 
-  /** Segments-roots of the work-packages reported in recent history, by package hash: what an import named by
-    * package hash can be resolved through, since the report's segment-root lookup must be checkable on chain.
+  /** Segments-roots of the work-packages reported in recent history (β), by package hash: what a ⊞ import can be
+    * resolved through, since the report's segment-root lookup must be checkable on chain.
     */
   private def reportedPackages: Map[Hash, Hash] =
     chain.stateView().beta.history.flatMap(_.reported).map(r => r.hash -> r.exportsRoot).toMap
@@ -619,16 +623,14 @@ final class GuarantorService(
   )
 
   /** Fetches of imported segments: a few at once, a bounded number waiting. */
-  private val importPool = new java.util.concurrent.ThreadPoolExecutor(
+  private val importPool = threads.own("jam-import-fetch")(factory => new java.util.concurrent.ThreadPoolExecutor(
     GuarantorService.ImportFetchThreads,
     GuarantorService.ImportFetchThreads,
     30L,
     java.util.concurrent.TimeUnit.SECONDS,
     new java.util.concurrent.LinkedBlockingQueue[Runnable](GuarantorService.MaxQueuedSubmissions),
-    { r =>
-      val t = new Thread(r, "jam-import-fetch"); t.setDaemon(true); t
-    }
-  )
+    factory
+  ))
 
   /** Run the work-report computation pipeline (Xi) and, on success, custody
     * the bundle/shards and sign+pool+distribute the resulting report. Shared
@@ -643,12 +645,14 @@ final class GuarantorService(
       justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
       segmentRootLookup: Map[Hash, Hash]
   ): Unit =
+    // Assignments and the guarantee's timeslot are the next block's: a head a few slots behind the clock would put
+    // the guarantee in a rotation that may be over by the time a block can include it.
     val slot = chain.nextBlockSlot
     precheck(wp, coreIndex, slot) match
       case Left(why) => logger.warn(s"work package ${RefineFetch.workPackageHash(wp).toHex.take(18)} refused before refine: $why")
       case Right(anchorState) => refineAndGuarantee(coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState)
 
-  /** Everything that can be judged before refining. The work-package limits and the guarantee
+  /** GP §guaranteeing: everything that can be judged before refining. The work-package limits and the guarantee
     * extrinsic's refine-independent rules (authorizer in the pool, anchors) against the head, that one of our keys is
     * assigned to the core, and that we hold the lookup anchor's state. Returns that state's lookup.
     */
@@ -779,8 +783,8 @@ final class GuarantorService(
     * it is assigned, else the lowest assigned index we hold. Messages that
     * cannot be co-signed are rejected by resetting the stream.
     */
-  def workPackageSharingHandler: io.forge.jam.network.StreamHandler =
-    (conn: JamnpConnection, stream: JamnpStream) =>
+  def workPackageSharingHandler: io.forge.jam.network.PeerStreamHandler =
+    (conn: PeerConnection, stream: MessageStream) =>
       // CE 134 is a header and a bundle. Only those two are kept: a peer that goes on sending, or sends more than
       // a submission may hold, gets a reset and nothing more of its stream is buffered.
       if !fromValidator(conn) then
@@ -790,7 +794,16 @@ final class GuarantorService(
         val intake = new StreamIntake(2, maxSubmissionBytes, conn.holdInbound, conn.releaseInbound)
         var rejected = false
         stream.onMessage { msg =>
-          if intake.offer(msg) then
+          // The header names the core: a validator that is not one of its guarantors is refused before its bundle
+          // is kept. A header that does not decode is refused with the bundle, as before.
+          val stranger = intake.size == 0 && !rejected &&
+            GuarantorService.decodeSharingHeader(msg).exists((core, _, _) => !fromCoGuarantor(conn, core))
+          if stranger then
+            rejected = true
+            logger.debug("CE134: the sender is not a guarantor of the core it names; rejecting")
+            stream.reset()
+          else if rejected then ()
+          else if intake.offer(msg) then
             if intake.size == 2 then
               val Seq(header, bundle) = intake.messages: @unchecked
               val admitted = coSignAdmission.tryExecute(refinePool.at(RefinePool.Priority.CoSign), intake.bytes, conn) {
@@ -816,7 +829,7 @@ final class GuarantorService(
           if intake.size < 2 && !rejected then stream.reset()
         }
 
-  private def respondCoSign(stream: JamnpStream, header: Array[Byte], bundleBytes: Array[Byte]): Unit =
+  private def respondCoSign(stream: MessageStream, header: Array[Byte], bundleBytes: Array[Byte]): Unit =
     GuarantorService.decodeSharingHeader(header) match
       case Left(err) =>
         logger.warn(s"CE134: $err")
@@ -905,7 +918,7 @@ final class GuarantorService(
     )
     val targets = if keyed.nonEmpty then keyed else peers
 
-    val responses = new java.util.concurrent.LinkedBlockingQueue[(JamnpConnection, Option[Array[Byte]])]()
+    val responses = new java.util.concurrent.LinkedBlockingQueue[(PeerConnection, Option[Array[Byte]])]()
     targets.foreach { conn =>
       coSignPool.submit { (() =>
         responses.put(conn -> coSignRoundTrip(conn, header, computed.bundleBytes))
@@ -966,7 +979,7 @@ final class GuarantorService(
   /** Ask a co-guarantor that computed a different report for its report (CE 136) and log where the two differ: the
     * only way to see why two implementations disagree on a package. Off the waiting thread; best effort.
     */
-  private def explainDifference(conn: JamnpConnection, ours: io.forge.jam.core.types.workpackage.WorkReport, theirs: Hash): Unit =
+  private def explainDifference(conn: PeerConnection, ours: io.forge.jam.core.types.workpackage.WorkReport, theirs: Hash): Unit =
     try
       coSignPool.execute { () =>
         StreamRequest.collect(conn, io.forge.jam.network.StreamKind.WorkReportRequest, theirs.bytes, 5000) match
@@ -984,38 +997,30 @@ final class GuarantorService(
     catch case _: java.util.concurrent.RejectedExecutionException => ()
 
   /** Runs CE 134 round trips in parallel, off the guarantor thread. */
-  private val coSignPool = java.util.concurrent.Executors.newCachedThreadPool(r =>
-    val t = new Thread(r, "jam-cosign")
-    t.setDaemon(true)
-    t
-  )
+  private val coSignPool = threads.cached("jam-cosign")
 
   /** One CE 134 round trip: header and bundle messages, FIN, then the
     * 96-byte response; None when the peer resets or times out.
     */
   private def coSignRoundTrip(
-      conn: JamnpConnection,
+      conn: PeerConnection,
       header: Array[Byte],
       bundle: Array[Byte]
   ): Option[Array[Byte]] =
-    var stream: JamnpStream = null
-    var signed: Option[Array[Byte]] = None
-    try
-      stream = conn
-        .openStream(io.forge.jam.network.StreamKind.WorkPackageSharing)
-        .get(10, java.util.concurrent.TimeUnit.SECONDS)
-      val response = new java.util.concurrent.CompletableFuture[Array[Byte]]()
-      stream.onMessage(response.complete(_))
-      stream.onClosed(() => response.complete(null)) // peer rejected or lacks the protocol
-      stream.send(header)
-      stream.send(bundle)
-      stream.finish()
-      signed =
-        Option(response.get(GuarantorService.CoSignTimeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
-    catch case e: Exception => logger.debug(s"CE134 round trip failed: ${e.getMessage}")
-    // No response (rejected, timed out, failed): give the stream up on both sides.
-    finally if stream != null && signed.isEmpty then stream.reset()
-    signed
+    // No response (the peer rejected it or lacks the protocol, a timeout, a failure): the stream is given up on
+    // both sides.
+    StreamRequest
+      .exchange(
+        conn,
+        io.forge.jam.network.StreamKind.WorkPackageSharing,
+        Seq(header, bundle),
+        10_000,
+        () => GuarantorService.CoSignTimeoutMillis,
+        StreamRequest.Until.FirstMessage,
+        maxMessages = 1
+      )
+      .toOption
+      .flatMap(_.headOption)
 
 object GuarantorService:
   /** Work packages fetching their imports at once. */
@@ -1106,6 +1111,30 @@ object GuarantorService:
   ): (Hash, IndexedSeq[K]) =
     if slot / config.epochLength > stateSlot / config.epochLength then (entropy(1), pending)
     else (entropy(2), current)
+
+  /** The validators that may share a package for `core` around `slot` (CE 134): those assigned to it in the slot's
+    * rotation, and those of the rotation before, who may still be finishing one. A rotation of the epoch before the
+    * state's is the previous set's (λ, with η_3).
+    */
+  def guarantorsOf[K](
+      stateSlot: Long,
+      entropy: List[Hash],
+      previous: IndexedSeq[K],
+      current: IndexedSeq[K],
+      pending: IndexedSeq[K],
+      core: Int,
+      slot: Long,
+      config: io.forge.jam.core.ChainConfig
+  ): Set[K] =
+    def at(s: Long): Set[K] =
+      val (randomness, validators) =
+        if s / config.epochLength < stateSlot / config.epochLength then (entropy(3), previous)
+        else rotatedForSlot(stateSlot, entropy, current, pending, s, config)
+      val cores =
+        io.forge.jam.protocol.report.GuarantorAssignment.coreAssignments(randomness, s, validators.size, config)
+      validators.zip(cores).collect { case (v, c) if c == core => v }.toSet
+    val before = (slot / config.rotationPeriod - 1) * config.rotationPeriod
+    at(slot) ++ (if before >= 0 then at(before) else Set.empty)
 
   def assignments(
       view: io.forge.jam.protocol.state.TrieBackedJamState,

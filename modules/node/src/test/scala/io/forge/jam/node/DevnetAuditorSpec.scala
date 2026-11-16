@@ -217,6 +217,48 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
           Thread.sleep(100)
         auditorA.announcementsFor(reportHash) shouldBe 3
         auditorA.isAudited(available.hash) shouldBe false
+
+        // Later tranches. Validators 4 and 5 announce in tranche 0 as well, so three validators (2, 4, 5) have
+        // announced and not judged. Validator 3 joins tranche 1 for them: with three no-shows of six validators
+        // every VRF output escalates (eq:latertranches), so the announcement stands or falls with its evidence.
+        import AuditSelection.{Announcement, NoShow}
+        def vrf(v: Int, input: Array[Byte]) = io.forge.jam.vrfs.BandersnatchWrapper
+          .ietfVrfSign(devKeys(v).bandersnatchSecret, input, Array.emptyByteArray)
+        def announcement(v: Int, tranche: Int) = Announcement(
+          items,
+          io.forge.jam.crypto.Ed25519ZebraWrapper
+            .sign(devKeys(v).ed25519Secret, AuditSelection.announcementMessage(tranche, items, available.hash))
+        )
+        for v <- Seq(4, 5) do
+          auditorA.receiveAnnouncement(
+            devKeys(v).ed25519Public,
+            AuditSelection.encodeHead(available.hash, 0, announcement(v, 0)),
+            AuditSelection.encodeFirstEvidence(vrf(v, AuditSelection.initialInput(y)))
+          )
+        while auditorA.announcersOf(reportHash, 0) != Set(0, 1, 2, 4, 5) && System.currentTimeMillis() < deadline + 15000 do
+          Thread.sleep(50)
+        auditorA.announcersOf(reportHash, 0) shouldBe Set(0, 1, 2, 4, 5)
+
+        val later = AuditSelection.encodeHead(available.hash, 1, announcement(3, 1))
+        val s1 = vrf(3, AuditSelection.laterInput(y, reportHash, 1))
+        def laterWith(noShows: Seq[NoShow]): Unit =
+          auditorA.receiveAnnouncement(
+            devKeys(3).ed25519Public,
+            later,
+            AuditSelection.encodeLaterEvidence(Seq(s1 -> noShows))
+          )
+        // No-shows that are only named: an unsigned announcement, validator 3's own under their indices, and
+        // tranche-1 announcements where tranche-0 ones are needed.
+        laterWith(Seq(2, 4, 5).map(NoShow(_, Announcement(items, new Array[Byte](64)))))
+        laterWith(Seq(2, 4, 5).map(NoShow(_, announcement(3, 0))))
+        laterWith(Seq(2, 4, 5).map(v => NoShow(v, announcement(v, 1))))
+        auditorA.judgesOf(reportHash) // the auditor's thread has handled all three
+        auditorA.announcersOf(reportHash, 1) shouldBe Set.empty
+        // Each no-show with that validator's own tranche-0 announcement.
+        laterWith(Seq(2, 4, 5).map(v => NoShow(v, announcement(v, 0))))
+        while auditorA.announcersOf(reportHash, 1).isEmpty && System.currentTimeMillis() < deadline + 15000 do
+          Thread.sleep(50)
+        auditorA.announcersOf(reportHash, 1) shouldBe Set(3)
       finally
         nodeC.shutdown()
         cleanup(dirC)
@@ -256,7 +298,7 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers:
       nodeA.pools.addJudgment(reportHash, 0L, 5, false, new Array[Byte](64))
       val announcedBefore = auditorA.announcementsFor(reportHash)
       val judgesBefore = auditorA.judgesOf(reportHash)
-      announcedBefore shouldBe 3
+      announcedBefore shouldBe 6 // every validator has announced it by now
       judgesBefore shouldBe (Set(0, 1, 2, 3, 4), Set(5))
       auditorA.isAudited(available.hash) shouldBe true
       nodeA.shutdown()
