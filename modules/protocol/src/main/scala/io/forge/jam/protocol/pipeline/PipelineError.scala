@@ -29,6 +29,7 @@ enum PipelineError:
   case HeaderErr(code: HeaderErrorCode)
   case InvalidOffendersMark
   case BadSignatureBatch
+  case NewServiceIdConflict(serviceId: Long)
 
   def message: String = this match
     case SafroleErr(code) => s"Safrole: $code"
@@ -39,3 +40,4 @@ enum PipelineError:
     case HeaderErr(code) => s"Header: $code"
     case InvalidOffendersMark => "Invalid offenders mark"
     case BadSignatureBatch => "Bad signature batch"
+    case NewServiceIdConflict(id) => s"Accumulation: two services created service $id"

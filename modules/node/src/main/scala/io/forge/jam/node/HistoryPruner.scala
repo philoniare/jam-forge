@@ -27,7 +27,8 @@ private[node] final class HistoryPruner(
     pruneOldState: Boolean,
     pruneState: (Hash, Long) => Unit,
     header: Hash => Option[Header],
-    forget: Hash => Unit
+    forget: Hash => Unit,
+    defer: (() => Unit) => Unit
 ) extends LazyLogging:
 
   /** The oldest main-chain block whose data is kept; genesis until anything has been pruned. */
@@ -89,9 +90,9 @@ private[node] final class HistoryPruner(
               meta.dropFinalizedAt(oldestHeight)
             // The old floor's state goes: every state still kept descends from `n`, so the nodes `n` replaced
             // are unreachable unless a later block brought them back.
-            if pruneOldState then
-              pruneState(n, oldestHeight + 1)
-            else trieBackend.dropJournal(n)
+            val height = oldestHeight + 1
+            if pruneOldState then defer(() => pruneState(n, height))
+            else defer(() => trieBackend.dropJournal(n))
             oldest = n
             oldestHeight += 1
             pruned += 1
@@ -106,10 +107,12 @@ private[node] final class HistoryPruner(
   /** Drop the state journals of `root` and everything built on it, keeping the blocks. */
   private def dropBranchJournals(root: Hash): Unit =
     val stack = mutable.ArrayDeque(root)
+    val branch = mutable.ListBuffer.empty[Hash]
     while stack.nonEmpty do
       val h = stack.removeHead()
-      trieBackend.dropJournal(h)
+      branch += h
       blockStore.children(h).foreach(stack.append)
+    defer(() => branch.foreach(trieBackend.dropJournal))
 
   /** Delete the block `root` and everything built on it; returns how many blocks went. */
   private def deleteBranch(root: Hash): Int =
@@ -123,8 +126,9 @@ private[node] final class HistoryPruner(
     order.reverseIterator.foreach(deleteBlockRecord(_, finalizedChain = false))
     order.size
 
-  /** Delete everything stored under one block. The equivocation mark of its slot goes only with the finalized
-    * chain's block: a side-branch block may sit at a slot that is not finalized yet, where the mark still counts.
+  /** Delete everything stored under one block: its metadata with the chain change, the block itself once that is
+    * durable. The equivocation mark of its slot goes only with the finalized chain's block: a side-branch block may
+    * sit at a slot that is not finalized yet, where the mark still counts.
     */
   private def deleteBlockRecord(h: Hash, finalizedChain: Boolean): Unit =
     val parent = headers.parentOf(h).getOrElse(Hash.zero)
@@ -133,8 +137,9 @@ private[node] final class HistoryPruner(
       meta.dropSlotAuthorIf(slot, hd.authorIndex.toInt, h)
       if finalizedChain then meta.dropEquivocated(slot)
     }
-    blockStore.deleteBlock(h, parent)
-    // A side branch's journal is never acted on: it describes what the branch replaced, not the finalized chain.
-    if !finalizedChain then trieBackend.dropJournal(h)
-    forget(h)
     meta.dropBlock(h)
+    defer { () =>
+      blockStore.deleteBlock(h, parent)
+      if !finalizedChain then trieBackend.dropJournal(h)
+      forget(h)
+    }

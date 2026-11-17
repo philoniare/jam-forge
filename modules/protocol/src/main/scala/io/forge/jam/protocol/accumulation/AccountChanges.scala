@@ -11,12 +11,16 @@ import java.nio.{ByteBuffer, ByteOrder}
   */
 class AccountChanges:
   val accountUpdates: mutable.Map[Long, ServiceAccount] = mutable.Map.empty
+  val createdIds: mutable.Set[Long] = mutable.Set.empty
   val removedAccounts: mutable.Set[Long] = mutable.Set.empty
   // Storage data changes (for WRITE host call updates)
   val rawServiceDataUpdates: mutable.Map[JamBytes, JamBytes] = mutable.Map.empty
   val rawServiceDataRemovals: mutable.Set[JamBytes] = mutable.Set.empty
 
   def checkAndMerge(other: AccountChanges): Unit =
+    other.createdIds.find(createdIds.contains).foreach(id => throw new AccountChanges.DuplicateNewServiceId(id))
+    createdIds ++= other.createdIds
+
     // Merge account updates
     for (id, account) <- other.accountUpdates do
       accountUpdates.get(id) match
@@ -75,3 +79,7 @@ class AccountChanges:
       state.rawServiceDataByStateKey.removedAll(rawServiceDataRemovals)
     state.rawServiceDataByStateKey =
       state.rawServiceDataByStateKey ++ rawServiceDataUpdates
+
+object AccountChanges:
+  final class DuplicateNewServiceId(val serviceId: Long)
+      extends RuntimeException(s"two services of one accumulation batch created service $serviceId: block invalid")

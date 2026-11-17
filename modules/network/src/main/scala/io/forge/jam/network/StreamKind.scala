@@ -38,6 +38,8 @@ object StreamKind:
   val GrandpaCatchUp: Byte = 152.toByte
   val WarpSyncRequest: Byte = 153.toByte
 
+  val BuilderKinds: Set[Byte] = Set(WorkPackageSubmission, WorkPackageBundleSubmission)
+
   def maxOpenerMessageBytes(kind: Byte): Int = kind match
     case BlockRequest | StateRequest | TicketDistributionStep1 | TicketDistributionStep2 | WorkReportRequest |
         ShardDistribution | AuditShardRequest | SegmentShardRequest | SegmentShardRequestVerified |

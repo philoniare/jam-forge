@@ -320,3 +320,64 @@ class JamnpNodeSpec extends AnyFunSuite with Matchers:
       plainNode.shutdown()
       serverNode.shutdown()
   }
+
+  private def staysOpen(c: JamnpConnection): Boolean =
+    val deadline = System.currentTimeMillis() + 1500
+    while c.isOpen && System.currentTimeMillis() < deadline do Thread.sleep(50)
+    c.isOpen
+
+  test("builder connections count against the per-address cap and stay within the builder slots") {
+    val builders = Seq.fill(3)(new JamnpNode(NodeIdentity.generate(), config.copy(builder = true)))
+    val capped = new JamnpNode(NodeIdentity.generate(), config.copy(maxInboundConnections = 10, builderSlots = 5, maxInboundPerAddress = 1))
+    val fewSlots = new JamnpNode(NodeIdentity.generate(), config.copy(maxInboundConnections = 10, builderSlots = 1))
+    try
+      capped.start(new InetSocketAddress("127.0.0.1", 0))
+      fewSlots.start(new InetSocketAddress("127.0.0.1", 0))
+      val toCapped = new InetSocketAddress("127.0.0.1", capped.boundPort)
+      staysOpen(builders(0).connect(toCapped).get(10, TimeUnit.SECONDS)) shouldBe true
+      staysOpen(builders(1).connect(toCapped).get(10, TimeUnit.SECONDS)) shouldBe false
+
+      val toFewSlots = new InetSocketAddress("127.0.0.1", fewSlots.boundPort)
+      staysOpen(builders(1).connect(toFewSlots).get(10, TimeUnit.SECONDS)) shouldBe true
+      staysOpen(builders(2).connect(toFewSlots).get(10, TimeUnit.SECONDS)) shouldBe false
+    finally
+      builders.foreach(_.shutdown())
+      capped.shutdown()
+      fewSlots.shutdown()
+  }
+
+  test("a builder connection is served only the streams a builder submits work on; others are reset") {
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val builderNode = new JamnpNode(NodeIdentity.generate(), config.copy(builder = true))
+    val plainNode = new JamnpNode(NodeIdentity.generate(), config)
+    Seq(StreamKind.BlockRequest, StreamKind.WorkPackageSubmission, StreamKind.WorkPackageBundleSubmission).foreach { kind =>
+      serverNode.registerHandler(
+        kind,
+        (_: JamnpConnection, stream: JamnpStream) =>
+          stream.onMessage { msg =>
+            stream.send(msg)
+            stream.finish()
+          }
+      )
+    }
+    def ask(conn: JamnpConnection, kind: Byte): Option[String] =
+      val answers = new LinkedBlockingQueue[Option[String]]()
+      val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
+      stream.onMessage(m => answers.offer(Some(new String(m, "UTF-8"))))
+      stream.onClosed(() => answers.offer(None))
+      stream.send("hello".getBytes("UTF-8"))
+      stream.finish()
+      await(answers)
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val address = new InetSocketAddress("127.0.0.1", serverNode.boundPort)
+      val builder = builderNode.connect(address).get(10, TimeUnit.SECONDS)
+      ask(builder, StreamKind.WorkPackageSubmission) shouldBe Some("hello")
+      ask(builder, StreamKind.WorkPackageBundleSubmission) shouldBe Some("hello")
+      ask(builder, StreamKind.BlockRequest) shouldBe None
+      ask(plainNode.connect(address).get(10, TimeUnit.SECONDS), StreamKind.BlockRequest) shouldBe Some("hello")
+    finally
+      builderNode.shutdown()
+      plainNode.shutdown()
+      serverNode.shutdown()
+  }

@@ -60,6 +60,13 @@ object AuditSelection:
   def peerEscalates(seedOutput: Array[Byte], validatorCount: Int, noShows: Int): Boolean =
     escalates(seedOutput, validatorCount, noShows) || escalatesWide(seedOutput, validatorCount, noShows)
 
+  def noShowsNeeded(seedOutput: Array[Byte], validatorCount: Int): Int =
+    val d = (seedOutput(0) & 0xff).toLong
+    val wide = d | ((seedOutput(1) & 0xffL) << 8)
+    val narrowNeeds = validatorCount * d / (256L * BiasFactor)
+    val wideNeeds = validatorCount * wide / (65536L * BiasFactor)
+    math.min(narrowNeeds, wideNeeds).toInt + 1
+
   /** x_n of eq:announcement: `E₂(core) ++ H(w)` per announced report, in the order the announcement lists them, with
     * no length prefix. That is what polkajam v0.8.0 signs: its two-report announcements verify only in wire order
     * (run AA, 2026-10-22).
@@ -71,22 +78,28 @@ object AuditSelection:
   def announcementMessage(tranche: Int, items: Seq[(Int, Hash)], headerHash: Hash): Array[Byte] =
     (AnnounceContext :+ tranche.toByte) ++ announcedItems(items) ++ headerHash.bytes.toArray
 
-  /** U(w): no negative judgment and some started tranche whose announced auditors all judged positively, or more
-    * than two thirds of the validators judged positively. A tranche 0 that nobody announced in counts only once it
-    * has ended, and an empty later tranche never counts: under the literal ∅ ⊆ J⊤ every report would read as
-    * audited before any announcement arrives (inferred reading).
+  /** U(w): no negative judgment and some tranche n with A_n(w) ⊆ J⊤(w), or more than two thirds of the validators
+    * judged positively. An empty tranche (∅ ⊆ J⊤) counts once it has ended, whichever tranche it is: until then an
+    * announcement may still arrive, and under the literal reading every report would be audited before any does
+    * (inferred reading: n ranges over ended tranches when A_n is empty).
+    *
+    * What this node did not see must not read as an empty tranche: an empty tranche counts only from `watchedFrom`,
+    * the first tranche it watched from its start, and a tranche in `lost` (one of its announcements was dropped
+    * unread) never counts.
     */
   def audited(
       announcedBy: scala.collection.Map[Int, scala.collection.Set[Int]],
       positive: scala.collection.Set[Int],
       negative: scala.collection.Set[Int],
       validatorCount: Int,
-      currentTranche: Int
+      currentTranche: Int,
+      watchedFrom: Int = 0,
+      lost: scala.collection.Set[Int] = Set.empty
   ): Boolean =
     val supermajority = 3 * positive.size > 2 * validatorCount
     val someTrancheDone = (0 to currentTranche).exists { n =>
       val a = announcedBy.getOrElse(n, Set.empty[Int])
-      if a.isEmpty then n == 0 && currentTranche > 0 else a.subsetOf(positive)
+      !lost(n) && (if a.isEmpty then n >= watchedFrom && currentTranche > n else a.subsetOf(positive))
     }
     supermajority || (negative.isEmpty && someTrancheDone)
 
@@ -125,6 +138,28 @@ object AuditSelection:
             Ed25519.verify(validators(i), announcementMessage(tranche - 1, a.items, headerHash), a.signature) =>
         i
     }.toSet
+
+  def enoughNoShows(
+      noShows: Seq[NoShow],
+      needed: Int,
+      report: Hash,
+      tranche: Int,
+      headerHash: Hash,
+      validators: IndexedSeq[Array[Byte]],
+      held: Int => Option[Announcement] = _ => None,
+      verify: (Array[Byte], Array[Byte], Array[Byte]) => Boolean = Ed25519.verify
+  ): Boolean =
+    val named = scala.collection.mutable.Set.empty[Int]
+    val it = noShows.iterator
+    var proven = 0
+    var ok = true
+    while ok && proven < needed && it.hasNext do
+      val NoShow(i, a) = it.next()
+      ok = validators.indices.contains(i) && named.add(i) && a.items.exists(_._2 == report) &&
+        (held(i).exists(h => h.items == a.items && java.util.Arrays.equals(h.signature, a.signature)) ||
+          verify(validators(i), announcementMessage(tranche - 1, a.items, headerHash), a.signature))
+      if ok then proven += 1
+    ok && proven >= needed
 
   /** Message 1: `Header Hash ++ Tranche ++ Announcement`. */
   def encodeHead(headerHash: Hash, tranche: Int, a: Announcement): Array[Byte] =
@@ -170,12 +205,18 @@ object AuditSelection:
       if r.done then Right((header, tranche, a)) else Left("trailing bytes")
     catch case e: Exception => Left(s"bad announcement: ${e.getMessage}")
 
-  def decodeLaterEvidence(bytes: Array[Byte], reports: Int): Either[String, Seq[(Array[Byte], Seq[NoShow])]] =
+  def decodeLaterEvidence(
+      bytes: Array[Byte],
+      reports: Int,
+      maxNoShows: Int
+  ): Either[String, Seq[(Array[Byte], Seq[NoShow])]] =
     try
       val r = new Reader(bytes)
       val out = (0 until reports).map { _ =>
         val sig = r.take(96)
-        val n = r.compact.toInt
+        val count = r.compact
+        if count < 0 || count > maxNoShows then throw new IllegalArgumentException(s"bad no-show count $count")
+        val n = count.toInt
         sig -> (0 until n).map(_ => NoShow(r.u16, r.announcement))
       }
       if r.done then Right(out) else Left("trailing bytes")

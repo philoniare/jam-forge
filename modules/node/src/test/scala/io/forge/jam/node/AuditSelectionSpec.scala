@@ -71,10 +71,32 @@ class AuditSelectionSpec extends AnyFunSuite with Matchers:
     audited(announced, Set(3), Set.empty, 6, 0) shouldBe false
   }
 
-  test("an unannounced tranche 0 counts only after it ends; an empty later tranche never counts") {
+  test("an empty tranche counts once it has ended, whichever tranche it is; one that has not ended never does") {
     audited(Map.empty, Set.empty, Set.empty, 6, 0) shouldBe false
     audited(Map.empty, Set.empty, Set.empty, 6, 1) shouldBe true
-    audited(Map(0 -> Set(1)), Set.empty, Set.empty, 6, 3) shouldBe false
+    val noShow = Map(0 -> Set(1))
+    audited(noShow, Set.empty, Set.empty, 6, 0) shouldBe false
+    audited(noShow, Set.empty, Set.empty, 6, 1) shouldBe false
+    audited(noShow, Set.empty, Set.empty, 6, 2) shouldBe true
+    audited(noShow, Set.empty, Set.empty, 6, 3) shouldBe true
+    val late = Map(0 -> Set(1), 1 -> Set(2))
+    audited(late, Set.empty, Set.empty, 6, 2) shouldBe false
+    audited(late, Set(2), Set.empty, 6, 2) shouldBe true
+    audited(late, Set.empty, Set.empty, 6, 3) shouldBe true
+    audited(noShow, Set.empty, Set(3), 6, 2) shouldBe false
+    audited(late, Set(2), Set(3), 6, 5) shouldBe false
+  }
+
+  test("an empty tranche counts only if watched from its start; a tranche whose announcement was lost never counts") {
+    audited(Map.empty, Set.empty, Set.empty, 6, 3, watchedFrom = 4) shouldBe false
+    audited(Map.empty, Set.empty, Set.empty, 6, 4, watchedFrom = 4) shouldBe false
+    audited(Map.empty, Set.empty, Set.empty, 6, 5, watchedFrom = 4) shouldBe true
+    audited(Map(0 -> Set(1)), Set(1), Set.empty, 6, 3, watchedFrom = 4) shouldBe true
+    audited(Map.empty, Set.empty, Set.empty, 6, 1, lost = Set(0)) shouldBe false
+    audited(Map.empty, Set.empty, Set.empty, 6, 2, lost = Set(0)) shouldBe true
+    audited(Map(0 -> Set(1)), Set(1), Set.empty, 6, 1, lost = Set(0)) shouldBe false
+    audited(Map(0 -> Set(1)), Set(1), Set.empty, 6, 2, lost = Set(0, 1)) shouldBe false
+    audited(Map(0 -> Set(1)), Set(0, 1, 2, 3, 4), Set.empty, 6, 0, watchedFrom = 4, lost = Set(0)) shouldBe true
   }
 
   test("a third of the validators judging a report invalid disregards its block") {
@@ -131,10 +153,54 @@ class AuditSelectionSpec extends AnyFunSuite with Matchers:
 
     val sig = Array.fill(96)(3.toByte)
     val evidence = encodeLaterEvidence(Seq(sig -> Seq(NoShow(4, a)), sig -> Nil))
-    val Right(per) = decodeLaterEvidence(evidence, 2): @unchecked
+    val Right(per) = decodeLaterEvidence(evidence, 2, maxNoShows = 6): @unchecked
     per.map(_._2.map(_.validator)) shouldBe Seq(Seq(4), Nil)
     per.head._2.head.announcement.items shouldBe a.items
-    decodeLaterEvidence(evidence, 1).isLeft shouldBe true
+    decodeLaterEvidence(evidence, 1, maxNoShows = 6).isLeft shouldBe true
+    val many = encodeLaterEvidence(Seq(sig -> Seq.fill(7)(NoShow(4, a))))
+    decodeLaterEvidence(many, 1, maxNoShows = 7).isRight shouldBe true
+    decodeLaterEvidence(many, 1, maxNoShows = 6).isLeft shouldBe true
+  }
+
+  test("the no-shows a later-tranche VRF output needs: the fewest for which either rule selects") {
+    for v <- Seq(6, 1023); d <- 0 until 65536 do
+      val y = out(d)
+      val k = noShowsNeeded(y, v)
+      k should be >= 1
+      peerEscalates(y, v, k) shouldBe true
+      peerEscalates(y, v, k - 1) shouldBe false
+  }
+
+  test("no-show evidence is checked in order only until enough are proven; the first entry that fails rejects it all") {
+    val (header, report, other) = (h(9), h(1), h(2))
+    val validators = IndexedSeq.tabulate(1023)(i => Array.fill(32)(i.toByte))
+    var calls = 0
+    def verifying(result: Boolean): (Array[Byte], Array[Byte], Array[Byte]) => Boolean = (_, _, _) =>
+      calls += 1
+      result
+    def claim(i: Int, items: Seq[(Int, Hash)] = Seq(0 -> report)) = NoShow(i, Announcement(items, Array.fill(64)(i.toByte)))
+    def check(noShows: Seq[NoShow], needed: Int, ok: Boolean, held: Int => Option[Announcement] = _ => None): Boolean =
+      calls = 0
+      enoughNoShows(noShows, needed, report, 2, header, validators, held, verifying(ok))
+
+    check((0 until 1000).map(claim(_)), needed = 3, ok = false) shouldBe false
+    calls shouldBe 1
+    check((0 until 1000).map(claim(_)), needed = 3, ok = true) shouldBe true
+    calls shouldBe 3
+    check((0 until 2).map(claim(_)), needed = 3, ok = true) shouldBe false
+    check(Nil, needed = 0, ok = true) shouldBe true
+    calls shouldBe 0
+    check(Seq(claim(1023)), needed = 1, ok = true) shouldBe false
+    check(Seq(claim(-1)), needed = 1, ok = true) shouldBe false
+    check(Seq(claim(4, Seq(0 -> other))), needed = 1, ok = true) shouldBe false
+    calls shouldBe 0
+    check(Seq(claim(4), claim(4)), needed = 2, ok = true) shouldBe false
+    calls shouldBe 1
+    val held = claim(5).announcement
+    check(Seq(claim(5)), needed = 1, ok = false, held = i => Option.when(i == 5)(held)) shouldBe true
+    calls shouldBe 0
+    check(Seq(NoShow(5, Announcement(held.items, new Array[Byte](64)))), needed = 1, ok = false, held = _ => Some(held)) shouldBe false
+    calls shouldBe 1
   }
 
   test("historical lookup availability I(l, t)") {

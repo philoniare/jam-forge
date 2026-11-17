@@ -28,6 +28,11 @@ private[node] final class UnverifiedBlocks(meta: ChainMeta, maxBlocks: Int, maxP
       // Persisted (with the size) so a restart can count and prune it again.
       meta.putUnverified(hash, size)
 
+  def clear(): Unit =
+    blocks.clear()
+    perPeer.clear()
+    bytes = 0L
+
   def untrack(hash: Hash): Unit =
     blocks.remove(hash).foreach { u =>
       bytes -= u.size

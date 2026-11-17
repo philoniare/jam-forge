@@ -55,8 +55,13 @@ final class ChainMeta(store: BlockStore):
     putFlag(s"marked:${h.toHex}", marked)
     putLong(s"weight:${h.toHex}", weight)
 
-  def invalid(h: Hash): Boolean = flag(s"invalid:${h.toHex}")
-  def markInvalid(h: Hash): Unit = putLong(s"invalid:${h.toHex}", 1L)
+  def invalid(h: Hash): Boolean = long(s"invalid:${h.toHex}").exists(_ != 0L)
+  def markInvalid(h: Hash): Unit = putLong(s"invalid:${h.toHex}", ChainMeta.Invalid)
+
+  def disregarded(h: Hash): Boolean = long(s"invalid:${h.toHex}").contains(ChainMeta.Disregarded)
+
+  def markDisregarded(h: Hash): Unit =
+    if !invalid(h) then putLong(s"invalid:${h.toHex}", ChainMeta.Disregarded)
 
   def unverifiedSize(h: Hash): Option[Long] = long(s"unverified:${h.toHex}")
   def putUnverified(h: Hash, size: Long): Unit = putLong(s"unverified:${h.toHex}", size)
@@ -92,11 +97,28 @@ final class ChainMeta(store: BlockStore):
   def pruneFloor: Option[Hash] = hash("prune_floor")
   def pruneFloor_=(h: Hash): Unit = putHash("prune_floor", h)
 
+  def ancestryFloor: Option[Long] = long("ancestry_floor")
+  def ancestryFloor_=(slot: Option[Long]): Unit = slot match
+    case Some(s) => putLong("ancestry_floor", s)
+    case None    => store.deleteMeta("ancestry_floor")
+
   def grandpaSet: Option[Array[Byte]] = store.getMeta("grandpa:set")
   def grandpaSet_=(encoded: Array[Byte]): Unit = store.setMeta("grandpa:set", encoded)
 
+  def putGrandpaSet(encoded: Array[Byte], settlesCheckpoint: Boolean): Unit =
+    store.writeMeta(List("grandpa:set" -> encoded), if settlesCheckpoint then List("grandpa:checkpoint") else Nil)
+
   def grandpaRound: Option[Array[Byte]] = store.getMeta("grandpa:round")
-  def grandpaRound_=(encoded: Array[Byte]): Unit = store.setMeta("grandpa:round", encoded)
+
+  def putGrandpaRound(encoded: Array[Byte], durable: Boolean): Unit =
+    if durable then store.setMetaSynced("grandpa:round", encoded) else store.setMeta("grandpa:round", encoded)
+
+  def grandpaCheckpoint: Option[Long] = long("grandpa:checkpoint")
+
+  def startGrandpaAtCheckpoint(setId: Long): Unit =
+    putLong("grandpa:checkpoint", setId)
+    store.deleteMeta("grandpa:set")
+    store.deleteMeta("grandpa:round")
 
   def grandpaJustification(h: Hash): Option[Array[Byte]] = store.getMeta(s"grandpa:just:${h.toHex}")
   def putGrandpaJustification(h: Hash, encoded: Array[Byte]): Unit =
@@ -112,6 +134,9 @@ final class ChainMeta(store: BlockStore):
   def beefyLatest_=(encoded: Array[Byte]): Unit = store.setMeta("beefy:latest", encoded)
 
 object ChainMeta:
+
+  private val Invalid = 1L
+  private val Disregarded = 2L
 
   private val SideBranchKeys = List("height", "ticketed", "marked", "weight")
 

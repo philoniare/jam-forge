@@ -9,7 +9,9 @@ private[node] final class FetchQueue[P <: AnyRef](
     maxPerPeer: Int,
     maxPending: Int,
     maxAlternates: Int,
-    isOpen: P => Boolean
+    isOpen: P => Boolean,
+    samePeer: (P, P) => Boolean = (a: P, b: P) => a eq b,
+    order: List[FetchQueue.Request[P]] => List[FetchQueue.Request[P]] = (rs: List[FetchQueue.Request[P]]) => rs
 ):
   import FetchQueue.Request
 
@@ -72,17 +74,12 @@ private[node] final class FetchQueue[P <: AnyRef](
   def next(): Option[Request[P]] = synchronized {
     if inFlight.size >= maxInFlight then None
     else
-      val it = pending.iterator()
-      var found: Request[P] = null
-      while found == null && it.hasNext do
-        val p = it.next()
-        if !inFlight.stream().anyMatch(_.peer eq p.peer) then
-          it.remove()
-          found = p
-      if found == null then None
-      else
+      val free = pending.asScala.iterator.filter(p => !inFlight.stream().anyMatch(f => samePeer(f.peer, p.peer))).toList
+      order(free).headOption.map { found =>
+        pending.removeFirstOccurrence(found)
         inFlight.add(found)
-        Some(found)
+        found
+      }
   }
 
   def finished(request: Request[P], have: Boolean, answered: Boolean = true): List[Request[P]] = synchronized {
@@ -130,5 +127,6 @@ private[node] object FetchQueue:
       val from: Hash,
       val maxBlocks: Int,
       val onDone: () => Unit,
-      val ascending: Boolean = false
+      val ascending: Boolean = false,
+      val announced: Boolean = false
   )

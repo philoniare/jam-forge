@@ -223,6 +223,21 @@ final class DistributionService(
       () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
     )
 
+  private[node] def submitSends(
+      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
+      kind: Byte,
+      payloads: Seq[Array[Byte]],
+      peer: AnyRef
+  ): Unit =
+    OneShotSend.submitEach(
+      egress,
+      peer,
+      open,
+      payloads,
+      why => logger.warn(s"distribution on ${StreamKind.name(kind)} failed: $why"),
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} sends (shutting down)")
+    )
+
   /** Request/response exchanges wait on a peer for up to half a minute each (10 s to open, 20 s for the answer).
     * They run here, a few at a time, and not on the egress thread, where one silent peer would hold up every
     * assurance, ticket, vote and judgment behind it. When more wait than the queue holds, the oldest gives way: its

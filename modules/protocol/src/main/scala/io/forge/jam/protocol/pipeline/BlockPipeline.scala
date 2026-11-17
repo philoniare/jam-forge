@@ -7,6 +7,7 @@ import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.SignatureBatch
 import io.forge.jam.protocol.accumulation.{
+  AccountChanges,
   AccumulationExecutor,
   AccumulationOutputData,
   AccumulationTransition,
@@ -99,7 +100,8 @@ object BlockPipeline:
 
   /** `whileChecksRun` is the caller's work on a block whose steps all passed, done here so that it overlaps the
     * signature checks still running on other threads. The caller must not let it take effect until this returns
-    * Right: a check may yet fail.
+    * Right: a check may yet fail. `extrinsicHashChecked` is the caller's word that the block's body already matched
+    * its header's extrinsic hash (HeaderChecks.extrinsicHash), which is then not computed again.
     */
   def execute(
       block: Block,
@@ -107,13 +109,14 @@ object BlockPipeline:
       skipAncestryValidation: Boolean = false,
       sharedExecutor: Option[AccumulationExecutor] = None,
       ancestry: List[AncestorHeader] = List.empty,
-      whileChecksRun: BlockPipelineResult => Unit = _ => ()
+      whileChecksRun: BlockPipelineResult => Unit = _ => (),
+      extrinsicHashChecked: Boolean = false
   ): Either[PipelineError, BlockPipelineResult] =
     val run = StageTimers.time("x/context")(new Run(block, view))
     val pending = run.checks
     val result =
       try
-        val ran = steps(run, skipAncestryValidation, sharedExecutor, ancestry)
+        val ran = steps(run, skipAncestryValidation, sharedExecutor, ancestry, extrinsicHashChecked)
         ran.foreach(whileChecksRun)
         ran
       catch
@@ -130,7 +133,8 @@ object BlockPipeline:
       run: Run,
       skipAncestryValidation: Boolean,
       sharedExecutor: Option[AccumulationExecutor],
-      ancestry: List[AncestorHeader]
+      ancestry: List[AncestorHeader],
+      extrinsicHashChecked: Boolean
   ): Either[PipelineError, BlockPipelineResult] = boundary:
     import StageTimers.time
     val block = run.block
@@ -138,7 +142,7 @@ object BlockPipeline:
     val slot = block.header.slot.toLong
 
     // Step 0: Validate extrinsic hash
-    time("extrinsic-hash")(HeaderChecks.extrinsicHash(block, run.config)).orStop
+    if !extrinsicHashChecked then time("extrinsic-hash")(HeaderChecks.extrinsicHash(block, run.config)).orStop
     view.postOffenders = run.posteriorOffenders
 
     // Step 1: Safrole
@@ -218,15 +222,18 @@ object BlockPipeline:
 
     // Step 7: Accumulation
     val accumulated: AccumulationOutputData = time("accumulation") {
-      AccumulationTransition.stfView(
-        InputExtractor.extractAccumulationInput(availableReports, slot),
-        view,
-        run.priorSlot,
-        sharedExecutor,
-        Some(view.storage)
-      ) match
-        case Right(output) => output
-        case Left(nothing) => nothing
+      try
+        AccumulationTransition.stfView(
+          InputExtractor.extractAccumulationInput(availableReports, slot),
+          view,
+          run.priorSlot,
+          sharedExecutor,
+          Some(view.storage)
+        ) match
+          case Right(output) => output
+          case Left(nothing) => nothing
+      catch
+        case e: AccountChanges.DuplicateNewServiceId => break(Left(PipelineError.NewServiceIdConflict(e.serviceId)))
     }
     val accumulateRoot = Hash(accumulated.ok.toArray)
     view.lastAccumulationOutputs = accumulated.commitments

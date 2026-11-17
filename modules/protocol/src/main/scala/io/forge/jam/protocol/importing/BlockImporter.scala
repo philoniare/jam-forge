@@ -45,6 +45,7 @@ enum ImportError:
   case PreimageError
   case ReportError
   case SignatureError
+  case AccumulationError
 
 /** BlockImporter handles importing blocks and applying all state transitions.
   *
@@ -87,6 +88,8 @@ class BlockImporter(
   private val trieStore: StateTrieStore =
     externalTrieStore.getOrElse(new StateTrieStore(new InMemoryTrieBackend))
 
+  private val ownsStore: Boolean = externalTrieStore.isEmpty
+
   def store: StateTrieStore = trieStore
 
   def currentTrieRoot: Hash = trieStore.currentRoot
@@ -105,20 +108,22 @@ class BlockImporter(
   def importBlock(
       block: Block,
       preState: RawState,
-      ancestry: List[AncestorHeader] = List.empty
+      ancestry: List[AncestorHeader] = List.empty,
+      extrinsicHashChecked: Boolean = false
   ): ImportResult =
     if !importInFlight.compareAndSet(false, true) then
       throw new IllegalStateException(
         "BlockImporter.importBlock invoked concurrently on the same instance; " +
           "callers must serialize imports per instance (e.g. via synchronized)"
       )
-    try StageTimers.time("total")(importBlockUnguarded(block, preState, ancestry))
+    try StageTimers.time("total")(importBlockUnguarded(block, preState, ancestry, extrinsicHashChecked))
     finally importInFlight.set(false)
 
   private def importBlockUnguarded(
       block: Block,
       preState: RawState,
-      ancestry: List[AncestorHeader]
+      ancestry: List[AncestorHeader],
+      extrinsicHashChecked: Boolean
   ): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
@@ -128,7 +133,21 @@ class BlockImporter(
         )
 
       if trieStore.currentRoot != block.header.parentStateRoot then
-        backendLock.synchronized(trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value))))
+        if ownsStore then
+          backendLock.synchronized(trieStore.bootstrap(preState.keyvals.map(kv => (kv.key, kv.value))))
+        else
+          val parentRoot = block.header.parentStateRoot
+          val repinned = backendLock.synchronized {
+            val held = parentRoot == Hash.zero || trieStore.backend.readNode(parentRoot).isDefined
+            if held then trieStore.markCommitted(parentRoot)
+            held
+          }
+          if !repinned then
+            val message = s"parent state ${parentRoot.toHex.take(18)} is not in the state store " +
+              s"(pinned at ${trieStore.currentRoot.toHex.take(18)})"
+            logger.warn(s"block import failed: $message")
+            return ImportResult.Failed(message, new IllegalStateException(message))
+          logger.warn(s"state store was pinned elsewhere; re-pinned at parent state ${parentRoot.toHex.take(18)}")
         if trieStore.currentRoot != block.header.parentStateRoot then
           return ImportResult.Invalid(
             ImportError.InvalidStateRoot,
@@ -147,7 +166,7 @@ class BlockImporter(
         // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
         // A key in both takes the storage view's value, as when they were applied one after the other.
         val updates = StageTimers.time("commit-encode") {
-          val u = view.commitUpdates(holdStoreUpdates = true)
+          val u = view.commitUpdates()
           u ++= storageView.commitUpdates()
           u
         }
@@ -161,7 +180,8 @@ class BlockImporter(
             skipAncestryValidation,
             Some(sharedExecutor),
             ancestry,
-            _ => stageUpdates()
+            _ => stageUpdates(),
+            extrinsicHashChecked
           )
         )
 
@@ -170,10 +190,9 @@ class BlockImporter(
           ImportResult.Invalid(mapPipelineError(error), error.message, Some(error))
 
         case Right(result) =>
-          view.applyStoreUpdates()
           backendLock.synchronized {
             StageTimers.time("trie-save")(trie.save())
-            trieStore.commitChild(block.header.parentStateRoot, trie.rootHash)
+            trieStore.commitChild(block.header.parentStateRoot, trie.rootHash, view.accountRecordChanges)
             if gcAfterImport then StageTimers.time("trie-gc")(trieStore.gc())
           }
 
@@ -196,6 +215,7 @@ class BlockImporter(
     case PipelineError.HeaderErr(_)             => ImportError.InvalidHeader
     case PipelineError.InvalidOffendersMark     => ImportError.InvalidHeader
     case PipelineError.BadSignatureBatch        => ImportError.SignatureError
+    case PipelineError.NewServiceIdConflict(_)  => ImportError.AccumulationError
 
   /** The state at the last imported root. Safe to run alongside a later import, though it then reads that import's
     * state if the import commits first; callers that need a given block's state must order the two themselves.

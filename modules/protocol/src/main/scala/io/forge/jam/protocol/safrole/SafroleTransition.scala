@@ -32,7 +32,10 @@ import com.typesafe.scalalogging.StrictLogging
 object SafroleTransition extends StrictLogging:
 
   /**
-   * Signals an unrecoverable native-crypto fault
+   * Signals an unrecoverable native-crypto fault: the ring root of the next epoch's keys could not be made. Not a
+   * verdict on the block: the keys come from the state, and a key that is not a valid point is taken as the padding
+   * point, so only a local failure (the native library or its ring context) gets here. The import fails and may be
+   * retried; the block is not marked invalid.
    */
   final class SafroleCryptoFailure(message: String) extends RuntimeException(message)
 

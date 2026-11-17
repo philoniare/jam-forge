@@ -27,6 +27,8 @@ trait MessageStream:
   def id: Long
   def pendingOutboundBytes: Long
 
+  def refusedHere: Boolean = false
+
 /** A connection to one peer as the protocol services see it: who the peer is, and streams to it. */
 trait PeerConnection:
   /** Whether this side dialed. */

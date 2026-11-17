@@ -267,13 +267,19 @@ final class TrieBackedJamState(
   private[state] def privileges_=(v: Privileges): Unit =
     privilegesCell.set(v)
 
+  private val createdAt: Hash = trie.rootHash
+
+  private def cacheStore: Option[StateTrieStore] =
+    if store.isDefined && trie.rootHash == createdAt then store else None
+
   private[state] def priorServiceInfoEncoded(id: Long): Option[JamBytes] =
-    store.flatMap(_.cachedServiceInfo(id)).orElse {
+    val s = cacheStore
+    s.flatMap(_.cachedServiceInfo(createdAt, id)).orElse {
       val read = trie.read(StateKey.computeServiceAccountKey(id))
       for
-        s <- store
+        st <- s
         encoded <- read
-      do s.putCachedServiceInfo(id, encoded)
+      do st.putCachedServiceInfo(createdAt, id, encoded)
       read
     }
 
@@ -292,7 +298,7 @@ final class TrieBackedJamState(
   private[state] def removeService(id: Long): Unit = _accountChanges(id) = None
 
   private[state] def serviceIds: Set[Long] =
-    val prior = TrieBackedJamState.readServiceIds(trie, store)
+    val prior = TrieBackedJamState.readServiceIds(trie, cacheStore, createdAt)
     _accountChanges.foldLeft(prior) {
       case (ids, (id, Some(_))) => ids + id
       case (ids, (id, None))    => ids - id
@@ -359,22 +365,18 @@ final class TrieBackedJamState(
     val updates = commitUpdates()
     if updates.nonEmpty then target.update(updates.toIndexedSeq)
 
-  /**
-   * The trie writes [[commit]] would apply, re-encoding only dirty components, so a caller can merge them with other
-   * writes into one [[StateTrie.update]] and rebuild each touched node once per block. Updates the store's service
-   * caches as [[commit]] does.
-   */
-  private val heldStoreUpdates = mutable.ArrayBuffer.empty[StateTrieStore => Unit]
+  private val committedAccountRecords = mutable.ArrayBuffer.empty[(Long, Option[JamBytes])]
 
   /**
-   * The store's service caches follow the state being committed. With `holdStoreUpdates` they are left as they are
-   * until [[applyStoreUpdates]], for a caller that does not yet know whether the block stands.
+   * The trie writes [[commit]] would apply, re-encoding only dirty components, so a caller can merge them with other
+   * writes into one [[StateTrie.update]] and rebuild each touched node once per block. The store's caches are not
+   * touched: the account records written are kept in [[accountRecordChanges]], for the importer to hand to
+   * [[StateTrieStore.commitChild]] once the new state is saved and pinned.
    */
-  def commitUpdates(holdStoreUpdates: Boolean = false): mutable.ArrayBuffer[(JamBytes, Option[JamBytes])] =
+  def commitUpdates(): mutable.ArrayBuffer[(JamBytes, Option[JamBytes])] =
     val updates =
       mutable.ArrayBuffer.empty[(JamBytes, Option[JamBytes])]
-    def onStore(f: StateTrieStore => Unit): Unit =
-      if holdStoreUpdates then heldStoreUpdates += f else store.foreach(f)
+    committedAccountRecords.clear()
 
     cells.foreach { c =>
       if c.dirty then updates += ((StateKeys.simpleKey(c.prefix), Some(c.encoded)))
@@ -396,25 +398,16 @@ final class TrieBackedJamState(
         val encoded = TrieBackedJamState.encodeServiceInfo(info)
         if !prior.contains(encoded) then
           updates += ((StateKey.computeServiceAccountKey(id), Some(encoded)))
-          onStore { s =>
-            s.putCachedServiceInfo(id, encoded)
-            if prior.isEmpty then s.addKnownServiceId(id)
-          }
+          committedAccountRecords += ((id, Some(encoded)))
       case (id, None) =>
         if priorServiceInfoEncoded(id).isDefined then
           updates += ((StateKey.computeServiceAccountKey(id), None))
-          onStore { s =>
-            s.evictCachedServiceInfo(id)
-            s.removeKnownServiceId(id)
-          }
+          committedAccountRecords += ((id, None))
     }
 
     updates
 
-  /** Applies the store updates a [[commitUpdates]] call held back. */
-  def applyStoreUpdates(): Unit =
-    store.foreach(s => heldStoreUpdates.foreach(_(s)))
-    heldStoreUpdates.clear()
+  def accountRecordChanges: Seq[(Long, Option[JamBytes])] = committedAccountRecords.toSeq
 
   def toFullJamState(): FullJamState =
     FullJamState(
@@ -657,12 +650,13 @@ object TrieBackedJamState:
       )
     )
 
-  private def readServiceIds(trie: StateTrie, store: Option[StateTrieStore]): Set[Long] =
-    store.flatMap(_.cachedServiceIds) match
+  private def readServiceIds(trie: StateTrie, store: Option[StateTrieStore], root: Hash): Set[Long] =
+    store.flatMap(_.cachedServiceIds(root)) match
       case Some(ids) => ids
       case None =>
         val ffPrefix = JamBytes(Array(0xff.toByte))
         val ids = mutable.HashSet.empty[Long]
+        val records = mutable.ArrayBuffer.empty[(Long, JamBytes)]
         def isAccountRecordKey(arr: Array[Byte]): Boolean =
           if (arr(0) & 0xff) != 0xff then false
           else if arr(2) != 0 || arr(4) != 0 || arr(6) != 0 then false
@@ -680,10 +674,14 @@ object TrieBackedJamState:
                 ((k(5).toLong & 0xff) << 16) |
                 ((k(7).toLong & 0xff) << 24)
             ids += serviceId
-            store.foreach(_.putCachedServiceInfo(serviceId, v))
+            if store.isDefined then records += ((serviceId, v))
         }
-        store.foreach(_.primeKnownServiceIds(ids.toSet))
-        ids.toSet
+        val idSet = ids.toSet
+        store.foreach { s =>
+          s.putCachedServiceInfos(root, records)
+          s.primeKnownServiceIds(root, idSet)
+        }
+        idSet
 
   private def encodeJB[A](codec: Codec[A], value: A): JamBytes =
     codec.encodeJam(value)

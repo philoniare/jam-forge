@@ -186,6 +186,34 @@ class RpcApiSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("subscriptions are computed only when a head moves, once per distinct question however many ask it") {
+    withApi(blocks = 2) { (node, api, _) =>
+      val anchor = str(b64(node.chain.best.hash))
+      val wp = str(b64(Array.fill[Byte](32)(7)))
+      val clients = (1 to 5).map(_ => new Client(api))
+      val subscriptions = for c <- clients; _ <- 1 to 10 yield c -> c.result("subscribeWorkPackageStatus", wp, anchor, Json.False)
+      val sessions = clients.map(_.session)
+      api.refresh(sessions)
+      subscriptions.foreach((c, id) => c.notified(id).size shouldBe 1)
+      api.computations.get shouldBe 1L
+
+      api.computations.set(0)
+      (1 to 10).foreach(_ => api.refresh(sessions)) // no head moved
+      api.computations.get shouldBe 0L
+
+      author(List(node), 3 to 3)
+      api.refresh(sessions)
+      api.computations.get shouldBe 1L
+      subscriptions.foreach((c, id) => c.notified(id).size shouldBe 2) // one block fewer before the anchor ages out
+
+      api.computations.set(0)
+      val late = clients.head.result("subscribeBestBlock")
+      api.refresh(List(clients.head.session))
+      clients.head.notified(late).size shouldBe 1
+      api.computations.get shouldBe 1L
+    }
+  }
+
   test("a connection holds a bounded number of subscriptions") {
     withApi(blocks = 0) { (_, _, rpc) =>
       (1 to RpcApi.MaxSubscriptions).foreach(_ => rpc.result("subscribeBestBlock"))

@@ -46,18 +46,17 @@ class UntouchedServiceAccountsSpec extends AnyFunSuite with Matchers:
       withClue(s"block at slot ${step.block.header.slot}: ") { result.isRight shouldBe true }
       guarantees += step.block.extrinsic.guarantees.size
       accumulated += result.toOption.get.accumulationStats.size
-      val updates = view.commitUpdates(holdStoreUpdates = true)
+      val updates = view.commitUpdates()
       updates ++= storage.commitUpdates()
       trie.update(updates.toIndexedSeq)
-      view.applyStoreUpdates()
       trie.save()
-      store.commitChild(parent, trie.rootHash)
+      store.commitChild(parent, trie.rootHash, view.accountRecordChanges)
     }
     guarantees should be > 0
     accumulated should be > 0
 
-    extraIds.foreach(id => withClue(s"service $id: ")(store.cachedServiceInfo(id) shouldBe None))
-    store.cachedServiceIds shouldBe None
+    extraIds.foreach(id => withClue(s"service $id: ")(store.cachedServiceInfo(store.currentRoot, id) shouldBe None))
+    store.cachedServiceIds(store.currentRoot) shouldBe None
 
     // The state is the trace's own post-state plus the extra accounts, unchanged.
     val expected = steps.last.postState.keyvals ++ extraIds.map(id => KeyValue(StateKey.computeServiceAccountKey(id), template))

@@ -7,7 +7,7 @@ import java.util.concurrent.{
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, LittleEndian}
-import io.forge.jam.core.primitives.{Hash, ServiceId}
+import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash, ServiceId}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.extrinsic.Preimage
 import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
@@ -54,6 +54,14 @@ final class PreimageService(
       new java.util.LinkedHashMap[Hash, (Long, Long)](64, 0.75f, false) {
         override def removeEldestEntry(e: java.util.Map.Entry[Hash, (Long, Long)]) =
           size > announcedMetaCap
+      }
+    )
+
+  private val announcedTo =
+    java.util.Collections.synchronizedMap(
+      new java.util.LinkedHashMap[(Hash, Ed25519PublicKey), java.lang.Boolean](64, 0.75f, false) {
+        override def removeEldestEntry(e: java.util.Map.Entry[(Hash, Ed25519PublicKey), java.lang.Boolean]) =
+          size > PreimageService.MaxAnnouncedPairs
       }
     )
 
@@ -153,7 +161,7 @@ final class PreimageService(
     val length = blob.length.toLong
     announcedMeta.put(hash, (serviceId, length))
     val payload = PreimageCodec.encodeAnnouncement(serviceId, hash, length)
-    peers.foreach { conn =>
+    peers.filter(conn => announcedTo.putIfAbsent((hash, conn.peerPublicKey), java.lang.Boolean.TRUE) == null).foreach { conn =>
       submitSend(
         () => conn.openStream(StreamKind.PreimageAnnouncement),
         StreamKind.PreimageAnnouncement,
@@ -226,3 +234,5 @@ object PreimageService:
   /** CE 143 fetches that may wait for one of the four fetch threads. */
   val MaxQueuedFetches: Int = 256
   val DefaultAnnouncedMetaCap: Int = 4096
+
+  val MaxAnnouncedPairs: Int = 16384

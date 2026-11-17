@@ -128,6 +128,44 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
       server.node.shutdown()
   }
 
+  test("an answer refused for our own budget is told apart from the peer resetting the stream") {
+    val server = new Server(InboundLimits(maxConnectionBytes = 64L * KiB))
+    val client = new JamnpNode(NodeIdentity.generate(), config())
+    client.registerHandler(
+      StreamKind.ShardDistribution,
+      (_: JamnpConnection, stream: JamnpStream) =>
+        stream.onMessage { msg =>
+          if msg(0) == 1 then
+            stream.send(new Array[Byte](10))
+            stream.send(new Array[Byte](200 * KiB))
+            stream.finish()
+          else stream.reset()
+        }
+    )
+    try
+      val accepted = new LinkedBlockingQueue[JamnpConnection]()
+      server.node.onConnectionChange((c, up) => if up then accepted.offer(c))
+      server.connect(client)
+      val toClient = accepted.poll(10, TimeUnit.SECONDS)
+      def ask(first: Byte): (JamnpStream, Int) =
+        val stream = toClient.openStream(StreamKind.ShardDistribution).get(10, TimeUnit.SECONDS)
+        val ended = new CountDownLatch(1)
+        val got = new java.util.concurrent.atomic.AtomicInteger()
+        stream.onMessage(_ => { got.incrementAndGet(); () })
+        stream.onClosed(() => ended.countDown())
+        stream.send(Array[Byte](first))
+        stream.finish()
+        ended.await(10, TimeUnit.SECONDS) shouldBe true
+        (stream, got.get)
+      val (refused, received) = ask(1)
+      received shouldBe 1
+      refused.refusedHere shouldBe true
+      ask(2)._1.refusedHere shouldBe false
+    finally
+      client.shutdown()
+      server.node.shutdown()
+  }
+
   test("bytes a handler holds for a connection share its budget with the frames still arriving") {
     val server = new Server(InboundLimits(maxConnectionBytes = 1024L * KiB))
     val client = new JamnpNode(NodeIdentity.generate(), config())

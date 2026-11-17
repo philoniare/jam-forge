@@ -134,6 +134,11 @@ final class BlockStore private (
       writes.put(name, Some(value.clone()))
     else db.put(metaCf, name.getBytes("UTF-8"), value)
 
+  def setMetaSynced(name: String, value: Array[Byte]): Unit =
+    val writes = pending.get()
+    if writes != null then writes.remove(name)
+    db.put(metaCf, syncWriteOptions, name.getBytes("UTF-8"), value)
+
   def getMeta(name: String): Option[Array[Byte]] =
     val writes = pending.get()
     if writes != null && writes.containsKey(name) then writes.get(name)

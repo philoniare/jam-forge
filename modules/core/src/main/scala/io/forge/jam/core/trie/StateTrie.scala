@@ -5,6 +5,9 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.trie.HashTables.{NodeTable, ValueTable}
 import scala.collection.mutable
 
+final class MissingTrieNodeException(val hash: Hash, val what: String)
+    extends IllegalStateException(s"State trie $what ${hash.toHex} is missing")
+
 /**
  * Binary Patricia Merkle state trie, with writes buffered until [[save]].
  *
@@ -34,7 +37,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         case TrieNodeType.EmbeddedLeaf =>
           TrieNode.embeddedValue(node)
         case TrieNodeType.RegularLeaf =>
-          pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
+          Some(pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe)))
         case TrieNodeType.Branch =>
           None
     }
@@ -262,10 +265,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     else pendingValues.addRef(slot, -1)
     ()
 
-  private def pendingOrStoredValue(h: Hash): Option[JamBytes] =
+  private def pendingOrStoredValue(h: Hash): JamBytes =
     val slot = pendingValues.find(h.toArrayUnsafe)
     val v = if slot >= 0 then pendingValues.value(slot) else null
-    if v != null then Some(JamBytes.wrap(v)) else backend.readRawValue(h)
+    if v != null then JamBytes.wrap(v)
+    else backend.readRawValue(h).getOrElse(throw new MissingTrieNodeException(h, "value"))
 
   /** Nodes queued for the next [[save]]; for tests. */
   private[trie] def pendingNodeCount: Int = pendingNodes.payloadCount
@@ -304,8 +308,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       i += 1
     true
 
-  /** Fails on a node or value the trie refers to but the backend no longer holds (e.g. removed by a concurrent gc),
-    * so a walk never returns a silently truncated state.
+  /** Fails ([[MissingTrieNodeException]]) on a node or value the trie refers to but the backend no longer holds, so a
+    * walk never returns a silently truncated state.
     */
   private def collectLeaves(node: TrieNode, buf: mutable.ArrayBuffer[(JamBytes, JamBytes)]): Unit =
     node.nodeType match
@@ -317,16 +321,10 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           buf += ((TrieNode.leafKey(node), v))
         }
       case TrieNodeType.RegularLeaf =>
-        val vh = Hash.wrapUnchecked(node.right.toArrayUnsafe)
-        val v = pendingOrStoredValue(vh).getOrElse(
-          throw new IllegalStateException(s"State trie value ${vh.toHex} is missing")
-        )
-        buf += ((TrieNode.leafKey(node), v))
+        buf += ((TrieNode.leafKey(node), pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))))
 
   private def collectChild(hash: Hash, buf: mutable.ArrayBuffer[(JamBytes, JamBytes)]): Unit =
-    if hash != Hash.zero then
-      val child = getNode(hash).getOrElse(throw new IllegalStateException(s"State trie node ${hash.toHex} is missing"))
-      collectLeaves(child, buf)
+    getNode(hash).foreach(collectLeaves(_, buf))
 
   /** JAMNP-S CE 129 range read: the key/value pairs with keys in
     * `[start, end]`, in key order, plus the boundary nodes on the paths from
@@ -352,7 +350,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       node.nodeType match
         case TrieNodeType.EmbeddedLeaf => TrieNode.embeddedValue(node)
         case TrieNodeType.RegularLeaf =>
-          pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe))
+          Some(pendingOrStoredValue(Hash.wrapUnchecked(node.right.toArrayUnsafe)))
         case TrieNodeType.Branch => None
 
     def descentPath(key: JamBytes): List[TrieNode] =
@@ -424,7 +422,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     else
       val slot = pendingNodes.find(hash.toArrayUnsafe)
       val pending = if slot >= 0 then pendingNodes.node(slot, hash) else null
-      if pending != null then Some(pending) else backend.readNode(hash)
+      if pending != null then Some(pending)
+      else
+        val stored = backend.readNode(hash)
+        if stored.isEmpty then throw new MissingTrieNodeException(hash, "node")
+        stored
 
   private[trie] def findLeaf(hash: Hash, key: JamBytes, depth: Int): Option[TrieNode] =
     getNode(hash).flatMap { node =>

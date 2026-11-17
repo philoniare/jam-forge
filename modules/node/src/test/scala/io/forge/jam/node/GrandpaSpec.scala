@@ -55,10 +55,15 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     val set = VoterSet(0, blocks.vote(blocks.genesis), keySets.map(_.ed25519Public))
     /** Each voter's last persisted (set, round, our votes). */
     val progress = mutable.Map.empty[Int, (Long, Long, List[VoteMessage])]
+    val log = mutable.Map.empty[Int, mutable.ListBuffer[Any]]
+    var onPrevote: (Int, VoteMessage) => Unit = (_, _) => ()
     /** Voter `i` as it starts: set 0, round 1, or the persisted round when `resume`. */
     def newVoter(i: Int, resume: Boolean = false): GrandpaVoter =
       val out = new GrandpaOutbound:
-        def broadcastVote(m: VoteMessage): Unit = queue.enqueue(i -> m)
+        def broadcastVote(m: VoteMessage): Unit =
+          log.getOrElseUpdate(i, mutable.ListBuffer.empty) += m
+          if m.message.kind == Prevote then onPrevote(i, m)
+          queue.enqueue(i -> m)
         def broadcastCommit(round: Long, setId: Long, c: Commit): Unit =
           commits += ((round, setId, c)); queue.enqueue(i -> (round, setId, c))
         def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
@@ -68,7 +73,9 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
         set,
         Some(keySets(i)),
         clock = () => now,
-        onProgress = (s, r, votes) => progress(i) = (s, r, votes),
+        onProgress = (s, r, votes, durable) =>
+          progress(i) = (s, r, votes)
+          log.getOrElseUpdate(i, mutable.ListBuffer.empty) += ((r, votes, durable)),
         resume = Option.when(resume)(progress.get(i).map((_, r, v) => (r, v))).flatten
       )
     val voters: mutable.ArrayBuffer[GrandpaVoter] = mutable.ArrayBuffer.from(keySets.indices.map(i => newVoter(i)))
@@ -136,6 +143,58 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     net.run(10_000)
     net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b5"))
     net.commits.map(_._3.target.hash) should contain(h("b5"))
+  }
+
+  test("each prevote and precommit is in a durably written round record before it is sent; a new round's record is not synced") {
+    val blocks = new Blocks
+    val net = new Net(blocks, keys)
+    (1 to 4).foreach { i =>
+      blocks.add(s"b$i", i.toLong)
+      net.run(6_000)
+    }
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b4"))
+    keys.indices.foreach { i =>
+      val events = net.log(i).toList
+      val sent = events.collect { case m: VoteMessage if m.message.kind != PrimaryPropose => m }
+      sent.size should be >= 4
+      events.zipWithIndex.foreach {
+        case (m: VoteMessage, at) if m.message.kind != PrimaryPropose =>
+          withClue(s"voter $i, ${if m.message.kind == Prevote then "prevote" else "precommit"} of round ${m.round}: ") {
+            events.take(at).reverse.collectFirst { case p: (Long, List[VoteMessage], Boolean) @unchecked => p } match
+              case Some((round, votes, durable)) =>
+                durable shouldBe true
+                round shouldBe m.round
+                votes should contain(m)
+              case None => fail("sent before any record was written")
+          }
+        case _ => ()
+      }
+      val synced = events.collect { case (_, _, true) => () }.size
+      synced shouldBe sent.size
+      events.collect { case (_, _, false) => () }.size should be > 0
+    }
+  }
+
+  test("a vote whose record cannot be written durably is not sent, now or by a resend, and no other is cast instead") {
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    val chain = new FakeChain(blocks)
+    var now = 0L
+    val sent = mutable.ListBuffer.empty[VoteMessage]
+    val set = VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public))
+    val voter = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = sent += m
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , set, Some(keys(0)), clock = () => now,
+      onProgress = (_, _, _, durable) => if durable then throw new java.io.IOException("injected: disk full"))
+    (1 to 20).foreach { _ =>
+      now += 250
+      try voter.step() catch case _: java.io.IOException => ()
+    }
+    sent.filter(_.message.kind != PrimaryPropose) shouldBe empty
+    voter.ourVotes shouldBe Nil
+    voter.roundVotes.filter(_.message.signed.signerKey == keys(0).ed25519Key) shouldBe Nil
   }
 
   test("finality follows a growing chain over many rounds") {
@@ -489,3 +548,278 @@ class GrandpaSpec extends AnyFunSuite with Matchers:
     observer.voterSet.setId shouldBe 8L
     adopted.reverse shouldBe List(GrandpaVoter.UnknownSet, 7L, 8L)
   }
+
+  test("after a checkpoint start the next set's precommits, repackaged under a target of ours, teach no set id") {
+    val markerKeys = Some(keys.map(_.ed25519Public).toList)
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    val b2 = blocks.add("b2", 2, marker = markerKeys)
+    val b3 = blocks.add("b3", 3)
+    val b4 = blocks.add("b4", 4)
+    val b5 = blocks.add("b5", 5, marker = markerKeys) // ends set 7; set 8 has the same keys
+    val b6 = blocks.add("b6", 6)
+    val chain = new FakeChain(blocks)
+    chain.finalizedHash = b3
+    val observer = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = ()
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public)), None)
+    observer.restartAt(VoterSet(GrandpaVoter.UnknownSet, blocks.vote(b2), keys.map(_.ed25519Public)))
+    def precommits(v: Vote, round: Long, setId: Long) = keys.take(3).map(k => sign(Precommit, v, round, setId, k)).toList
+
+    observer.onCommit(2L, 8L, Commit(blocks.vote(b4), precommits(blocks.vote(b6), 2L, 8L))).isLeft shouldBe true
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+    chain.finalizedHash shouldBe b3
+    List(b4, b5).foreach { target =>
+      val refused = observer.onCommit(3L, 8L, Commit(blocks.vote(target), precommits(blocks.vote(b5), 3L, 8L)))
+      refused.isLeft shouldBe true
+      refused.left.toOption.get should not be GrandpaVoter.BadPrecommitSignature // not held against the peer
+    }
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+    chain.finalizedHash shouldBe b3
+    val unheld = Vote(h("unheld"), h("r"), 5L)
+    observer.onCommit(4L, 7L, Commit(blocks.vote(b4), precommits(unheld, 4L, 7L))) shouldBe Right(Some(unheld.hash))
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+    val pairOutOfRange = List(sign(Precommit, blocks.vote(b4), 4L, 7L, keys(2)), sign(Precommit, blocks.vote(b6), 4L, 7L, keys(2)))
+    observer.onCommit(4L, 7L, Commit(blocks.vote(b4), precommits(blocks.vote(b4), 4L, 7L).take(2) ++ pairOutOfRange))
+      .isLeft shouldBe true
+    observer.voterSet.setId shouldBe GrandpaVoter.UnknownSet
+
+    observer.onCommit(4L, 7L, Commit(blocks.vote(b4), precommits(blocks.vote(b4), 4L, 7L))) shouldBe Right(None)
+    observer.voterSet.setId shouldBe 7L
+    chain.finalizedHash shouldBe b4
+    val _ = b5
+  }
+
+  test("after a checkpoint start with the set id given, the voter votes in that set and learns no other") {
+    val blocks = new Blocks
+    val b1 = blocks.add("b1", 1)
+    val b2 = blocks.add("b2", 2)
+    val b3 = blocks.add("b3", 3)
+    val chain = new FakeChain(blocks)
+    chain.finalizedHash = b1
+    var now = 0L
+    val cast = mutable.ListBuffer.empty[VoteMessage]
+    val voter = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = cast += m
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public)), Some(keys(0)), clock = () => now)
+    voter.restartAt(VoterSet(7L, blocks.vote(b1), keys.map(_.ed25519Public)))
+    def commit(target: Hash, setId: Long) =
+      Commit(blocks.vote(target), keys.take(3).map(k => sign(Precommit, blocks.vote(target), 1L, setId, k)).toList)
+    voter.onCommit(1L, 8L, commit(b2, 8L)).isLeft shouldBe true
+    voter.onCommit(1L, 6L, commit(b2, 6L)).isLeft shouldBe true
+    voter.voterSet.setId shouldBe 7L
+    chain.finalizedHash shouldBe b1
+    now += 2500
+    voter.step()
+    cast.map(_.setId).distinct.toList shouldBe List(7L)
+    voter.onCommit(1L, 7L, commit(b3, 7L)) shouldBe Right(None)
+    chain.finalizedHash shouldBe b3
+  }
+
+  test("a paused voter signs no vote, whatever it hears, and votes once unpaused") {
+    val blocks = new Blocks
+    blocks.add("b1", 1)
+    blocks.add("b2", 2)
+    val chain = new FakeChain(blocks)
+    var now = 0L
+    var paused = true
+    val cast = mutable.ListBuffer.empty[VoteMessage]
+    val set = VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public))
+    val primary = keys.indexWhere(k => set.primary(1L) == k.ed25519Key)
+    val voter = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = cast += m
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , set, Some(keys(primary)), clock = () => now, paused = () => paused)
+    (1 to 40).foreach { _ =>
+      now += 250
+      voter.step()
+    }
+    keys.indices.filter(_ != primary).foreach { i =>
+      voter.onVote(vote(Prevote, blocks.vote(h("b2")), i))
+      voter.onVote(vote(Precommit, blocks.vote(h("b2")), i))
+    }
+    cast shouldBe empty
+    paused = false
+    voter.step()
+    cast.map(_.message.kind).toSet should contain(Prevote)
+  }
+
+  test("a primary's proposal of a block we have not audited does not make us prevote it") {
+    val blocks = new Blocks
+    val b1 = blocks.add("b1", 1)
+    val b2 = blocks.add("b2", 2)
+    val b3 = blocks.add("b3", 3)
+    val set = VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public))
+    val round = 1L
+    val primary = keys.find(k => set.primary(round) == k.ed25519Key).get
+    val us = keys.find(_ ne primary).get
+    val chain = new FakeChain(blocks)
+    chain.unaudited = Set(b3) // b3 makes a report available that we have not finished auditing
+    var now = 0L
+    val cast = mutable.ListBuffer.empty[VoteMessage]
+    val voter = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = cast += m
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , set, Some(us), clock = () => now, gossipMillis = 1000L)
+
+    voter.onVote(VoteMessage(round, 0L, SignedMessage(PrimaryPropose, sign(PrimaryPropose, blocks.vote(b3), round, 0L, primary))))
+    now += 2500
+    voter.step()
+    val prevotes = cast.filter(_.message.kind == Prevote).map(_.message.signed.vote.hash).toList
+    prevotes should have size 1
+    prevotes.head should not be b3
+    prevotes.head shouldBe b2 // the best audited block, as without the proposal
+    val _ = b1
+  }
+
+  private final class RoundTwo:
+    val blocks = new Blocks
+    val a1 = blocks.add("a1", 1)
+    val a2 = blocks.add("a2", 2)
+    val a3 = blocks.add("a3", 3)
+    val a4 = blocks.add("a4", 4)
+    blocks.tip = blocks.genesis
+    val x1 = blocks.add("x1", 1)
+    blocks.tip = a1
+    val c2 = blocks.add("c2", 2)
+    val c3 = blocks.add("c3", 3)
+    val set = VoterSet(0, blocks.vote(blocks.genesis), keys.map(_.ed25519Public))
+    val primary = keys.find(k => set.primary(2) == k.ed25519Key).get
+    val us = keys.find(_ ne primary).get
+    val others = keys.filter(_ ne us)
+    val chain = new FakeChain(blocks)
+    var now = 0L
+    val cast = mutable.ListBuffer.empty[VoteMessage]
+    val voter = new GrandpaVoter(chain, new GrandpaOutbound:
+      def broadcastVote(m: VoteMessage): Unit = cast += m
+      def broadcastCommit(round: Long, setId: Long, c: Commit): Unit = ()
+      def broadcastState(round: Long, setId: Long, slot: Long): Unit = ()
+    , set, Some(us), clock = () => now, gossipMillis = 1000L)
+
+    def send(kind: Int, v: Vote, round: Long, by: ValidatorKeySet): Boolean =
+      voter.onVote(VoteMessage(round, 0L, SignedMessage(kind, sign(kind, v, round, 0L, by))))
+    def prevotes(round: Long): List[Hash] =
+      cast.filter(m => m.round == round && m.message.kind == Prevote).map(_.message.signed.vote.hash).toList
+
+    others.foreach(k => send(Prevote, blocks.vote(a3), 1L, k))
+    now = 2000
+    voter.step()
+    prevotes(1) shouldBe List(c3)
+    others.take(2).foreach(k => send(Precommit, blocks.vote(a1), 1L, k))
+
+    voter.round shouldBe 2L
+    chain.finalizedHash shouldBe a1
+    private val round1 = voter.roundState(1L).get
+    voter.estimate(round1).map(_.hash) shouldBe Some(a1)
+    voter.prevoteGhost(round1).map(_.hash) shouldBe Some(a3)
+    voter.roundState.primaryProposal shouldBe None
+    voter.prevoteFloor(voter.roundState).hash shouldBe a1
+    prevotes(2) shouldBe Nil
+
+    def propose(proposal: Vote, by: ValidatorKeySet = primary): Unit = send(PrimaryPropose, proposal, 2L, by): Unit
+    def prevote(): Hash =
+      now += 2000
+      voter.step()
+      prevotes(2) should have size 1
+      prevotes(2).head
+
+  test("a primary's proposal within the last prevote GHOST and audited moves our prevote onto its fork") {
+    val t = new RoundTwo
+    t.propose(t.blocks.vote(t.a2))
+    t.voter.prevoteFloor(t.voter.roundState).hash shouldBe t.a2
+    t.prevote() shouldBe t.a2 // our best, c3, is not on a2's chain
+    val u = new RoundTwo
+    u.propose(u.blocks.vote(u.a3))
+    u.prevote() shouldBe u.a3
+  }
+
+  test("a primary's proposal above the last prevote GHOST is not taken") {
+    val t = new RoundTwo
+    t.propose(t.blocks.vote(t.a4))
+    t.voter.roundState.primaryProposal.map(_.hash) shouldBe Some(t.a4)
+    t.voter.prevoteFloor(t.voter.roundState).hash shouldBe t.a1
+    t.prevote() shouldBe t.c3
+  }
+
+  test("a primary's proposal is not taken when it, or a block below it above the estimate, is not audited") {
+    val t = new RoundTwo
+    t.chain.unaudited = Set(t.a2)
+    t.propose(t.blocks.vote(t.a3))
+    t.voter.prevoteFloor(t.voter.roundState).hash shouldBe t.a1
+    t.prevote() shouldBe t.c3
+    val u = new RoundTwo
+    u.chain.unaudited = Set(u.a2)
+    u.propose(u.blocks.vote(u.a2))
+    u.voter.prevoteFloor(u.voter.roundState).hash shouldBe u.a1
+    u.prevote() shouldBe u.c3
+  }
+
+  test("a primary's proposal of the estimate, of a block not above it, or of a block we do not hold has no effect") {
+    def check(proposal: RoundTwo => Vote): Unit =
+      val t = new RoundTwo
+      t.propose(proposal(t))
+      t.voter.roundState.primaryProposal shouldBe Some(proposal(t))
+      t.voter.prevoteFloor(t.voter.roundState).hash shouldBe t.a1
+      t.prevote() shouldBe t.c3
+    check(t => t.blocks.vote(t.a1)) // the estimate itself
+    check(t => t.blocks.vote(t.blocks.genesis)) // below it
+    check(t => t.blocks.vote(t.x1)) // on another fork
+    check(t => t.blocks.vote(t.a2).copy(stateRoot = h("another root"))) // a2 with a root other than ours
+    check(_ => Vote(h("elsewhere"), h("r"), 2L)) // a block we do not hold
+  }
+
+  test("a proposal from a voter that is not the round's primary is ignored") {
+    val t = new RoundTwo
+    val notPrimary = t.others.find(_ ne t.primary).get
+    t.propose(t.blocks.vote(t.a2), by = notPrimary)
+    t.voter.roundState.primaryProposal shouldBe None
+    t.prevote() shouldBe t.c3
+  }
+
+  test("finality keeps up while a Byzantine primary proposes the newest block, which nobody has audited yet") {
+    val blocks = new Blocks
+    val net = new Net(blocks, keys)
+    val byzantine = keys(0) // votes honestly, but proposes the chain tip in the rounds it leads
+    var refused = 0
+    var unauditedPrevotes = 0
+    net.onPrevote = (i, m) =>
+      if i != 0 then
+        val v = net.voters(i)
+        val rs = v.roundState(m.round).get
+        if !net.chains(i).isAudited(m.message.signed.vote.hash) then unauditedPrevotes += 1
+        val floor = v.prevoteFloor(rs)
+        rs.primaryProposal.foreach { b =>
+          if b != floor && net.chains(i).isAncestor(floor.hash, b.hash) then refused += 1
+        }
+    val ownProposals: (Int, Any) => Boolean = (from, msg) =>
+      from == 0 && (msg match { case m: VoteMessage => m.message.kind == PrimaryPropose; case _ => false })
+    def injectProposals(): Unit =
+      (1 until 4).foreach { j =>
+        val v = net.voters(j)
+        if net.set.primary(v.round) == byzantine.ed25519Key && v.roundState.primaryProposal.isEmpty then
+          val tip = blocks.vote(blocks.tip)
+          v.onVote(VoteMessage(v.round, 0L, SignedMessage(PrimaryPropose, sign(PrimaryPropose, tip, v.round, 0L, byzantine))))
+      }
+    (1 to 8).foreach { i =>
+      val b = blocks.add(s"b$i", i.toLong)
+      net.chains.foreach(_.unaudited = Set(b)) // each block takes 10 s to audit
+      (1 to 48).foreach { tick =>
+        if tick == 41 then net.chains.foreach(_.unaudited = Set.empty)
+        net.run(250, silent = ownProposals)
+        injectProposals()
+      }
+    }
+    var waited = 0
+    while net.chains.exists(_.finalizedHash != h("b8")) && waited < 10_000 do
+      net.run(250, silent = ownProposals); injectProposals(); waited += 250
+    net.chains.map(_.finalizedHash).distinct shouldBe Seq(h("b8"))
+    refused should be > 0
+    unauditedPrevotes shouldBe 0
+  }
+

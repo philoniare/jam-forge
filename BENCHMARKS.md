@@ -187,3 +187,33 @@ Node soak (`soakNodes --slots=400 --sample-every=50`, 341 s): 400 of 400 slots a
 assurances included, finalized to slot 395; heap after GC 86 MB at slot 50, 92 MB at 100-200, 96 MB at 250-400;
 16 MB per 1,000 slots over the second half, so GROWING and exit 1. Too short a run to say whether that is a leak or
 caches still filling; use 4,000 slots or more for a real answer.
+
+## One node at full size (`FullSizeBench`)
+
+No machine holds 1,023 validators, so this drives one real node at that size with the other validators played by
+the harness (in-memory connections, real signatures and VRF proofs).
+
+```
+sbt "benchGenTrace --spec=full --blocks=12 --busy-cores=341 --out=target/bench/full-busy-trace"
+sbt "node/Test/runMain io.forge.jam.node.bench.FullSizeBench"
+```
+
+`--busy-cores=341` makes a chain in which every core gets a report in one block and all 341 become available in
+the next. The harness replays it into a node and measures: (1) auditing a block of 341 reports with a tranche-0
+announcement from each of the 1,023 validators and a judgment for each of their 10,230 picks; (2) finding a shard
+among 1,022 peers of which the report's three guarantors hold it, in connection order and guarantors first;
+(3) ordering 1,022 peers by their faults.
+
+16 November 2026: the bench VM (x86-64, 8 vCPU; three runs, which agree within a few percent) and one run on an
+M-series Mac.
+
+| Measure | Bench VM | Mac |
+|---|---|---|
+| A block's 1,023 announcements, wall | 0.78 s | 0.58 s |
+| Audit thread CPU per announcement (its VRF proof is checked there) | 0.63 ms | 0.44 ms |
+| The block's 10,230 judgments, wall | 1.5 s | 1.1 s |
+| Audit thread CPU per judgment | 55 us | 58 us (114 us with every report re-checked per message) |
+| Block audited after (a tranche is 8 s) | 2.2 s | 1.7 s |
+| Peers asked for a shard, connection order / guarantors first | 277 / 4.0 | 277 / 3.9 |
+| Shard lookup median, connection order / guarantors first (in memory: no network round trips) | 14 ms / 0.30 ms | 18.5 ms / 0.25 ms |
+| Ordering 1,022 peers: nobody faulted / 10 faulted / all faulted | 1.9 / 106 / 226 us a call | 2.6 / 95 / 252 us a call |

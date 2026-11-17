@@ -77,7 +77,8 @@ object Main extends LazyLogging:
   private def run(args: Array[String]): Unit =
     installProcessSettings()
     val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (flags, rest) = afterPeers.partition(a => Set("--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
+    val (rpcOrigins, afterOrigins) = extractRepeated("--rpc-allow-origin", afterPeers)
+    val (flags, rest) = afterOrigins.partition(a => Set("--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
     val opts = parseArgs(rest, Map.empty)
 
     if opts.contains("author") && opts.contains("validator-seed") then
@@ -123,6 +124,7 @@ object Main extends LazyLogging:
       if extraBootnodes.isEmpty then loadedSpec
       else loadedSpec.copy(bootnodes = loadedSpec.bootnodes ++ extraBootnodes)
 
+    val syncFrom = opts.get("sync-from").map(v => parseSyncFrom(v).fold(fail, identity))
     val config = NodeConfig(
       dataDir = Paths.get(dataDir),
       listenPort = opts.get("port").map(_.toInt).getOrElse(DefaultPort),
@@ -146,13 +148,8 @@ object Main extends LazyLogging:
       finalityPeers = opts.get("finality-peers").map(_.toInt),
       telemetry = opts.get("telemetry").map(parseHostPort),
       submitPort = opts.get("submit-port").map(_.toInt),
-      syncFrom = opts.get("sync-from").map { hex =>
-        val bytes =
-          try io.forge.jam.core.JamBytes.fromHexUnsafe(hex.stripPrefix("0x")).toArray
-          catch case _: Exception => fail(s"--sync-from: not a hex header hash: $hex")
-        if bytes.length != 32 then fail(s"--sync-from: a header hash is 32 bytes, got ${bytes.length}")
-        io.forge.jam.core.primitives.Hash(bytes)
-      }
+      syncFrom = syncFrom.map(_._1),
+      syncFromSetId = syncFrom.flatMap(_._2)
     )
 
     val node = new JamNode(spec, config).start()
@@ -164,7 +161,7 @@ object Main extends LazyLogging:
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
-    opts.get("rpc-port").foreach(p => node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1")))
+    opts.get("rpc-port").foreach(p => node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1"), rpcOrigins))
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized
@@ -176,6 +173,23 @@ object Main extends LazyLogging:
 
     Runtime.getRuntime.addShutdownHook(new Thread(() => node.shutdown()))
     Thread.currentThread().join()
+
+  private[node] def parseSyncFrom(value: String): Either[String, (io.forge.jam.core.primitives.Hash, Option[Long])] =
+    val (hex, setId) = value.indexOf(':') match
+      case -1 => (value, None)
+      case i  => (value.substring(0, i), Some(value.substring(i + 1)))
+    val bytes = JamBytes.fromHex(hex.stripPrefix("0x")).toOption.map(_.toArray)
+    bytes match
+      case None => Left(s"--sync-from: not a hex header hash: $hex")
+      case Some(b) if b.length != 32 => Left(s"--sync-from: a header hash is 32 bytes, got ${b.length}")
+      case Some(b) =>
+        val hash = io.forge.jam.core.primitives.Hash(b)
+        setId match
+          case None => Right((hash, None))
+          case Some(id) =>
+            id.toLongOption.filter(_ >= 0) match
+              case Some(n) => Right((hash, Some(n)))
+              case None => Left(s"--sync-from: the GRANDPA set id after ':' must be a non-negative integer, got '$id'")
 
   /** A validator's public keys and the JAMNP-S peer name its Ed25519 key gives, as JSON. */
   private def publicKeysJson(k: ValidatorKeySet): String =

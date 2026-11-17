@@ -225,3 +225,48 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
       cleanup(dirA)
       cleanup(dirB)
   }
+
+  test("a preimage submitted again is not announced again: each peer is told of a hash once") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val serviceId = 0L
+    val blob = Array.tabulate[Byte](40)(i => (i * 7).toByte)
+    val hash = Hashing.blake2b256(blob)
+    val infoKey = StateKey.computePreimageInfoStateKey(serviceId, blob.length, JamBytes(hash.bytes))
+    val spec = ChainSpec(
+      id = "preimage-resubmit",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals :+ KeyValue(infoKey, StateKey.encodePreimageInfoValue(Nil)),
+      bootnodes = Nil
+    )
+    val dir = Files.createTempDirectory("jam-preimage-resubmit")
+    val trieBackend = RocksDbTrieBackend.open(dir.resolve("trie"), trackGarbage = false)
+    val blockStore = BlockStore.open(dir.resolve("blocks"))
+    val chain = new ChainManager(ChainConfig.TINY, trieBackend, blockStore)
+    val queued = new java.util.concurrent.atomic.AtomicInteger
+    val egress = new java.util.concurrent.AbstractExecutorService:
+      def execute(r: Runnable): Unit = queued.incrementAndGet(): Unit
+      def shutdown(): Unit = ()
+      def shutdownNow(): java.util.List[Runnable] = java.util.List.of()
+      def isShutdown: Boolean = false
+      def isTerminated: Boolean = false
+      def awaitTermination(t: Long, u: TimeUnit): Boolean = true
+    def peer(i: Int) =
+      io.forge.jam.network.Loopback.pair(Array.fill[Byte](32)(0), Array.fill[Byte](32)(i.toByte), _ => None, _ => None)._1
+    var targets = List(peer(1), peer(2), peer(3))
+    val service = new PreimageService(chain, new ExtrinsicPools, egress, gossipTargets = () => targets)
+    try
+      chain.initializeOrRestore(spec)
+      service.submit(serviceId, blob) shouldBe Right(hash)
+      queued.get shouldBe 3
+      service.submit(serviceId, blob) shouldBe Right(hash)
+      service.submit(serviceId, blob) shouldBe Right(hash)
+      queued.get shouldBe 3
+      targets = targets :+ peer(4)
+      service.submit(serviceId, blob) shouldBe Right(hash)
+      queued.get shouldBe 4
+    finally
+      service.shutdown()
+      cleanup(dir)
+  }

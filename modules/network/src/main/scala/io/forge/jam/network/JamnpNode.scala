@@ -62,8 +62,8 @@ final case class JamnpConfig(
       * (JAMNP-S "Required connectivity": "e.g. 20").
       */
     builderSlots: Int = 20,
-    /** Inbound connections one address may hold, for peers that are neither validators nor builders: one host
-      * cannot take the slots of many. Validators (see [[JamnpNode.setPriorityPeers]]) are not counted or limited.
+    /** Inbound connections one address may hold, builders and other peers together: one host cannot take the
+      * slots of many. Validators (see [[JamnpNode.setPriorityPeers]]) are not counted or limited.
       */
     maxInboundPerAddress: Int = 32,
     /** A CE stream with no bytes read or written for this long is reset, so a
@@ -403,6 +403,8 @@ final class JamnpStream private[network] (
   /** The QUIC stream ID. */
   def id: Long = channel.streamId()
 
+  override def refusedHere: Boolean = java.lang.Boolean.TRUE == channel.attr(JamnpNode.RefusedHereKey).get()
+
 object JamnpStream:
   /** Cap on bytes buffered before a receiver is registered; later frames are dropped. */
   val MaxPendingBytes: Long = 4L * 1024 * 1024
@@ -591,9 +593,10 @@ final class JamnpNode(
   /** Inbound admission.
     *   - A validator is admitted while any slot is free, and when the slots open to ordinary peers are all taken
     *     an ordinary peer is closed to make room for it.
-    *   - A builder may use any free slot.
+    *   - A builder may use one of the `builderSlots`, and at most `maxInboundPerAddress` builders and other peers
+    *     together from one address.
     *   - Any other peer may use all but the `builderSlots` reserved for builders, and at most
-    *     `maxInboundPerAddress` from one address.
+    *     `maxInboundPerAddress` from one address, builders included.
     */
   private def admitInbound(conn: JamnpConnection): Boolean = synchronized {
     val inbound = connections.asScala.filter(c => !c.initiator && c.isOpen).toList
@@ -601,7 +604,10 @@ final class JamnpNode(
     def isPriority(c: JamnpConnection) = priorityPeer(c.peerPublicKey.bytes.toArray)
     val ordinaryLimit = config.maxInboundConnections - config.builderSlots
     val nonBuilders = inbound.filterNot(isBuilder)
-    if isBuilder(conn) then inbound.size < config.maxInboundConnections
+    def sameAddress = addressOf(conn).fold(0)(a => inbound.count(c => !isPriority(c) && addressOf(c).contains(a)))
+    if isBuilder(conn) then
+      inbound.size < config.maxInboundConnections && inbound.count(isBuilder) < config.builderSlots &&
+        sameAddress < config.maxInboundPerAddress
     else if isPriority(conn) then
       if nonBuilders.size < ordinaryLimit then true
       else
@@ -610,9 +616,7 @@ final class JamnpNode(
             evicted.close()
             true
           case None => inbound.size < config.maxInboundConnections
-    else
-      val sameAddress = addressOf(conn).fold(0)(a => nonBuilders.count(c => !isPriority(c) && addressOf(c).contains(a)))
-      nonBuilders.size < ordinaryLimit && sameAddress < config.maxInboundPerAddress
+    else nonBuilders.size < ordinaryLimit && sameAddress < config.maxInboundPerAddress
   }
 
   def boundPort: Int =
@@ -676,7 +680,13 @@ final class JamnpNode(
           // kind byte must not hold it either.
           addIdleTimeout(ch, config.streamIdleTimeoutMillis)
           ch.pipeline().addLast(
-            new IncomingStreamHandler(handlers, config.maxFrameBytes, config.streamIdleTimeoutMillis, config.outbound)
+            new IncomingStreamHandler(
+              handlers,
+              config.maxFrameBytes,
+              config.streamIdleTimeoutMillis,
+              config.outbound,
+              acceptor = true
+            )
           )
       })
       .build()
@@ -809,6 +819,8 @@ object JamnpNode:
   private val OutboundFlowKey = io.netty.util.AttributeKey.valueOf[OutboundFlow]("jamnp-outbound-flow")
 
   private[network] val InboundFlowKey = io.netty.util.AttributeKey.valueOf[InboundFlow]("jamnp-inbound-flow")
+
+  private[network] val RefusedHereKey = io.netty.util.AttributeKey.valueOf[java.lang.Boolean]("jamnp-refused-here")
 
   private[network] def inboundFlow(quic: QuicChannel): InboundFlow = quic.attr(InboundFlowKey).get()
 
@@ -944,6 +956,7 @@ object JamnpNode:
             if flow != null then
               if flow.hold(len.toLong) then counted = len.toLong
               else
+                ch.attr(RefusedHereKey).set(java.lang.Boolean.TRUE)
                 refused = true
                 in.skipBytes(in.readableBytes())
                 resetStream(ch)
@@ -978,13 +991,15 @@ object JamnpNode:
 
   /** First reads the stream-kind byte of a peer-opened stream, then installs
     * framing and hands the stream to the registered handler. Streams of
-    * unregistered kinds are reset.
+    * unregistered kinds are reset, and so are streams a builder opens on a
+    * connection we accepted (`acceptor`) other than [[StreamKind.BuilderKinds]].
     */
   private[network] final class IncomingStreamHandler(
       handlers: ConcurrentHashMap[Byte, StreamHandler],
       maxFrame: Int,
       streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
-      outbound: OutboundLimits = OutboundLimits()
+      outbound: OutboundLimits = OutboundLimits(),
+      acceptor: Boolean = false
   ) extends ByteToMessageDecoder:
     // Set once the kind is refused: bytes still in flight are not a new kind byte.
     private var rejected = false
@@ -1004,8 +1019,9 @@ object JamnpNode:
         return
       if in.readableBytes() < 1 then return
       val kind = in.readByte()
-      val handler = handlers.get(kind)
       val ch = ctx.channel().asInstanceOf[QuicStreamChannel]
+      val builderOnly = acceptor && JamnpConfig.isBuilderAlpn(ch.parent().sslEngine().getApplicationProtocol)
+      val handler = if builderOnly && !StreamKind.BuilderKinds.contains(kind) then null else handlers.get(kind)
       if handler == null then
         // Reset, not close: closing sends FIN only and leaves whatever the
         // peer goes on to send unread, so QUIC never retires the stream and

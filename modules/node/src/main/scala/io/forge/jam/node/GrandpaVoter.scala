@@ -81,7 +81,9 @@ final class RoundState(val round: Long, val startedAt: Long):
 /** GRANDPA voting (GP 0.8.0 §grandpa, after Stewart 2020) over the JAMNP-S wire format. Not thread safe: the
   * caller runs every method on one thread. Votes for a set stop at the first unfinalized block carrying an epoch
   * marker; finalizing that block moves to the next set: the validators of the epoch the block begins (its κ'), which
-  * are the keys of the marker before it. The block's own marker names the validators one epoch later.
+  * are the keys of the marker before it. The block's own marker names the validators one epoch later. A round's
+  * primary proposes the previous round's estimate; we prevote from that proposal only when it lies within the
+  * previous round's prevote GHOST and we have audited it ([[prevoteFloor]]), else from our own estimate.
   *
   * @param gossipMillis
   *   T: prevote at round start + 2T, precommit at + 4T at the latest
@@ -97,10 +99,10 @@ final class GrandpaVoter(
     onFinalized: (Vote, Justification, Boolean) => Unit = (_, _, _) => (),
     /** Called with each voter set we move to, by our own justification or from the finalized chain. */
     onSetAdopted: VoterSet => Unit = _ => (),
-    /** Called with our set, round and votes in it whenever they change, to persist them. */
-    onProgress: (Long, Long, List[VoteMessage]) => Unit = (_, _, _) => (),
+    onProgress: (Long, Long, List[VoteMessage], Boolean) => Unit = (_, _, _, _) => (),
     /** Round and our votes in it from before a restart, in `initialSet`. */
-    resume: Option[(Long, List[VoteMessage])] = None
+    resume: Option[(Long, List[VoteMessage])] = None,
+    paused: () => Boolean = () => false
 ) extends LazyLogging:
 
   private var set: VoterSet = initialSet
@@ -163,7 +165,7 @@ final class GrandpaVoter(
     current = new RoundState(1, clock())
     rounds.put(1, current)
     onSetAdopted(set)
-    onProgress(set.setId, 1, Nil)
+    onProgress(set.setId, 1, Nil, false)
     logger.info(
       s"GRANDPA restarted at ${set.base.short} with ${set.size} voters, set " +
         (if set.setId == GrandpaVoter.UnknownSet then "not yet known" else set.setId.toString)
@@ -179,24 +181,42 @@ final class GrandpaVoter(
         case _                                                                              => ok = false
     ok
 
+  private var markerWaitLogged = false
+
   private def learnSetId(round: Long, setId: Long, c: Commit, ancestries: List[Array[Byte]]): Either[String, Option[Hash]] =
     val unknown = set
+    def held(v: Vote) = chain.slotOf(v.hash).isDefined
     if setId < 0 then Left("no set id")
     else
       set = unknown.copy(setId = setId)
+      val bySigner = c.precommits.groupBy(_.signerKey).values.toList
+      val counted = bySigner.filter(_.forall(p =>
+        held(p.vote) && inCurrentRange(p.vote) && chain.epochMarkerKeys(p.vote.hash).isEmpty
+      ))
+      val unheld = c.precommits.map(_.vote).find(v => !held(v))
+      if counted.size < set.threshold && unheld.isEmpty && !markerWaitLogged &&
+        c.precommits.exists(p => chain.epochMarkerKeys(p.vote.hash).isDefined)
+      then
+        markerWaitLogged = true
+        logger.info(
+          "GRANDPA set id not learned from a commit whose precommits sit on the epoch's first block; " +
+            "--sync-from <hash>:<set id> avoids the wait"
+        )
       val proven =
-        if chain.slotOf(c.target.hash).isEmpty then verifyCommitSignatures(round, setId, c).map(_ => false)
+        if !held(c.target) then verifyCommitSignatures(round, setId, c).map(_ => Some(c.target.hash))
         else if !inCurrentRange(c.target) then Left("not for a block the set at our finalized block votes on")
-        else verifyCommit(round, setId, c, ancestries).map(_ => true)
+        else if counted.size < set.threshold && unheld.isDefined then
+          verifyCommitSignatures(round, setId, c).map(_ => unheld.map(_.hash))
+        else verifyCommit(round, setId, c.copy(precommits = counted.flatten), ancestries).map(_ => None)
       proven match
-        case Right(true) =>
+        case Right(None) =>
           logger.info(s"GRANDPA set $setId learned from the commit for ${c.target.short}")
           onSetAdopted(set)
-          onProgress(set.setId, current.round, Nil)
+          onProgress(set.setId, current.round, Nil, false)
           onCommit(round, setId, c, ancestries)
-        case Right(false) =>
+        case Right(wanted) =>
           set = unknown
-          Right(Some(c.target.hash)) // signed by our voters; whether it is ours to learn from needs the block
+          Right(wanted)
         case Left(why) =>
           set = unknown
           Left(s"set not yet known; $why")
@@ -338,8 +358,22 @@ final class GrandpaVoter(
   // voting
   // ---------------------------------------------------------------------------
 
+  private def prevoteFloor(r: RoundState, prevEstimate: Vote): Vote =
+    r.primaryProposal
+      .filter { b =>
+        val above = pathToBase(b.hash, prevEstimate) // empty unless we hold B and it strictly descends from E_{r-1}
+        above.headOption.flatMap((h, slot) => voteFor(h, slot)).contains(b) &&
+        above.forall((h, _) => chain.isAudited(h)) &&
+        rounds.get(r.round - 1).flatMap(prevoteGhost).exists(g => chain.isAncestor(b.hash, g.hash))
+      }
+      .getOrElse(prevEstimate)
+
+  private[node] def prevoteFloor(r: RoundState): Vote = prevoteFloor(r, previousEstimate(r.round))
+
   /** Our best block to vote for: the best head, not past the first unfinalized epoch-marker block (the set change)
-    * nor past the last block before an unaudited one, and never off the chain of `floor`.
+    * nor past the last block before an unaudited one, and never off the chain of `floor`. Only blocks above `floor`
+    * are checked for audit: every exit returns `floor` or an audited block above it, so the caller must pass a floor
+    * that is the estimate to build on or itself audited ([[prevoteFloor]]).
     */
   private def voteTarget(floor: Vote): Vote =
     val best = chain.best
@@ -359,8 +393,16 @@ final class GrandpaVoter(
   private def cast(kind: Int, vote: Vote): Unit =
     keys.filter(k => set.members.contains(k.ed25519Key)).foreach { k =>
       val signed = sign(kind, vote, current.round, set.setId, k)
-      if kind == PrimaryPropose then current.primaryProposal = Some(signed.vote) else record(current, kind, signed)
-      onProgress(set.setId, current.round, ourVotes)
+      if kind == PrimaryPropose then
+        current.primaryProposal = Some(signed.vote)
+        onProgress(set.setId, current.round, ourVotes, false)
+      else
+        record(current, kind, signed)
+        try onProgress(set.setId, current.round, ourVotes, true)
+        catch
+          case e: Throwable =>
+            (if kind == Prevote then current.prevotes else current.precommits).remove(k.ed25519Key)
+            throw e
       out.broadcastVote(VoteMessage(current.round, set.setId, SignedMessage(kind, signed)))
       logger.debug(s"GRANDPA round ${current.round} set ${set.setId}: ${kindName(kind)} ${vote.short}")
     }
@@ -440,7 +482,7 @@ final class GrandpaVoter(
         current = new RoundState(1, clock())
         rounds.put(1, current)
         out.broadcastState(1, set.setId, f.slot)
-        onProgress(set.setId, 1, Nil)
+        onProgress(set.setId, 1, Nil, false)
         replayFuture()
       markers.nonEmpty
 
@@ -473,6 +515,7 @@ final class GrandpaVoter(
   /** Advance the current round as far as the votes and timers allow. */
   def step(): Unit =
     if set.setId == GrandpaVoter.UnknownSet then return // nothing can be signed for a set we cannot name
+    if paused() then return
     adoptFinalizedSetChanges()
     val r = current
     val now = clock()
@@ -482,7 +525,7 @@ final class GrandpaVoter(
         r.proposed = true
         if prevEstimate.slot > chain.finalized.slot then cast(PrimaryPropose, prevEstimate)
       if !r.prevoted && (now >= r.startedAt + 2 * gossipMillis || completable(r)) then
-        val floor = r.primaryProposal.filter(p => chain.isAncestor(prevEstimate.hash, p.hash)).getOrElse(prevEstimate)
+        val floor = prevoteFloor(r, prevEstimate)
         r.prevoted = true
         cast(Prevote, voteTarget(floor))
       if r.prevoted && !r.precommitted then
@@ -500,7 +543,7 @@ final class GrandpaVoter(
     current = rounds.getOrElseUpdate(n, new RoundState(n, clock()))
     rounds.keys.filter(_ < n - 2).toList.foreach(rounds.remove)
     out.broadcastState(n, set.setId, chain.finalized.slot)
-    onProgress(set.setId, n, ourVotes)
+    onProgress(set.setId, n, ourVotes, false)
 
   /** Finalize the highest precommit GHOST above our finalized block, in any round we track; true when the voter set
     * changed.
@@ -556,7 +599,7 @@ final class GrandpaVoter(
             rounds.put(1, current)
             logger.info(s"GRANDPA set change to set ${set.setId} at ${target.short} (${set.size} voters)")
             out.broadcastState(1, set.setId, target.slot)
-            onProgress(set.setId, 1, Nil)
+            onProgress(set.setId, 1, Nil, false)
             replayFuture()
             Some(true)
           case false => Some(false)

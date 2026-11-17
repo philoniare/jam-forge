@@ -196,7 +196,7 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       // The new chain extends; the disregarded block is refused from now on.
       val b5 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(5).getOrElse(fail("author 5"))
       nodeA.chain.importBlock(nodeA.chain.encodeBlock(b5)).isRight shouldBe true
-      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)) shouldBe Left(ChainError.PreviouslyInvalid)
+      nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)) shouldBe Left(ChainError.Disregarded)
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()
       if nodeB != null then nodeB.shutdownStorageOnly()

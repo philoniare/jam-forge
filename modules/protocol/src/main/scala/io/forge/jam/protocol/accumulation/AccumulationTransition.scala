@@ -1061,12 +1061,14 @@ object AccumulationTransition:
       case changed: LazyAccounts =>
         for (id, postAccount) <- changed.written
             if id != serviceId && !initialState.accounts.contains(id) do
+          changes.createdIds += id
           if !changes.accountUpdates.contains(id) then changes.accountUpdates(id) = postAccount
         for id <- changed.removedIds do
           if initialState.accounts.contains(id) then changes.removedAccounts += id
       case all =>
         for (id, postAccount) <- all
             if id != serviceId && !initialState.accounts.contains(id) do
+          changes.createdIds += id
           if accountChanged(initialState.accounts.get(id), postAccount) then
             if !changes.accountUpdates.contains(id) then
               changes.accountUpdates(id) = postAccount

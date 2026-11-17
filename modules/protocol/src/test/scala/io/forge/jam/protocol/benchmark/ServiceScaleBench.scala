@@ -61,16 +61,15 @@ object ServiceScaleBench:
       val t0 = System.nanoTime()
       val result = BlockPipeline.execute(step.block, view, skipAncestryValidation = true, sharedExecutor = Some(executor))
       if result.isRight then
-        val updates = view.commitUpdates(holdStoreUpdates = true)
+        val updates = view.commitUpdates()
         updates ++= storage.commitUpdates()
         trie.update(updates.toIndexedSeq)
       val t1 = System.nanoTime()
       result match
         case Right(_) =>
           millis += (t1 - t0) / 1e6
-          view.applyStoreUpdates()
           trie.save()
-          store.commitChild(parent, trie.rootHash)
+          store.commitChild(parent, trie.rootHash, view.accountRecordChanges)
           if extra == 0 && trie.rootHash != step.postState.stateRoot then mismatches += 1
         case Left(_) => failures += 1
     }

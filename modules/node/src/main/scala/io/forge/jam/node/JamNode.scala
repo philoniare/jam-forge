@@ -40,6 +40,7 @@ final case class NodeConfig(
       */
     pruneOldState: Boolean = true,
     syncFrom: Option[Hash] = None,
+    syncFromSetId: Option[Long] = None,
     /** FAULT INJECTION, `--fault-tamper-reports`: guarantee deliberately wrong reports, to test disputes. Never on a
       * real network: the node's guarantors become culprits.
       */
@@ -116,7 +117,7 @@ final class JamNode(
   /** CE 128 / CE 129 requests are answered here, not on the network event loops. */
   private[node] val serving: InboundWork = InboundWork.serving(threads)
   private[node] val scores: PeerScores = new PeerScores(
-    isValidator = key => peers.isValidator(key),
+    exempt = key => peers.inHeadValidatorSets(key) || peers.isConfigured(key),
     onBan = key => network.closeConnectionsOf(key)
   )
 
@@ -153,9 +154,9 @@ final class JamNode(
             case Right(_)                           => t.blockVerified(importing)
             case Left(e: ChainError.InvalidBlock)   => t.blockVerificationFailed(importing, e.message)
             case Left(e: ChainError.ImportFailed)   => t.blockExecutionFailed(importing, e.message)
-            case Left(_)                            => () // kept on a side branch, or not ours to judge yet
+            case Left(_)                            => ()
         case _ => ()
-  val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry)
+  val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry, scores)
   private val roleStore = RoleStore.over(blockStore)
   val pools = new ExtrinsicPools(store = roleStore)
   val distribution = new DistributionService(
@@ -205,7 +206,7 @@ final class JamNode(
     JamnpConfig(genesisHashPrefix = spec.alpnPrefix, reusePort = nodeConfig.reusePort)
   )
 
-  private val peers = new PeerConnectivity(
+  private[node] val peers = new PeerConnectivity(
     identity,
     network,
     chain,
@@ -422,6 +423,9 @@ final class JamNode(
               pools.removePreimages(x.preimages)
               retry()
             }
+          case Left(ChainError.BodyMismatch) =>
+            logger.error(s"authored block for slot $slot: ${ChainError.BodyMismatch.message}")
+            None
           case Left(_) => None
       }
     }
@@ -451,23 +455,27 @@ final class JamNode(
     new SyncGate(JamNode.SyncLagSlots, JamNode.SyncPatienceSlots * spec.config.slotDuration * 1000L)
   @volatile private var held = false
 
-  @volatile private var checkpointSyncing = false
+  @volatile private var checkpointSyncing = nodeConfig.syncFrom.isDefined
   private[node] def syncingFromCheckpoint: Boolean = checkpointSyncing
 
   private def startCheckpointSync(checkpoint: Hash): Unit =
     if !chain.atGenesis then
       logger.info(s"--sync-from ${checkpoint.toHex.take(18)} ignored: this node already has blocks")
+      checkpointSyncing = false
     else
       checkpointSyncing = true
       sync.hold()
-      val job = new CheckpointSync(chain, sync, checkpoint, () => distribution.peers, misbehaved)
+      val job =
+        new CheckpointSync(chain, sync, checkpoint, () => distribution.peers, misbehaved, nodeConfig.syncFromSetId)
       threads.single("jam-checkpoint-sync").execute { () =>
         try
           while checkpointSyncing do
             job.attempt() match
               case Right(_) =>
-                checkpointSyncing = false
-                if !chain.atGenesis then grandpaService.foreach(_.restartAtFinalized())
+                grandpaLock.synchronized {
+                  if !chain.atGenesis then grandpaService.foreach(_.restartAtFinalized())
+                  checkpointSyncing = false
+                }
                 sync.release()
               case Left(why) =>
                 logger.debug(s"checkpoint sync not yet possible: $why")
@@ -872,7 +880,8 @@ final class JamNode(
       audited = h => auditor.forall(_.isAudited(h)),
       serving = serving,
       threads = threads,
-      misbehaved = misbehaved
+      misbehaved = misbehaved,
+      paused = () => checkpointSyncing
     )
     // Start the voter before taking CE 149-153 streams, so no message finds it unset.
     // Set 0 is the genesis validators whatever the node's best state is now: a follower restarted as a voter after
@@ -880,16 +889,20 @@ final class JamNode(
     val (genesisKeys, genesisNextKeys) = spec.genesisValidatorKeys
     val initial =
       if genesisKeys.nonEmpty then genesisKeys else chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq
-    g.start(spec.genesisHeaderHash, initial, if genesisNextKeys.nonEmpty then genesisNextKeys else initial)
+    grandpaLock.synchronized {
+      g.start(spec.genesisHeaderHash, initial, if genesisNextKeys.nonEmpty then genesisNextKeys else initial)
+      grandpaService = Some(g)
+    }
     g.register(network)
-    grandpaService = Some(g)
     g
 
   @volatile private var grandpaService: Option[GrandpaService] = None
+
+  private val grandpaLock = new Object
   @volatile private var rpcServer: Option[RpcServer] = None
 
-  def enableRpc(port: Int, host: String = "127.0.0.1"): RpcServer =
-    val server = new RpcServer(new java.net.InetSocketAddress(host, port), rpcApi, threads).start()
+  def enableRpc(port: Int, host: String = "127.0.0.1", allowedOrigins: Seq[String] = Nil): RpcServer =
+    val server = new RpcServer(new java.net.InetSocketAddress(host, port), rpcApi, threads, allowedOrigins.toSet).start()
     rpcServer = Some(server)
     server
 
@@ -956,10 +969,11 @@ final class JamNode(
 
   /** Close only the storage layers (for tests that never start networking). */
   def shutdownStorageOnly(): Unit =
-    chain.shutdown()
-    blockStore.close()
+    val pruneStopped = chain.shutdown()
     shardStore.close()
-    trieBackend.close()
+    if pruneStopped then
+      blockStore.close()
+      trieBackend.close()
 
 object JamNode:
 

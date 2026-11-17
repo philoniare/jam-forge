@@ -109,10 +109,9 @@ object BandersnatchVrf:
     if lastRingRootKey != null && lastRingRootKey == cacheKey then
       lastRingRootResult
     else
+      ensureInitialized(ringSize)
       val result =
         try
-          ensureInitialized(ringSize)
-
           // Concatenate all public keys into a single byte array
           val concatenatedKeys = keys.flatMap(_.bytes.toSeq).toArray
 
@@ -181,9 +180,8 @@ object BandersnatchVrf:
     attempt: UByte,
     ringSize: Int
   ): Option[VerificationResult] =
+    ensureInitialized(ringSize) // throws for a local failure: see the object's comment
     try
-      ensureInitialized(ringSize)
-
       val result = JniBandersnatchWrapper.verifierRingVrfVerify(
         entropy.bytes.toArray,
         attempt.toByte,
@@ -215,8 +213,8 @@ object BandersnatchVrf:
   ): Option[Seq[JamBytes]] =
     if tickets.isEmpty then Some(Seq.empty)
     else
+      ensureInitialized(ringSize) // throws for a local failure: see the object's comment
       try
-        ensureInitialized(ringSize)
         val length = tickets.head._1.length
         if tickets.exists(_._1.length != length) then None
         else
@@ -247,9 +245,8 @@ object BandersnatchVrf:
     commitment: Array[Byte],
     ringSize: Int
   ): Option[Array[Byte]] =
+    ensureInitialized(ringSize) // throws for a local failure: see the object's comment
     try
-      ensureInitialized(ringSize)
-
       val result = JniBandersnatchWrapper.verifierRingVrfVerify(
         entropy,
         attempt.toByte,
@@ -290,8 +287,8 @@ object BandersnatchVrf:
     auxData: Array[Byte],
     signature: Array[Byte]
   ): Option[Array[Byte]] =
+    JniBandersnatchWrapper.ensureLibraryLoaded() // throws for a local failure: see the object's comment
     try
-      JniBandersnatchWrapper.ensureLibraryLoaded()
       val result = JniBandersnatchWrapper.ietfVrfVerify(publicKey, vrfInput, auxData, signature)
       if result == null || result.length != 32 then
         None
@@ -311,16 +308,16 @@ object BandersnatchVrf:
    * point without verifying the proof. None if the output point does not decode.
    */
   def ringVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
+    JniBandersnatchWrapper.ensureLibraryLoaded() // throws for a local failure: see the object's comment
     try
-      JniBandersnatchWrapper.ensureLibraryLoaded()
       val result = JniBandersnatchWrapper.getRingVrfOutput(signature)
       if result == null || result.length != 32 then None else Some(result)
     catch
       case _: RuntimeException => None
 
   def getVrfOutput(signature: Array[Byte]): Option[Array[Byte]] =
+    JniBandersnatchWrapper.ensureLibraryLoaded() // throws for a local failure: see the object's comment
     try
-      JniBandersnatchWrapper.ensureLibraryLoaded()
       val result = JniBandersnatchWrapper.getIetfVrfOutput(signature)
       if result == null || result.length != 32 then
         None

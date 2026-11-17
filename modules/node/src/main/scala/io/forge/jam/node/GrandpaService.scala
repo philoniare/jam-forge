@@ -26,7 +26,9 @@ final class GrandpaService(
     serving: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
-    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    paused: () => Boolean = () => false,
+    clock: () => Long = () => System.currentTimeMillis()
 ) extends LazyLogging:
 
   private val exec: ScheduledExecutorService = threads.scheduled("jam-grandpa")
@@ -68,6 +70,8 @@ final class GrandpaService(
 
   @volatile private var voter: GrandpaVoter = null
 
+  private[node] def voterSet: VoterSet = voter.voterSet
+
   /** One open connection per voter peer. */
   private def voterPeers: List[PeerConnection] =
     val members = Option(voter).map(_.voterSet.members).getOrElse(Set.empty)
@@ -84,24 +88,27 @@ final class GrandpaService(
   /** Voters that have our current round's votes. */
   private val votesSentTo = ConcurrentHashMap.newKeySet[Ed25519PublicKey]()
   @volatile private var votesRound = (0L, 0L)
-  @volatile private var roundSince = 0L
   @volatile private var lastCatchUpAsk = 0L
+  private val stall = new StallClock(gossipMillis)
 
-  /** Resend our current round's votes to voters that connected since, and every vote we hold for it to every voter
-    * while the round is stalled (votes lost in a partition are not resent by their senders).
+  private val forwardedTo = mutable.Set.empty[Ed25519PublicKey]
+
+  /** Resend our current round's votes to voters that connected since, and to every voter while the round is
+    * stalled; on a stall, forward the others' votes we hold for it to a few voters at a time (votes lost in a
+    * partition are not resent by their senders). Each voter's votes go as one egress entry: a stalled round must not
+    * crowd out what is queued with them.
     */
   private def resendVotes(): Unit =
-    val now = System.currentTimeMillis()
+    if silent then return
+    val now = clock()
     val round = (voter.voterSet.setId, voter.round)
-    var stalled = false
     if round != votesRound then
       votesRound = round
-      roundSince = now
+      stall.restart(now)
       votesSentTo.clear()
-    else if now - roundSince > 8 * gossipMillis then
-      roundSince = now - 4 * gossipMillis
-      votesSentTo.clear()
-      stalled = true
+      forwardedTo.clear()
+    val stalled = stall.due(now)
+    if stalled then votesSentTo.clear()
     // An observer has no round to complete: it follows by justification (CE 130), and voters refuse it a catch-up.
     if stalled && keys.isDefined && now - lastCatchUpAsk > 30 * gossipMillis then
       // A voter back from a restart hears nothing from peers that never resend: ask them.
@@ -113,12 +120,35 @@ final class GrandpaService(
           s"GRANDPA round ${voter.round} of set ${voter.voterSet.setId} stalled: asking ${asked.size} voter(s) not heard from since the start for a catch-up"
         )
         asked.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
-    val votes = if stalled then voter.roundVotes else voter.ourVotes
-    if votes.nonEmpty then
-      voterPeers.filterNot(c => votesSentTo.contains(c.peerPublicKey)).foreach { c =>
+    val peers = voterPeers
+    val own = voter.ourVotes
+    if own.nonEmpty then
+      peers.filterNot(c => votesSentTo.contains(c.peerPublicKey)).foreach { c =>
         votesSentTo.add(c.peerPublicKey)
-        votes.foreach(v => send(c, StreamKind.GrandpaVote, encodeVoteMessage(v)))
+        sendVotes(c, own)
       }
+    if stalled then
+      val ours = keys.map(_.ed25519Key)
+      val others = voter.roundVotes.filterNot(m => ours.contains(m.message.signed.signerKey))
+      if others.nonEmpty then forwardTargets(peers).foreach(sendVotes(_, others))
+
+  private def forwardTargets(peers: List[PeerConnection]): List[PeerConnection] =
+    val waiting = peers.filterNot(c => forwardedTo.contains(c.peerPublicKey))
+    val pool =
+      if waiting.nonEmpty then waiting
+      else
+        forwardedTo.clear()
+        peers
+    val heard = voter.votersHeard
+    val chosen = pool
+      .sortWith((a, b) => java.util.Arrays.compareUnsigned(a.peerKey, b.peerKey) < 0)
+      .sortBy(c => heard.contains(c.peerPublicKey))
+      .take(GrandpaService.ForwardPeersPerStall)
+    chosen.foreach(c => forwardedTo += c.peerPublicKey)
+    chosen
+
+  private def sendVotes(c: PeerConnection, votes: List[VoteMessage]): Unit =
+    distribution.submitSends(() => c.openStream(StreamKind.GrandpaVote), StreamKind.GrandpaVote, votes.map(encodeVoteMessage), c)
 
   /** Commits whose target block we are still fetching, by target. Touched on the voter thread only. */
   private val pendingCommits = new PendingCommits(GrandpaService.MaxPendingCommits)
@@ -167,17 +197,25 @@ final class GrandpaService(
       outbound,
       set,
       keys,
+      clock = clock,
       gossipMillis = gossipMillis,
       onFinalized = persist,
       onSetAdopted = s =>
-        chain.meta.grandpaSet = LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray ++ s.keys.flatten,
-      onProgress = (setId, round, votes) =>
-        chain.meta.grandpaRound =
+        chain.meta.putGrandpaSet(
+          LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray ++ s.keys.flatten,
+          settlesCheckpoint = rebased && s.setId != GrandpaVoter.UnknownSet
+        ),
+      onProgress = (setId, round, votes, durable) =>
+        chain.meta.putGrandpaRound(
           LittleEndian.encode(setId, 8) ++ LittleEndian.encode(round, 8) ++ votes.flatMap(encodeVoteMessage),
-      resume = storedRound(set.setId)
+          durable
+        ),
+      resume = storedRound(set.setId),
+      paused = () => silent
     )
-    logger.info(s"GRANDPA voter started: set ${set.setId} round ${voter.round}, ${set.size} voters, voting=${keys
-        .exists(k => set.members.contains(k.ed25519Key))}")
+    if chain.meta.grandpaCheckpoint.isDefined then rebaseAtFinalized()
+    logger.info(s"GRANDPA voter started: set ${voter.voterSet.setId} round ${voter.round}, ${voter.voterSet.size} " +
+      s"voters, voting=${keys.exists(k => voter.voterSet.members.contains(k.ed25519Key))}")
     chain.onImported((head, _) =>
       exec.execute(() => { retryPending(head.hash); voter.step() })
     )
@@ -190,6 +228,11 @@ final class GrandpaService(
     exec.scheduleAtFixedRate(() => guarded(followPeers()), 2, 2, TimeUnit.SECONDS)
 
   def shutdown(): Unit = exec.shutdownNow()
+
+  private[node] def onVoterThread[A](f: GrandpaVoter => A): A =
+    exec.submit(() => f(voter)).get(10, TimeUnit.SECONDS)
+
+  private[node] def resendNow(): Unit = onVoterThread(_ => resendVotes())
 
   private def guarded(f: => Unit): Unit =
     try f
@@ -220,32 +263,42 @@ final class GrandpaService(
   private def retryPending(imported: Hash): Unit =
     pendingCommits.take(imported).foreach((round, setId, c, anc) => applyCommit(round, setId, c, anc, None): Unit)
 
-  /** True when the voter took the commit. */
+  @volatile private var rebasing = false
+
+  @volatile private var rebased = false
+
+  private def silent: Boolean = paused() || rebasing
+
   def restartAtFinalized(): Unit =
+    rebasing = true
     exec.execute(() =>
-      guarded {
-        val f = chain.finalized
-        chain.stateViewAt(f.hash).foreach { view =>
-          val epoch = f.slot / chain.config.epochLength
-          var base = f.hash
-          var cursor: Option[Hash] = Some(f.hash)
-          var found = false
-          while !found && cursor.isDefined do
-            chain.header(cursor.get) match
-              case Some(h) if h.slot.toLong / chain.config.epochLength == epoch =>
-                if h.epochMark.isDefined then
-                  base = cursor.get
-                  found = true
-                else cursor = Some(h.parent)
-              case _ => cursor = None
-          if !found then
-            logger.warn("GRANDPA: the block that began the checkpoint's epoch is not held; the next voter set may be wrong")
-          val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(f.slot))
-          pendingCommits.prune(Long.MaxValue, Long.MaxValue)
-          voter.restartAt(VoterSet(GrandpaVoter.UnknownSet, baseVote, view.validators.current.map(_.ed25519.bytes)))
-        }
-      }
+      try guarded(if chain.meta.grandpaCheckpoint.isDefined then rebaseAtFinalized())
+      finally rebasing = false
     )
+
+  private def rebaseAtFinalized(): Unit =
+    val f = chain.finalized
+    val setId = chain.meta.grandpaCheckpoint.getOrElse(GrandpaVoter.UnknownSet)
+    chain.stateViewAt(f.hash).foreach { view =>
+      val epoch = f.slot / chain.config.epochLength
+      var base = f.hash
+      var cursor: Option[Hash] = Some(f.hash)
+      var found = false
+      while !found && cursor.isDefined do
+        chain.header(cursor.get) match
+          case Some(h) if h.slot.toLong / chain.config.epochLength == epoch =>
+            if h.epochMark.isDefined then
+              base = cursor.get
+              found = true
+            else cursor = Some(h.parent)
+          case _ => cursor = None
+      if !found then
+        logger.warn("GRANDPA: the block that began the checkpoint's epoch is not held; the next voter set may be wrong")
+      val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(f.slot))
+      pendingCommits.prune(Long.MaxValue, Long.MaxValue)
+      rebased = true
+      voter.restartAt(VoterSet(setId, baseVote, view.validators.current.map(_.ed25519.bytes)))
+    }
 
   private def applyCommit(
       round: Long,
@@ -496,6 +549,8 @@ final class GrandpaService(
 
 object GrandpaService:
 
+  val ForwardPeersPerStall: Int = 4
+
   /** Commits kept while their target block is fetched. Each one carries a supermajority of valid precommits of the
     * current set (checked before it is kept) for a block above our finalized one, so honest voters produce at most
     * one target per round, and finalizing the highest target finalizes the rest: when more than this many wait, the
@@ -506,6 +561,21 @@ object GrandpaService:
   /** CE 149-152 messages from peers that may wait for the voter thread, and the bytes they may hold. */
   val MaxQueuedMessages: Int = 4096
   val MaxQueuedBytes: Long = 32L * 1024 * 1024
+
+private[node] final class StallClock(gossipMillis: Long):
+  private var next = Long.MaxValue
+  private var interval = 0L
+
+  def restart(now: Long): Unit =
+    next = now + 8 * gossipMillis
+    interval = 4 * gossipMillis
+
+  def due(now: Long): Boolean =
+    if now < next then false
+    else
+      next = now + interval
+      interval = math.min(interval * 2, 64 * gossipMillis)
+      true
 
 /** Verified commits waiting for their target block, at most `max`: the highest targets are kept. Not thread safe. */
 private[node] final class PendingCommits(max: Int):

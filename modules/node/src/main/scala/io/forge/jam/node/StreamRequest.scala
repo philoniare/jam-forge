@@ -21,11 +21,13 @@ object StreamRequest extends LazyLogging:
     case NotSent(detail: String)
     /** The peer neither answered nor closed in time. */
     case TimedOut
+    case Refused
 
     def message: String = this match
       case NotOpened(detail) => s"stream not opened: $detail"
       case NotSent(detail)   => s"request not sent: $detail"
       case TimedOut          => "no answer in time"
+      case Refused           => "answer refused: over our inbound buffer limit"
 
   /** When the answer is complete. */
   enum Until:
@@ -92,7 +94,10 @@ object StreamRequest extends LazyLogging:
     sent.flatMap { _ =>
       try
         val wait = responseTimeoutMs()
-        if wait <= 0 then Left(Failure.TimedOut) else Right(done.get(wait, TimeUnit.MILLISECONDS))
+        if wait <= 0 then Left(Failure.TimedOut)
+        else
+          val answer = done.get(wait, TimeUnit.MILLISECONDS)
+          if stream.refusedHere then Left(Failure.Refused) else Right(answer)
       catch
         case _: TimeoutException => Left(Failure.TimedOut)
         case e: Exception        => Left(Failure.NotSent(describe(e)))

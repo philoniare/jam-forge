@@ -238,6 +238,116 @@ class HistoryPruningSpec extends AnyFunSuite with Matchers with NodeFixture:
       cleanup(dirPruned)
   }
 
+  test("a reorg onto a branch that forks below the prune floor is refused: nothing is replayed or marked, the chain stays") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
+    val sp = spec("prune-reorg-below-floor", genesis)
+    val dirA = tempDir("jam-prune-reorg-a")
+    val dirB = tempDir("jam-prune-reorg-b")
+    var node: JamNode = null
+    var nodeB: JamNode = null
+    try
+      node = newNode(sp, dirA, prune = false)
+      nodeB = newNode(sp, dirB, prune = false)
+      val block1 = new BlockAuthor(node.chain, devKeys).tryAuthor(1).getOrElse(fail("author block 1"))
+      val block1Bytes = node.chain.encodeBlock(block1)
+      val head1 = node.chain.importBlock(block1Bytes).fold(e => fail(s"import of block 1: $e"), identity)
+      nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
+      authorOn(node, 2)
+      val side = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(3).getOrElse(fail("author 3'"))
+      val sideHash = nodeB.chain.headerHashOf(side)
+      node.chain.importBlock(nodeB.chain.encodeBlock(side)).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+
+      grow(node, 4 to 40)
+      node.chain.awaitStatePruning()
+      node.chain.pruneFloorHeight should be > 1L
+      node.chain.stateAt(head1.hash) shouldBe None
+      node.chain.hasBlock(sideHash) shouldBe true
+      val best = node.chain.best
+      val fin = node.chain.finalized
+
+      node.chain.finalizeAdopting(sideHash) match
+        case Left(ChainError.BelowPruneFloor(fork, floor)) =>
+          fork shouldBe 1L
+          floor shouldBe node.chain.pruneFloorHeight
+        case other => fail(s"expected BelowPruneFloor, got $other")
+      node.chain.meta.invalid(sideHash) shouldBe false
+      node.chain.best shouldBe best
+      node.chain.finalized.hash shouldBe fin.hash
+      node.chain.postStateRoot(sideHash) shouldBe None
+      authorOn(node, 41).slot shouldBe 41L
+    finally
+      if node != null then node.shutdownStorageOnly()
+      if nodeB != null then nodeB.shutdownStorageOnly()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("a finalization whose metadata write fails deletes nothing: the stored floor's block and state stay whole") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
+    val sp = spec("prune-failed-floor-write", genesis)
+    val dir = tempDir("jam-prune-failed-floor")
+    var node: JamNode = null
+    try
+      node = newNode(sp, dir)
+      grow(node, 1 to 30)
+      authorOn(node, 31)
+      node.chain.awaitStatePruning()
+      val floorHeight = node.chain.pruneFloorHeight
+      floorHeight should be > 1L
+      val floor = node.chain.meta.pruneFloor.getOrElse(fail("no prune floor"))
+      val finalized = node.chain.finalized
+
+      node.chain.faultBeforeMetaCommit = () => throw new java.io.IOException("injected: metadata write lost")
+      an[java.io.IOException] should be thrownBy node.chain.finalizeAtDepth(2)
+      node.chain.faultBeforeMetaCommit = () => ()
+      node.chain.awaitStatePruning()
+
+      node.chain.finalized.hash shouldBe finalized.hash
+      node.chain.pruneFloorHeight shouldBe floorHeight
+      node.chain.hasBlock(floor) shouldBe true
+      node.chain.headerBytes(floor).isDefined shouldBe true
+      node.chain.scheduledStatePrunes shouldBe Nil
+      val state = node.chain.stateAt(floor).getOrElse(fail("the floor's state is not readable"))
+      noException should be thrownBy state.getKeyValues(io.forge.jam.core.JamBytes.empty, 0)
+
+      node.chain.finalizeAtDepth(2).isDefined shouldBe true
+      node.chain.awaitStatePruning()
+      node.chain.pruneFloorHeight shouldBe floorHeight + 1
+      node.chain.hasBlock(floor) shouldBe false
+      node.chain.scheduledStatePrunes shouldBe Nil
+    finally
+      if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
+  test("after shutdown began no state prune starts; a finalization records it, and the next start does it") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
+    val sp = spec("prune-after-shutdown", genesis)
+    val dir = tempDir("jam-prune-after-shutdown")
+    var node: JamNode = null
+    try
+      node = newNode(sp, dir)
+      grow(node, 1 to 30)
+      authorOn(node, 31)
+      node.chain.awaitStatePruning()
+      val floorHeight = node.chain.pruneFloorHeight
+
+      node.chain.shutdown() shouldBe true
+      node.chain.finalizeAtDepth(2).isDefined shouldBe true
+      node.chain.pruneFloorHeight shouldBe floorHeight + 1
+      val recorded = node.chain.scheduledStatePrunes
+      recorded.map(_._2) shouldBe List(floorHeight + 1)
+      node.shutdownStorageOnly()
+
+      node = newNode(sp, dir)
+      node.chain.awaitStatePruning()
+      node.chain.scheduledStatePrunes shouldBe Nil
+      node.chain.pruneFloorHeight shouldBe floorHeight + 1
+    finally
+      if node != null then node.shutdownStorageOnly()
+      cleanup(dir)
+  }
+
   test("shard custody units expire by when their erasure-root was last stored") {
     val dir = tempDir("jam-shard-expiry")
     var now = 1000L

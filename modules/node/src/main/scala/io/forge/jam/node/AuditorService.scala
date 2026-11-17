@@ -61,8 +61,8 @@ final class AuditorService(
       val bandersnatch: IndexedSeq[Array[Byte]],
       val q: IndexedSeq[Option[WorkReport]],
       val reportHashes: IndexedSeq[Option[Hash]],
-      /** The epoch of the current validator set: judgments on this block's reports index into that epoch's set. */
-      val epoch: Long
+      val epoch: Long,
+      val watchedFrom: Int
   ):
     /** A_n(w): validators announcing each report, per tranche. */
     val announced = mutable.Map.empty[(Hash, Int), mutable.Set[Int]]
@@ -79,6 +79,11 @@ final class AuditorService(
 
     /** Reports each of our validator indices has announced, with the tranche. */
     val ours = mutable.Map.empty[Int, mutable.Map[Hash, Int]]
+
+    val attempts = mutable.Map.empty[(Int, Int), Int]
+
+    val lost = mutable.Set.empty[Int]
+
     var tranche0Done: Set[Int] = Set.empty
     var lastTranche: Int = -1
     def available: Seq[(Int, WorkReport, Hash)] =
@@ -96,6 +101,11 @@ final class AuditorService(
     * callbacks and audit results are not counted and never dropped.
     */
   private val intake = new WorkGate("auditor intake", AuditorService.MaxQueuedMessages, AuditorService.MaxQueuedBytes)
+
+  private val refusedAnnouncements = new AuditorService.RefusedTranches(AuditorService.MaxRefusedBlocks)
+  private val refusedJudgments = new java.util.concurrent.atomic.AtomicLong()
+
+  private[node] val checks = new AuditorService.Checks
 
   /** Peer messages waiting for the audit thread. */
   private[node] def queuedMessages: Int = intake.queued
@@ -179,22 +189,26 @@ final class AuditorService(
   private def track(hash: Hash, slot: Long, block: Block): Unit =
     chain.stateViewAt(block.header.parent) match
       case None =>
-        logger.warn(s"no prior state for ${hash.toHex.take(18)}; counting it as audited")
-        auditedBlocks.put(hash, AuditorService.Mark(slot, true))
+        logger.warn(s"no prior state for ${hash.toHex.take(18)}; it stays unaudited")
+        auditedBlocks.put(hash, AuditorService.Mark(slot, false))
       case Some(prior) =>
         val kappa = prior.validators.current.toIndexedSeq
         val q = justBecameAvailable(block, prior.cores.reports.toIndexedSeq, kappa.size)
         val vrfOut = BandersnatchVrf.getVrfOutput(block.header.entropySource.toArray).getOrElse(Array.emptyByteArray)
+        val now = clock()
+        val origin = trancheOrigin(slot, now)
+        val began = trancheAt(now, origin)
         val t = new Tracked(
           hash,
           slot,
-          trancheOrigin(slot, clock()),
+          origin,
           vrfOut,
           kappa.map(_.ed25519.bytes.toArray),
           kappa.map(_.bandersnatch.bytes.toArray),
           q,
           q.map(_.map(w => Hashing.blake2b256(w.encode.toArray))),
-          prior.timeslot / chain.config.epochLength
+          prior.timeslot / chain.config.epochLength,
+          if began == 0 then 0 else began + 1
         )
         if t.available.isEmpty then auditedBlocks.put(hash, AuditorService.Mark(slot, true))
         else
@@ -253,6 +267,7 @@ final class AuditorService(
     val now = clock()
     forgetFinalized(finalizedSlot, now)
     tracked.values.foreach { t =>
+      t.lost ++= refusedAnnouncements.take(t.hash)
       val n = trancheAt(now, t.origin)
       ownIndices(t).foreach { (v, keys) =>
         if !t.tranche0Done.contains(v) then
@@ -429,7 +444,9 @@ final class AuditorService(
         positive.getOrElse(h, AuditorService.NoOne),
         negative.getOrElse(h, AuditorService.NoOne),
         v,
-        n
+        n,
+        t.watchedFrom,
+        t.lost
       )
       if ok then t.unaudited -= h else t.unaudited += h
     }
@@ -586,7 +603,9 @@ final class AuditorService(
 
   /** An announcement from the peer with Ed25519 key `peer`: checked now when its block is tracked, kept for the
     * block's import otherwise. False when the audit thread has too many peer messages waiting (from the connection
-    * `source`, or in all) and the announcement was not taken.
+    * `source`, or in all) and the announcement was not taken. Refused because the queue is full in all, it may be
+    * an honest validator's, so its tranche of its block no longer counts as known in full; refused because its
+    * source has too many waiting, only that source loses.
     */
   private[node] def receiveAnnouncement(
       peer: Array[Byte],
@@ -594,7 +613,7 @@ final class AuditorService(
       evidence: Array[Byte],
       source: AnyRef = null
   ): Boolean =
-    intake.tryExecute(exec, head.length.toLong + evidence.length, source) {
+    val admission = intake.submit(exec, head.length.toLong + evidence.length, source) {
       guarded {
         decodeHead(head) match
           case Left(err) => logger.debug(s"CE144 from ${JamNode.hex(peer).take(16)}: $err")
@@ -603,6 +622,9 @@ final class AuditorService(
             else keepAnnouncement(Ed25519PublicKey(peer), headerHash, n, head, evidence)
       }
     }
+    if admission == WorkGate.Admission.Full && head.length >= 33 then
+      refusedAnnouncements.note(Hash(java.util.Arrays.copyOfRange(head, 0, 32)), head(32) & 0xff)
+    admission == WorkGate.Admission.Admitted
 
   /** Keep an announcement for a block we have not imported, which cannot be checked without the block. Only a
     * validator can be an announcer, each announces once per block and tranche, and the wait is for an import a few
@@ -652,7 +674,11 @@ final class AuditorService(
     out
 
   /** Verify an announcement against the block it names (Ed25519 signature, VRF evidence, and that the VRF selects
-    * the announced reports) and record it in A_n.
+    * the announced reports) and record it in A_n. Announcers are validators, which are never banned, so what one
+    * can make this thread spend is bounded here, cheapest checks first: an announcement already recorded for its
+    * validator and tranche, one for a tranche not begun, or one listing more reports than the block has or a core or
+    * report twice is dropped with no cryptography, and only the first [[AuditorService.AttemptsPerAnnouncer]] of a
+    * validator for a block and tranche are verified at all.
     */
   private def applyAnnouncement(peer: Array[Byte], head: Array[Byte], evidence: Array[Byte]): Unit =
     for
@@ -661,32 +687,67 @@ final class AuditorService(
       v = t.validators.indexWhere(java.util.Arrays.equals(_, peer))
       if v >= 0
     do
-      val signed = Ed25519.verify(t.validators(v), announcementMessage(n, a.items, headerHash), a.signature)
-      val known = a.items.forall((c, h) => t.reportHashes.lift(c).flatten.contains(h))
-      val selected =
-        if n == 0 then
-          BandersnatchVrf
-            .ietfVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence)
-            .exists(y => a.items.map(_._1).toSet.subsetOf(initialCores(t.q, y).toSet))
-        else
-          decodeLaterEvidence(evidence, a.items.size).toOption.exists { perReport =>
-            a.items.zip(perReport).forall { case ((_, h), (sig, noShows)) =>
-              BandersnatchVrf
-                .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
-                .exists(y =>
-                  negative.get(h).exists(_.nonEmpty) ||
-                    peerEscalates(y, t.validators.size, provenNoShows(noShows, h, n, headerHash, t.validators).size)
-                )
-            }
-          }
-      if signed && known && selected then
-        recordAnnouncement(t, v, n, a)
-        logger.debug(s"audit announcement from validator $v, tranche $n, ${a.items.size} report(s)")
-        updateAudited(t, t.lastTranche, a.items.map(_._2))
+      if t.announcements.contains((n, v)) then ()
+      else if n > trancheAt(clock(), t.origin) + 1 then
+        logger.debug(s"CE144 from validator $v for tranche $n, not begun: dropped")
+      else if a.items.size > t.available.size || a.items.map(_._1).distinct.size != a.items.size ||
+        a.items.map(_._2).distinct.size != a.items.size
+      then logger.debug(s"CE144 from validator $v: ${a.items.size} report(s), malformed: dropped")
       else
-        logger.warn(s"rejected CE144 from validator $v (signature $signed, reports $known, selection $selected)")
-        if !signed then misbehaved(peer, Offence.BadSignature)
-        logger.debug(s"CE144 rejected: key=${JamNode.hex(peer)} head=${JamNode.hex(head)} evidence=${JamNode.hex(evidence)}")
+        val attempt = t.attempts.getOrElse((n, v), 0) + 1
+        t.attempts.update((n, v), attempt)
+        if attempt > AuditorService.AttemptsPerAnnouncer then
+          logger.debug(s"CE144 from validator $v for tranche $n: attempt $attempt, not verified")
+        else verifyAnnouncement(t, v, n, a, peer, head, evidence)
+
+  private def verifyAnnouncement(
+      t: Tracked,
+      v: Int,
+      n: Int,
+      a: Announcement,
+      peer: Array[Byte],
+      head: Array[Byte],
+      evidence: Array[Byte]
+  ): Unit =
+    checks.signatures.incrementAndGet()
+    val signed = Ed25519.verify(t.validators(v), announcementMessage(n, a.items, t.hash), a.signature)
+    val known = signed && a.items.forall((c, h) => t.reportHashes.lift(c).flatten.contains(h))
+    val selected = known && {
+      if n == 0 then
+        checks.vrfs.incrementAndGet()
+        BandersnatchVrf
+          .ietfVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence)
+          .exists(y => a.items.map(_._1).toSet.subsetOf(initialCores(t.q, y).toSet))
+      else
+        decodeLaterEvidence(evidence, a.items.size, t.validators.size).toOption.exists { perReport =>
+          a.items.zip(perReport).forall { case ((_, h), (sig, noShows)) =>
+            checks.vrfs.incrementAndGet()
+            BandersnatchVrf
+              .ietfVrfVerify(t.bandersnatch(v), laterInput(t.vrfOutput, h, n), Array.emptyByteArray, sig)
+              .exists { y =>
+                val needed = if negative.get(h).exists(_.nonEmpty) then 0 else noShowsNeeded(y, t.validators.size)
+                enoughNoShows(
+                  noShows,
+                  needed,
+                  h,
+                  n,
+                  t.hash,
+                  t.validators,
+                  i => t.announcements.get((n - 1, i)),
+                  checks.countedVerify
+                )
+              }
+          }
+        }
+    }
+    if selected then
+      recordAnnouncement(t, v, n, a)
+      logger.debug(s"audit announcement from validator $v, tranche $n, ${a.items.size} report(s)")
+      updateAudited(t, t.lastTranche, a.items.map(_._2))
+    else
+      logger.warn(s"rejected CE144 from validator $v (signature $signed, reports $known, selection $selected)")
+      if !signed then misbehaved(peer, Offence.BadSignature)
+      logger.debug(s"CE144 rejected: key=${JamNode.hex(peer)} head=${JamNode.hex(head)} evidence=${JamNode.hex(evidence)}")
 
   // =========================================================================
   // CE 145 — judgment publication
@@ -773,7 +834,7 @@ final class AuditorService(
         )
       )
       if genuine then
-        intake.tryExecute(exec, msg.length.toLong, source) {
+        val taken = intake.tryExecute(exec, msg.length.toLong, source) {
           guarded {
             val holders = tracked.values.filter(_.reportSet(reportHash)).toList
             if holders.nonEmpty then
@@ -782,6 +843,8 @@ final class AuditorService(
             else keepJudgment(reportHash, epoch, idx, valid, signature)
           }
         }
+        if !taken then
+          logger.debug(s"judgment from validator $idx not taken (${refusedJudgments.incrementAndGet()} so far)")
         logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
       else
         logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
@@ -825,13 +888,18 @@ final class AuditorService(
               positive.getOrElse(h, AuditorService.NoOne),
               negative.getOrElse(h, AuditorService.NoOne),
               t.validators.size,
-              t.auditedAt
+              t.auditedAt,
+              t.watchedFrom,
+              t.lost
             )
             fresh == !t.unaudited(h)
           }
         }
       )
       .get(30, TimeUnit.SECONDS)
+
+  private[node] def trackedSelection(hash: Hash): Option[(Array[Byte], IndexedSeq[Option[Hash]], Long)] =
+    exec.submit(() => tracked.get(hash).map(t => (t.vrfOutput, t.reportHashes, t.epoch))).get(30, TimeUnit.SECONDS)
 
   /** A_n(w) of the blocks being audited: the validators recorded as announcing `reportHash` in `tranche`. */
   private[node] def announcersOf(reportHash: Hash, tranche: Int): Set[Int] =
@@ -927,10 +995,35 @@ object AuditorService extends LazyLogging:
     */
   val PendingJudgmentsPerValidator: Int = 2 * AuditSelection.InitialCores
 
+  private[node] final class Checks:
+    val signatures = new java.util.concurrent.atomic.AtomicLong()
+    val vrfs = new java.util.concurrent.atomic.AtomicLong()
+    val noShowSignatures = new java.util.concurrent.atomic.AtomicLong()
+
+    val countedVerify: (Array[Byte], Array[Byte], Array[Byte]) => Boolean = (key, message, signature) =>
+      noShowSignatures.incrementAndGet()
+      Ed25519.verify(key, message, signature)
+
+  val AttemptsPerAnnouncer: Int = 3
+
+  val MaxRefusedBlocks: Int = 1024
+
+  private[node] final class RefusedTranches(capacity: Int):
+    private val byBlock = mutable.LinkedHashMap.empty[Hash, Set[Int]]
+
+    def note(block: Hash, tranche: Int): Unit = synchronized {
+      byBlock.update(block, byBlock.getOrElse(block, Set.empty[Int]) + tranche)
+      while byBlock.size > capacity do byBlock.remove(byBlock.head._1)
+    }
+
+    def take(block: Hash): Set[Int] = synchronized(byBlock.remove(block).getOrElse(Set.empty))
+
   private val NoOne: scala.collection.Set[Int] = Set.empty[Int]
   private val NoAnnouncements: scala.collection.Map[Int, scala.collection.Set[Int]] = Map.empty
 
-  /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. */
+  /** CE 147 against up to `maxPeers` open peers in turn, within `totalBudgetMs` overall. Each peer gets its share of
+    * the budget, so a silent one leaves time for the others.
+    */
   private[node] def fetchBundleDirect(
       erasureRoot: Hash,
       peers: Iterable[PeerConnection],
@@ -938,10 +1031,11 @@ object AuditorService extends LazyLogging:
       maxPeers: Int = 3
   ): Option[Array[Byte]] =
     val deadline = System.currentTimeMillis() + totalBudgetMs
+    val perPeer = totalBudgetMs / math.max(1, maxPeers)
     val candidates = peers.iterator.filter(_.isOpen).take(maxPeers)
     var result: Option[Array[Byte]] = None
     while result.isEmpty && candidates.hasNext && System.currentTimeMillis() < deadline do
-      result = fetchBundleFrom(candidates.next(), erasureRoot, deadline)
+      result = fetchBundleFrom(candidates.next(), erasureRoot, math.min(deadline, System.currentTimeMillis() + perPeer))
     result
 
   /** One CE 147 request/response attempt against `conn`, bounded by the

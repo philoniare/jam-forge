@@ -8,6 +8,8 @@ enum ChainError:
   case Undecodable(detail: String)
   case AlreadyImported
   case PreviouslyInvalid
+  case Disregarded
+  case BodyMismatch
   case UnknownParent(parent: Hash)
   case StoredOnSideBranch(weight: Long, height: Long, bestWeight: Long, bestHeight: Long)
   /** The block was checked and is invalid. */
@@ -33,14 +35,21 @@ enum ChainError:
     * it brings it back as a missing ancestor).
     */
   case FutureSlot(slot: Long, now: Long)
+  case CannotCheck(detail: String)
+  case BelowPruneFloor(forkHeight: Long, floorHeight: Long)
 
   def message: String = this match
+    case BelowPruneFloor(fork, floor) =>
+      s"the branch forks at height $fork, below the oldest state kept (height $floor)"
+    case CannotCheck(detail)       => s"cannot check the block: $detail"
     case SideBranchRefused(detail) => s"side-branch block refused: $detail"
     case UnverifiedLimit(scope)    => s"too many unverified side-branch blocks ($scope limit)"
     case FutureSlot(slot, now)     => s"block of slot $slot is ahead of the current slot $now"
     case Undecodable(detail)  => detail
     case AlreadyImported      => "block already imported"
     case PreviouslyInvalid    => "block failed validation before"
+    case Disregarded          => "block was disregarded"
+    case BodyMismatch         => "block body does not match its header"
     case UnknownParent(p)     => s"unknown parent ${p.toHex.take(18)}"
     case StoredOnSideBranch(w, h, bw, bh) =>
       s"stored on side branch (weight $w height $h vs best $bw/$bh)"

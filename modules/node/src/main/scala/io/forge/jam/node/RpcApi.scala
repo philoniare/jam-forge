@@ -33,9 +33,13 @@ final class RpcSubscription(
     val id: Long,
     val method: String,
     val finalized: Boolean,
-    val current: ChainHead => (Json, Json)
+    val current: ChainHead => (Json, Json),
+    val key: String,
+    val everyRefresh: Boolean = false
 ):
   @volatile var sent: Json = null
+
+  @volatile var readAt: Hash = null
 
 final class RpcSession(val send: Json => Unit):
   val subscriptions = new ConcurrentHashMap[java.lang.Long, RpcSubscription]()
@@ -56,6 +60,8 @@ final class RpcApi(
   import RpcApi.*
 
   private val config: ChainConfig = chain.config
+
+  private[node] val computations = new java.util.concurrent.atomic.AtomicLong()
 
   def handle(text: String, session: RpcSession): Option[Json] =
     val answer = new java.util.concurrent.CompletableFuture[Option[Json]]()
@@ -160,27 +166,29 @@ final class RpcApi(
       case "fetchWorkPackageSegments" =>
         for wp <- p.hash(0); indices <- p.indices(1); found <- segments(segmentsRootOf(wp), indices) yield found
 
-      case "subscribeBestBlock"      => subscribe(session, method, finalized = false, None)
-      case "subscribeFinalizedBlock" => subscribe(session, method, finalized = true, None)
-      case "subscribeStatistics" => for f <- p.flag(0); id <- subscribe(session, method, f, inState(statistics)) yield id
+      case "subscribeBestBlock"      => subscribe(session, method, finalized = false, "", None)
+      case "subscribeFinalizedBlock" => subscribe(session, method, finalized = true, "", None)
+      case "subscribeStatistics" =>
+        for f <- p.flag(0); id <- subscribe(session, method, f, "", inState(statistics)) yield id
       case "subscribeStateValue" =>
-        for k <- p.stateKey(0); f <- p.flag(1); id <- subscribe(session, method, f, inState(raw(_, k))) yield id
+        for k <- p.stateKey(0); f <- p.flag(1); id <- subscribe(session, method, f, k.toHex, inState(raw(_, k))) yield id
       case "subscribeServiceData" =>
-        for s <- p.service(0); f <- p.flag(1); id <- subscribe(session, method, f, inState(serviceData(_, s))) yield id
+        for s <- p.service(0); f <- p.flag(1); id <- subscribe(session, method, f, s.toString, inState(serviceData(_, s)))
+        yield id
       case "subscribeServiceValue" =>
         for
           s <- p.service(0); k <- p.blob(1); f <- p.flag(2)
-          id <- subscribe(session, method, f, inState(serviceValue(_, s, k)))
+          id <- subscribe(session, method, f, s"$s ${JamBytes.toHex(k)}", inState(serviceValue(_, s, k)))
         yield id
       case "subscribeServicePreimage" =>
         for
           s <- p.service(0); x <- p.hash(1); f <- p.flag(2)
-          id <- subscribe(session, method, f, inState(servicePreimage(_, s, x)))
+          id <- subscribe(session, method, f, s"$s ${x.toHex}", inState(servicePreimage(_, s, x)))
         yield id
       case "subscribeServiceRequest" =>
         for
           s <- p.service(0); x <- p.hash(1); len <- p.number(2); f <- p.flag(3)
-          id <- subscribe(session, method, f, inState(serviceRequest(_, s, x, len)))
+          id <- subscribe(session, method, f, s"$s ${x.toHex} $len", inState(serviceRequest(_, s, x, len)))
         yield id
       case "subscribeWorkPackageStatus" =>
         for
@@ -190,11 +198,12 @@ final class RpcApi(
             session,
             method,
             f,
+            s"${wp.toHex} ${anchor.toHex}",
             Some(head => workPackageStatus(head.hash, wp, anchor).getOrElse(failed("The anchor is not available")))
           )
         yield id
       case "subscribeSyncStatus" =>
-        register(session, new RpcSubscription(newId(), method, false, _ => (syncStatus, syncStatus)))
+        register(session, new RpcSubscription(newId(), method, false, _ => (syncStatus, syncStatus), method, everyRefresh = true))
 
       case other if other.startsWith("unsubscribe") && Subscribable.contains("subscribe" + other.drop(11)) =>
         for id <- p.number(0)
@@ -344,6 +353,7 @@ final class RpcApi(
       session: RpcSession,
       method: String,
       finalized: Boolean,
+      parameters: String,
       value: Option[ChainHead => Json]
   ): Either[RpcError, Json] =
     val current: ChainHead => (Json, Json) = value match
@@ -355,24 +365,37 @@ final class RpcApi(
         head =>
           val v = read(head)
           (descriptor(head.hash, head.slot).deepMerge(Json.obj("value" -> v)), v)
-    register(session, new RpcSubscription(newId(), method, finalized, current))
+    val key = s"$method $parameters ${if finalized then "finalized" else "best"}"
+    register(session, new RpcSubscription(newId(), method, finalized, current, key))
 
   def refresh(sessions: Iterable[RpcSession]): Unit =
     val best = chain.best
     val finalized = chain.finalized
+    val answers = scala.collection.mutable.HashMap.empty[(String, Hash), Option[(Json, Json)]]
     for session <- sessions; s <- session.subscriptions.values.asScala do
-      try
-        val (result, watched) = s.current(if s.finalized then finalized else best)
-        if watched != s.sent then
-          s.sent = watched
-          session.send(
-            Json.obj(
-              "jsonrpc" -> Json.fromString("2.0"),
-              "method" -> Json.fromString(s.method),
-              "params" -> Json.obj("subscription" -> Json.fromLong(s.id), "result" -> result)
-            )
-          )
-      catch case _: Exception => () // a state pruned between the head read and this one: the next refresh sends
+      val head = if s.finalized then finalized else best
+      if s.everyRefresh || s.readAt != head.hash then
+        val answer = answers.getOrElseUpdate(
+          (s.key, head.hash),
+          try
+            computations.incrementAndGet()
+            Some(s.current(head))
+          catch case _: Exception => None // a state pruned between the head read and this one: the next refresh sends
+        )
+        answer.foreach { (result, watched) =>
+          s.readAt = head.hash
+          if watched != s.sent then
+            s.sent = watched
+            try
+              session.send(
+                Json.obj(
+                  "jsonrpc" -> Json.fromString("2.0"),
+                  "method" -> Json.fromString(s.method),
+                  "params" -> Json.obj("subscription" -> Json.fromLong(s.id), "result" -> result)
+                )
+              )
+            catch case _: Exception => ()
+        }
 
 object RpcApi:
 

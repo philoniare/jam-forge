@@ -43,7 +43,7 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
       val backend = new ConcurrentBackend
       val store = new StateTrieStore(backend)
       store.bootstrap(Seq(key(0) -> value(0)))
-      store.primeKnownServiceIds(Set(0L))
+      store.primeKnownServiceIds(store.currentRoot, Set(0L))
 
       val errors = new CopyOnWriteArrayList[Throwable]()
       val writerDone = new AtomicBoolean(false)
@@ -60,7 +60,7 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
             trie.update(Seq(key(i) -> Some(value(i))))
             trie.save()
             store.commitChild(parent, trie.rootHash)
-            store.addKnownServiceId(i.toLong)
+            store.addKnownServiceId(trie.rootHash, i.toLong)
             i += 1
         } catch {
           case t: Throwable => errors.add(t)
@@ -82,10 +82,10 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
               val trie = StateTrie.at(backend, root)
               trie.read(key(0))
               val id = (base + k).toLong
-              if store.cachedServiceInfo(id).isEmpty then
-                store.putCachedServiceInfo(id, value(k))
-              store.cachedServiceIds
-              k += 1
+              if store.cachedServiceInfo(root, id).isEmpty then
+                store.putCachedServiceInfo(root, id, value(k))
+              store.cachedServiceIds(root)
+              if store.cachedServiceInfo(store.currentRoot, id).isDefined then k += 1
             // Keep snapshotting until the writer stops, to widen the race.
             while !writerDone.get() do
               val trie = StateTrie.at(backend, store.currentRoot)
@@ -112,7 +112,7 @@ class StateTrieStoreConcurrencySpec extends AnyFlatSpec with Matchers:
       val missing =
         (0 until readerCount).flatMap { r =>
           val base = 1000 + r * idsPerReader
-          (0 until idsPerReader).map(base + _).filter(id => store.cachedServiceInfo(id.toLong).isEmpty)
+          (0 until idsPerReader).map(base + _).filter(id => store.cachedServiceInfo(store.currentRoot, id.toLong).isEmpty)
         }
       withClue(s"lost ${missing.size} concurrently-cached ids, e.g. ${missing.take(8)}: ") {
         missing shouldBe empty

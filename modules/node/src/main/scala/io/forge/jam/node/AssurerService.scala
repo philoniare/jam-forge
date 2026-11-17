@@ -1,5 +1,7 @@
 package io.forge.jam.node
 
+import scala.jdk.CollectionConverters.*
+
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{Hashing, JamBytes, constants}
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Ed25519Signature, Hash, ValidatorIndex}
@@ -26,7 +28,8 @@ final class AssurerService(
     guarantorsFirst: (Hash, List[io.forge.jam.network.PeerConnection]) => List[io.forge.jam.network.PeerConnection] =
       GuarantorIndex.unordered,
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    retryMillis: Long = AssurerService.RetryMillis
 ) extends LazyLogging:
 
   /** Assurances made at the latest import, not yet sent on CE 141. A newer
@@ -44,8 +47,20 @@ final class AssurerService(
   private val latest = new java.util.concurrent.atomic.AtomicReference[ChainHead](null)
   private val worker = threads.single("jam-assurer")
 
-  /** Custody lookups of one head run side by side on these. */
-  private val custodyPool = threads.fixed("jam-assurer-custody", AssurerService.CustodyLookupsAtOnce)
+  private val custodyPool = threads.own("jam-assurer-custody")(factory =>
+    new java.util.concurrent.ThreadPoolExecutor(
+      AssurerService.CustodyLookupsAtOnce,
+      AssurerService.CustodyLookupsAtOnce,
+      0L,
+      java.util.concurrent.TimeUnit.MILLISECONDS,
+      new java.util.concurrent.LinkedBlockingQueue[Runnable](chain.config.coresCount),
+      factory
+    )
+  )
+
+  private val lookups = new java.util.concurrent.ConcurrentHashMap[Hash, java.util.concurrent.CompletableFuture[Unit]]()
+
+  private val failedAt = new java.util.concurrent.ConcurrentHashMap[Hash, java.lang.Long]()
 
   /** Import listener: acquire custody, then assure held cores, off the caller's thread. */
   def onImported(head: ChainHead): Unit =
@@ -79,30 +94,22 @@ final class AssurerService(
     }
     if heldIndexes.isEmpty then return
 
-    // Custody per (core, validator index): local store, else CE 137 pull. The pulls run side by side, so one
-    // unreachable shard does not use up the time before the assurances are due.
-    val peers = distribution.peers
-    val lookups =
+    val units =
       for
         (r, core) <- reports.zipWithIndex
         assignment <- r.toList
         (idx, _) <- heldIndexes
-      yield
-        val root = assignment.report.packageSpec.erasureRoot
-        val shardIndex = DaShards.shardIndexFor(core, idx, chain.config)
-        val held: java.util.concurrent.Future[Boolean] =
-          if shardStore.has(root, shardIndex) then java.util.concurrent.CompletableFuture.completedFuture(true)
-          else custodyPool.submit(() => acquireCustody(root, shardIndex, peers))
-        (core, idx) -> held
+      yield (core, idx) -> (assignment.report.packageSpec.erasureRoot, DaShards.shardIndexFor(core, idx, chain.config))
+    val missing = units.map(_._2).filterNot((root, i) => shardStore.has(root, i)).groupMap(_._1)(_._2)
+    val lookups = lookUp(missing, distribution.peers)
     // An assurance sent after its slot is of no use, so the lookups share one slot's time: a unit not held by then
     // is not assured (its lookup may still finish, for a later head).
     val deadline = System.currentTimeMillis() + chain.config.slotDuration * 1000L
-    val custody: Map[(Int, Int), Boolean] = lookups.map { (k, f) =>
-      val held =
-        try f.get(math.max(0L, deadline - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS)
-        catch case _: java.util.concurrent.TimeoutException => false
-      k -> held
-    }.toMap
+    lookups.foreach { f =>
+      try f.get(math.max(0L, deadline - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS)
+      catch case _: java.util.concurrent.TimeoutException => ()
+    }
+    val custody: Map[(Int, Int), Boolean] = units.map { case (k, (root, i)) => k -> shardStore.has(root, i) }.toMap
 
     val batch = List.newBuilder[AssuranceExtrinsic]
     var produced = 0
@@ -138,6 +145,38 @@ final class AssurerService(
           s"at anchor ${head.hash.toHex.take(18)}"
       )
 
+  private[node] def lookupsQueuedOrRunning: Int = lookups.size
+
+  private[node] def lookUp(
+      missing: Map[Hash, Seq[Int]],
+      peers: List[io.forge.jam.network.PeerConnection]
+  ): Seq[java.util.concurrent.Future[?]] =
+    failedAt.keySet.retainAll(missing.keySet.asJava)
+    val now = System.currentTimeMillis()
+    missing.toSeq.flatMap { (root, indexes) =>
+      Option(lookups.get(root)).orElse {
+        if Option(failedAt.get(root)).exists(now - _ < retryMillis) then None
+        else
+          val started = new java.util.concurrent.CompletableFuture[Unit]()
+          if lookups.putIfAbsent(root, started) != null then Option(lookups.get(root))
+          else
+            try
+              custodyPool.execute { () =>
+                try
+                  val held = indexes.map(i => acquireCustody(root, i, peers)).forall(identity)
+                  if held then failedAt.remove(root) else failedAt.put(root, System.currentTimeMillis())
+                finally
+                  lookups.remove(root)
+                  started.complete(()): Unit
+              }
+            catch
+              case _: java.util.concurrent.RejectedExecutionException => // shutting down, or reports gone but still looked up fill it
+                lookups.remove(root)
+                started.complete(())
+            Some(started)
+      }
+    }
+
   /** True when verified shards for (erasure-root, shard index) are in
     * custody, pulling them from peers via CE 137 when absent.
     */
@@ -156,8 +195,10 @@ final class AssurerService(
 
 object AssurerService:
 
-  /** Custody lookups (one per pending core and held key) run at once. */
+  /** Custody lookups (one per pending report) run at once. */
   val CustodyLookupsAtOnce: Int = 8
+
+  val RetryMillis: Long = 4000
 
   /** How long one peer is waited on for a custody unit: under a slot, so the assurance can still be sent for it. */
   val CustodyTimeoutMillis: Long = 4000

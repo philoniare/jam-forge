@@ -23,7 +23,8 @@ final class ShardService(
     work: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
-    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    reconstructMillis: Long = ShardService.ReconstructMillis
 ) extends LazyLogging:
   import ShardService.*
 
@@ -312,7 +313,9 @@ final class ShardService(
         case None    => Right(rebuilt.map(_.toOption.get))
 
   /** Fetch enough bundle shards (local store first, then CE 138 from `peers`)
-    * to reconstruct the audit bundle for a report.
+    * to reconstruct the audit bundle for a report. Peers are asked for `reconstructMillis` at most: with too few
+    * shards by then the result is the same as with too few peers answering ([[ShardService.TooFewShards]]), an audit
+    * to retry later, not an invalid report.
     */
   def reconstructBundle(
       erasureRoot: Hash,
@@ -333,41 +336,44 @@ final class ShardService(
     // Fetched audit shards are not stored: they lack the segment shards a
     // CE 137 custody unit carries.
     val peerList = peers.filter(_.isOpen).toList
+    val deadline = System.currentTimeMillis() + reconstructMillis
+    def left: Long = deadline - System.currentTimeMillis()
     if collected.size < needed && peerList.nonEmpty then
       val fetched = new ConcurrentHashMap[Int, Array[Byte]]()
       collected.foreach((i, b) => fetched.put(i, b))
       def enough: Boolean = fetched.size >= needed
+      def fetch(conn: PeerConnection, idx: Int): Unit =
+        if left > 0 then fetchAuditShard(conn, erasureRoot, idx, math.min(AuditShardTimeoutMillis, left)).foreach(fetched.putIfAbsent(idx, _))
       def onAllPeers(work: PeerConnection => Unit): Unit =
         val done = peerList.map { conn =>
-          try CompletableFuture.runAsync(() => if !enough then work(conn), fetchPool)
+          try CompletableFuture.runAsync(() => if !enough && left > 0 then work(conn), fetchPool)
           catch
             case _: java.util.concurrent.RejectedExecutionException => CompletableFuture.completedFuture[Void](null)
         }
         done.foreach { f =>
-          try f.get()
+          try f.get(math.max(0L, left), TimeUnit.MILLISECONDS)
           catch case _: Exception => ()
         }
       // First the shards each peer is assigned, every peer at once: that is where they are when all is well.
       onAllPeers { conn =>
         holds(conn).distinct.foreach { idx =>
-          if !enough && idx >= 0 && idx < config.validatorCount && !fetched.containsKey(idx) then
-            fetchAuditShard(conn, erasureRoot, idx).foreach(fetched.putIfAbsent(idx, _))
+          if !enough && idx >= 0 && idx < config.validatorCount && !fetched.containsKey(idx) then fetch(conn, idx)
         }
       }
       // Then every still-missing index on every peer, peers in parallel: a peer may hold shards we cannot map to it
       // (a node running several validators, or a validator set that has changed since the report).
-      if !enough then
+      if !enough && left > 0 then
         onAllPeers { conn =>
           var idx = 0
-          while !enough && idx < config.validatorCount do
-            if !fetched.containsKey(idx) then
-              fetchAuditShard(conn, erasureRoot, idx).foreach(fetched.putIfAbsent(idx, _))
+          while !enough && left > 0 && idx < config.validatorCount do
+            if !fetched.containsKey(idx) then fetch(conn, idx)
             idx += 1
         }
       fetched.forEach((i, b) => collected(i) = b)
 
     if collected.size < needed then
-      Left(s"${ShardService.TooFewShards}: only ${collected.size}/$needed recoverable")
+      val late = if left <= 0 then s" within ${reconstructMillis} ms" else ""
+      Left(s"${ShardService.TooFewShards}: only ${collected.size}/$needed recoverable$late")
     else DaShards.reconstructBundle(bundleLength, collected.toSeq, config)
 
   // =========================================================================
@@ -398,6 +404,10 @@ object ShardService:
 
   /** Prefix of the error when too few peers answered to rebuild a bundle, as opposed to a bundle that fails to decode. */
   val TooFewShards = "too few bundle shards"
+
+  val ReconstructMillis: Long = 60000
+
+  val AuditShardTimeoutMillis: Long = 10000
 
   /** Most segment shards one CE 139/140 stream may request: 2·W_M with
     * W_M = 3072 (JAMNP-S CE 139/140, GP 0.8.0 W_M).

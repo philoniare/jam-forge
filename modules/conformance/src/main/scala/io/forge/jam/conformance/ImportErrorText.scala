@@ -40,6 +40,7 @@ object ImportErrorText:
     case PipelineError.InvalidOffendersMark => "bad offenders mark"
     case PipelineError.BadSignatureBatch   => "bad signature batch"
     case PipelineError.HeaderErr(code)     => s"$code"
+    case PipelineError.NewServiceIdConflict(id) => s"accumulation error: service $id created twice"
 
   private def safrole(code: SafroleErrorCode): String = code match
     case SafroleErrorCode.BadSlot          => "bad slot"

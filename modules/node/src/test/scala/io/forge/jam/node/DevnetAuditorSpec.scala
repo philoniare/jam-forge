@@ -260,10 +260,10 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
             later,
             AuditSelection.encodeLaterEvidence(Seq(s1 -> noShows))
           )
-        // No-shows that are only named: an unsigned announcement, validator 3's own under their indices, and
-        // tranche-1 announcements where tranche-0 ones are needed.
+        // No-shows that are only named: an unsigned announcement, and tranche-1 announcements where tranche-0 ones
+        // are needed. (Only three announcements of a validator for a block and tranche are verified, so these two
+        // leave room for the genuine one below.)
         laterWith(Seq(2, 4, 5).map(NoShow(_, Announcement(items, new Array[Byte](64)))))
-        laterWith(Seq(2, 4, 5).map(NoShow(_, announcement(3, 0))))
         laterWith(Seq(2, 4, 5).map(v => NoShow(v, announcement(v, 1))))
         auditorA.judgesOf(reportHash) // the auditor's thread has handled all three
         auditorA.announcersOf(reportHash, 1) shouldBe Set.empty

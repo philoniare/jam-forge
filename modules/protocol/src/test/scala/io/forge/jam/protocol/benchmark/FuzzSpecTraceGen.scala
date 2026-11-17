@@ -21,7 +21,10 @@ import java.nio.file.{Files, Paths}
  * compare.
  *
  * Usage: sbt "protocol/Test/runMain io.forge.jam.protocol.benchmark.FuzzSpecTraceGen --out=<dir> [--spec=fuzz]
- * [--blocks=200] [--staging=N] [--genesis=fuzzy] [--seed=42]"
+ * [--blocks=200] [--staging=N] [--genesis=fuzzy] [--seed=42] [--busy-cores=N]"
+ *
+ * `--busy-cores=N` (default 2) guarantees and then assures a report on each of the first N cores, block after
+ * block: with N = 341 at the full spec, 341 reports become available in one block.
  *
  * `--staging=N` puts only the first N validators in the genesis staging set (iota), as if a `designate` had
  * resized the set: N keys enter gamma_P at the first epoch change and kappa at the second.
@@ -57,7 +60,7 @@ object FuzzSpecTraceGen:
     val store = importer.store
     store.bootstrap(genesisState.keyvals.map(kv => (kv.key, kv.value)))
     val generator = new BlockGenerator(config, keys, store, seed = opts.get("seed").map(_.toLong).getOrElse(42L),
-      genesisHeaderHash = Some(genesisHash))
+      genesisHeaderHash = Some(genesisHash), busyCores = opts.get("busy-cores").map(_.toInt).getOrElse(2))
     val stepCodec = TraceStep.codec(config.epochLength, config.coresCount)
 
     var root = genesisState.stateRoot

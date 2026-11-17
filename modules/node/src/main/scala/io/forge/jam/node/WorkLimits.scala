@@ -42,24 +42,28 @@ final class WorkGate(name: String, maxQueued: Int, maxBytes: Long = Long.MaxValu
     * per source).
     */
   def tryExecute(exec: Executor, bytes: Long = 0L, source: AnyRef = null)(task: => Unit): Boolean =
+    submit(exec, bytes, source)(task) == WorkGate.Admission.Admitted
+
+  def submit(exec: Executor, bytes: Long = 0L, source: AnyRef = null)(task: => Unit): WorkGate.Admission =
     val n = waiting.incrementAndGet()
     val b = waitingBytes.addAndGet(bytes)
     val fromSource = if source == null then 0 else bySource.merge(source, 1, (a, c) => a + c).intValue
-    if fromSource > maxPerSource || (n > 1 && (n > maxQueued || b > maxBytes)) then
+    val full = n > 1 && (n > maxQueued || b > maxBytes)
+    if fromSource > maxPerSource || full then
       leave(bytes, source)
       refuse()
-      false
+      if fromSource > maxPerSource then WorkGate.Admission.SourceFull else WorkGate.Admission.Full
     else
       try
         exec.execute { () =>
           leave(bytes, source)
           task
         }
-        true
+        WorkGate.Admission.Admitted
       catch
         case _: RejectedExecutionException =>
           leave(bytes, source)
-          false
+          WorkGate.Admission.Stopped
 
   private def leave(bytes: Long, source: AnyRef): Unit =
     waiting.decrementAndGet()
@@ -72,6 +76,13 @@ final class WorkGate(name: String, maxQueued: Int, maxBytes: Long = Long.MaxValu
     // Powers of two: a flood logs a handful of lines, not one per message.
     if (total & (total - 1)) == 0 then
       logger.warn(s"$name: queue full ($maxQueued tasks / $maxBytes bytes); $total submission(s) refused so far")
+
+object WorkGate:
+  enum Admission:
+    case Admitted
+    case SourceFull
+    case Full
+    case Stopped
 
 object WorkLimits extends LazyLogging:
 

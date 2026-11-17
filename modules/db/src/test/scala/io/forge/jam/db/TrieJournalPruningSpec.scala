@@ -286,3 +286,107 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
+  test("a block saved twice is pruned as if saved once: a value another key still uses stays") {
+    val dir = Files.createTempDirectory("jam-trie-journal")
+    val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    try
+      val shared = JamBytes(Array.fill[Byte](80)(7)) // a raw value (over 32 bytes), held by two keys
+      val other = JamBytes(Array.fill[Byte](80)(9))
+      def save(name: String, height: Long, parent: Hash, updates: Seq[(JamBytes, Option[JamBytes])]): Hash =
+        backend.withJournal(label(name), height) {
+          val t = StateTrie.at(backend, parent)
+          t.update(updates)
+          t.save()
+          t.rootHash
+        }
+      val a = save("a", 1L, Hash.zero, Seq(key(1) -> Some(shared)))
+      val e = save("e", 2L, a, Seq(key(3) -> Some(shared)))
+      val b = save("b", 3L, e, Seq(key(1) -> Some(other)))
+      save("b", 3L, e, Seq(key(1) -> Some(other))) shouldBe b
+      backend.pruneJournal(label("b"), 3L)
+      val kept = StateTrie.at(backend, b)
+      kept.read(key(1)) shouldBe Some(other)
+      kept.read(key(3)) shouldBe Some(shared)
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("saving a block a second time leaves its journal as the first save wrote it") {
+    val dir = Files.createTempDirectory("jam-trie-journal")
+    val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+    try
+      val rng = new Random(5)
+      val keys = 60
+      val genesis = step(backend, State(label("g"), 0L, Hash.zero, Map.empty), "g", 0L, new Random(1), keys)
+      val a = step(backend, genesis, "a", 1L, rng, keys)
+      val seed = rng.nextLong()
+      val b = step(backend, a, "b", 2L, new Random(seed), keys)
+      val first = backend.journalOf(b.label)
+      first should not be empty
+      first.distinct shouldBe first
+      val c = step(backend, b, "c", 3L, rng, keys)
+      step(backend, a, "b", 2L, new Random(seed), keys).root shouldBe b.root
+      backend.journalOf(b.label) shouldBe first
+      step(backend, a, "b", 2L, new Random(seed), keys).root shouldBe b.root
+      backend.journalOf(b.label) shouldBe first
+      backend.pruneJournal(b.label, 2L)
+      backend.pruneJournal(c.label, 3L)
+      check(backend, c, keys, "after saving b three times")
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("pruned histories keep every state intact when some blocks are saved twice, forks included") {
+    val rng = new Random(13)
+    for round <- 1 to 4 do
+      val dir = Files.createTempDirectory("jam-trie-journal")
+      val backend = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20))
+      try
+        val keys = 20 + rng.nextInt(40)
+        val genesisModel: Model = (0 until keys / 2).map(i => key(i) -> value(rng)).toMap
+        val genesisRoot = backend.withJournal(label("genesis"), 0L) {
+          val t = StateTrie.at(backend, Hash.zero)
+          t.update(genesisModel.toSeq.map((k, v) => k -> Some(v)))
+          t.save()
+          t.rootHash
+        }
+        final case class Saved(parent: State, name: String, height: Long, seed: Long, state: State)
+        val saves = mutable.ArrayBuffer[Saved]()
+        var replays = 0
+        def save(parent: State, name: String, height: Long): State =
+          val seed = rng.nextLong()
+          val s = step(backend, parent, name, height, new Random(seed), keys)
+          saves += Saved(parent, name, height, seed, s)
+          s
+        val chain = mutable.ArrayBuffer(State(label("genesis"), 0L, genesisRoot, genesisModel))
+        val forksAt = mutable.HashMap.empty[Long, List[State]]
+        val length = 40
+        val window = 5
+        for h <- 1 to length do
+          chain += save(chain.last, s"r$round-c$h", h.toLong)
+          if rng.nextInt(4) == 0 then
+            val base = chain(math.max(0, chain.size - 1 - rng.nextInt(3)))
+            var tip = base
+            val branch = (1 to 1 + rng.nextInt(3)).map { d =>
+              tip = save(tip, s"r$round-f$h-$d", base.height + d)
+              tip
+            }.toList
+            forksAt(base.height) = forksAt.getOrElse(base.height, Nil) ++ branch
+          val recent = saves.filter(_.parent.height >= h - window + 2)
+          if recent.nonEmpty && rng.nextInt(2) == 0 then
+            val again = recent(rng.nextInt(recent.size))
+            step(backend, again.parent, again.name, again.height, new Random(again.seed), keys).root shouldBe again.state.root
+            replays += 1
+          val floor = h - window
+          if floor >= 1 then
+            forksAt.remove(floor.toLong - 1).foreach(_.foreach(s => backend.dropJournal(s.label)))
+            backend.pruneJournal(chain(floor).label, floor.toLong)
+            chain.drop(floor).foreach(check(backend, _, keys, s"round $round canonical"))
+            forksAt.foreach((base, states) => if base >= floor then states.foreach(check(backend, _, keys, s"round $round fork")))
+        replays should be > 5
+      finally
+        backend.close()
+        cleanup(dir)
+  }

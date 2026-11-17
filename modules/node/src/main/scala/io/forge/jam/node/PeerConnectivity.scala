@@ -30,6 +30,7 @@ private[node] final class PeerConnectivity(
     @volatile var backoffMillis: Long = nodeConfig.redialMillis
     @volatile var lastFailure: String = ""
     @volatile var inFlight: Boolean = false
+    @volatile var learnedKey: Option[Array[Byte]] = None
 
   private val dialTargets = new java.util.concurrent.CopyOnWriteArrayList[DialTarget]()
 
@@ -94,6 +95,24 @@ private[node] final class PeerConnectivity(
   def appliedSlotOf(epoch: Long): Option[Long] = connectivity.filter(_.epoch == epoch).map(_.appliedSlot)
 
   def isValidator(key: Array[Byte]): Boolean = connectivity.exists(_.validators.contains(JamBytes(key)))
+
+  def isConfigured(key: Array[Byte]): Boolean =
+    dialTargets.stream().anyMatch(t => t.key.orElse(t.learnedKey).exists(java.util.Arrays.equals(_, key)))
+
+  def inHeadValidatorSets(key: Array[Byte]): Boolean =
+    val best = chain.best.hash
+    val (at, keys) = headValidators
+    val current =
+      if at == best then keys
+      else
+        val v = chain.stateView().validators
+        val read = (v.previous ++ v.current ++ v.nextEpoch).map(vk => JamBytes(vk.ed25519.bytes.toArray)).toSet
+        headValidators = (best, read)
+        read
+    current.contains(JamBytes(key))
+
+  @volatile private var headValidators: (io.forge.jam.core.primitives.Hash, Set[JamBytes]) =
+    (io.forge.jam.core.primitives.Hash.zero, Set.empty)
 
   def currentValidatorConnections: List[PeerConnection] =
     connectivity.map(v => connectionsTo(v.current)).getOrElse(Nil)
@@ -265,6 +284,7 @@ private[node] final class PeerConnectivity(
     val where = s"${t.address.getHostString}:${t.address.getPort}"
     try
       t.connection = connectPeer(t.address, t.key)
+      if t.key.isEmpty then t.learnedKey = Some(t.connection.peerKey)
       t.backoffMillis = nodeConfig.redialMillis
       t.lastFailure = ""
       logger.info(s"${if initial then "connected" else "reconnected"} peer $where")

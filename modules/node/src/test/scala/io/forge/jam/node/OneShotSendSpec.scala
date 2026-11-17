@@ -81,6 +81,43 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
     finally egress.shutdownNow()
   }
 
+  test("submitEach sends every message on its own stream as one queue entry, past the per-peer cap, and stops at a failure") {
+    val egress = singleThread("jam-egress")
+    try
+      val streams = new AtomicInteger()
+      val received = new ConcurrentLinkedQueue[Int]()
+      val record: io.forge.jam.network.PeerStreamHandler = (_, stream) =>
+        streams.incrementAndGet()
+        stream.onMessage(m => received.add(m.length): Unit)
+      val (toPeer, _) = io.forge.jam.network.Loopback.pair(Array.fill[Byte](32)(1), Array.fill[Byte](32)(2), _ => None, _ => Some(record))
+      val queuedBefore = new AtomicInteger()
+      val counting = new java.util.concurrent.AbstractExecutorService:
+        def execute(r: Runnable): Unit = { queuedBefore.incrementAndGet(); egress.execute(r) }
+        def shutdown(): Unit = ()
+        def shutdownNow(): java.util.List[Runnable] = java.util.List.of()
+        def isShutdown: Boolean = false
+        def isTerminated: Boolean = false
+        def awaitTermination(t: Long, u: TimeUnit): Boolean = true
+      val count = 3 * OneShotSend.MaxWaitingPerPeer
+      val failures = new ConcurrentLinkedQueue[String]()
+      val messages = (0 until count).map(i => Array[Byte](i.toByte, (i >> 8).toByte))
+      OneShotSend.submitEach(counting, toPeer, () => toPeer.openStream(1.toByte), messages, failures.add(_))
+      queuedBefore.get shouldBe 1
+      eventually("every message to arrive")(received.size == count)
+      streams.get shouldBe count
+      failures shouldBe empty
+      OneShotSend.waitingOn(toPeer) shouldBe 0
+
+      val opens = new AtomicInteger()
+      val refused = new CompletableFuture[MessageStream]()
+      refused.completeExceptionally(new RuntimeException("refused"))
+      OneShotSend.submitEach(egress, toPeer, () => { opens.incrementAndGet(); refused }, messages, failures.add(_))
+      eventually("the failure to be reported")(failures.size == 2)
+      opens.get shouldBe 1
+      failures.peek() should include("refused")
+    finally egress.shutdownNow()
+  }
+
   test("inbound work runs off the caller's thread and is refused when too much waits") {
     val inbound = InboundWork.pooled()
     try

@@ -92,8 +92,10 @@ final class RocksDbTrieBackend private (
   /** Nodes journalled for block `label`, if any. */
   private[db] def journalOf(label: Hash): List[Hash] =
     val b = db.get(journalCf, key(label))
-    if b == null then Nil
-    else (0 until b.length / 32).map(i => Hash.wrap(java.util.Arrays.copyOfRange(b, i * 32, i * 32 + 32))).toList
+    if b == null then Nil else decodeJournal(b)
+
+  private def decodeJournal(b: Array[Byte]): List[Hash] =
+    (0 until b.length / 32).map(i => Hash.wrap(java.util.Arrays.copyOfRange(b, i * 32, i * 32 + 32))).toList
 
   /** Trie nodes and raw values on disk, by a full scan: for tests and diagnostics. */
   def storedCounts: (Long, Long) =
@@ -139,7 +141,7 @@ final class RocksDbTrieBackend private (
     * lock, when a save came in between).
     */
   def pruneJournal(label: Hash, height: Long): (Int, Int) =
-    val journalled = journalOf(label).toIndexedSeq
+    val journalled = journalOf(label).distinct.toIndexedSeq
     if journalled.isEmpty then
       val batch = new WriteBatch()
       try
@@ -262,7 +264,7 @@ final class RocksDbTrieBackend private (
     val label = journalLabel
     // Outside a journal the height is unknown: such nodes are marked as added "at the end of time" and never pruned.
     val born = encodeBE8(if label == null then Long.MaxValue else journalHeight)
-    val replaced = new java.io.ByteArrayOutputStream()
+    val replaced = mutable.LinkedHashSet[Hash]()
     val added = mutable.ArrayBuffer[Hash]()
     try
       ops.foreach {
@@ -277,7 +279,7 @@ final class RocksDbTrieBackend private (
             if d < 0 then deadNodeCandidates.add(h)
           if d > 0 then
             if label == null then batch.merge(nodeBornCf, key(h), born) else added += h
-          else if d < 0 && label != null then replaced.write(key(h))
+          else if d < 0 && label != null then replaced += h
         case BackendOp.RawValueRefDelta(h, d) =>
           batch.merge(valueRefsCf, key(h), encodeLE8(d))
           if d < 0 && tracksGarbage then deadValueCandidates.add(h)
@@ -295,9 +297,15 @@ final class RocksDbTrieBackend private (
             .parallel()
             .forEach(c => (c * chunk until math.min(added.size, (c + 1) * chunk)).foreach(ask))
         added.indices.foreach(i => if stored(i) then batch.merge(nodeBornCf, key(added(i)), born))
-        if label != null && replaced.size > 0 then
+        if label != null && replaced.nonEmpty then
           val earlier = db.get(journalCf, key(label))
-          batch.put(journalCf, key(label), if earlier == null then replaced.toByteArray else earlier ++ replaced.toByteArray)
+          val have = if earlier == null then Set.empty[Hash] else decodeJournal(earlier).toSet
+          val fresh = replaced.iterator.filterNot(have.contains).toIndexedSeq
+          if fresh.nonEmpty then
+            val out = new java.io.ByteArrayOutputStream((if earlier == null then 0 else earlier.length) + 32 * fresh.size)
+            if earlier != null then out.write(earlier)
+            fresh.foreach(h => out.write(key(h)))
+            batch.put(journalCf, key(label), out.toByteArray)
         db.write(writeOptions, batch)
         written.foreach(n => nodeCache.put(n.hash, n))
         saves += 1

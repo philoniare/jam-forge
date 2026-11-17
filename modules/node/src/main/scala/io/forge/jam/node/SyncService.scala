@@ -188,7 +188,8 @@ final class SyncService(
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
-    observer: SyncService.ImportObserver = SyncService.ImportObserver.none
+    observer: SyncService.ImportObserver = SyncService.ImportObserver.none,
+    scores: PeerScores = new PeerScores()
 ) extends LazyLogging:
   import SyncCodec.*
 
@@ -261,6 +262,8 @@ final class SyncService(
   /** Fetch block `hash` and its missing ancestors from `conn`, once at a time per block. */
   def fetchBlock(conn: PeerConnection, hash: Hash): Unit =
     if fetching.add(hash) then requestAndImport(conn, hash, onDone = () => fetching.remove(hash))
+
+  private[node] def fetchingBlock(hash: Hash): Boolean = fetching.contains(hash)
 
   /** Drop what is held for a connection that closed. Its UP 0 stream's close listener normally does this; a message
     * handled while the stream closes can put an entry back, which nothing else would remove.
@@ -410,7 +413,7 @@ final class SyncService(
       val wanted = if parentKnown then 1 else blocksWanted(Some(slot))
       if wanted > 0 then
         logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting $wanted block(s)")
-        requestAndImport(conn, headerHash, wanted)
+        requestAndImport(conn, headerHash, wanted, announced = true)
 
   private def onPeerLeaves(conn: PeerConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
     leaves.maxByOption(_.slot).foreach(notePeerBest(conn, _))
@@ -490,12 +493,13 @@ final class SyncService(
       from: Hash,
       maxBlocks: Int = SyncService.MaxBlocksPerRequest,
       onDone: () => Unit = () => (),
-      ascending: Boolean = false
+      ascending: Boolean = false,
+      announced: Boolean = false
   ): Unit =
     if held then
       onDone()
       return
-    val request = new FetchQueue.Request(conn, from, maxBlocks, onDone, ascending)
+    val request = new FetchQueue.Request(conn, from, maxBlocks, onDone, ascending, announced)
     val dropped = fetches.offer(request)
     dropped.foreach(_.onDone())
     if dropped.forall(_ ne request) then schedulePump()
@@ -506,7 +510,9 @@ final class SyncService(
     maxPerPeer = SyncService.MaxPendingFetchesPerPeer,
     maxPending = SyncService.MaxPendingFetches,
     maxAlternates = SyncService.MaxAlternatePeers,
-    isOpen = _.isOpen
+    isOpen = _.isOpen,
+    samePeer = (a, b) => (a eq b) || java.util.Arrays.equals(a.peerKey, b.peerKey),
+    order = requests => scores.leastFaultedFirst(requests)(_.peer.peerKey)
   )
   private val pumpScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -541,7 +547,7 @@ final class SyncService(
 
   private def fetchThenImport(request: FetchQueue.Request[PeerConnection]): Unit =
     val answer =
-      try exchange(request.peer, request.from, request.maxBlocks, request.ascending)
+      try exchange(request.peer, request.from, request.maxBlocks, request.ascending, request.announced)
       catch
         case e: Exception =>
           logger.warn(s"block sync failed: ${e.getMessage}")
@@ -578,7 +584,8 @@ final class SyncService(
       conn: PeerConnection,
       from: Hash,
       maxBlocks: Int,
-      ascending: Boolean
+      ascending: Boolean,
+      announced: Boolean = false
   ): Option[List[Array[Byte]]] =
     // The response is one message; a peer that keeps sending is not buffered without limit.
     StreamRequest.exchange(
@@ -594,14 +601,18 @@ final class SyncService(
         if failure == StreamRequest.Failure.TimedOut then misbehaved(conn, Offence.Unanswered)
         None
       case Right(messages) =>
-        Some(messages.flatMap { m =>
+        var malformed = false
+        val blocks = messages.flatMap { m =>
           chain.splitBlocks(m) match
             case Right(bs) => bs
             case Left(err) =>
               logger.warn(s"CE128 response undecodable: $err")
               misbehaved(conn, Offence.Malformed)
+              malformed = true
               Nil
-        })
+        }
+        if announced && blocks.isEmpty && !malformed then misbehaved(conn, Offence.Unanswered)
+        Some(blocks)
 
   private def importFetched(conn: PeerConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =
     // Oldest first; skip blocks until one extends our best head.
@@ -621,8 +632,10 @@ final class SyncService(
           }
         case Left(err) =>
           if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
-          if err.isInstanceOf[ChainError.InvalidBlock] || err == ChainError.PreviouslyInvalid then
-            misbehaved(conn, Offence.InvalidBlock)
+          err match
+            case _: ChainError.InvalidBlock | ChainError.PreviouslyInvalid | ChainError.BodyMismatch =>
+              misbehaved(conn, Offence.InvalidBlock)
+            case _ => ()
           if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
           logger.debug(s"sync import skipped: $err")
     }

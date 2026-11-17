@@ -11,7 +11,7 @@ enum Offence(val points: Int):
   case Unanswered extends Offence(5)
 
 final class PeerScores(
-    isValidator: Array[Byte] => Boolean = _ => false,
+    exempt: Array[Byte] => Boolean = _ => false,
     onBan: Array[Byte] => Unit = _ => (),
     clock: () => Long = () => System.currentTimeMillis(),
     maxPeers: Int = PeerScores.MaxPeers
@@ -39,7 +39,7 @@ final class PeerScores(
           if old.getValue.bannedUntil <= now && old.getKey != k then
             it.remove()
             dropped = true
-      if e.points >= BanAt && e.bannedUntil <= now && !isValidator(key) then
+      if e.points >= BanAt && e.bannedUntil <= now && !exempt(key) then
         e.bannedUntil = now + BanMillis
         e.points = 0 // the ban is the answer to these; it starts clean afterwards
         true
@@ -50,9 +50,8 @@ final class PeerScores(
       logger.warn(s"peer ${JamNode.hex(key).take(16)} banned for ${BanMillis / 60000} min after: $offence")
       onBan(key)
 
-  def banned(key: Array[Byte]): Boolean = synchronized {
-    Option(entries.get(JamBytes(key))).exists(_.bannedUntil > clock())
-  }
+  def banned(key: Array[Byte]): Boolean =
+    synchronized(Option(entries.get(JamBytes(key))).exists(_.bannedUntil > clock())) && !exempt(key)
 
   def points(key: Array[Byte]): Double = synchronized {
     Option(entries.get(JamBytes(key))).fold(0.0)(decayed(_, clock()))

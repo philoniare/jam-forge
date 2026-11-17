@@ -34,7 +34,8 @@ class BlockGenerator(
   store: StateTrieStore,
   seed: Long = 42L,
   /** Hash of the genesis header, the first block's parent (default: the last recent-history entry). */
-  genesisHeaderHash: Option[Hash] = None
+  genesisHeaderHash: Option[Hash] = None,
+  busyCores: Int = 2
 ):
 
   private var lastHeaderHash: Option[Hash] = genesisHeaderHash
@@ -147,6 +148,18 @@ class BlockGenerator(
   ): (List[GuaranteeExtrinsic], List[AssuranceExtrinsic]) =
     val reports = view.cores.reports
     val recentHistory = view.beta.history
+
+    if busyCores > 2 then
+      val busy = math.min(busyCores, config.coresCount)
+      val pending = (0 until busy).filter(c => reports.lift(c).flatten.isDefined)
+      if pending.nonEmpty then
+        val bitfield = new Array[Byte]((config.coresCount + 7) / 8)
+        pending.foreach(c => bitfield(c / 8) = (bitfield(c / 8) | (1 << (c % 8))).toByte)
+        val parentHash = lastHeaderHash.getOrElse(recentHistory.lastOption.map(_.headerHash).getOrElse(Hash.zero))
+        return (List.empty, buildAssurances(parentHash, bitfield, view.validators.current.size))
+      else if recentHistory.size >= 3 then
+        return ((0 until busy).flatMap(c => buildGuarantee(view, slot, preTau, coreIndex = c)).toList, List.empty)
+      else return (List.empty, List.empty)
 
     val core0Pending = reports.lift(0).flatten.isDefined
     val core1Pending = reports.lift(1).flatten.isDefined
@@ -263,8 +276,9 @@ class BlockGenerator(
         stateRoot = anchorEntry.stateRoot,
         beefyRoot = anchorEntry.beefyRoot,
         lookupAnchor = anchorEntry.headerHash,
-        lookupAnchorSlot = Timeslot(UInt(preTau.toInt)),
-        lookupAnchorStateRoot = Hash.zero,
+        lookupAnchorSlot =
+          if busyCores > 2 then Timeslot(anchorEntry.slot.toInt) else Timeslot(UInt(preTau.toInt)),
+        lookupAnchorStateRoot = if busyCores > 2 then anchorEntry.stateRoot else Hash.zero,
         prerequisites = prerequisites
       ),
       coreIndex = CoreIndex(coreIndex),
