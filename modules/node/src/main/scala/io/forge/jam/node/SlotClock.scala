@@ -37,6 +37,7 @@ final class SlotClock(
   /** As above, with the ticking thread made by `threads`. */
   def scheduleSlotTicks(threads: NodeThreads)(onSlot: Long => Unit): AutoCloseable =
     val executor: ScheduledExecutorService = threads.scheduled("jam-slot-clock")
+    val tick = new Periodic("slot tick")
 
     def scheduleNext(): Unit =
       val next = currentSlot + 1
@@ -44,7 +45,7 @@ final class SlotClock(
         executor.schedule(
           new Runnable {
             override def run(): Unit =
-              try onSlot(next)
+              try tick.run(onSlot(next))
               finally scheduleNext()
           },
           millisUntilSlot(next),

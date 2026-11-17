@@ -64,10 +64,22 @@ final class StateHistoricalLookup(chain: ChainReader, anchorStateRoot: Option[Ha
       else None
     }
 
+  @volatile private var lost = false
+
+  def anchorLost: Boolean = lost
+
+  def unlessLost[E, A](computed: Either[E, A]): Either[E | String, A] =
+    computed.flatMap(c => if lost then Left("lookup anchor state not held") else Right(c))
+
   private def readRaw(stateKey: JamBytes): Option[JamBytes] =
     anchorState match
-      case Some(trie) => trie.read(stateKey)
-      case None       => chain.readRawState(stateKey)
+      case Some(trie) =>
+        try trie.read(stateKey)
+        catch
+          case _: io.forge.jam.core.trie.MissingTrieNodeException =>
+            lost = true
+            None
+      case None => chain.readRawState(stateKey)
 
 object StateHistoricalLookup:
 
@@ -715,7 +727,7 @@ final class GuarantorService(
       segmentRootLookup: Map[Hash, Hash],
       lookup: StateHistoricalLookup
   ): Unit =
-    computeReport.compute(
+    lookup.unlessLost(computeReport.compute(
       workPackage = wp,
       coreIndex = coreIndex,
       segmentRootLookup = segmentRootLookup,
@@ -723,7 +735,7 @@ final class GuarantorService(
       extrinsicData = extrinsicData,
       justifications = justifications,
       accounts = lookup
-    ).map(tamper) match
+    )).map(tamper) match
       case Left(err) =>
         logger.warn(s"work package refused: $err")
       case Right(computed) =>
@@ -892,15 +904,17 @@ final class GuarantorService(
               bundle.importSegments,
               bundle.justifications
             )
-            computed <- computeReport
-              .compute(
-                workPackage = bundle.workPackage,
-                coreIndex = coreIndex,
-                segmentRootLookup = lookup,
-                importSegments = bundle.importSegments,
-                extrinsicData = bundle.extrinsicData,
-                justifications = bundle.justifications,
-                accounts = anchored
+            computed <- anchored
+              .unlessLost(
+                computeReport.compute(
+                  workPackage = bundle.workPackage,
+                  coreIndex = coreIndex,
+                  segmentRootLookup = lookup,
+                  importSegments = bundle.importSegments,
+                  extrinsicData = bundle.extrinsicData,
+                  justifications = bundle.justifications,
+                  accounts = anchored
+                )
               )
               .map(tamper)
               .left

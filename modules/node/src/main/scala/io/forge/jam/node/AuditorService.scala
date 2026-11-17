@@ -42,7 +42,8 @@ final class AuditorService(
       GuarantorIndex.unordered,
     misbehaved: (Array[Byte], Offence) => Unit = (_, _) => (),
     /** Owner of this service's threads: the node's, or its own when made alone. */
-    threads: NodeThreads = new NodeThreads
+    threads: NodeThreads = new NodeThreads,
+    vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte] = BandersnatchWrapper.ietfVrfSign
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -86,6 +87,9 @@ final class AuditorService(
 
     var tranche0Done: Set[Int] = Set.empty
     var lastTranche: Int = -1
+
+    val laterSignatures = mutable.Map.empty[(Int, Hash), Array[Byte]]
+    var laterSignedFor: Int = -1
     def available: Seq[(Int, WorkReport, Hash)] =
       q.indices.flatMap(c => q(c).zip(reportHashes(c)).map((w, h) => (c, w, h)))
 
@@ -136,7 +140,7 @@ final class AuditorService(
   private val announcementCounts = new ConcurrentHashMap[Hash, java.util.Set[Integer]]()
   @volatile private var disregard: Hash => Unit = _ => ()
 
-  exec.scheduleWithFixedDelay(() => guarded(tick()), tickMillis, tickMillis, TimeUnit.MILLISECONDS)
+  exec.scheduleWithFixedDelay(new Periodic("audit tick")(tick()), tickMillis, tickMillis, TimeUnit.MILLISECONDS)
 
   def verdictFor(reportHash: Hash): Option[Boolean] =
     Option(verdicts.get(reportHash)).map(_.booleanValue)
@@ -285,7 +289,7 @@ final class AuditorService(
     t.validators.zipWithIndex.flatMap((k, i) => byPublic.get(Ed25519PublicKey(k)).map(i -> _))
 
   private def initialTranche(t: Tracked, v: Int, keys: ValidatorKeySet): Unit =
-    val s0 = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
+    val s0 = vrfSign(keys.bandersnatchSecret, initialInput(t.vrfOutput), Array.emptyByteArray)
     BandersnatchVrf.getVrfOutput(s0).foreach { y =>
       val cores = initialCores(t.q, y)
       val items = cores.sorted.flatMap(c => t.reportHashes(c).map(c -> _))
@@ -296,6 +300,9 @@ final class AuditorService(
     }
 
   private def laterTranche(t: Tracked, v: Int, keys: ValidatorKeySet, n: Int): Unit =
+    if t.laterSignedFor != n then
+      t.laterSignatures.clear()
+      t.laterSignedFor = n
     val mine = t.ours.getOrElseUpdate(v, mutable.Map.empty)
     val picks = t.available.filterNot((_, _, h) => mine.contains(h)).flatMap { (c, _, h) =>
       val prior = t.announced.getOrElse((h, n - 1), mutable.Set.empty[Int])
@@ -304,10 +311,9 @@ final class AuditorService(
       val forced = negative.get(h).exists(_.nonEmpty)
       if !forced && noShows.isEmpty then None
       else
-        val sig = BandersnatchWrapper.ietfVrfSign(
-          keys.bandersnatchSecret,
-          laterInput(t.vrfOutput, h, n),
-          Array.emptyByteArray
+        val sig = t.laterSignatures.getOrElseUpdate(
+          (v, h),
+          vrfSign(keys.bandersnatchSecret, laterInput(t.vrfOutput, h, n), Array.emptyByteArray)
         )
         val out = BandersnatchVrf.getVrfOutput(sig)
         if forced || out.exists(y => escalates(y, t.validators.size, noShows.size)) then
@@ -553,6 +559,7 @@ final class AuditorService(
           bundle,
           report.segmentRootLookup.map(l => l.workPackageHash -> l.segmentTreeRoot).toMap
         )
+        anchored = anchoredLookup(bundle.workPackage.context.lookupAnchorStateRoot)
         recomputed <- computeReport
           .compute(
             workPackage = bundle.workPackage,
@@ -562,10 +569,12 @@ final class AuditorService(
             importSegments = bundle.importSegments,
             extrinsicData = bundle.extrinsicData,
             justifications = bundle.justifications,
-            accounts = anchoredLookup(bundle.workPackage.context.lookupAnchorStateRoot)
+            accounts = anchored
           )
           .left
           .map(e => s"re-execution refused: $e")
+        _ = if anchored.anchorLost then
+          throw new IllegalStateException(s"lookup anchor state ${bundle.workPackage.context.lookupAnchorStateRoot.toHex.take(18)} not held")
       yield Hashing.blake2b256(recomputed.report.encode.toArray) ==
         Hashing.blake2b256(report.encode.toArray)
     result.foreach(matches => if !matches then logger.warn(s"AUDIT MISMATCH for package ${spec.hash.toHex.take(18)}"))

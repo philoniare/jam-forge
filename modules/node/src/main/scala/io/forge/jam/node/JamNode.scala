@@ -39,6 +39,7 @@ final case class NodeConfig(
       * nothing reads it.
       */
     pruneOldState: Boolean = true,
+    stateSweepIntervalMillis: Long = ChainManager.StateSweepIntervalMillis,
     syncFrom: Option[Hash] = None,
     syncFromSetId: Option[Long] = None,
     /** FAULT INJECTION, `--fault-tamper-reports`: guarantee deliberately wrong reports, to test disputes. Never on a
@@ -112,7 +113,8 @@ final class JamNode(
       trieBackend,
       blockStore,
       pruneFinalizedHistory = nodeConfig.pruneFinalizedHistory,
-      pruneOldState = nodeConfig.pruneOldState
+      pruneOldState = nodeConfig.pruneOldState,
+      stateSweepIntervalMillis = nodeConfig.stateSweepIntervalMillis
     )
   /** CE 128 / CE 129 requests are answered here, not on the network event loops. */
   private[node] val serving: InboundWork = InboundWork.serving(threads)
@@ -201,7 +203,7 @@ final class JamNode(
   // Slots are wall-clock only while the node ticks; a node driven slot by slot (tests) has no clock to bound by.
   if nodeConfig.slotTicking then chain.useWallClock(() => slotClock.currentSlot)
 
-  private val network = new JamnpNode(
+  private[node] val network = new JamnpNode(
     identity,
     JamnpConfig(genesisHashPrefix = spec.alpnPrefix, reusePort = nodeConfig.reusePort)
   )
@@ -242,8 +244,9 @@ final class JamNode(
         )
     )
   }
-  @volatile private var lastBest: Hash = Hash.zero
-  @volatile private var lastFinalized: Hash = Hash.zero
+  private val headsReport = new Object
+  private var lastBest: Hash = Hash.zero
+  private var lastFinalized: Hash = Hash.zero
   @volatile private var lastInSync: Option[Boolean] = None
 
   @volatile private var slotTicker: AutoCloseable = null
@@ -468,19 +471,19 @@ final class JamNode(
       val job =
         new CheckpointSync(chain, sync, checkpoint, () => distribution.peers, misbehaved, nodeConfig.syncFromSetId)
       threads.single("jam-checkpoint-sync").execute { () =>
-        try
-          while checkpointSyncing do
-            job.attempt() match
-              case Right(_) =>
-                grandpaLock.synchronized {
-                  if !chain.atGenesis then grandpaService.foreach(_.restartAtFinalized())
-                  checkpointSyncing = false
-                }
-                sync.release()
-              case Left(why) =>
-                logger.debug(s"checkpoint sync not yet possible: $why")
-                Thread.sleep(JamNode.CheckpointRetryMillis)
-        catch case _: InterruptedException => ()
+        CheckpointSync.untilStarted(
+          () => if chain.atGenesis then job.attempt() else Right(chain.best),
+          running = () => checkpointSyncing,
+          started = () =>
+            try
+              grandpaLock.synchronized {
+                try if !chain.atGenesis then grandpaService.foreach(_.restartAtFinalized())
+                finally checkpointSyncing = false
+              }
+            finally sync.release()
+          ,
+          retryMillis = JamNode.CheckpointRetryMillis
+        )
       }
 
   private def catchingUp: Boolean =
@@ -509,7 +512,7 @@ final class JamNode(
   private def connectionForNextEpochValidator(index: Int): Option[PeerConnection] =
     chain.stateView().validators.nextEpoch.lift(index).flatMap { vk =>
       val key = vk.ed25519.bytes.toArray
-      distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
+      distribution.connectionsTo(key).headOption
     }
 
   private def hasContent(block: io.forge.jam.core.types.block.Block): Boolean =
@@ -601,7 +604,10 @@ final class JamNode(
         io.forge.jam.protocol.report.GuarantorAssignment.oldestReportableSlot(head.slot, chain.config)
       )
     }
-    telemetry.foreach(_ => chain.onImported((_, _) => reportHeads()))
+    telemetry.foreach { _ =>
+      chain.onImported((_, _) => reportHeads())
+      chain.onFinalized(_ => reportHeads())
+    }
 
     network.onConnectionChange((conn, up) => if up && scores.banned(conn.peerKey) then conn.close())
     network.onConnectionChange { (conn, up) =>
@@ -660,7 +666,7 @@ final class JamNode(
       t.start()
       threads
         .scheduled("jam-telemetry-status")
-        .scheduleWithFixedDelay(() => reportStatus(t), 2, 2, java.util.concurrent.TimeUnit.SECONDS)
+        .scheduleWithFixedDelay(new Periodic("telemetry status")(reportStatus(t)), 2, 2, java.util.concurrent.TimeUnit.SECONDS)
     }
     submitServer = nodeConfig.submitPort.map(p => new SubmitServer(p, preimages).start())
 
@@ -806,17 +812,23 @@ final class JamNode(
     pools.pruneTicketsBefore(head.slot / spec.config.epochLength)
     tickets.processDeferred()
 
-  /** JIP-3 events 11 and 12 when the best or finalized head moved. */
+  /** JIP-3 events 11 and 12 when the best or finalized head moved. Called from the import listener, the slot tick
+    * and whichever thread finalized: one at a time, each reading the heads of one chain change inside the lock, so a
+    * head is reported once, a later caller never reports an older head than an earlier one did, and the best head is
+    * reported before the finalized head of the same change (the finalized block is never ahead of the best one
+    * reported).
+    */
   private def reportHeads(): Unit =
     telemetry.foreach { t =>
-      val best = chain.best
-      if best.hash != lastBest then
-        lastBest = best.hash
-        t.bestBlockChanged(best.slot, best.hash)
-      val fin = chain.finalized
-      if fin.hash != lastFinalized then
-        lastFinalized = fin.hash
-        t.finalizedBlockChanged(fin.slot, fin.hash)
+      headsReport.synchronized {
+        val (best, fin) = chain.heads
+        if best.hash != lastBest then
+          lastBest = best.hash
+          t.bestBlockChanged(best.slot, best.hash)
+        if fin.hash != lastFinalized then
+          lastFinalized = fin.hash
+          t.finalizedBlockChanged(fin.slot, fin.hash)
+      }
     }
 
   private def reportStatus(t: Telemetry): Unit =
@@ -911,7 +923,7 @@ final class JamNode(
       chain,
       spec.genesisHeaderHash,
       peerCount = () => distribution.peerCount,
-      syncing = () => held,
+      syncing = () => catchingUp,
       submitPreimage = preimages.submit,
       submitWorkPackage = submitWorkPackage,
       submitBundle = submitWorkPackageBundle,
@@ -937,43 +949,65 @@ final class JamNode(
   /** The thread pools that were still running when the last [[shutdown]] closed the stores; none, normally. */
   @volatile private[node] var poolsLeftRunning: List[String] = Nil
 
+  @volatile private[node] var shutdownFault: () => Unit = () => ()
+
   def shutdown(): Unit =
     shuttingDown = true
-    peers.beginShutdown()
-    submitServer.foreach(_.stop())
-    rpcServer.foreach(_.stop())
-    grandpaService.foreach(_.shutdown())
-    beefyService.foreach(_.shutdown())
-    auditor.foreach(_.shutdown())
-    assurer.foreach(_.shutdown()) // before the shard store closes
-    shards.shutdown()
-    peers.shutdown()
-    if assuranceTimer != null then assuranceTimer.shutdownNow()
-    telemetry.foreach(_.shutdown())
-    if slotTicker != null then slotTicker.close() // waits for in-flight tick
-    tickets.shutdown()
-    guarantor.foreach(_.shutdown())
-    refinePool.shutdown() // drains in-flight refine work
-    network.shutdown()
-    inbound.shutdown() // received messages still being checked read the chain
-    serving.shutdown() // requests being answered read the store
-    announcing.shutdown()
-    sync.shutdown() // waits for an in-flight sync import
-    distribution.shutdown()
-    egress.shutdown()
-    egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)
-    preimages.shutdown() // its own executor for CE143 fetches, drained alongside egress
+    var interrupted = false
+    def step(name: String)(action: => Unit): Unit =
+      try action
+      catch
+        case e: InterruptedException =>
+          interrupted = true
+          logger.error(s"shutdown: $name was interrupted", e)
+        case e: Exception => logger.error(s"shutdown: $name failed", e)
+    step("fault injection")(shutdownFault())
+    step("peers (begin)")(peers.beginShutdown())
+    step("submission endpoint")(submitServer.foreach(_.stop()))
+    step("RPC server")(rpcServer.foreach(_.stop()))
+    step("GRANDPA")(grandpaService.foreach(_.shutdown()))
+    step("BEEFY")(beefyService.foreach(_.shutdown()))
+    step("auditor")(auditor.foreach(_.shutdown()))
+    step("assurer")(assurer.foreach(_.shutdown())) // before the shard store closes
+    step("shards")(shards.shutdown())
+    step("peers")(peers.shutdown())
+    step("assurance timer")(if assuranceTimer != null then assuranceTimer.shutdownNow(): Unit)
+    step("telemetry")(telemetry.foreach(_.shutdown()))
+    step("slot ticker")(if slotTicker != null then slotTicker.close()) // waits for in-flight tick
+    step("tickets")(tickets.shutdown())
+    step("guarantor")(guarantor.foreach(_.shutdown()))
+    step("refine pool")(refinePool.shutdown()) // drains in-flight refine work
+    step("network")(network.shutdown())
+    step("inbound work")(inbound.shutdown()) // received messages still being checked read the chain
+    step("serving")(serving.shutdown()) // requests being answered read the store
+    step("announcing")(announcing.shutdown())
+    step("sync")(sync.shutdown()) // waits for an in-flight sync import
+    step("distribution")(distribution.shutdown())
+    step("egress")(egress.shutdown())
+    step("egress (wait)")(egress.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS): Unit)
+    step("preimages")(preimages.shutdown()) // its own executor for CE143 fetches, drained alongside egress
     // Several services only interrupt their threads. Wait for every pool, so none reads a store after it closes.
-    poolsLeftRunning = threads.close()
+    step("thread pools") { poolsLeftRunning = threads.close() }
     shutdownStorageOnly()
+    if interrupted then Thread.currentThread().interrupt()
 
-  /** Close only the storage layers (for tests that never start networking). */
+  /** Close only the storage layers (for tests that never start networking). Each close runs whatever the others
+    * did; a failure is logged.
+    */
   def shutdownStorageOnly(): Unit =
-    val pruneStopped = chain.shutdown()
-    shardStore.close()
+    val pruneStopped =
+      try chain.shutdown()
+      catch
+        case e: Exception =>
+          logger.error("shutdown: the chain failed to stop; a state prune may still run, so the stores are left open", e)
+          false
+    def close(name: String)(action: => Unit): Unit =
+      try action
+      catch case e: Exception => logger.error(s"shutdown: closing the $name store failed", e)
+    close("shard")(shardStore.close())
     if pruneStopped then
-      blockStore.close()
-      trieBackend.close()
+      close("block")(blockStore.close())
+      close("state")(trieBackend.close())
 
 object JamNode:
 

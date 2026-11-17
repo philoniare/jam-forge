@@ -188,7 +188,10 @@ final class GrandpaService(
               .orElse(markerBefore(base).map(_.toIndexedSeq))
               .getOrElse(genesisNextKeys)
         val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(0L))
-        VoterSet(setId, baseVote, voters)
+        val next = chain.meta.grandpaSetNext
+          .filter(n => n.length >= 32 && (n.length - 32) % 32 == 0 && Hash(n.take(32)) == base)
+          .map(_.drop(32).grouped(32).toIndexedSeq)
+        VoterSet(setId, baseVote, voters, next)
       case None =>
         val root = chain.postStateRoot(genesis).getOrElse(chain.finalized.stateRoot)
         VoterSet(0, Vote(genesis, root, adapter.slotOf(genesis).getOrElse(0L)), genesisKeys)
@@ -203,7 +206,8 @@ final class GrandpaService(
       onSetAdopted = s =>
         chain.meta.putGrandpaSet(
           LittleEndian.encode(s.setId, 8) ++ s.base.hash.bytes.toArray ++ s.keys.flatten,
-          settlesCheckpoint = rebased && s.setId != GrandpaVoter.UnknownSet
+          settlesCheckpoint = rebased && s.setId != GrandpaVoter.UnknownSet,
+          next = s.next.map(keys => s.base.hash.bytes.toArray ++ keys.flatten)
         ),
       onProgress = (setId, round, votes, durable) =>
         chain.meta.putGrandpaRound(
@@ -220,12 +224,12 @@ final class GrandpaService(
       exec.execute(() => { retryPending(head.hash); voter.step() })
     )
     exec.scheduleAtFixedRate(
-      () => guarded { voter.step(); resendVotes() },
+      stepTask { voter.step(); resendVotes() },
       gossipMillis / 4,
       gossipMillis / 4,
       TimeUnit.MILLISECONDS
     )
-    exec.scheduleAtFixedRate(() => guarded(followPeers()), 2, 2, TimeUnit.SECONDS)
+    exec.scheduleAtFixedRate(followTask(followPeers()), 2, 2, TimeUnit.SECONDS)
 
   def shutdown(): Unit = exec.shutdownNow()
 
@@ -233,6 +237,9 @@ final class GrandpaService(
     exec.submit(() => f(voter)).get(10, TimeUnit.SECONDS)
 
   private[node] def resendNow(): Unit = onVoterThread(_ => resendVotes())
+
+  private val stepTask = new Periodic("GRANDPA step")
+  private val followTask = new Periodic("GRANDPA catch-up from peers")
 
   private def guarded(f: => Unit): Unit =
     try f
@@ -293,11 +300,19 @@ final class GrandpaService(
             else cursor = Some(h.parent)
           case _ => cursor = None
       if !found then
-        logger.warn("GRANDPA: the block that began the checkpoint's epoch is not held; the next voter set may be wrong")
+        logger.info("GRANDPA: the block that began the checkpoint's epoch is not held; the set is based at the " +
+          "finalized block, and the next set's keys are taken from its state")
       val baseVote = Vote(base, adapter.stateRootOf(base).getOrElse(Hash.zero), adapter.slotOf(base).getOrElse(f.slot))
       pendingCommits.prune(Long.MaxValue, Long.MaxValue)
       rebased = true
-      voter.restartAt(VoterSet(setId, baseVote, view.validators.current.map(_.ed25519.bytes)))
+      voter.restartAt(
+        VoterSet(
+          setId,
+          baseVote,
+          view.validators.current.map(_.ed25519.bytes),
+          next = Some(view.validators.nextEpoch.map(_.ed25519.bytes))
+        )
+      )
     }
 
   private def applyCommit(

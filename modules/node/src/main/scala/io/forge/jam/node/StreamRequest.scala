@@ -22,12 +22,14 @@ object StreamRequest extends LazyLogging:
     /** The peer neither answered nor closed in time. */
     case TimedOut
     case Refused
+    case Excess(detail: String)
 
     def message: String = this match
       case NotOpened(detail) => s"stream not opened: $detail"
       case NotSent(detail)   => s"request not sent: $detail"
       case TimedOut          => "no answer in time"
       case Refused           => "answer refused: over our inbound buffer limit"
+      case Excess(detail)    => s"answer refused: $detail"
 
   /** When the answer is complete. */
   enum Until:
@@ -51,7 +53,9 @@ object StreamRequest extends LazyLogging:
       openTimeoutMs: Long,
       responseTimeoutMs: () => Long,
       until: Until = Until.Closed,
-      maxMessages: Int = DefaultMaxMessages
+      maxMessages: Int = DefaultMaxMessages,
+      excessFails: Boolean = false,
+      maxBytes: Long = Long.MaxValue
   ): Either[Failure, List[Array[Byte]]] =
     val opened =
       try
@@ -59,7 +63,7 @@ object StreamRequest extends LazyLogging:
         else Right(conn.openStream(kind).get(openTimeoutMs, TimeUnit.MILLISECONDS))
       catch case e: Exception => Left(Failure.NotOpened(describe(e)))
     opened.flatMap { stream =>
-      val result = answer(stream, request, responseTimeoutMs, until, maxMessages)
+      val result = answer(stream, request, responseTimeoutMs, until, maxMessages, excessFails, maxBytes)
       if !result.exists(_.nonEmpty) then
         try stream.reset()
         catch case e: Exception => logger.debug(s"reset of ${StreamKind.name(kind)} failed: ${e.getMessage}")
@@ -75,14 +79,33 @@ object StreamRequest extends LazyLogging:
       request: Seq[Array[Byte]],
       responseTimeoutMs: () => Long,
       until: Until,
-      maxMessages: Int
+      maxMessages: Int,
+      excessFails: Boolean,
+      maxBytes: Long
   ): Either[Failure, List[Array[Byte]]] =
     val messages = mutable.ListBuffer.empty[Array[Byte]]
     val done = new CompletableFuture[List[Array[Byte]]]()
+    var received = 0L // under `messages`
+    val excess = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
     def snapshot(): List[Array[Byte]] = messages.synchronized(messages.toList)
     stream.onMessage { m =>
-      messages.synchronized(if messages.size < maxMessages then messages += m)
-      if until == Until.FirstMessage then done.complete(snapshot()): Unit
+      val over = messages.synchronized {
+        if excess.get.isDefined then None
+        else
+          received += m.length
+          val tooMany = excessFails && messages.size >= maxMessages
+          if tooMany then Some(s"more than $maxMessages message(s)")
+          else if received > maxBytes then Some(s"more than $maxBytes byte(s)")
+          else
+            if messages.size < maxMessages then messages += m
+            None
+      }
+      over match
+        case Some(why) =>
+          excess.set(Some(why))
+          done.complete(Nil): Unit
+        case None =>
+          if until == Until.FirstMessage then done.complete(snapshot()): Unit
     }
     stream.onClosed(() => done.complete(snapshot()): Unit)
     val sent =
@@ -97,7 +120,10 @@ object StreamRequest extends LazyLogging:
         if wait <= 0 then Left(Failure.TimedOut)
         else
           val answer = done.get(wait, TimeUnit.MILLISECONDS)
-          if stream.refusedHere then Left(Failure.Refused) else Right(answer)
+          excess.get match
+            case Some(why)                => Left(Failure.Excess(why))
+            case None if stream.refusedHere => Left(Failure.Refused)
+            case None                     => Right(answer)
       catch
         case _: TimeoutException => Left(Failure.TimedOut)
         case e: Exception        => Left(Failure.NotSent(describe(e)))

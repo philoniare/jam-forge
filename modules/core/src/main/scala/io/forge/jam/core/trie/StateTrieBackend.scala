@@ -7,10 +7,12 @@ enum BackendOp:
   case WriteNode(node: TrieNode)
   /** A raw value stored under its Blake2b-256 `hash`, which the trie has already computed for the leaf node. */
   case WriteRawValue(hash: Hash, value: JamBytes)
-  case NodeRefDelta(hash: Hash, delta: Long)
+  case NodeRefDelta(hash: Hash, delta: Long, replacedValue: Hash | Null = null)
   case RawValueRefDelta(hash: Hash, delta: Long)
 
 object BackendOp:
+  val NotRegularLeaf: Hash = Hash.zero
+
   /** Builds a [[BackendOp.WriteRawValue]], hashing `value`; for callers that do not already hold the hash. */
   def writeRawValue(value: JamBytes): BackendOp = BackendOp.WriteRawValue(Hashing.blake2b256(value), value)
 

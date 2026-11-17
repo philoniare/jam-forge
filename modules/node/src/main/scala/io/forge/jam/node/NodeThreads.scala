@@ -77,3 +77,22 @@ object NodeThreads:
       val t = new Thread(r, s"$name-${n.incrementAndGet()}")
       t.setDaemon(true)
       t
+
+final class Periodic(task: String) extends LazyLogging:
+  private val seen = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  def run(body: => Unit): Unit =
+    try body
+    catch
+      case scala.util.control.NonFatal(e) =>
+        val what = s"${e.getClass.getName}: ${e.getMessage}"
+        if seen.size < Periodic.MaxDistinct && seen.add(what) then
+          logger.error(s"$task failed; it runs again at its next period, and this failure is not logged again: $what", e)
+        else logger.debug(s"$task failed again: $what")
+
+  def apply(body: => Unit): Runnable = () => run(body)
+
+  private[node] def distinctFailures: Int = seen.size
+
+object Periodic:
+  val MaxDistinct: Int = 64

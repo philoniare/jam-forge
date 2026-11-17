@@ -31,7 +31,7 @@ class StateTrieBatchSpec extends AnyFlatSpec with Matchers:
       (
         lastOps.collect { case BackendOp.WriteNode(n) => n.hash }.toSet,
         lastOps.collect { case BackendOp.WriteRawValue(h, _) => h }.toSet,
-        lastOps.collect { case BackendOp.NodeRefDelta(h, d) => h -> d }.toMap,
+        lastOps.collect { case BackendOp.NodeRefDelta(h, d, _) => h -> d }.toMap,
         lastOps.collect { case BackendOp.RawValueRefDelta(h, d) => h -> d }.toMap,
       )
 

@@ -385,6 +385,96 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       cleanup(dir)
   }
 
+  test("a reported package's status is told however far behind the head its report is") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val nullAuthPreimage = genesis.state.keyvals.map(_.value.toArray).find(_.length == 50)
+      .getOrElse(fail("NULL Authorizer preimage not found in genesis"))
+    val spec = ChainSpec(
+      id = "status-far-back",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dirA = tempDir("jam-status-a")
+    val dirB = tempDir("jam-status-b")
+    var nodeA: JamNode = null
+    var nodeB: JamNode = null
+    try
+      nodeA = new JamNode(spec, NodeConfig(dirA, slotTicking = false, ed25519Seed = Some(devKeys(0).ed25519Secret), pruneOldState = false))
+        .start()
+      nodeB = new JamNode(spec, NodeConfig(dirB, slotTicking = false, ed25519Seed = Some(devKeys(1).ed25519Secret)))
+        .start()
+      nodeA.enableAuthoring(devKeys)
+      nodeA.enableAssuring(devKeys)
+      nodeB.enableGuaranteeing(devKeys)
+      nodeA.connectPeer(new java.net.InetSocketAddress("127.0.0.1", nodeB.listenPort))
+      nodeA.authorSlot(1).isDefined shouldBe true
+      nodeA.authorSlot(2).isDefined shouldBe true
+      awaitSync(nodeA, nodeB)
+
+      val view = nodeB.chain.stateView()
+      val anchor = view.beta.history(view.beta.history.size - 2)
+      val serviceCodeHash = view.accumulation.serviceAccounts
+        .find(_.id == 0).map(_.data.service.codeHash).getOrElse(fail("no service 0"))
+      val context = Context(
+        anchor = anchor.headerHash,
+        anchorSlot = Timeslot(anchor.slot.toInt),
+        stateRoot = anchor.stateRoot,
+        beefyRoot = anchor.beefyRoot,
+        lookupAnchor = anchor.headerHash,
+        lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+        lookupAnchorStateRoot = anchor.stateRoot,
+        prerequisites = List.empty
+      )
+      val item = WorkItem(
+        service = ServiceId(0),
+        codeHash = serviceCodeHash,
+        payload = JamBytes("far back".getBytes("UTF-8")),
+        refineGasLimit = Gas(100_000_000L),
+        accumulateGasLimit = Gas(10_000_000L),
+        importSegments = List.empty,
+        extrinsic = List.empty,
+        exportCount = UShort(0)
+      )
+      val wp = WorkPackage(
+        authCodeHost = ServiceId(0),
+        authCodeHash = Hashing.blake2b256(nullAuthPreimage),
+        context = context,
+        authorization = JamBytes.empty,
+        authorizerConfig = JamBytes.empty,
+        items = List(item)
+      )
+      val b64 = (bytes: Array[Byte]) => java.util.Base64.getEncoder.encodeToString(bytes)
+      def quoted(bytes: Array[Byte]) = "\"" + b64(bytes) + "\""
+      def rpc(node: JamNode, method: String, params: String*): io.circe.Json =
+        val request = s"""{"jsonrpc":"2.0","id":1,"method":"$method","params":[${params.mkString(",")}]}"""
+        node.rpcApi.handle(request, new RpcSession(_ => ())).getOrElse(fail(s"$method: no response"))
+      def status(at: Hash) =
+        rpc(nodeA, "workPackageStatus", quoted(at.bytes.toArray), quoted(Hashing.blake2b256(wp.encode.toArray).bytes.toArray), quoted(anchor.headerHash.bytes.toArray))
+          .hcursor.downField("result")
+
+      rpc(nodeB, "submitWorkPackage", "0", quoted(wp.encode.toArray), "[]").hcursor.downField("result").focus shouldBe Some(io.circe.Json.Null)
+      val deadline = System.currentTimeMillis() + 30000
+      while nodeA.pools.guaranteeCount == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val reportedIn = nodeA.authorSlot(3).getOrElse(fail("slot 3 not authored")).hash
+      while nodeA.pools.assuranceCount < 5 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val readyIn = nodeA.authorSlot(4).getOrElse(fail("slot 4 not authored")).hash
+      status(readyIn).downField("Ready").downField("ready_in").get[String]("header_hash") shouldBe Right(b64(readyIn.bytes.toArray))
+
+      (5 to 6 + RpcApi.MaxStatusWalk).foreach(slot => nodeA.authorSlot(slot.toLong).isDefined shouldBe true)
+      val far = status(nodeA.chain.best.hash).downField("Ready")
+      far.downField("reported_in").get[String]("header_hash") shouldBe Right(b64(reportedIn.bytes.toArray))
+      far.downField("ready_in").get[String]("header_hash") shouldBe Right(b64(readyIn.bytes.toArray))
+      status(reportedIn).downField("Reported").succeeded shouldBe true
+    finally
+      if nodeA != null then nodeA.shutdown()
+      if nodeB != null then nodeB.shutdown()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
   private def awaitSync(a: JamNode, b: JamNode): Unit =
     val deadline = System.currentTimeMillis() + 30000
     while b.chain.best.hash != a.chain.best.hash && System.currentTimeMillis() < deadline do

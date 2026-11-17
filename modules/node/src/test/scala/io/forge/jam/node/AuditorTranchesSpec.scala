@@ -120,7 +120,12 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
     while !cond && System.currentTimeMillis() < deadline do Thread.sleep(2)
     if !cond then fail(s"timed out waiting for: $what")
 
-  private def withAuditor(body: Fixture => Unit): Unit =
+  private def withAuditor(body: Fixture => Unit): Unit = withAuditorKeys(Nil, BandersnatchWrapper.ietfVrfSign)(body)
+
+  private def withAuditorKeys(
+      ownKeys: Seq[ValidatorKeySet],
+      vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte]
+  )(body: Fixture => Unit): Unit =
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(
       id = "auditor-tranches",
@@ -170,13 +175,14 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
         node.distribution,
         node.shards,
         node.pools,
-        Nil,
+        ownKeys,
         egress,
         trancheOrigin = (_, _) => 0L,
         clock = clock,
         tickMillis = TickMillis,
         store = store,
-        threads = threads
+        threads = threads,
+        vrfSign = vrfSign
       )
       try body(Fixture(auditor, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold))
       finally auditor.shutdown()
@@ -352,5 +358,40 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       send(needed)
       f.auditor.announcersOf(f.report, 1) shouldBe Set(v)
       f.auditor.checks.noShowSignatures.get shouldBe 0L
+    }
+  }
+
+  test("a later-tranche VRF signature is made once per (block, report, tranche), not at every tick") {
+    val ours = devKeys(4)
+    val later = new AtomicInteger()
+    val signer: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte] = (secret, input, aux) =>
+      if input.length == initialInput(new Array[Byte](32)).length then Array.emptyByteArray
+      else
+        later.incrementAndGet()
+        BandersnatchWrapper.ietfVrfSign(secret, input, aux)
+    withAuditorKeys(Seq(ours), signer) { f =>
+      val y1 = BandersnatchVrf.getVrfOutput(f.sn(4, 1)).get
+      val y2 = BandersnatchVrf.getVrfOutput(f.sn(4, 2)).get
+      if escalates(y1, devKeys.size, 1) || escalates(y2, devKeys.size, 1) then
+        cancel("validator 4 escalates for this block's fixed VRF output; nothing to count across ticks")
+      f.track()
+      f.announce0(1) shouldBe true // a tranche-0 no-show for tranche 1
+      f.settle()
+      later.get shouldBe 0
+      f.at(1)
+      (0 until 20).foreach(_ => f.settle())
+      later.get shouldBe 1
+      val w = Seq(2, 3, 5)
+        .find(v => peerEscalates(f.yn(v, 1), devKeys.size, 1))
+        .getOrElse(cancel("no other validator escalates in tranche 1"))
+      f.auditor.receiveAnnouncement(
+        devKeys(w).ed25519Public,
+        encodeHead(f.blockHash, 1, f.announcement(w, 1)),
+        encodeLaterEvidence(Seq(f.sn(w, 1) -> Seq(NoShow(1, f.announcement(1, 0)))))
+      )
+      f.drain()
+      f.at(2)
+      (0 until 20).foreach(_ => f.settle())
+      later.get shouldBe 2
     }
   }

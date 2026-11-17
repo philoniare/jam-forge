@@ -39,6 +39,12 @@ final case class BlockPipelineResult(
 
 object BlockPipeline:
 
+  def posteriorOffenders(
+      prior: List[Ed25519PublicKey],
+      disputes: io.forge.jam.core.types.extrinsic.Dispute
+  ): List[Ed25519PublicKey] =
+    (prior ++ disputes.culprits.map(_.key) ++ disputes.faults.map(_.key)).distinct
+
   private final class Run(val block: Block, val view: TrieBackedJamState):
     val config: ChainConfig = view.config
     val header = new EncodedHeader(block.header, config)
@@ -48,9 +54,7 @@ object BlockPipeline:
     val priorPreviousValidators: IndexedSeq[ValidatorKey] = view.validators.previous
 
     val posteriorOffenders: List[Ed25519PublicKey] =
-      (view.psi.offenders
-        ++ block.extrinsic.disputes.culprits.map(_.key)
-        ++ block.extrinsic.disputes.faults.map(_.key)).distinct
+      BlockPipeline.posteriorOffenders(view.psi.offenders, block.extrinsic.disputes)
 
     val checks = new PendingChecks
     val signatures = new SignatureBatch

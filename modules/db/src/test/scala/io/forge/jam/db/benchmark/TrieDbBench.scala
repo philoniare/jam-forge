@@ -13,14 +13,17 @@ import scala.util.Random
  * B blocks of K dirty keys each (update, save, commit, gc, as BlockImporter does), then random reads.
  *
  * `--backend=node` drives RocksDB the way the node does: garbage tracking off, each block's save attributed to the
- * block ([[RocksDbTrieBackend.withJournal]]) and the state `NodePruneLag` blocks back pruned by journal, with no gc.
+ * block ([[RocksDbTrieBackend.withJournal]]) and followed by a WAL sync (as `ChainManager.commit` does, timed apart
+ * as `sync`), and the state `NodePruneLag` blocks back pruned by journal, with no gc. Storage switches are the
+ * `-Djam.db.*` system properties of [[RocksDbTrieBackend.Settings]] and [[io.forge.jam.db.RocksDbMemory.Settings]].
  *
  * Args: `--keys=N` (1,000,000), `--blocks=B` (100), `--dirty=K` (1,000), `--reads=R` (100,000),
- * `--backend=rocksdb|node|memory|both` (both: rocksdb and memory). Prints `RESULT name value unit` lines.
+ * `--backend=rocksdb|node|memory|both` (both: rocksdb and memory), `--valueSize=S` (36 bytes), `--contend=N` (0 threads
+ * keeping the common fork-join pool busy). Prints `RESULT name value unit` lines.
  */
 object TrieDbBench:
   private val KeySize = 31
-  private val ValueSize = 36 // over 32 bytes, so a regular leaf with its value stored apart, as most service data is
+  private var ValueSize = 36
 
   private def result(name: String, value: Double, unit: String): Unit =
     println(f"RESULT $name $value%.3f $unit")
@@ -55,7 +58,8 @@ object TrieDbBench:
   private final case class Mode(
       save: (StateTrieBackend, Int, () => Unit) => Unit,
       reclaim: (StateTrieBackend, Int, StateTrieStore) => Unit,
-      reclaimName: String
+      reclaimName: String,
+      sync: StateTrieBackend => Unit = _ => ()
   )
 
   private val gcMode = Mode((_, _, body) => body(), (_, _, store) => store.gc(), "gc")
@@ -73,7 +77,11 @@ object TrieDbBench:
         case rocks: RocksDbTrieBackend if block >= NodePruneLag =>
           rocks.pruneJournal(blockLabel(block - NodePruneLag), block - NodePruneLag + 1L): Unit
         case _ => (),
-    "prune"
+    "prune",
+    {
+      case rocks: RocksDbTrieBackend => rocks.syncWal()
+      case _                         => ()
+    }
   )
 
   private def run(
@@ -95,7 +103,7 @@ object TrieDbBench:
     // Per block: 90% of the dirty keys overwrite existing ones, 10% are new.
     val inserted = p.dirty / 10
     var liveKeys = keys
-    val updateMs, saveMs, gcMs, blockMs = new Array[Double](p.blocks)
+    val updateMs, saveMs, syncMs, gcMs, blockMs = new Array[Double](p.blocks)
     for b <- 0 until p.blocks do
       val overwrites = Seq.fill(p.dirty - inserted)(liveKeys(rng.nextInt(liveKeys.length)))
       val fresh = Array.fill(inserted)(JamBytes(rng.nextBytes(KeySize)))
@@ -108,11 +116,14 @@ object TrieDbBench:
       mode.save(backend, b, () => trie.save())
       store.commitChild(parent, trie.rootHash)
       val t2 = System.nanoTime()
+      mode.sync(backend)
+      val t2s = System.nanoTime()
       mode.reclaim(backend, b, store)
       val t3 = System.nanoTime()
       updateMs(b) = (t1 - t0) / 1e6
       saveMs(b) = (t2 - t1) / 1e6
-      gcMs(b) = (t3 - t2) / 1e6
+      syncMs(b) = (t2s - t2) / 1e6
+      gcMs(b) = (t3 - t2s) / 1e6
       blockMs(b) = (t3 - t0) / 1e6
       liveKeys = liveKeys ++ fresh
     // The first tenth of the blocks is JIT warmup.
@@ -128,7 +139,15 @@ object TrieDbBench:
     result(s"${name}_block_update_p90", percentile(sortedUpdates, 0.9), "ms")
 
     result(s"${name}_block_save_mean", mean(saveMs), "ms")
+    result(s"${name}_block_save_p50", percentile(saveMs.drop(skip).sorted.toIndexedSeq, 0.5), "ms")
+    result(s"${name}_block_sync_mean", mean(syncMs), "ms")
+    result(s"${name}_block_save_and_sync_mean", mean(saveMs.lazyZip(syncMs).map(_ + _)), "ms")
     result(s"${name}_block_${mode.reclaimName}_mean", mean(gcMs), "ms")
+    result(s"${name}_block_${mode.reclaimName}_p50", percentile(gcMs.drop(skip).sorted.toIndexedSeq, 0.5), "ms")
+    backend match
+      case rocks: RocksDbTrieBackend =>
+        rocks.nativeMemory.foreach((k, v) => result(s"${name}_mem_$k", v / 1e6, "MB"))
+      case _ => ()
 
     val root = store.currentRoot
     def readAll(trie: StateTrie): Double =
@@ -163,6 +182,24 @@ object TrieDbBench:
     def int(k: String, d: Int) = opts.get(k).fold(d)(_.replace("_", "").toInt)
     val p = Params(int("keys", 1_000_000), int("blocks", 100), int("dirty", 1_000), int("reads", 100_000))
     val which = opts.getOrElse("backend", "both")
+    opts.get("valueSize").foreach(v => ValueSize = v.toInt)
+    (0 until int("contend", 0)).foreach { n =>
+      val t = new Thread(
+        () =>
+          while true do
+            java.util.stream.IntStream.range(0, 1024).parallel().forEach { _ =>
+              var x = 0L
+              var i = 0
+              while i < 20_000 do
+                x += i * x + 1
+                i += 1
+              if x == 42 then println(x)
+            },
+        s"contend-$n"
+      )
+      t.setDaemon(true)
+      t.start()
+    }
     println(s"TrieDbBench keys=${p.keys} blocks=${p.blocks} dirty=${p.dirty} reads=${p.reads}")
     if which == "both" || which == "rocksdb" then
       val dir = Files.createTempDirectory("trie-bench")

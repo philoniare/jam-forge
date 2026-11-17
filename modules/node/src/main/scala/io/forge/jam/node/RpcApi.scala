@@ -11,7 +11,7 @@ import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, LittleEndian}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.WorkReport
-import io.forge.jam.core.trie.StateTrie
+import io.forge.jam.core.trie.{MissingTrieNodeException, StateTrie}
 import io.forge.jam.protocol.pvmhost.ConstantsBlob
 import io.forge.jam.protocol.state.{StateKey, StateKeys}
 
@@ -104,8 +104,12 @@ final class RpcApi(
   private def call(method: String, p: Params, session: RpcSession): Either[RpcError, Json] =
     method match
       case "parameters"     => Right(parameters)
-      case "bestBlock"      => Right(descriptor(chain.best.hash, chain.best.slot))
-      case "finalizedBlock" => Right(descriptor(chain.finalized.hash, chain.finalized.slot))
+      case "bestBlock" =>
+        val head = chain.best
+        Right(descriptor(head.hash, head.slot))
+      case "finalizedBlock" =>
+        val head = chain.finalized
+        Right(descriptor(head.hash, head.slot))
       case "parent" =>
         for
           h <- p.hash(0)
@@ -117,22 +121,27 @@ final class RpcApi(
         for h <- p.hash(0); root <- chain.postStateRoot(h).toRight(RpcError.blockUnavailable(h))
         yield blob(root.bytes.toArray)
       case "beefyRoot" =>
-        for h <- p.hash(0); view <- chain.stateViewAt(h).toRight(RpcError.blockUnavailable(h))
-        yield view.beta.history.lastOption.map(b => blob(b.beefyRoot.bytes.toArray)).getOrElse(Json.Null)
-      case "statistics" => for h <- p.hash(0); t <- state(h) yield statistics(t)
-      case "stateValue" => for h <- p.hash(0); k <- p.stateKey(1); t <- state(h) yield raw(t, k)
-      case "serviceData" => for h <- p.hash(0); id <- p.service(1); t <- state(h) yield serviceData(t, id)
+        for
+          h <- p.hash(0)
+          view <- chain.stateViewAt(h).toRight(RpcError.blockUnavailable(h))
+          root <- whole(h)(view.beta.history.lastOption.map(b => blob(b.beefyRoot.bytes.toArray)).getOrElse(Json.Null))
+        yield root
+      case "statistics" => for h <- p.hash(0); v <- atState(h)(statistics) yield v
+      case "stateValue" => for h <- p.hash(0); k <- p.stateKey(1); v <- atState(h)(raw(_, k)) yield v
+      case "serviceData" => for h <- p.hash(0); id <- p.service(1); v <- atState(h)(serviceData(_, id)) yield v
       case "serviceValue" =>
-        for h <- p.hash(0); id <- p.service(1); k <- p.blob(2); t <- state(h) yield serviceValue(t, id, k)
+        for h <- p.hash(0); id <- p.service(1); k <- p.blob(2); v <- atState(h)(serviceValue(_, id, k)) yield v
       case "servicePreimage" =>
-        for h <- p.hash(0); id <- p.service(1); x <- p.hash(2); t <- state(h) yield servicePreimage(t, id, x)
+        for h <- p.hash(0); id <- p.service(1); x <- p.hash(2); v <- atState(h)(servicePreimage(_, id, x)) yield v
       case "servicePreimageLen" =>
-        for h <- p.hash(0); id <- p.service(1); x <- p.hash(2); t <- state(h)
-        yield preimageBytes(t, id, x).map(b => Json.fromInt(b.length)).getOrElse(Json.Null)
+        for
+          h <- p.hash(0); id <- p.service(1); x <- p.hash(2)
+          v <- atState(h)(preimageBytes(_, id, x).map(b => Json.fromInt(b.length)).getOrElse(Json.Null))
+        yield v
       case "serviceRequest" =>
-        for h <- p.hash(0); id <- p.service(1); x <- p.hash(2); len <- p.number(3); t <- state(h)
-        yield serviceRequest(t, id, x, len)
-      case "listServices" => for h <- p.hash(0); t <- state(h) yield listServices(t)
+        for h <- p.hash(0); id <- p.service(1); x <- p.hash(2); len <- p.number(3); v <- atState(h)(serviceRequest(_, id, x, len))
+        yield v
+      case "listServices" => for h <- p.hash(0); v <- atState(h)(listServices) yield v
       case "syncState" =>
         Right(Json.obj("num_peers" -> Json.fromInt(peerCount()), "status" -> syncStatus))
       case "submitPreimage" =>
@@ -199,7 +208,7 @@ final class RpcApi(
             method,
             f,
             s"${wp.toHex} ${anchor.toHex}",
-            Some(head => workPackageStatus(head.hash, wp, anchor).getOrElse(failed("The anchor is not available")))
+            Some(head => workPackageStatus(head.hash, wp, anchor).fold(e => failed(e.message), identity))
           )
         yield id
       case "subscribeSyncStatus" =>
@@ -219,6 +228,12 @@ final class RpcApi(
     chain.slotOf(h).orElse(Option.when(h == genesisHash)(0L)).toRight(RpcError.blockUnavailable(h))
 
   private def state(h: Hash): Either[RpcError, StateTrie] = chain.stateAt(h).toRight(RpcError.blockUnavailable(h))
+
+  private def atState(h: Hash)(read: StateTrie => Json): Either[RpcError, Json] = state(h).flatMap(t => whole(h)(read(t)))
+
+  private def whole[A](h: Hash)(read: => A): Either[RpcError, A] =
+    try Right(read)
+    catch case _: MissingTrieNodeException => Left(RpcError.blockUnavailable(h))
 
   private def raw(t: StateTrie, key: JamBytes): Json = t.read(key).map(v => blob(v.toArray)).getOrElse(Json.Null)
 
@@ -256,53 +271,103 @@ final class RpcApi(
   private def failed(why: String): Json = Json.obj("Failed" -> Json.fromString(why))
 
   private def workPackageStatus(header: Hash, wp: Hash, anchor: Hash): Either[RpcError, Json] =
-    for _ <- slotOf(header); anchorSlot <- slotOf(anchor)
-    yield
-      var cursor = header
-      var later = List.empty[Hash] // blocks after `cursor`, oldest first
-      var reported = Option.empty[(Hash, WorkReport)]
-      var atAnchor = false
-      var offChain = false
-      while reported.isEmpty && !atAnchor && !offChain do
-        if cursor == anchor then atAnchor = true
-        else if later.size >= MaxStatusWalk || !chain.slotOf(cursor).exists(_ > anchorSlot) then offChain = true
-        else
-          chain.block(cursor).flatMap(_.extrinsic.guarantees.map(_.report).find(_.packageSpec.hash == wp)) match
-            case Some(report) => reported = Some((cursor, report))
-            case None =>
-              chain.parentHash(cursor) match
-                case Some(parent) =>
-                  later = cursor :: later
-                  cursor = parent
-                case None => offChain = true
-      reported match
-        case Some((block, report)) =>
-          val core = report.coreIndex.toInt
-          val fields = List(
-            "reported_in" -> describe(block),
-            "core" -> Json.fromInt(core),
-            "report_hash" -> blob(Hashing.blake2b256(report.encode.toArray).bytes.toArray)
-          )
-          later.find(madeAvailable(_, core, wp)) match
-            case Some(ready) => Json.obj("Ready" -> Json.obj((fields :+ ("ready_in" -> describe(ready)))*))
-            case None        => Json.obj("Reported" -> Json.obj(fields*))
-        case None if atAnchor =>
-          val remaining = config.maxBlockHistory - later.size
-          if remaining > 0 then Json.obj("Reportable" -> Json.obj("remaining_blocks" -> Json.fromInt(remaining)))
-          else failed("Anchor is too old")
-        case None => failed("Anchor is on a different fork")
+    for _ <- slotOf(header); _ <- slotOf(anchor); status <- statusOnChain(header, wp, anchor) yield status
+
+  private def cannotTell(why: String): RpcError = RpcError.other(s"the work-package's status cannot be told: $why")
+
+  private def chainBetween(tip: Hash, from: Long, to: Long): Option[List[Hash]] =
+    if to < from then Some(Nil)
+    else
+      chain.ancestorAtHeight(tip, to).flatMap { top =>
+        var out = List(top)
+        var cursor: Option[Hash] = Some(top)
+        var n = to
+        while n > from && cursor.isDefined do
+          cursor = cursor.flatMap(chain.parentHash)
+          cursor.foreach(h => out = h :: out)
+          n -= 1
+        Option.when(cursor.isDefined)(out)
+      }
+
+  private def statusOnChain(header: Hash, wp: Hash, anchor: Hash): Either[RpcError, Json] =
+    (chain.heightOf(header), chain.heightOf(anchor)) match
+      case (_, None)   => Left(RpcError.blockUnavailable(anchor))
+      case (None, _)   => Left(RpcError.blockUnavailable(header))
+      case (Some(headerHeight), Some(anchorHeight)) if anchorHeight > headerHeight =>
+        Right(failed("Anchor is on a different fork"))
+      case (Some(headerHeight), Some(anchorHeight)) =>
+        chain.ancestorAtHeight(header, anchorHeight) match
+          case None => Left(cannotTell(s"the chain of block ${header.toHex} is not held back to the anchor"))
+          case Some(other) if other != anchor => Right(failed("Anchor is on a different fork"))
+          case Some(_) =>
+            val window = math.min(headerHeight, anchorHeight + config.maxBlockHistory)
+            chainBetween(header, anchorHeight + 1, window)
+              .toRight(cannotTell(s"the chain of block ${header.toHex} is not held back to the anchor"))
+              .flatMap(findReport(_, wp))
+              .flatMap {
+                case Some((block, report)) => reportedStatus(header, headerHeight, block, report, wp)
+                case None =>
+                  val remaining = config.maxBlockHistory - (headerHeight - anchorHeight)
+                  Right(
+                    if remaining > 0 then Json.obj("Reportable" -> Json.obj("remaining_blocks" -> Json.fromLong(remaining)))
+                    else failed("Anchor is too old")
+                  )
+              }
+
+  private def findReport(blocks: List[Hash], wp: Hash): Either[RpcError, Option[(Hash, WorkReport)]] =
+    blocks.iterator
+      .map(h => chain.block(h).toRight(RpcError.blockUnavailable(h)).map(b => h -> b))
+      .map(_.map((h, b) => b.extrinsic.guarantees.map(_.report).find(_.packageSpec.hash == wp).map(h -> _)))
+      .collectFirst { case Left(e) => Left(e); case Right(Some(found)) => Right(Some(found)) }
+      .getOrElse(Right(None))
+
+  private def reportedStatus(
+      header: Hash,
+      headerHeight: Long,
+      reportedIn: Hash,
+      report: WorkReport,
+      wp: Hash
+  ): Either[RpcError, Json] =
+    val core = report.coreIndex.toInt
+    val fields = List(
+      "reported_in" -> describe(reportedIn),
+      "core" -> Json.fromInt(core),
+      "report_hash" -> blob(Hashing.blake2b256(report.encode.toArray).bytes.toArray)
+    )
+    val reportedHeight = chain.heightOf(reportedIn).getOrElse(headerHeight)
+    val reported = Json.obj("Reported" -> Json.obj(fields*))
+    chainBetween(header, reportedHeight + 1, math.min(headerHeight, reportedHeight + MaxStatusWalk))
+      .toRight(cannotTell(s"the chain of block ${header.toHex} is not held back to its report"))
+      .flatMap { later =>
+        val outcomes = later.iterator.map(h => h -> availability(h, core, wp))
+        outcomes
+          .collectFirst {
+            case (h, Availability.MadeAvailable) =>
+              Right(Json.obj("Ready" -> Json.obj((fields :+ ("ready_in" -> describe(h)))*)))
+            case (_, Availability.NotPending) => Right(reported)
+            case (h, Availability.Unknown) =>
+              Left(cannotTell(s"the state before block ${h.toHex} is no longer held, so whether it made the report available is not known"))
+          }
+          .getOrElse(Right(reported))
+      }
 
   private def describe(h: Hash): Json = descriptor(h, chain.slotOf(h).getOrElse(0L))
 
-  private def madeAvailable(h: Hash, core: Int, wp: Hash): Boolean =
-    chain.block(h).exists { block =>
-      chain.stateViewAt(block.header.parent).exists { prior =>
-        prior.cores.reports.lift(core).flatten.exists(_.report.packageSpec.hash == wp) &&
-        io.forge.jam.protocol.assurance.AssuranceTransition
-          .assuredCores(block.extrinsic.assurances, config.coresCount, prior.validators.current.size)
-          .contains(core)
-      }
-    }
+  private enum Availability:
+    case MadeAvailable, StillPending, NotPending, Unknown
+
+  private def availability(h: Hash, core: Int, wp: Hash): Availability =
+    chain.block(h).flatMap(block => chain.stateViewAt(block.header.parent).map(block -> _)) match
+      case None => Availability.Unknown
+      case Some((block, prior)) =>
+        try
+          if !prior.cores.reports.lift(core).flatten.exists(_.report.packageSpec.hash == wp) then Availability.NotPending
+          else if io.forge.jam.protocol.assurance.AssuranceTransition
+              .assuredCores(block.extrinsic.assurances, config.coresCount, prior.validators.current.size)
+              .contains(core)
+          then Availability.MadeAvailable
+          else Availability.StillPending
+        catch case _: MissingTrieNodeException => Availability.Unknown
 
   private def workReport(hash: Hash): Option[WorkReport] =
     knownReport(hash).orElse {
@@ -369,8 +434,7 @@ final class RpcApi(
     register(session, new RpcSubscription(newId(), method, finalized, current, key))
 
   def refresh(sessions: Iterable[RpcSession]): Unit =
-    val best = chain.best
-    val finalized = chain.finalized
+    val (best, finalized) = chain.heads
     val answers = scala.collection.mutable.HashMap.empty[(String, Hash), Option[(Json, Json)]]
     for session <- sessions; s <- session.subscriptions.values.asScala do
       val head = if s.finalized then finalized else best

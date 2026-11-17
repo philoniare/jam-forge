@@ -65,19 +65,15 @@ private[node] final class PeerConnectivity(
 
   private val connectedAt = new java.util.concurrent.ConcurrentHashMap[PeerConnection, java.lang.Long]()
 
+  private val redialTask = new Periodic("peer redial")
+  private val upkeepTask = new Periodic("connectivity upkeep")
+
   def start(): Unit =
     spec.bootnodes.foreach(bn => dialTargets.add(new DialTarget(bn.address, Some(bn.ed25519Key))))
     dialTargets.forEach(t => dial(t, initial = true))
     redialer = threads.scheduled("jam-redial")
-    redialer.scheduleWithFixedDelay(() => redialLost(), 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
-    redialer.scheduleWithFixedDelay(
-      () =>
-        try maintain()
-        catch case e: Exception => logger.warn(s"connectivity upkeep failed: ${e.getMessage}"),
-      500,
-      500,
-      java.util.concurrent.TimeUnit.MILLISECONDS
-    )
+    redialer.scheduleWithFixedDelay(redialTask(redialLost()), 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
+    redialer.scheduleWithFixedDelay(upkeepTask(maintain()), 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
 
   def beginShutdown(): Unit = stopping = true
 
@@ -140,10 +136,10 @@ private[node] final class PeerConnectivity(
 
   /** An open connection to the peer with Ed25519 key `key`. */
   private def liveConnectionTo(key: Array[Byte]): Option[PeerConnection] =
-    distribution.peers.find(c => java.util.Arrays.equals(c.peerKey, key))
+    distribution.connectionsTo(key).headOption
 
   private def connectionsTo(keys: Set[JamBytes]): List[PeerConnection] =
-    distribution.peers.filter(c => keys.contains(JamBytes(c.peerKey)))
+    keys.toList.flatMap(k => distribution.connectionsTo(k.toArrayUnsafe))
 
   /** Devnet quorum finality counts the best heads peers announce on UP 0,
     * so UP 0 stays open to every peer while it runs; the grid restriction
@@ -186,17 +182,20 @@ private[node] final class PeerConnectivity(
       val self = JamBytes(identity.publicKeyBytes)
       // Only validators keep connections to all other validators.
       val wanted = if v.validators.contains(self) then v.endpoints - self else Map.empty
-      validatorDials.keySet.removeIf(k => !wanted.contains(k))
-      wanted.foreach { case (k, address) =>
-        val existing = validatorDials.get(k)
-        if existing == null || existing.address != address then
-          validatorDials.put(k, new ValidatorDial(k.toArray, address))
-      }
+      keepConnectedTo(wanted)
       logger.info(
         s"validator connectivity for epoch $headEpoch applied at slot $slot: " +
           s"${v.validators.size} validators, ${wanted.size} endpoints, ${v.neighbours.size} grid neighbours"
       )
   }
+
+  private[node] def keepConnectedTo(wanted: Map[JamBytes, InetSocketAddress]): Unit =
+    validatorDials.keySet.removeIf(k => !wanted.contains(k))
+    wanted.foreach { case (k, address) =>
+      val existing = validatorDials.get(k)
+      if existing == null || existing.address != address then
+        validatorDials.put(k, new ValidatorDial(k.toArray, address))
+    }
 
   private val upkeeper = threads.single("jam-upkeep")
   private val upkeepRunning = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -216,7 +215,7 @@ private[node] final class PeerConnectivity(
     * and open or close UP 0 streams on our dialed connections to follow the
     * grid. Runs on the redial thread.
     */
-  private def maintain(): Unit =
+  private[node] def maintain(): Unit =
     if stopping then return
     update(currentSlot())
     runUpkeep()
@@ -242,8 +241,7 @@ private[node] final class PeerConnectivity(
         }
     }
     // UP 0 may be opened by either side. A connection kept after a duplicate was closed, or an accepted one whose
-    // peer never opened UP 0, gets one from us after a grace period.
-    distribution.peers.foreach { c =>
+    distribution.openConnections.foreach { c =>
       val wanted = announcementWanted(c.peerKey)
       val open = sync.hasAnnouncementStream(c)
       val since = connectedAt.computeIfAbsent(c, _ => now)
@@ -263,9 +261,7 @@ private[node] final class PeerConnectivity(
     */
   def dropDuplicateConnections(conn: PeerConnection): Unit =
     val key = conn.peerKey
-    val same = (conn :: distribution.peers).distinct.filter(c =>
-      c.isOpen && java.util.Arrays.equals(c.peerKey, key)
-    )
+    val same = (conn :: distribution.connectionsTo(key)).distinct.filter(_.isOpen)
     if same.exists(_.initiator) && same.exists(!_.initiator) then
       val weInitiate = Connectivity.isPreferredInitiator(identity.publicKeyBytes, key)
       val (preferred, others) = same.partition(_.initiator == weInitiate)

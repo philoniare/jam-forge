@@ -84,6 +84,7 @@ private[node] final class HistoryPruner(
             val branches = blockStore.children(oldest).filterNot(_ == n)
             if pruneFinalizedHistory then branches.foreach(root => forks += deleteBranch(root))
             else branches.foreach(dropBranchJournals)
+            if branches.nonEmpty then meta.requestSweep()
             meta.pruneFloor = n
             if pruneFinalizedHistory then
               if !genesis.contains(oldest) then deleteBlockRecord(oldest, finalizedChain = true)

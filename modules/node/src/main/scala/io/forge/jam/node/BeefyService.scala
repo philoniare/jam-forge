@@ -62,7 +62,7 @@ final class BeefyService(
     chain.meta.beefyProof(block).flatMap(decodeProof(_).toOption)
 
   def start(): Unit =
-    exec.scheduleAtFixedRate(() => guarded(step()), pollMillis, pollMillis, TimeUnit.MILLISECONDS)
+    exec.scheduleAtFixedRate(stepTask(step()), pollMillis, pollMillis, TimeUnit.MILLISECONDS)
     logger.info(s"BEEFY started, signing=${keys.isDefined}")
 
   def shutdown(): Unit = exec.shutdownNow()
@@ -89,6 +89,8 @@ final class BeefyService(
           }
         case Left(err) => logger.warn(s"bad BEEFY payload: $err")
     }
+
+  private val stepTask = new Periodic("BEEFY step")
 
   private def guarded(f: => Unit): Unit =
     try f
@@ -165,11 +167,13 @@ final class BeefyService(
 
   private def readContext(block: Hash): Option[Ctx] =
     chain.stateAt(block).flatMap { trie =>
-      val state = new TrieBackedJamState(trie, chain.config, new ServiceStorageView(trie))
-      val vs = state.validators.current.toIndexedSeq
-      state.beta.history.lastOption.map(h =>
-        Ctx(vs.map(_.bls.bytes), vs.map(_.ed25519), h.beefyRoot)
-      )
+      try
+        val state = new TrieBackedJamState(trie, chain.config, new ServiceStorageView(trie))
+        val vs = state.validators.current.toIndexedSeq
+        state.beta.history.lastOption.map(h =>
+          Ctx(vs.map(_.bls.bytes), vs.map(_.ed25519), h.beefyRoot)
+        )
+      catch case _: io.forge.jam.core.trie.MissingTrieNodeException => None
     }
 
   private[node] def onCommitment(c: SignedCommitment): Unit =

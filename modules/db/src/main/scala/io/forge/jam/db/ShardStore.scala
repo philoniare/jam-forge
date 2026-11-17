@@ -29,26 +29,32 @@ final class ShardStore private (
     out(33) = ((validatorIndex >> 8) & 0xff).toByte
     out
 
+  private val indexLock = new Object
+
+  private def currentSeconds(erasureRoot: Hash): Option[Long] =
+    Option(db.get(storedAtCf, erasureRoot.toArrayUnsafe)).filter(_.length == 8).map(java.nio.ByteBuffer.wrap(_).getLong)
+
   /** Store a custody unit and note when its erasure-root was last stored: [[deleteStoredBefore]] expires roots by
     * that time. The index holds, per root, `seconds ++ root` (sorted by time) and `root -> seconds` (to move the
     * first when the root is stored again).
     */
   def put(erasureRoot: Hash, validatorIndex: Int, encodedShards: Array[Byte]): Unit =
-    val now = clock()
-    val batch = new org.rocksdb.WriteBatch()
     val options = new org.rocksdb.WriteOptions()
     try
-      batch.put(shardsCf, key(erasureRoot, validatorIndex), encodedShards)
-      val rootKey = erasureRoot.toArrayUnsafe
-      val previous = Option(db.get(storedAtCf, rootKey)).filter(_.length == 8).map(java.nio.ByteBuffer.wrap(_).getLong)
-      if !previous.contains(now) then
-        previous.foreach(t => batch.delete(storedAtCf, storedAtKey(t, erasureRoot)))
-        batch.put(storedAtCf, storedAtKey(now, erasureRoot), Array.emptyByteArray)
-        batch.put(storedAtCf, rootKey, java.nio.ByteBuffer.allocate(8).putLong(now).array())
-      db.write(options, batch)
-    finally
-      batch.close()
-      options.close()
+      indexLock.synchronized {
+        val now = clock()
+        val previous = currentSeconds(erasureRoot)
+        if !previous.contains(now) then
+          val batch = new org.rocksdb.WriteBatch()
+          try
+            previous.foreach(t => batch.delete(storedAtCf, storedAtKey(t, erasureRoot)))
+            batch.put(storedAtCf, storedAtKey(now, erasureRoot), Array.emptyByteArray)
+            batch.put(storedAtCf, erasureRoot.toArrayUnsafe, java.nio.ByteBuffer.allocate(8).putLong(now).array())
+            db.write(options, batch)
+          finally batch.close()
+      }
+      db.put(shardsCf, options, key(erasureRoot, validatorIndex), encodedShards)
+    finally options.close()
 
   // Seconds (big-endian, so keys sort by time) then the erasure-root.
   private def storedAtKey(seconds: Long, erasureRoot: Hash): Array[Byte] =
@@ -61,32 +67,50 @@ final class ShardStore private (
     * them); returns how many units went. Units stored before this index existed have no entry and are not touched.
     */
   def deleteStoredBefore(seconds: Long): Int =
-    val expired = mutable.ListBuffer.empty[Hash]
+    val found = mutable.ListBuffer.empty[(Long, Hash)]
     val it = db.newIterator(storedAtCf)
     try
       // Time entries are 40 bytes; the 32-byte per-root entries are skipped. Seconds are non-negative, so the
       // time entries sort by time from the first key.
       it.seekToFirst()
       var more = true
-      while more && it.isValid && expired.size < ShardStore.MaxExpiredPerCall do
+      while more && it.isValid && found.size < ShardStore.MaxExpiredPerCall do
         val k = it.key()
         if k.length == 40 then
-          if java.nio.ByteBuffer.wrap(k).getLong < seconds then expired += Hash(java.util.Arrays.copyOfRange(k, 8, 40))
+          val t = java.nio.ByteBuffer.wrap(k).getLong
+          if t < seconds then found += t -> Hash(java.util.Arrays.copyOfRange(k, 8, 40))
           else more = false
         it.next()
     finally it.close()
     var deleted = 0
-    expired.foreach { root =>
-      heldIndexes(root).foreach { idx =>
-        db.delete(shardsCf, key(root, idx))
-        deleted += 1
+    found.foreach { (t, root) =>
+      indexLock.synchronized {
+        if currentSeconds(root).contains(t) then
+          heldIndexes(root).foreach { idx =>
+            db.delete(shardsCf, key(root, idx))
+            deleted += 1
+          }
+          db.delete(storedAtCf, root.toArrayUnsafe)
+        db.delete(storedAtCf, storedAtKey(t, root))
       }
-      Option(db.get(storedAtCf, root.toArrayUnsafe)).filter(_.length == 8).foreach { t =>
-        db.delete(storedAtCf, storedAtKey(java.nio.ByteBuffer.wrap(t).getLong, root))
-      }
-      db.delete(storedAtCf, root.toArrayUnsafe)
     }
     deleted
+
+  private[db] def putTimeEntryForTesting(erasureRoot: Hash, seconds: Long): Unit =
+    db.put(storedAtCf, storedAtKey(seconds, erasureRoot), Array.emptyByteArray)
+
+  private[db] def timeEntriesForTesting(erasureRoot: Hash): List[Long] =
+    val it = db.newIterator(storedAtCf)
+    try
+      val out = List.newBuilder[Long]
+      it.seekToFirst()
+      while it.isValid do
+        val k = it.key()
+        if k.length == 40 && java.util.Arrays.equals(k, 8, 40, erasureRoot.toArrayUnsafe, 0, 32) then
+          out += java.nio.ByteBuffer.wrap(k).getLong
+        it.next()
+      out.result()
+    finally it.close()
 
   def get(erasureRoot: Hash, validatorIndex: Int): Option[Array[Byte]] =
     Option(db.get(shardsCf, key(erasureRoot, validatorIndex)))

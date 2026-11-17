@@ -61,6 +61,37 @@ class PeerScoresSpec extends AnyFunSuite with Matchers:
     scores.points(key(60)) should be > 0.0
   }
 
+  test("the table stays bounded when every entry serves a ban: the ban that ends soonest is forgotten first") {
+    var now = 0L
+    val scores = new PeerScores(clock = () => now, maxPeers = 4)
+    def ban(i: Int): Unit =
+      (1 to 2).foreach(_ => scores.report(key(i), Offence.BadSignature))
+      scores.banned(key(i)) shouldBe true
+    (1 to 4).foreach { i => ban(i); now += 1000 }
+    (5 to 40).foreach { i => ban(i); now += 1000 }
+    scores.tableSize shouldBe 4
+    (37 to 40).foreach(i => scores.banned(key(i)) shouldBe true)
+    scores.banned(key(1)) shouldBe false // its ban ended soonest and was forgotten
+    scores.report(key(50), Offence.Unanswered)
+    now += 1000
+    scores.report(key(51), Offence.Unanswered)
+    scores.tableSize shouldBe 4
+    scores.points(key(50)) shouldBe 0.0
+    (38 to 40).foreach(i => scores.banned(key(i)) shouldBe true)
+  }
+
+  test("peers are ordered by their points read once each, not re-read while sorting") {
+    var reads = 0
+    var now = 0L
+    val scores = new PeerScores(clock = () => { reads += 1; now })
+    (0 until 100).foreach(i => (0 until i % 7).foreach(_ => scores.report(key(i), Offence.Unanswered)))
+    reads = 0
+    val ordered = scores.leastFaultedFirst((0 until 100).toList)(key)
+    reads should be <= 1
+    ordered.map(i => i % 7) shouldBe (0 until 100).toList.map(_ % 7).sorted
+    ordered.filter(_ % 7 == 3) shouldBe (0 until 100).filter(_ % 7 == 3).toList // equal points keep their order
+  }
+
 class PeerFaultReportingSpec extends AnyFunSuite with Matchers with LoopbackFixture:
   import io.forge.jam.network.{Loopback, PeerStreamHandler, StreamKind}
 

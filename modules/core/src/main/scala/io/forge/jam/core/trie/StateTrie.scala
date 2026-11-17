@@ -101,7 +101,10 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
             if pendingNodes.hasPayload(s) then
               ops(n) = BackendOp.WriteNode(pendingNodes.node(s, h).nn)
               n += 1
-            ops(n) = BackendOp.NodeRefDelta(h, pendingNodes.ref(s))
+            val d = pendingNodes.ref(s)
+            ops(n) =
+              if d < 0 then BackendOp.NodeRefDelta(h, d, pendingNodes.givenUpValue(s, BackendOp.NotRegularLeaf))
+              else BackendOp.NodeRefDelta(h, d)
             n += 1
           s += 1
         s = 0
@@ -135,7 +138,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           // Same values written again: nothing below changed, so neither does this branch.
           if newLeft == leftHash && newRight == rightHash then hash
           else
-            unrefNode(hash)
+            unrefNode(hash, node)
             collapseBranch(newLeft, newRight)
         case Some(leaf) =>
           // Where the leaf's key sits in the batch: its update if it has one, else its sorted position.
@@ -151,7 +154,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
             val kept = batch(a).value.isDefined && batch(a).leaf.hash == hash
             if kept then buildFromBatch(depth, batch, lo, hi, existing = leaf, existingIndex = a, existingHash = hash)
             else
-              unrefNode(hash)
+              unrefNode(hash, leaf)
               buildFromBatch(depth, batch, lo, hi, existing = null, existingIndex = lo, existingHash = Hash.zero)
 
   /**
@@ -242,7 +245,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
    * Drops a reference to `h`. A node created since the last save that loses its only reference is discarded with its
    * raw value's reference, so the backend never sees either.
    */
-  private def unrefNode(h: Hash): Unit =
+  private def unrefNode(h: Hash, node: TrieNode): Unit =
     val slot = pendingNodes.findOrInsert(h.toArrayUnsafe)
     val d = pendingNodes.ref(slot) - 1
     if d == 0 then
@@ -252,7 +255,9 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         pendingNodes.remove(slot)
         unrefValue(vh)
       else pendingNodes.remove(slot)
-    else pendingNodes.setRef(slot, d)
+    else
+      pendingNodes.setRef(slot, d)
+      if d < 0 then pendingNodes.setGivenUp(slot, node)
 
   private def refValue(h: Array[Byte], value: JamBytes): Unit =
     val slot = pendingValues.findOrInsert(h)

@@ -206,7 +206,14 @@ final class SyncService(
     peerFinals.keySet.forEach(conn => catchUp(conn))
 
   private[node] def fetchBlocks(conn: PeerConnection, from: Hash, maxBlocks: Int, ascending: Boolean = false)
-      : Option[List[Array[Byte]]] = exchange(conn, from, maxBlocks, ascending)
+      : Option[List[Array[Byte]]] =
+    exchange(conn, from, maxBlocks, ascending, strict = true).flatMap { blocks =>
+      if blocks.size <= maxBlocks then Some(blocks)
+      else
+        logger.warn(s"CE128: ${blocks.size} block(s) in answer to a request for $maxBlocks")
+        misbehaved(conn, Offence.Malformed)
+        None
+    }
 
   /** The latest `Final` announced by the peer on `conn`, if any handshake or
     * announcement has been received from it yet.
@@ -363,23 +370,29 @@ final class SyncService(
       logger.debug(s"UP0: bad message from $side peer: $reason")
       misbehaved(conn, Offence.Malformed)
       stream.reset()
+    def decoded[A](decode: => Either[String, A]): Either[String, A] =
+      try decode
+      catch case e: Exception => Left(String.valueOf(e.getMessage))
+    def ours(what: String)(f: => Unit): Unit =
+      try f
+      catch case e: Exception => logger.warn(s"UP0: handling a $what from $side peer failed here, not charged: $e")
     def handle(first: Boolean, msg: Array[Byte]): Unit =
-      try
-        if first then
-          decodeHandshake(msg) match
-            case Left(reason) => malformed(reason)
-            case Right((peerFinal, peerLeaves)) =>
+      if first then
+        decoded(decodeHandshake(msg)) match
+          case Left(reason) => malformed(reason)
+          case Right((peerFinal, peerLeaves)) =>
+            ours("handshake") {
               peerFinals.put(conn, peerFinal)
               logger.info(
                 s"UP0 handshake decoded from $side peer: final=${peerFinal.hash.toHex.take(18)} " +
                   s"slot=${peerFinal.slot} leaves=${peerLeaves.size}"
               )
               onPeerLeaves(conn, peerLeaves, peerFinal)
-        else
-          decodeAnnouncement(msg) match
-            case Left(reason)                   => malformed(reason)
-            case Right((headerBytes, peerFinal)) => onAnnouncement(conn, headerBytes, peerFinal)
-      catch case e: Exception => malformed(String.valueOf(e.getMessage))
+            }
+      else
+        decoded(decodeAnnouncement(msg)) match
+          case Left(reason)                   => malformed(reason)
+          case Right((headerBytes, peerFinal)) => ours("announcement")(onAnnouncement(conn, headerBytes, peerFinal))
     stream.onMessage { msg =>
       val first = !handshaken
       handshaken = true
@@ -459,13 +472,14 @@ final class SyncService(
                     val blocks =
                       if ascending then chain.blocksAscending(from, max)
                       else chain.blocksDescending(from, max)
-                    // Keep the one message under the peer's frame cap.
-                    val out = new java.io.ByteArrayOutputStream()
-                    blocks.iterator
-                      .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
-                      .foreach(b => out.write(b))
-                    stream.send(out.toByteArray)
-                    stream.finish()
+                    if blocks.isEmpty && !ascending then stream.reset()
+                    else
+                      val out = new java.io.ByteArrayOutputStream()
+                      blocks.iterator
+                        .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
+                        .foreach(b => out.write(b))
+                      stream.send(out.toByteArray)
+                      stream.finish()
                 catch
                   case e: Exception =>
                     logger.warn(s"CE128 handler failed: ${e.getMessage}")
@@ -585,7 +599,8 @@ final class SyncService(
       from: Hash,
       maxBlocks: Int,
       ascending: Boolean,
-      announced: Boolean = false
+      announced: Boolean = false,
+      strict: Boolean = false
   ): Option[List[Array[Byte]]] =
     // The response is one message; a peer that keeps sending is not buffered without limit.
     StreamRequest.exchange(
@@ -594,11 +609,15 @@ final class SyncService(
       Seq(encodeBlockRequest(from, ascending = ascending, maxBlocks = maxBlocks.toLong)),
       10_000,
       () => 20_000,
-      maxMessages = SyncService.MaxResponseMessages
+      maxMessages = if strict then 1 else SyncService.MaxResponseMessages,
+      excessFails = strict
     ) match
       case Left(failure) =>
         logger.warn(s"block request failed: ${failure.message}")
-        if failure == StreamRequest.Failure.TimedOut then misbehaved(conn, Offence.Unanswered)
+        failure match
+          case StreamRequest.Failure.TimedOut  => misbehaved(conn, Offence.Unanswered)
+          case StreamRequest.Failure.Excess(_) => misbehaved(conn, Offence.Malformed)
+          case _                               => ()
         None
       case Right(messages) =>
         var malformed = false
@@ -687,6 +706,9 @@ final class SyncService(
                       stream.send(encodeStatePairs(pairs))
                       stream.finish()
                 catch
+                  case e: io.forge.jam.core.trie.MissingTrieNodeException =>
+                    logger.debug(s"CE129: state of ${headerHash.toHex.take(18)} is no longer held whole (${e.getMessage})")
+                    stream.reset()
                   case e: Exception =>
                     logger.warn(s"CE129 handler failed: ${e.getMessage}")
                     stream.reset()

@@ -198,3 +198,47 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers with NodeFixture:
       server.close()
       cleanup(dir)
   }
+
+  test("JIP-3: a block finalized with no import after it is reported (event 12) at once") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
+    val spec = specFor("telemetry-finalized", genesis)
+    val server = new ServerSocket(0)
+    server.setSoTimeout(20000)
+    val dir = tempDir("jam-telemetry-finalized")
+    var node: JamNode = null
+    try
+      node = new JamNode(
+        spec,
+        NodeConfig(dataDir = dir, slotTicking = false, telemetry = Some(new InetSocketAddress("127.0.0.1", server.getLocalPort)))
+      ).start()
+      val socket = server.accept()
+      socket.setSoTimeout(20000)
+      val in = new DataInputStream(socket.getInputStream)
+      def readMessage(): Array[Byte] =
+        val size = new Array[Byte](4)
+        in.readFully(size)
+        val content = new Array[Byte](LittleEndian.get(size, 0, 4).toInt)
+        in.readFully(content)
+        content
+      readMessage() // node information
+
+      node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
+      val first = node.authorSlot(1).getOrElse(fail("author slot 1"))
+      node.authorSlot(2).getOrElse(fail("author slot 2"))
+      Iterator.continually(readMessage()).take(20).find(e => e(8) == 11.toByte && LittleEndian.get(e, 9, 4) == 2L)
+        .getOrElse(fail("no event 11 for slot 2"))
+
+      node.chain.finalize(first.hash).isRight shouldBe true
+      val finalizedAt = System.nanoTime()
+      socket.setSoTimeout(2000) // the slot tick, the old fallback, is off: only the finalization can send it
+      val event = Iterator.continually(readMessage()).take(10).find(_(8) == 12.toByte).getOrElse(fail("no event 12"))
+      val waitedMs = (System.nanoTime() - finalizedAt) / 1e6
+      info(f"event 12 received $waitedMs%.1f ms after the finalization")
+      LittleEndian.get(event, 9, 4) shouldBe 1L
+      event.slice(13, 45) shouldBe first.hash.bytes.toArray
+      socket.close()
+    finally
+      if node != null then node.shutdown()
+      server.close()
+      cleanup(dir)
+  }

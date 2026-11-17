@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters.*
 import io.circe.Json
 import io.circe.parser.parse
 import io.forge.jam.core.JamBytes
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.protocol.state.{StateKey, StateKeys}
 import org.scalatest.funsuite.AnyFunSuite
@@ -242,6 +243,74 @@ class RpcApiSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       rpc.session.subscriptions.size shouldBe 1
       rpc.errorCode("subscribeWorkPackageStatus", wp, unknown, Json.False) shouldBe 1
       following.isNumber shouldBe true
+    }
+  }
+
+  test("a work-package whose anchor is far behind the head is too old, not on a different fork") {
+    withApi(blocks = RpcApi.MaxStatusWalk + 6) { (node, _, rpc) =>
+      val chainUp = Iterator.iterate(node.chain.best.hash)(h => node.chain.parentHash(h).get).take(RpcApi.MaxStatusWalk + 6).toVector
+      val wp = str(b64(Array.fill[Byte](32)(7)))
+      def status(at: Int, anchor: Int) = rpc.result("workPackageStatus", str(b64(chainUp(at))), wp, str(b64(chainUp(anchor))))
+      status(at = 0, anchor = RpcApi.MaxStatusWalk + 2) shouldBe Json.obj("Failed" -> str("Anchor is too old"))
+      status(at = 0, anchor = 9) shouldBe Json.obj("Failed" -> str("Anchor is too old"))
+      status(at = RpcApi.MaxStatusWalk + 2, anchor = 0) shouldBe Json.obj("Failed" -> str("Anchor is on a different fork"))
+    }
+  }
+
+  test("sync status is in progress while the node starts from a checkpoint") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val spec = ChainSpec(
+      id = "rpc-checkpoint",
+      config = io.forge.jam.core.ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dir = tempDir("jam-rpc-checkpoint")
+    val node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false, syncFrom = Some(Hash(Array.fill[Byte](32)(5)))))
+    try
+      node.chain.initializeOrRestore(spec)
+      node.syncingFromCheckpoint shouldBe true
+      val rpc = new Client(node.rpcApi)
+      rpc.result("syncState").hcursor.get[String]("status") shouldBe Right("InProgress")
+    finally
+      node.shutdown()
+      cleanup(dir)
+  }
+
+  test("a head is shown to RPC readers only once its block's records are written") {
+    withApi(blocks = 1) { (node, api, rpc) =>
+      val before = node.chain.best
+      val subscription = rpc.result("subscribeBestBlock")
+      api.refresh(List(rpc.session))
+      val block = new BlockAuthor(node.chain, devKeys).tryAuthor(2L).getOrElse(fail("author block 2"))
+      val bytes = node.chain.encodeBlock(block)
+      val paused = new java.util.concurrent.CountDownLatch(1)
+      val release = new java.util.concurrent.CountDownLatch(1)
+      node.chain.faultBeforeMetaCommit = () =>
+        paused.countDown()
+        release.await(30, java.util.concurrent.TimeUnit.SECONDS): Unit
+      val importing = new Thread(() => node.chain.importBlock(bytes): Unit)
+      importing.start()
+      try
+        paused.await(30, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        val shown = rpc.result("bestBlock")
+        shown shouldBe Json.obj("header_hash" -> str(b64(before.hash)), "slot" -> num(1))
+        val hash = Hash(Base64.getDecoder.decode(shown.hcursor.get[String]("header_hash").toOption.get))
+        rpc.result("stateRoot", str(b64(hash))) shouldBe str(b64(before.stateRoot))
+        rpc.result("statistics", str(b64(hash))).isString shouldBe true
+        api.refresh(List(rpc.session))
+        rpc.notified(subscription).map(_.hcursor.get[Long]("slot").toOption.get) shouldBe List(1L)
+      finally
+        release.countDown()
+        importing.join(30000)
+        node.chain.faultBeforeMetaCommit = () => ()
+      val after = node.chain.best
+      after.slot shouldBe 2L
+      rpc.result("stateRoot", str(b64(after.hash))) shouldBe str(b64(after.stateRoot))
+      api.refresh(List(rpc.session))
+      rpc.notified(subscription).map(_.hcursor.get[Long]("slot").toOption.get) shouldBe List(1L, 2L)
     }
   }
 

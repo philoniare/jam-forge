@@ -390,3 +390,152 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
         backend.close()
         cleanup(dir)
   }
+
+
+  private val bare = RocksDbTrieBackend.Settings(journalValueHashes = false)
+  private val described = RocksDbTrieBackend.Settings(journalValueHashes = true)
+  private def openWith(dir: Path, settings: RocksDbTrieBackend.Settings): RocksDbTrieBackend =
+    val b = RocksDbTrieBackend.open(dir, trackGarbage = false, new RocksDbMemory(16L << 20, 4L << 20), settings)
+    b.exactStoredCheckForTesting = true
+    b
+
+  private def history(
+      first: RocksDbTrieBackend,
+      seed: Long,
+      switchAt: Int = -1,
+      reopen: RocksDbTrieBackend => RocksDbTrieBackend = identity
+  ): (Seq[Seq[(String, Seq[(String, String)])]], RocksDbTrieBackend) =
+    val rng = new Random(seed)
+    var backend = first
+    val keys = 30
+    val genesisModel: Model = (0 until keys / 2).map(i => key(i) -> value(rng)).toMap
+    val genesisRoot = backend.withJournal(label("genesis"), 0L) {
+      val t = StateTrie.at(backend, Hash.zero)
+      t.update(genesisModel.toSeq.map((k, v) => k -> Some(v)))
+      t.save()
+      t.rootHash
+    }
+    final case class Saved(parent: State, name: String, height: Long, seed: Long, state: State)
+    val saves = mutable.ArrayBuffer[Saved]()
+    def save(parent: State, name: String, height: Long): State =
+      val s = rng.nextLong()
+      val st = step(backend, parent, name, height, new Random(s), keys)
+      saves += Saved(parent, name, height, s, st)
+      st
+    val chain = mutable.ArrayBuffer(State(label("genesis"), 0L, genesisRoot, genesisModel))
+    val forksAt = mutable.HashMap.empty[Long, List[State]]
+    val snapshots = mutable.ArrayBuffer[Seq[(String, Seq[(String, String)])]]()
+    val window = 5
+    for h <- 1 to 50 do
+      chain += save(chain.last, s"c$h", h.toLong)
+      if rng.nextInt(4) == 0 then
+        val base = chain(math.max(0, chain.size - 1 - rng.nextInt(3)))
+        var tip = base
+        val branch = (1 to 1 + rng.nextInt(3)).map { d =>
+          tip = save(tip, s"f$h-$d", base.height + d)
+          tip
+        }.toList
+        forksAt(base.height) = forksAt.getOrElse(base.height, Nil) ++ branch
+      val recent = saves.filter(_.parent.height >= h - window + 2)
+      if recent.nonEmpty && rng.nextInt(2) == 0 then
+        val again = recent(rng.nextInt(recent.size))
+        step(backend, again.parent, again.name, again.height, new Random(again.seed), keys).root shouldBe again.state.root
+      if h == switchAt then backend = reopen(backend)
+      val floor = h - window
+      if floor >= 1 then
+        forksAt.remove(floor.toLong - 1).foreach(_.foreach(s => backend.dropJournal(s.label)))
+        backend.pruneJournal(chain(floor).label, floor.toLong)
+        chain.drop(floor).foreach(check(backend, _, keys, s"seed $seed canonical"))
+        forksAt.foreach((base, states) => if base >= floor then states.foreach(check(backend, _, keys, s"seed $seed fork")))
+        snapshots += backend.contentsForTesting
+    (snapshots.toSeq, backend)
+
+  test("a journal of bare hashes, written before entries described their nodes, still prunes correctly") {
+    val rng = new Random(21)
+    val dir = Files.createTempDirectory("jam-trie-journal-bare")
+    var backend = openWith(dir, bare)
+    try
+      val keys = 40
+      val g = step(backend, State(label("g"), 0L, Hash.zero, Map.empty), "g", 0L, rng, keys)
+      val a = step(backend, g, "a", 1L, rng, keys)
+      val seedB = rng.nextLong()
+      val b = step(backend, a, "b", 2L, new Random(seedB), keys)
+      val c = step(backend, b, "c", 3L, rng, keys)
+      backend.journalEntriesOf(a.label) should not be empty
+      backend.journalEntriesOf(a.label).foreach(_.known shouldBe false)
+      backend.close()
+      backend = openWith(dir, described)
+      val d = step(backend, c, "d", 4L, rng, keys)
+      backend.journalEntriesOf(d.label).foreach(_.known shouldBe true)
+      val bareB = backend.journalOf(b.label)
+      step(backend, a, "b", 2L, new Random(seedB), keys).root shouldBe b.root
+      backend.journalOf(b.label) shouldBe bareB
+      backend.journalEntriesOf(b.label).foreach(_.known shouldBe false)
+      Seq(a, b).foreach(s => backend.pruneJournal(s.label, s.height))
+      backend.pruneNodeReadsForTesting should be > 0L
+      check(backend, c, keys, "after pruning bare journals")
+      check(backend, d, keys, "after pruning bare journals")
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("a journal that describes its nodes is pruned without reading a node") {
+    val rng = new Random(23)
+    val dir = Files.createTempDirectory("jam-trie-journal-described")
+    val backend = openWith(dir, described)
+    try
+      val keys = 80
+      var state = step(backend, State(label("g"), 0L, Hash.zero, Map.empty), "g", 0L, rng, keys)
+      val states = mutable.ArrayBuffer(state)
+      for h <- 1 to 60 do
+        state = step(backend, state, s"b$h", h.toLong, rng, keys)
+        states += state
+      states.drop(1).foreach(s => backend.journalEntriesOf(s.label).foreach(_.known shouldBe true))
+      states.drop(1).exists(s => backend.journalEntriesOf(s.label).exists(_.leafValue != null)) shouldBe true
+      var deleted = 0
+      for h <- 1 to 55 do deleted += backend.pruneJournal(states(h).label, h.toLong)._1
+      deleted should be > 0
+      backend.pruneNodeReadsForTesting shouldBe 0L
+      states.drop(55).foreach(check(backend, _, keys, "after pruning described journals"))
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
+  test("pruning leaves the store the same with bare journals, described ones, or a restart between the two") {
+    for seed <- Seq(31L, 32L, 33L) do
+      val dirs = Seq.fill(3)(Files.createTempDirectory("jam-trie-journal-formats"))
+      var open = List.empty[RocksDbTrieBackend]
+      try
+        val (bareRun, b1) = history(openWith(dirs(0), bare), seed)
+        open = b1 :: open
+        val (describedRun, b2) = history(openWith(dirs(1), described), seed)
+        open = b2 :: open
+        val (mixedRun, b3) = history(
+          openWith(dirs(2), bare),
+          seed,
+          switchAt = 20,
+          reopen = old =>
+            old.close()
+            openWith(dirs(2), described)
+        )
+        open = b3 :: open
+        b2.pruneNodeReadsForTesting shouldBe 0L
+        b1.pruneNodeReadsForTesting should be > 0L
+        bareRun.size shouldBe describedRun.size
+        bareRun.indices.foreach { i =>
+          def differences(a: Seq[(String, Seq[(String, String)])], b: Seq[(String, Seq[(String, String)])]) =
+            a.zip(b).flatMap { case ((column, x), (_, y)) =>
+              val (xm, ym) = (x.toMap, y.toMap)
+              (xm.keySet ++ ym.keySet).toSeq.sorted.filter(k => xm.get(k) != ym.get(k)).map(k => s"$column $k: ${xm.get(k)} vs ${ym.get(k)}")
+            }
+          withClue(s"seed $seed, after prune ${i + 1}: ") {
+            differences(describedRun(i), bareRun(i)) shouldBe Nil
+            differences(mixedRun(i), bareRun(i)) shouldBe Nil
+          }
+        }
+      finally
+        open.foreach(_.close())
+        dirs.foreach(cleanup)
+  }

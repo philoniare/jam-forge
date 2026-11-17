@@ -1,7 +1,9 @@
 package io.forge.jam.node
 
-import java.io.{ByteArrayOutputStream, OutputStream}
-import java.net.{InetSocketAddress, Socket}
+import java.io.ByteArrayOutputStream
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.nio.channels.{SelectionKey, Selector, SocketChannel}
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.{ArrayBlockingQueue, TimeUnit}
 
@@ -19,14 +21,21 @@ import io.forge.jam.core.primitives.Hash
   * verified, 46 block execution failed. Not emitted: 47 block executed (the accumulate costs it carries are not
   * collected) and the events of block distribution, tickets, guaranteeing, availability, recovery and preimages.
   *
-  * Events queue on a bounded buffer and a single sender thread writes them;
-  * when the server is unreachable they are dropped and the connection is
-  * retried, starting again with the node information message (event IDs are
-  * per connection, so they restart at 0).
+  * Events queue on a bounded buffer and a single writer thread sends them; no other thread ever waits on
+  * telemetry. An event that finds the buffer full is dropped and counted: the newest, since JIP-3 event IDs are
+  * implicit (the order of events on the connection) and earlier events may already be referenced by ID. JIP-3's own
+  * report of dropped events is not sent (its layout is not in this repository): drops are counted
+  * ([[droppedEvents]]) and logged once per episode. A write that does not complete within `writeTimeoutMillis` (a
+  * server that stopped reading) closes the connection. A lost or refused connection is retried with a doubling
+  * backoff from `retryMillis` up to `maxRetryMillis`; loss and recovery are logged at warn once per change. Every
+  * new connection starts with the node information message (event IDs are per connection, so they restart at 0).
   */
 final class Telemetry(
     address: InetSocketAddress,
-    nodeInfo: () => Array[Byte]
+    nodeInfo: () => Array[Byte],
+    writeTimeoutMillis: Long = Telemetry.WriteTimeoutMillis,
+    retryMillis: Long = Telemetry.RetryMillis,
+    maxRetryMillis: Long = Telemetry.MaxRetryMillis
 ) extends LazyLogging:
   import Telemetry.*
 
@@ -37,6 +46,16 @@ final class Telemetry(
   private var generation = 0L
   private var nextEventId = 0L
   private val idLock = new Object
+
+  private val dropped = new java.util.concurrent.atomic.AtomicLong()
+  private val droppedUnlogged = new java.util.concurrent.atomic.AtomicLong()
+
+  def droppedEvents: Long = dropped.get
+
+  private def drop(n: Long): Unit =
+    if n > 0 then
+      dropped.addAndGet(n)
+      droppedUnlogged.addAndGet(n): Unit
 
   private val sender = new Thread(() => run(), "jam-telemetry")
   sender.setDaemon(true)
@@ -57,7 +76,9 @@ final class Telemetry(
       if queue.offer((generation, content)) then
         nextEventId += 1
         Some(ref)
-      else None
+      else
+        drop(1)
+        None
     }
 
   /** Event ID of `ref` if it was sent on the current connection. */
@@ -135,49 +156,105 @@ final class Telemetry(
     running = false
     sender.interrupt()
 
+  private var wasConnected: Option[Boolean] = None
+  private var lastDropLog = System.nanoTime() - DropLogIntervalMillis * 1_000_000L
+
+  private def newGeneration(): Long =
+    idLock.synchronized {
+      drop(queue.size.toLong)
+      queue.clear()
+      generation += 1
+      nextEventId = 0
+      generation
+    }
+
   private def run(): Unit =
+    var backoff = retryMillis
     while running do
+      var channel: SocketChannel = null
+      var selector: Selector = null
       try
-        val socket = new Socket()
-        try
-          socket.connect(address, 5000)
-          socket.setTcpNoDelay(true)
-          val out = socket.getOutputStream
-          val gen = idLock.synchronized {
-            // Events queued while disconnected belong to no connection.
-            queue.clear()
-            generation += 1
-            nextEventId = 0
-            generation
-          }
-          logger.info(s"telemetry connected to $address")
-          writeMessage(out, nodeInfo())
-          while running do
-            val next = queue.poll(1, TimeUnit.SECONDS)
-            if next != null && next._1 == gen then writeMessage(out, next._2)
-        finally socket.close()
+        channel = SocketChannel.open()
+        channel.configureBlocking(false)
+        selector = Selector.open()
+        connect(channel, selector)
+        channel.socket().setTcpNoDelay(true)
+        val gen = newGeneration()
+        if wasConnected.contains(false) then logger.warn(s"telemetry reconnected to $address")
+        else logger.info(s"telemetry connected to $address")
+        wasConnected = Some(true)
+        backoff = retryMillis
+        write(channel, selector, nodeInfo())
+        while running do
+          val next = queue.poll(1, TimeUnit.SECONDS)
+          if next != null && next._1 == gen then write(channel, selector, next._2)
+          if droppedUnlogged.get > 0 && System.nanoTime() - lastDropLog >= DropLogIntervalMillis * 1_000_000L then
+            lastDropLog = System.nanoTime()
+            logger.warn(s"telemetry dropped ${droppedUnlogged.getAndSet(0)} event(s): the queue was full")
       catch
         case _: InterruptedException => running = false
-        case e: Exception =>
-          logger.debug(s"telemetry to $address unavailable: ${e.getMessage}")
-          idLock.synchronized {
-            queue.clear()
-            generation += 1
-            nextEventId = 0
-          }
-          try Thread.sleep(RetryMillis)
+        case _: java.nio.channels.ClosedByInterruptException => running = false
+        case e: Exception if running =>
+          newGeneration()
+          val unlogged = droppedUnlogged.getAndSet(0)
+          val drops = if unlogged > 0 then s" ($unlogged event(s) dropped)" else ""
+          wasConnected match
+            case Some(true) =>
+              logger.warn(s"telemetry connection to $address lost: ${e.getMessage}$drops; reconnecting")
+            case None => logger.warn(s"telemetry server $address unavailable: ${e.getMessage}$drops; retrying")
+            case Some(false) => logger.debug(s"telemetry to $address still unavailable: ${e.getMessage}$drops")
+          wasConnected = Some(false)
+          try Thread.sleep(backoff)
           catch case _: InterruptedException => running = false
+          backoff = math.min(backoff * 2, maxRetryMillis)
+        case _: Exception => ()
+      finally
+        if channel != null then
+          try channel.close()
+          catch case _: java.io.IOException => ()
+        if selector != null then
+          try selector.close()
+          catch case _: java.io.IOException => ()
 
-  private def writeMessage(out: OutputStream, content: Array[Byte]): Unit =
-    out.write(LittleEndian.encode(content.length.toLong, 4))
-    out.write(content)
-    out.flush()
+  private def connect(channel: SocketChannel, selector: Selector): Unit =
+    if !channel.connect(address) then
+      val key = channel.register(selector, SelectionKey.OP_CONNECT)
+      val deadline = System.nanoTime() + ConnectTimeoutMillis * 1_000_000L
+      while !channel.finishConnect() do
+        val left = (deadline - System.nanoTime()) / 1_000_000L
+        if left <= 0 then throw new java.net.SocketTimeoutException("connect timed out")
+        selector.select(left)
+        selector.selectedKeys().clear()
+      key.cancel()
+      selector.selectNow(): Unit
+
+  private def write(channel: SocketChannel, selector: Selector, content: Array[Byte]): Unit =
+    val buffer = ByteBuffer.wrap(LittleEndian.encode(content.length.toLong, 4) ++ content)
+    val deadline = System.nanoTime() + writeTimeoutMillis * 1_000_000L
+    channel.write(buffer)
+    if buffer.hasRemaining then
+      val key = channel.register(selector, SelectionKey.OP_WRITE)
+      try
+        while buffer.hasRemaining do
+          val left = (deadline - System.nanoTime()) / 1_000_000L
+          if left <= 0 then throw new java.net.SocketTimeoutException(s"a write did not complete in $writeTimeoutMillis ms")
+          if !running then throw new InterruptedException
+          selector.select(math.min(left, 1000L))
+          selector.selectedKeys().clear()
+          channel.write(buffer)
+      finally
+        key.cancel()
+        selector.selectNow(): Unit
 
 object Telemetry:
   final case class EventRef(generation: Long, id: Long)
 
   private val QueueCapacity = 4096
-  private val RetryMillis = 2000L
+  private val RetryMillis = 1000L
+  private val MaxRetryMillis = 30000L
+  private val WriteTimeoutMillis = 10000L
+  private val ConnectTimeoutMillis = 5000L
+  private val DropLogIntervalMillis = 10000L
 
   /** JIP-3 Timestamp: microseconds since the start of the JAM Common Era. */
   def timestampMicros(): Long =

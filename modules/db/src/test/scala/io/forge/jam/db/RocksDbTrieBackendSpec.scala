@@ -10,9 +10,15 @@ import org.scalatest.matchers.should.Matchers
 
 class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
 
+  protected def settings: RocksDbTrieBackend.Settings = RocksDbTrieBackend.Settings()
+  protected def memory: RocksDbMemory = RocksDbMemory.shared
+
+  private def openBackend(dir: java.nio.file.Path, trackGarbage: Boolean = true): RocksDbTrieBackend =
+    RocksDbTrieBackend.open(dir, trackGarbage, memory, settings)
+
   private def withBackend[A](f: RocksDbTrieBackend => A): A =
     val dir = Files.createTempDirectory("jam-rocksdb-test")
-    val backend = RocksDbTrieBackend.open(dir)
+    val backend = openBackend(dir)
     try f(backend)
     finally
       backend.close()
@@ -29,6 +35,27 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     bytes(0) = (i & 0xff).toByte
     bytes(1) = ((i >> 8) & 0xff).toByte
     JamBytes(bytes)
+
+  test("large raw values (code, preimages) read back whole, also after a flush to disk and a reopen") {
+    val dir = Files.createTempDirectory("jam-rocksdb-large")
+    try
+      val values = (0 until 20).map(i => JamBytes(Array.tabulate[Byte](3000 + 700 * i)(j => (i * 7 + j).toByte)))
+      val b1 = openBackend(dir, trackGarbage = false)
+      val root =
+        try
+          val t = StateTrie.at(b1, Hash.zero)
+          t.update(values.indices.map(i => key31(i) -> Some(values(i))))
+          t.save()
+          b1.syncWal()
+          t.rootHash
+        finally b1.close()
+      val b2 = openBackend(dir, trackGarbage = false)
+      try
+        val t = StateTrie.at(b2, root)
+        values.indices.foreach(i => t.read(key31(i)) shouldBe Some(values(i)))
+      finally b2.close()
+    finally deleteRecursively(dir)
+  }
 
   test("gc reclaims dead nodes and their regular-leaf values, keeps live ones") {
     withBackend { backend =>
@@ -150,14 +177,14 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     val dir = Files.createTempDirectory("jam-rocksdb-merge")
     try
       val h = Hashing.blake2b256(JamBytes(Array[Byte](1)))
-      val b1 = RocksDbTrieBackend.open(dir)
+      val b1 = openBackend(dir)
       b1.batchUpdate(Seq(BackendOp.NodeRefDelta(h, 3), BackendOp.RawValueRefDelta(h, 2)))
       b1.batchUpdate(Seq(BackendOp.NodeRefDelta(h, -1)))
       b1.batchUpdate(Seq(BackendOp.NodeRefDelta(h, -4)))
       b1.nodeRefcount(h) shouldBe -2L
       b1.valueRefcount(h) shouldBe 2L
       b1.close()
-      val b2 = RocksDbTrieBackend.open(dir)
+      val b2 = openBackend(dir)
       try
         b2.nodeRefcount(h) shouldBe -2L
         b2.batchUpdate(Seq(BackendOp.NodeRefDelta(h, 2)))
@@ -184,7 +211,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       val node = TrieNode.leaf(key31(11), value)
 
       // Seed data so each reopen has something to read back.
-      val seed = RocksDbTrieBackend.open(dir)
+      val seed = openBackend(dir)
       seed.batchUpdate(
         Seq(
           BackendOp.WriteNode(node),
@@ -197,7 +224,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
 
       // Open/close repeatedly; a leaked lock throws here.
       (0 until 5).foreach { _ =>
-        val b = RocksDbTrieBackend.open(dir)
+        val b = openBackend(dir)
         b.readNode(node.hash) shouldBe Some(node)
         b.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
         b.nodeRefcount(node.hash) shouldBe 1L
@@ -205,7 +232,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       }
 
       // A fresh open on the same dir still succeeds and sees the data.
-      val reopened = RocksDbTrieBackend.open(dir)
+      val reopened = openBackend(dir)
       try
         reopened.readNode(node.hash) shouldBe Some(node)
         reopened.readRawValue(Hashing.blake2b256(value)) shouldBe Some(value)
@@ -252,7 +279,7 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
   test("with garbage tracking off, no dead candidates are held, every earlier root stays readable, and gc refuses to run") {
     val dir = Files.createTempDirectory("jam-rocksdb-notrack-roots")
     try
-      val backend = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      val backend = openBackend(dir, trackGarbage = false)
       try
         backend.tracksGarbage shouldBe false
         val (roots, pending) = saveRounds(backend, rounds = 20, perRound = 15)
@@ -281,8 +308,8 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     val dirOff = Files.createTempDirectory("jam-rocksdb-off")
     val dirOn = Files.createTempDirectory("jam-rocksdb-on")
     try
-      val off = RocksDbTrieBackend.open(dirOff, trackGarbage = false)
-      val on = RocksDbTrieBackend.open(dirOn)
+      val off = openBackend(dirOff, trackGarbage = false)
+      val on = openBackend(dirOn)
       try
         val (rootsOff, _) = saveRounds(off, rounds = 15, perRound = 10)
         val (rootsOn, _) = saveRounds(on, rounds = 15, perRound = 10)
@@ -318,13 +345,13 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
   test("a store opened without garbage tracking drops its node refcounts and refuses to be opened with tracking again") {
     val dir = Files.createTempDirectory("jam-rocksdb-mode")
     try
-      val on = RocksDbTrieBackend.open(dir)
+      val on = openBackend(dir)
       val (roots, _) =
         try saveRounds(on, rounds = 10, perRound = 10)
         finally on.close()
       val (lastRoot, lastState) = roots.last
 
-      val off = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      val off = openBackend(dir, trackGarbage = false)
       try
         // Counts written while tracking are no use to a store that never collects by them.
         val stack = scala.collection.mutable.Stack(lastRoot)
@@ -339,9 +366,9 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
       finally off.close()
 
       // With the counts gone, gc would take every replaced node for garbage.
-      an[IllegalStateException] should be thrownBy RocksDbTrieBackend.open(dir)
+      an[IllegalStateException] should be thrownBy openBackend(dir)
       // The refusal leaves the store usable.
-      val again = RocksDbTrieBackend.open(dir, trackGarbage = false)
+      val again = openBackend(dir, trackGarbage = false)
       try StateTrie.at(again, lastRoot).getKeyValues(JamBytes(Array.emptyByteArray), 0).toMap shouldBe lastState
       finally again.close()
     finally deleteRecursively(dir)

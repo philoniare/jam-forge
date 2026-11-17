@@ -29,7 +29,7 @@ final class InMemoryTrieBackend extends StateTrieBackend:
         nodes.setNode(nodes.findOrInsert(node.hash.toArrayUnsafe), node)
       case BackendOp.WriteRawValue(h, v) =>
         values.setValue(values.findOrInsert(h.toArrayUnsafe), v.toArrayUnsafe)
-      case BackendOp.NodeRefDelta(h, d) =>
+      case BackendOp.NodeRefDelta(h, d, _) =>
         if nodes.addRef(nodes.findOrInsert(h.toArrayUnsafe), d) <= 0 then deadNodeCandidates.add(h.toArrayUnsafe)
       case BackendOp.RawValueRefDelta(h, d) =>
         if values.addRef(values.findOrInsert(h.toArrayUnsafe), d) <= 0 then deadValueCandidates.add(h.toArrayUnsafe)

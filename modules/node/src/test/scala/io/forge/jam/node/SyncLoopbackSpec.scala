@@ -75,3 +75,54 @@ class SyncLoopbackSpec extends AnyFunSuite with Matchers with NodeFixture:
       b.chain.best.slot shouldBe 3L
     }
   }
+
+  private final class FlakyConnection(inner: io.forge.jam.network.PeerConnection) extends io.forge.jam.network.PeerConnection:
+    @volatile var failing = false
+    override def hashCode: Int =
+      if failing then throw new IllegalStateException("local failure (simulated)") else inner.hashCode
+    override def equals(o: Any): Boolean = o.asInstanceOf[AnyRef] eq this
+    def initiator = inner.initiator
+    def openedAtMillis = inner.openedAtMillis
+    def peerKey = inner.peerKey
+    def peerPublicKey = inner.peerPublicKey
+    def negotiatedAlpn = inner.negotiatedAlpn
+    def holdInbound(bytes: Long) = inner.holdInbound(bytes)
+    def releaseInbound(bytes: Long) = inner.releaseInbound(bytes)
+    def heldInboundBytes = inner.heldInboundBytes
+    def pendingOutboundBytes = inner.pendingOutboundBytes
+    def droppedOutboundMessages = inner.droppedOutboundMessages
+    def openStream(kind: Byte) = inner.openStream(kind)
+    def close() = inner.close()
+    def isOpen = inner.isOpen
+    def openStreamCount = inner.openStreamCount
+    def remoteAddress = inner.remoteAddress
+
+  test("UP 0: a local failure handling a peer's announcement is not charged to it; an undecodable one is") {
+    withNodes(blocks = 2) { (a, b, _, _) =>
+      val charged = new java.util.concurrent.ConcurrentLinkedQueue[Offence]()
+      val sync = new SyncService(b.chain, misbehaved = (_, o) => charged.add(o): Unit)
+      var flaky: FlakyConnection = null
+      val (aToB, _) = Loopback.pair(
+        a.identity.publicKeyBytes,
+        b.identity.publicKeyBytes,
+        handlers(a),
+        kind =>
+          Option.when(kind == StreamKind.BlockAnnouncement)((conn, stream) =>
+            flaky = new FlakyConnection(conn)
+            sync.blockAnnouncementHandler.onStream(flaky, stream)
+          )
+      )
+      try
+        val stream = a.sync.openAnnouncementStream(aToB)
+        eventually("B's service to take A's handshake")(flaky != null && sync.peerFinal(flaky).isDefined)
+        flaky.failing = true
+        a.sync.announce(a.chain.headerBytes(a.chain.best.hash).getOrElse(fail("header of A's head")))
+        Thread.sleep(200)
+        charged.isEmpty shouldBe true
+        stream.isOpen shouldBe true
+        flaky.failing = false
+        stream.send(Array[Byte](1, 2, 3))
+        eventually("the undecodable message to be charged")(charged.contains(Offence.Malformed))
+      finally sync.shutdown()
+    }
+  }

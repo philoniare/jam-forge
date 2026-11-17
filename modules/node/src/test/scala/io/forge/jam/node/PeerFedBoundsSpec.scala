@@ -143,12 +143,11 @@ class PeerFedBoundsSpec extends AnyFunSuite with Matchers with NodeFixture:
       tickets.pendingForwardCount shouldBe 1
       tickets.deferredCount shouldBe 0
 
-      // Tickets for the next epoch cannot be verified yet: thousands of distinct ones, and replays of them, are
-      // held up to the number of valid tickets a contest can have.
+      // Forged tickets for the next epoch are checked before they are kept (TicketServiceSpec covers the bounds on
+      // valid ones): thousands of distinct ones, and replays of them, leave nothing behind.
       (1 to 5000).foreach(i => tickets.receive(TicketCodec.encode(epoch + 1, forged(i)), asProxy = i % 2 == 0, "flood"))
       (1 to 5000).foreach(i => tickets.receive(TicketCodec.encode(epoch + 1, forged(i)), asProxy = true, "flood"))
-      tickets.deferredCount should be <= maxTickets
-      tickets.deferredCount should be > 0
+      tickets.deferredCount shouldBe 0
 
       // The rest of the legitimate tickets are still pooled and queued, each once.
       valid.foreach(env => tickets.receive(TicketCodec.encode(epoch, env), asProxy = true, "honest") shouldBe true)

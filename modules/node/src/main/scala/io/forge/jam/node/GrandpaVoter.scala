@@ -48,8 +48,12 @@ trait GrandpaOutbound:
   def broadcastCommit(round: Long, setId: Long, c: Commit): Unit
   def broadcastState(round: Long, setId: Long, finalizedSlot: Long): Unit
 
-/** A GRANDPA voter set: its id, the block it starts from and its Ed25519 keys. */
-final case class VoterSet(setId: Long, base: Vote, keys: IndexedSeq[Array[Byte]]):
+final case class VoterSet(
+    setId: Long,
+    base: Vote,
+    keys: IndexedSeq[Array[Byte]],
+    next: Option[IndexedSeq[Array[Byte]]] = None
+):
   val members: Set[Ed25519PublicKey] = keys.map(Ed25519PublicKey(_)).toSet
   def size: Int = keys.size
 
@@ -109,12 +113,14 @@ final class GrandpaVoter(
 
   /** The set that follows `of` once the epoch-marker block `base` is finalized. Its voters are the validators of the
     * epoch `base` begins: those the marker before it named, which is `of`'s own base (at genesis, the genesis
-    * state's next-epoch validators).
+    * state's next-epoch validators; for a set re-based at a checkpoint without that marker, the keys it carries).
     */
   private def successor(of: VoterSet, base: Vote): VoterSet =
     val named =
-      chain.epochMarkerKeys(of.base.hash).orElse(if of.setId == 0 then chain.genesisNextKeys else None)
-    VoterSet(of.setId + 1, base, named.fold(of.keys)(_.toIndexedSeq))
+      chain.epochMarkerKeys(of.base.hash).map(_.toIndexedSeq)
+        .orElse(if of.setId == 0 then chain.genesisNextKeys.map(_.toIndexedSeq) else None)
+        .orElse(of.next)
+    VoterSet(of.setId + 1, base, named.getOrElse(of.keys))
   private var lastSyncedFinal: Hash = Hash.zero
   private var current: RoundState = new RoundState(resume.fold(1L)(_._1), clock())
   private val rounds = mutable.TreeMap(current.round -> current)

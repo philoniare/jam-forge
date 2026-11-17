@@ -222,10 +222,10 @@ object SafroleTransition extends StrictLogging:
     // Generate new ring root.
     val ringKeys = newGammaK
       .map(_.bandersnatch)
-      .padTo(config.validatorCount, BandersnatchPublicKey(new Array[Byte](32)))
+      .padTo(config.ringSize, BandersnatchPublicKey(new Array[Byte](32)))
       .toList
     val newGammaZ = BandersnatchWrapper
-      .generateRingRoot(ringKeys, config.validatorCount)
+      .generateRingRoot(ringKeys, config.ringSize)
       .getOrElse(
         throw new SafroleCryptoFailure("Bandersnatch ring-root generation failed during epoch transition")
       )
@@ -293,7 +293,7 @@ object SafroleTransition extends StrictLogging:
         val eta2 = postState.eta(2)
         def proofHolds(ticket: TicketEnvelope, mark: TicketMark): Boolean =
           BandersnatchWrapper
-            .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.validatorCount)
+            .verifyRingProof(ticket.signature, verificationGammaZ, eta2, ticket.attempt, config.ringSize)
             .exists(_.id == mark.id)
         // Several tickets are verified as one batch, which shares the pairing check between them.
         def proofsHold: Boolean =
@@ -304,7 +304,7 @@ object SafroleTransition extends StrictLogging:
                 tickets.map(t => (t.signature, t.attempt)),
                 verificationGammaZ,
                 eta2,
-                config.validatorCount
+                config.ringSize
               )
               .exists(ids => ids.corresponds(marks)((id, mark) => id == mark.id))
         val accumulated = accumulate(postState, marks, config)
@@ -349,7 +349,7 @@ object SafroleTransition extends StrictLogging:
     if marks.exists(t => !survivingIds.contains(t.id)) then Left(SafroleErrorCode.UselessTicket)
     else Right(postState.copy(gammaA = combined))
 
-  private def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =
+  def maxTicketEntries(pendingSetSize: Int, config: ChainConfig): Int =
     if pendingSetSize <= 0 then config.ticketsPerValidator
     else (2 * config.epochLength + pendingSetSize - 1) / pendingSetSize
 

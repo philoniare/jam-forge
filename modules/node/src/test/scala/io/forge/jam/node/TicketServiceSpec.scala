@@ -4,6 +4,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.jdk.CollectionConverters.*
 
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.network.{Loopback, PeerStreamHandler, StreamKind}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -84,9 +85,8 @@ class TicketServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       b.tickets.pendingForwardCount shouldBe 0
       b.tickets.deferredCount shouldBe 0
 
-      // The next epoch's cannot be checked yet: it is kept, not pooled.
-      b.tickets.receive(TicketCodec.encode(epoch + 1, envelope), asProxy = false, "test") shouldBe true
-      b.tickets.deferredCount shouldBe 1
+      b.tickets.receive(TicketCodec.encode(epoch + 1, envelope), asProxy = false, "test") shouldBe false
+      b.tickets.deferredCount shouldBe 0
       b.pools.ticketCount shouldBe 0
       // The same ticket on CE 132 is anyone's to pool.
       b.tickets.receive(genuine, asProxy = false, "test") shouldBe true
@@ -104,5 +104,97 @@ class TicketServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       (1 to 5).foreach(_ => b.tickets.receive(genuine, asProxy = true, "test"))
       b.pools.ticketCount shouldBe 1
       b.tickets.pendingForwardCount shouldBe 1
+    }
+  }
+
+  private val perPeerBound = 2 * 4
+
+  private def nextEpochTickets(a: JamNode, b: JamNode): (List[Array[Byte]], Array[Byte]) =
+    author(Seq(a, b), 1 to 11)
+    author(Seq(a), 12 to 12)
+    val first = a.chain.encodeBlock(a.chain.block(a.chain.best.hash).getOrElse(fail("slot 12 block")))
+    a.tickets.setValidatorKeys(devKeys)
+    a.tickets.maybeGenerate(12L) shouldBe true
+    val view = a.chain.stateView()
+    val envs = a.pools.takeTickets(1L, TicketService.contestEntropy(view), Set.empty, Int.MaxValue, Int.MaxValue)
+    envs.size shouldBe devKeys.size * perValidator
+    (envs.map((_, env) => TicketCodec.encode(1L, env)), first)
+
+  test("next-epoch tickets are kept up to a bound per sending validator; a flood from one keeps no other's out") {
+    withNodes(2, "tickets-deferred-flood") { nodes =>
+      val Seq(a, b) = nodes: @unchecked
+      val (msgs, _) = nextEpochTickets(a, b)
+      b.tickets.setValidatorKeys(devKeys) // the proxy of every ticket
+      val one = Some(devKeys(1).ed25519Key)
+      msgs.count(m => b.tickets.receive(m, asProxy = true, "one", one)) shouldBe perPeerBound
+      b.tickets.deferredCount shouldBe perPeerBound
+      msgs.take(perPeerBound).foreach(m => b.tickets.receive(m, asProxy = true, "one", one) shouldBe true)
+      b.tickets.deferredCount shouldBe perPeerBound
+      val two = Some(devKeys(2).ed25519Key)
+      msgs.slice(perPeerBound, 2 * perPeerBound).foreach(m => b.tickets.receive(m, asProxy = true, "two", two) shouldBe true)
+      b.tickets.deferredCount shouldBe 2 * perPeerBound
+      b.tickets.receive(msgs.last, asProxy = true, "stranger", Some(ValidatorKeySet.dev(17).ed25519Key)) shouldBe false
+      val bad = msgs.last.clone()
+      bad(bad.length - 1) = (bad(bad.length - 1) ^ 1).toByte
+      b.tickets.receive(bad, asProxy = false, "three", Some(devKeys(3).ed25519Key)) shouldBe false
+      b.tickets.deferredCount shouldBe 2 * perPeerBound
+      b.pools.ticketCount shouldBe 0
+    }
+  }
+
+  test("deferred tickets are pooled and queued for forwarding once the epoch's first block is imported") {
+    withNodes(2, "tickets-deferred-taken") { nodes =>
+      val Seq(a, b) = nodes: @unchecked
+      val (msgs, first) = nextEpochTickets(a, b)
+      b.tickets.setValidatorKeys(devKeys)
+      msgs.zipWithIndex.foreach((m, i) =>
+        b.tickets.receive(m, asProxy = true, s"v$i", Some(devKeys(1 + i % 5).ed25519Key)) shouldBe true
+      )
+      b.tickets.deferredCount shouldBe msgs.size
+      b.tickets.processDeferred() // still in epoch 0: nothing is due
+      b.tickets.deferredCount shouldBe msgs.size
+      b.chain.importBlock(first).isRight shouldBe true
+      b.tickets.processDeferred()
+      eventually("the deferred tickets to be pooled")(b.pools.ticketCount == msgs.size)
+      b.tickets.deferredCount shouldBe 0
+      b.tickets.pendingForwardCount shouldBe msgs.size
+    }
+  }
+
+  test("the import listener hands deferred tickets to a worker and returns at once, however slow their checks") {
+    withNodes(2, "tickets-deferred-slow") { nodes =>
+      val Seq(a, b) = nodes: @unchecked
+      val (msgs, first) = nextEpochTickets(a, b)
+      val calls = new java.util.concurrent.atomic.AtomicInteger()
+      val slow: TicketService.Verifier = (envs, _, _, _) =>
+        if Thread.currentThread.getName.contains("deferred") then
+          calls.incrementAndGet()
+          Thread.sleep(1000)
+        envs.map(e => io.forge.jam.crypto.BandersnatchVrf.ringVrfOutput(e.signature.toArray).map(Hash(_)))
+      val threads = new NodeThreads
+      val egress = java.util.concurrent.Executors.newSingleThreadExecutor()
+      try
+        val svc = new TicketService(
+          b.chain,
+          b.pools,
+          b.distribution,
+          egress,
+          threads = threads,
+          verifyTickets = slow,
+          ringRootOf = _ => Some(io.forge.jam.core.JamBytes(new Array[Byte](144)))
+        )
+        svc.setValidatorKeys(devKeys)
+        msgs.zipWithIndex.foreach((m, i) => svc.receive(m, asProxy = false, s"v$i", Some(devKeys(1 + i % 5).ed25519Key)) shouldBe true)
+        svc.deferredCount shouldBe msgs.size
+        b.chain.importBlock(first).isRight shouldBe true
+        val t0 = System.nanoTime()
+        svc.processDeferred()
+        (System.nanoTime() - t0) / 1_000_000 should be < 500L
+        eventually("the deferred tickets to be checked and pooled")(b.pools.ticketCount == msgs.size)
+        calls.get shouldBe 1 // one batch
+        svc.deferredCount shouldBe 0
+      finally
+        threads.close()
+        egress.shutdownNow()
     }
   }

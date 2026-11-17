@@ -43,7 +43,8 @@ private[trie] object HashTables:
       size = 0
 
   // Slot layout, `stride` words per slot: the key's four words, the count, a meta word (1 key and count only, 2 + tag
-  // for a slot holding a payload), then the subclass's payload words.
+  // for a slot holding a payload, -(2 + tag) for a count-only node slot that records what it gave up: see
+  // NodeTable.setGivenUp), then the subclass's payload words.
   inline val Ref = 4
   inline val Meta = 5
   inline val Head = 6
@@ -273,6 +274,25 @@ private[trie] object HashTables:
         TrieNode.withHash(TrieNodeType.fromTag((m - 2).toByte).get, JamBytes.wrap(l), JamBytes.wrap(r), hash)
 
     def isRegularLeaf(slot: Int): Boolean = meta(slot) == 2L + TrieNodeType.RegularLeaf.tag
+
+    def setGivenUp(slot: Int, node: TrieNode): Unit =
+      setMeta(slot, -(2L + node.nodeType.tag))
+      if node.nodeType == TrieNodeType.RegularLeaf then
+        val r = node.right.toArrayUnsafe
+        val b = base(slot) + Head + 4
+        var j = 0
+        while j < 4 do
+          slots(b + j) = word(r, j * 8)
+          j += 1
+
+    def givenUpValue(slot: Int, notLeaf: Hash): Hash | Null =
+      val m = meta(slot)
+      if m >= 0 then null
+      else if m == -(2L + TrieNodeType.RegularLeaf.tag) then
+        val out = new Array[Byte](32)
+        copyRight(slot, out)
+        Hash.wrapUnchecked(out)
+      else notLeaf
 
     def copyRight(slot: Int, out: Array[Byte]): Unit =
       val b = base(slot) + Head + 4

@@ -197,6 +197,35 @@ class SafroleTest extends AnyFunSuite with Matchers:
         assertSafroleStateEquals(testCase.postState, postState, testCaseName)
   }
 
+  test("GP eq:valcount: the ring is 3C keys when the configured validator count is below 3C, and a later 3C set enacts") {
+    val config = TinyConfig.copy(coresCount = 3)
+    config.validatorCount should be < config.ringSize
+    val folderPath = "stf/safrole/tiny"
+    val epochChange = TestFileLoader
+      .getTestFilenamesFromTestVectors(folderPath)
+      .getOrElse(List.empty)
+      .iterator
+      .map(n => TestFileLoader.loadJsonFromTestVectors[SafroleCase](folderPath, n).fold(fail(_), identity))
+      .find(c => c.output.exists(_.epochMark.isDefined) && c.input.extrinsic.isEmpty)
+      .getOrElse(fail("no tiny vector enacts an epoch change without tickets"))
+    def rootOf(keys: Seq[BandersnatchPublicKey]): JamBytes =
+      io.forge.jam.crypto.BandersnatchVrf
+        .generateRingRoot(keys.toList.padTo(9, BandersnatchPublicKey(new Array[Byte](32))), 9)
+        .getOrElse(fail("ring root"))
+
+    val (first, out1) = SafroleTransition.stfInternal(epochChange.input, epochChange.preState, config)
+    out1.isRight shouldBe true withClue s"${out1.left.toOption}"
+    first.gammaK.size shouldBe 6
+    first.gammaZ shouldBe rootOf(first.gammaK.map(_.bandersnatch))
+
+    val grown = first.copy(iota = first.iota ++ first.kappa.take(3))
+    val next = SafroleInput(epochChange.input.slot + config.epochLength, epochChange.input.entropy, Nil)
+    val (second, out2) = SafroleTransition.stfInternal(next, grown, config)
+    out2.isRight shouldBe true withClue s"${out2.left.toOption}"
+    second.gammaK.size shouldBe 9
+    second.gammaZ shouldBe rootOf(second.gammaK.map(_.bandersnatch))
+  }
+
   /**
    * Compare SafroleOutput instances with detailed error messages.
    */

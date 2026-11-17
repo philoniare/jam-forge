@@ -5,6 +5,7 @@ import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.core.trie.{MissingTrieNodeException, StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
+import io.forge.jam.core.types.header.Header
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.pipeline.{BlockPipeline, HeaderChecks, PipelineError}
 import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, ReportErrorCode}
@@ -38,6 +39,8 @@ object ChainManager:
   /** Slots a side-branch block may be ahead of the wall clock (clock skew between author and this node). */
   val FutureSlotTolerance: Long = 1L
 
+  val StateSweepIntervalMillis: Long = 60L * 60 * 1000
+
 /** Owns the canonical chain: the persistent state trie, block storage and the
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
   *
@@ -61,7 +64,8 @@ final class ChainManager(
     /** Delete the state of blocks more than `maxLookupAnchorAge` slots behind the finalized block (they are never
       * read again).
       */
-    pruneOldState: Boolean = true
+    pruneOldState: Boolean = true,
+    stateSweepIntervalMillis: Long = ChainManager.StateSweepIntervalMillis
 ) extends ChainReader
     with LazyLogging:
 
@@ -98,22 +102,42 @@ final class ChainManager(
     * is durable. A crash anywhere leaves the chain as it was before the change or after it.
     */
   private def commit[A](f: => A): A =
-    synchronized {
+    var finalizedMoved: Option[ChainHead] = None
+    val result = synchronized {
       val outermost = commitDepth == 0
       commitDepth += 1
       try
+        val before = published._2
         val result = blockStore.atomically { () =>
           trieBackend.syncWal()
           faultBeforeMetaCommit()
         }(f)
-        if outermost then runCommitted()
+        if outermost then
+          publishHeads()
+          if published._2.hash != before.hash then finalizedMoved = Some(published._2)
+          runCommitted()
         result
       catch
         case t: Throwable if outermost =>
           afterCommit.clear()
           recoverFromStore(t)
+          publishHeads()
           throw t
       finally commitDepth -= 1
+    }
+    finalizedMoved.foreach(head => if !Thread.holdsLock(this) then tellFinalized(head))
+    result
+
+  private val finalizedListeners = new java.util.concurrent.CopyOnWriteArrayList[ChainHead => Unit]()
+
+  def onFinalized(listener: ChainHead => Unit): Unit =
+    finalizedListeners.add(listener)
+    ()
+
+  private def tellFinalized(head: ChainHead): Unit =
+    finalizedListeners.forEach { l =>
+      try l(head)
+      catch case NonFatal(e) => logger.error("finalized-head listener failed", e)
     }
 
   private var commitDepth = 0
@@ -132,6 +156,7 @@ final class ChainManager(
       try action()
       catch case NonFatal(e) => logger.warn(s"deleting pruned history failed (left behind): ${e.getMessage}")
     }
+    maybeSweepState()
 
   @volatile private[node] var faultBeforeMetaCommit: () => Unit = () => ()
 
@@ -142,6 +167,11 @@ final class ChainManager(
     headerLinks.record(hash, headerBytes)
 
   @volatile private var bestHead: ChainHead = ChainHead(Hash.zero, 0L, Hash.zero)
+
+  @volatile private var published: (ChainHead, ChainHead) =
+    (ChainHead(Hash.zero, 0L, Hash.zero), ChainHead(Hash.zero, 0L, Hash.zero))
+
+  private def publishHeads(): Unit = published = (bestHead, storedFinalized)
 
   private val leafMap = new java.util.concurrent.ConcurrentHashMap[Hash, ChainHead]()
 
@@ -168,6 +198,86 @@ final class ChainManager(
     trieBackend.scheduledPrunes.foreach((block, height) => statePruning.execute(() => pruneStateOf(block, height)))
 
   private[node] def awaitStatePruning(): Unit = statePruning.submit((() => ()): Runnable).get()
+
+
+  private val downloads = new java.util.concurrent.atomic.AtomicInteger(0)
+  private val downloadedRoots = mutable.LinkedHashSet.empty[Hash]
+  private val sweepQueued = new java.util.concurrent.atomic.AtomicBoolean(false)
+  @volatile private var lastSweepNanos: Long = System.nanoTime()
+
+  @volatile private[node] var lastStateSweep: Option[RocksDbTrieBackend.SweepOutcome] = None
+
+  @volatile private[node] var sweepAfterMark: () => Unit = () => ()
+
+  private def maybeSweepState(now: Boolean = false): Unit =
+    if !closing && downloads.get == 0 && meta.sweepWanted.isDefined &&
+      (now || System.nanoTime() - lastSweepNanos >= stateSweepIntervalMillis * 1_000_000L) &&
+      sweepQueued.compareAndSet(false, true)
+    then
+      try statePruning.execute(() => sweepState())
+      catch case _: java.util.concurrent.RejectedExecutionException => sweepQueued.set(false)
+
+  private[node] def requestStateSweep(): Unit =
+    synchronized(meta.requestSweep())
+    maybeSweepState()
+
+  private def keptStateRoots(floorHeight: Long): Vector[Hash] =
+    val out = Vector.newBuilder[Hash]
+    out ++= downloadedRoots
+    var cursor = bestHead.hash
+    var more = cursor != Hash.zero
+    while more do
+      blockHeight(cursor) match
+        case Some(h) if !pruneOldState || h >= floorHeight =>
+          blockRoot(cursor).foreach(out += _)
+          parentOf(cursor) match
+            case Some(p) if p != Hash.zero => cursor = p
+            case _                         => more = false
+        case _ => more = false
+    out.result()
+
+  private def sweepState(): Unit =
+    try
+      if !closing && downloads.get == 0 then
+        val prepared = synchronized {
+          meta.sweepWanted match
+            case Some(request) if !closing && downloads.get == 0 =>
+              val sweep = trieBackend.beginSweep()
+              try
+                val floor = pruner.floorHeight
+                Some((sweep, request, keptStateRoots(floor), floor))
+              catch
+                case e: Throwable =>
+                  sweep.close()
+                  throw e
+            case _ => None
+        }
+        prepared.foreach { (sweep, request, roots, floor) =>
+          lastSweepNanos = System.nanoTime()
+          try
+            val outcome = sweep.run(
+              roots,
+              floorHeight = floor,
+              journalWanted = label => blockHeight(label).exists(_ > floor),
+              stop = () => closing || downloads.get > 0,
+              afterMark = sweepAfterMark
+            )
+            lastStateSweep = Some(outcome)
+            outcome match
+              case RocksDbTrieBackend.SweepOutcome.Completed(stats) =>
+                trieBackend.syncWal()
+                synchronized(meta.clearSweepWanted(request))
+                logger.info(s"state swept from ${roots.size} kept root(s) above height $floor: $stats")
+              case RocksDbTrieBackend.SweepOutcome.Stopped(stats) =>
+                logger.info(s"state sweep stopped, to be taken up again: $stats")
+              case RocksDbTrieBackend.SweepOutcome.Incomplete(hash, what, _) =>
+                logger.error(
+                  s"state sweep deleted nothing: kept state is not whole (trie $what ${hash.toHex} is missing)"
+                )
+          finally sweep.close()
+        }
+    catch case NonFatal(e) => logger.warn(s"state sweep failed (nothing unreachable is lost): ${e.getMessage}")
+    finally sweepQueued.set(false)
 
   private val pruner = new HistoryPruner(
     config,
@@ -214,16 +324,21 @@ final class ChainManager(
   )
 
   def shutdown(): Boolean =
-    postImportBus.close()
+    try postImportBus.close()
+    catch case NonFatal(e) => logger.error("shutdown: the post-import bus failed to close", e)
     synchronized { closing = true }
     statePruning.shutdown()
     val stopped = statePruning.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)
     if !stopped then logger.error("a state prune is still running 30 s into shutdown; the stores are left open")
     stopped
 
-  def best: ChainHead = bestHead
+  def best: ChainHead = if Thread.holdsLock(this) then bestHead else published._1
 
-  def finalized: ChainHead =
+  def finalized: ChainHead = if Thread.holdsLock(this) then storedFinalized else published._2
+
+  def heads: (ChainHead, ChainHead) = if Thread.holdsLock(this) then (bestHead, storedFinalized) else published
+
+  private def storedFinalized: ChainHead =
     val hash = blockStore.getHead(BlockStore.FinalizedHead).getOrElse(Hash.zero)
     ChainHead(hash, meta.finalizedSlot.getOrElse(0L), meta.finalizedRoot.getOrElse(Hash.zero))
 
@@ -269,11 +384,12 @@ final class ChainManager(
     * Returns the newly finalized head when it advanced.
     */
   def finalizeAtDepth(depth: Int, peerBests: Iterable[Hash] = Nil, quorum: Int = 1): Option[ChainHead] =
-    val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
+    val (head, fin) = heads
+    val bestHeight = blockHeight(head.hash).getOrElse(0L)
     val targetHeight = bestHeight - depth
-    if targetHeight <= blockHeight(finalized.hash).getOrElse(0L) then None
+    if targetHeight <= blockHeight(fin.hash).getOrElse(0L) then None
     else
-      ancestorAtHeight(bestHead.hash, targetHeight) match
+      ancestorAtHeight(head.hash, targetHeight) match
         case None => None
         case Some(target) =>
           // One entry per peer: peers at the same head each count.
@@ -360,6 +476,8 @@ final class ChainManager(
   /** Posterior state root of a validated block. */
   def postStateRoot(h: Hash): Option[Hash] = blockRoot(h)
 
+  def heightOf(h: Hash): Option[Long] = blockHeight(h)
+
   /** Encoded header of a stored block. */
   def headerBytes(h: Hash): Option[Array[Byte]] = blockStore.getHeader(h)
 
@@ -389,7 +507,7 @@ final class ChainManager(
   private def parentOf(h: Hash): Option[Hash] = headers.parentOf(h)
 
   def leaves: List[ChainHead] =
-    val best = bestHead
+    val best = this.best
     val rest = leafMap.values().asScala.filterNot(_.hash == best.hash).toList
     best :: rest
 
@@ -538,10 +656,12 @@ final class ChainManager(
           )
         loadStoredChain(genesisHash, bestHash, root)
         resumeStatePruning()
+        maybeSweepState(now = true)
         if !meta.hasFinalizedRoot then
           blockStore.getHead(BlockStore.FinalizedHead).flatMap(blockRoot).foreach { finalizedRoot =>
             meta.finalizedRoot = finalizedRoot
           }
+        synchronized(publishHeads())
         logger.info(
           s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
         )
@@ -589,19 +709,32 @@ final class ChainManager(
       ],
       lied: io.forge.jam.network.PeerConnection => Unit = _ => ()
   ): Either[String, Long] =
-    new StateDownload(
-      target,
-      stateRoot,
-      trieBackend,
-      ask,
-      save => synchronized(trieBackend.withJournal(target, height)(save())),
-      lied
-    ).run(peers)
+    synchronized {
+      downloads.incrementAndGet()
+      meta.requestSweep()
+    }
+    var result: Either[String, Long] = Left("the download failed")
+    try
+      result = new StateDownload(
+        target,
+        stateRoot,
+        trieBackend,
+        ask,
+        save => synchronized(trieBackend.withJournal(target, height, replaced = false)(save())),
+        lied
+      ).run(peers)
+    finally
+      synchronized {
+        result.foreach(_ => downloadedRoots += stateRoot)
+        downloads.decrementAndGet()
+      }
+    if result.isLeft then maybeSweepState()
+    result
 
   def startAt(
       targetBytes: Array[Byte],
       stateRoot: Hash,
-      ancestors: List[Array[Byte]],
+      ancestorHeaders: List[Array[Byte]],
       grandpaSetId: Option[Long] = None
   ): Either[String, ChainHead] =
     commit {
@@ -615,19 +748,19 @@ final class ChainManager(
           (),
           s"state ${stateRoot.toHex.take(18)} is not in the store"
         )
-        older <- ancestors.foldLeft[Either[String, (Hash, List[(Hash, Block)])]](Right((block.header.parent, Nil))) {
+        older <- ancestorHeaders.foldLeft[Either[String, (Hash, List[(Hash, Header, Array[Byte])])]](Right((block.header.parent, Nil))) {
           case (Right((expected, acc)), bytes) =>
-            decodeBlock(bytes).flatMap { b =>
-              val h = headerHashOf(b)
-              Either.cond(h == expected, (b.header.parent, (h, b) :: acc), s"ancestor ${h.toHex.take(18)} is not the parent expected")
+            headerCodec.decodeExact(bytes).left.map(e => s"ancestor header: $e").flatMap { header =>
+              val h = Hashing.blake2b256(bytes)
+              Either.cond(h == expected, (header.parent, (h, header, bytes) :: acc), s"ancestor ${h.toHex.take(18)} is not the parent expected")
             }
           case (left, _) => left
         }.map(_._2.reverse)
       yield
         val slot = block.header.slot.toLong
         val height = slot
-        older.foreach { (h, b) =>
-          if !blockStore.hasBlock(h) then storeBlock(h, b.header.parent, headerCodec.encode(b.header), Array.emptyByteArray)
+        older.foreach { (h, header, bytes) =>
+          if !blockStore.hasBlock(h) then storeBlock(h, header.parent, bytes, Array.emptyByteArray)
         }
         storeBlock(hash, block.header.parent, headerCodec.encode(block.header), targetBytes)
         headerLinks.advance(slot)
@@ -642,17 +775,19 @@ final class ChainManager(
         meta.putHeight(hash, height)
         meta.pruneFloor = hash
         meta.putFinalizedAt(height, hash)
+        meta.requestSweep()
+        downloadedRoots.clear()
         bestHead = ChainHead(hash, slot, stateRoot)
         val ticketed = stateView().gamma.st match
           case io.forge.jam.protocol.safrole.SafroleTypes.TicketsOrKeys.Tickets(_) => true
           case _                                                                => false
         val epoch = slot / config.epochLength
-        val marked = (block :: older.map(_._2)).exists(b =>
-          b.header.slot.toLong / config.epochLength == epoch && b.header.ticketsMark.isDefined
+        val marked = (block.header :: older.map(_._2)).exists(header =>
+          header.slot.toLong / config.epochLength == epoch && header.ticketsMark.isDefined
         )
         meta.putForkChoice(hash, ticketed, marked, weight = 0L)
         val genesis = blockStore.getHead(BlockStore.GenesisHead)
-        val (oldestSlot, belowOldest) = older.lastOption.fold((slot, block.header.parent))((_, b) => (b.header.slot.toLong, b.header.parent))
+        val (oldestSlot, belowOldest) = older.lastOption.fold((slot, block.header.parent))((_, header, _) => (header.slot.toLong, header.parent))
         meta.ancestryFloor = Option.unless(genesis.contains(belowOldest))(oldestSlot)
         meta.startGrandpaAtCheckpoint(grandpaSetId.getOrElse(GrandpaVoter.UnknownSet))
         leafMap.clear()
@@ -716,7 +851,7 @@ final class ChainManager(
   def useWallClock(now: () => Long): Unit = wallClockSlot = Some(now)
 
   def nextBlockSlot: Long =
-    val afterHead = bestHead.slot + 1
+    val afterHead = best.slot + 1
     wallClockSlot.fold(afterHead)(now => math.max(now(), afterHead))
 
   /** Side-branch blocks stored without a seal check. */
@@ -794,6 +929,8 @@ final class ChainManager(
     pruneOldState && blockHeight(h).exists(_ < pruneFloorHeight)
 
   private var refusedBelowFloor: Hash = Hash.zero
+
+  private[node] def stateBackendForTesting: RocksDbTrieBackend = trieBackend
 
   private[node] def scheduledStatePrunes: List[(Hash, Long)] = trieBackend.scheduledPrunes
 
@@ -1057,7 +1194,7 @@ final class ChainManager(
 
   /** Raw read of a 31-byte state key from the current best state. */
   def readRawState(stateKey: JamBytes): Option[JamBytes] =
-    trieStore.at(bestHead.stateRoot).read(stateKey)
+    trieStore.at(best.stateRoot).read(stateKey)
 
   /** The stored state with root `root`, if its trie nodes are still held (the empty state always is). */
   def stateAtRoot(root: Hash): Option[StateTrie] =
@@ -1127,7 +1264,7 @@ final class ChainManager(
   /** A read view over the current best state (mutations are staged in the
     * view and discarded; imports go through importBlock).
     */
-  def stateView(): TrieBackedJamState = stateViewOf(bestHead)
+  def stateView(): TrieBackedJamState = stateViewOf(best)
 
   /** The state after `head`, which the caller read once: a role that takes the head and then its state with two
     * reads of the chain can get the state of a newer head, and build on a parent whose state it never saw.
@@ -1188,7 +1325,7 @@ final class ChainManager(
     while out.size < max && continue do
       val children = blockStore.children(cursor).filter(canBeFinalized)
       val preferred = children
-        .find(c => blockHeight(c).exists(h => ancestorAtHeight(bestHead.hash, h).contains(c)))
+        .find(c => blockHeight(c).exists(h => ancestorAtHeight(best.hash, h).contains(c)))
         .orElse(children.maxByOption(c => (weightOf(c), blockHeight(c).getOrElse(0L))))
       preferred.toList match
         case child :: _ =>

@@ -48,28 +48,52 @@ final class DistributionService(
   private val connections =
     java.util.concurrent.ConcurrentHashMap.newKeySet[PeerConnection]()
 
+  private val byKey = new java.util.concurrent.ConcurrentHashMap[JamBytes, List[PeerConnection]]()
+
+  private def index(conn: PeerConnection): Unit =
+    byKey.compute(JamBytes(conn.peerKey), (_, old) => conn :: Option(old).fold(Nil)(_.filterNot(_ eq conn))): Unit
+
+  private def unindex(conn: PeerConnection): Unit =
+    byKey.computeIfPresent(
+      JamBytes(conn.peerKey),
+      (_, old) =>
+        val rest = old.filterNot(_ eq conn)
+        if rest.isEmpty then null else rest
+    ): Unit
+
   /** Track an open peer connection for outgoing distribution. A connection that already closed is not kept: its
     * connection-down callback has fired, so nothing would remove it.
     */
   def trackConnection(conn: PeerConnection): Unit =
     if conn.isOpen then
       connections.add(conn)
+      index(conn)
       // Closed between the check and the add: the down callback may have run before the add.
-      if !conn.isOpen then connections.remove(conn): Unit
+      if !conn.isOpen then untrackConnection(conn)
 
   /** Forget a connection that closed. */
   def untrackConnection(conn: PeerConnection): Unit =
-    connections.remove(conn): Unit
+    connections.remove(conn)
+    unindex(conn)
 
-  /** Currently tracked open peer connections. */
+  /** Currently tracked open peer connections, in the order they are to be asked in (least faulted first): one
+    * sort per call, so a caller that walks the peers or looks several up should call it once, or use
+    * [[connectionsTo]] or [[openConnections]].
+    */
   def peers: List[PeerConnection] =
-    askOrder(connections.asScala.filter(_.isOpen).toList)
+    askOrder(openConnections)
+
+  def openConnections: List[PeerConnection] =
+    connections.asScala.filter(_.isOpen).toList
+
+  def connectionsTo(key: Array[Byte]): List[PeerConnection] =
+    Option(byKey.get(JamBytes(key))).fold(Nil)(_.filter(_.isOpen))
 
   /** Connections held, open or not: equals the open ones once the close callbacks have run. */
   private[node] def trackedConnectionCount: Int = connections.size
 
   /** Distinct peers: one reached over two connections counts once. */
-  def peerCount: Int = peers.map(c => JamBytes(c.peerKey)).distinct.size
+  def peerCount: Int = byKey.values.asScala.count(_.exists(_.isOpen))
 
   // =========================================================================
   // CE 135 — guaranteed work-report distribution

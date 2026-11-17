@@ -94,6 +94,12 @@ final class ChainMeta(store: BlockStore):
   def putFinalizedAt(height: Long, h: Hash): Unit = putHash(finalizedIndexKey(height), h)
   def dropFinalizedAt(height: Long): Unit = store.deleteMeta(finalizedIndexKey(height))
 
+  def sweepWanted: Option[Long] = long("state_sweep_wanted")
+  def requestSweep(): Unit = putLong("state_sweep_wanted", sweepWanted.getOrElse(0L) + 1)
+
+  def clearSweepWanted(seen: Long): Unit =
+    if sweepWanted.contains(seen) then store.deleteMeta("state_sweep_wanted")
+
   def pruneFloor: Option[Hash] = hash("prune_floor")
   def pruneFloor_=(h: Hash): Unit = putHash("prune_floor", h)
 
@@ -105,8 +111,13 @@ final class ChainMeta(store: BlockStore):
   def grandpaSet: Option[Array[Byte]] = store.getMeta("grandpa:set")
   def grandpaSet_=(encoded: Array[Byte]): Unit = store.setMeta("grandpa:set", encoded)
 
-  def putGrandpaSet(encoded: Array[Byte], settlesCheckpoint: Boolean): Unit =
-    store.writeMeta(List("grandpa:set" -> encoded), if settlesCheckpoint then List("grandpa:checkpoint") else Nil)
+  def grandpaSetNext: Option[Array[Byte]] = store.getMeta("grandpa:set-next")
+
+  def putGrandpaSet(encoded: Array[Byte], settlesCheckpoint: Boolean, next: Option[Array[Byte]] = None): Unit =
+    store.writeMeta(
+      List("grandpa:set" -> encoded) ++ next.map("grandpa:set-next" -> _),
+      (if settlesCheckpoint then List("grandpa:checkpoint") else Nil) ++ (if next.isEmpty then List("grandpa:set-next") else Nil)
+    )
 
   def grandpaRound: Option[Array[Byte]] = store.getMeta("grandpa:round")
 
@@ -118,6 +129,7 @@ final class ChainMeta(store: BlockStore):
   def startGrandpaAtCheckpoint(setId: Long): Unit =
     putLong("grandpa:checkpoint", setId)
     store.deleteMeta("grandpa:set")
+    store.deleteMeta("grandpa:set-next")
     store.deleteMeta("grandpa:round")
 
   def grandpaJustification(h: Hash): Option[Array[Byte]] = store.getMeta(s"grandpa:just:${h.toHex}")

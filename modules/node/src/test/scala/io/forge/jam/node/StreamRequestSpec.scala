@@ -47,6 +47,22 @@ class StreamRequestSpec extends AnyFunSuite with Matchers:
     }
   }
 
+  test("with excessFails a message past the limit fails the exchange, and so do bytes past maxBytes") {
+    withPeer { (stream, request) =>
+      stream.send(request)
+      stream.send(request)
+      stream.send(request)
+      stream.finish()
+    } { (conn, _) =>
+      def strict(maxMessages: Int, maxBytes: Long) =
+        StreamRequest.exchange(conn, kind, Seq(Array[Byte](1, 2, 3)), 5000, () => 5000, Until.Closed, maxMessages, excessFails = true, maxBytes = maxBytes)
+      strict(2, Long.MaxValue) shouldBe a[Left[?, ?]]
+      strict(2, Long.MaxValue).left.toOption.get shouldBe a[Failure.Excess]
+      strict(3, 8).left.toOption.get shouldBe a[Failure.Excess]
+      strict(3, 9).map(_.size) shouldBe Right(3)
+    }
+  }
+
   test("with FirstMessage the answer does not wait for the peer to close") {
     withPeer((stream, request) => stream.send(request)) { (conn, _) =>
       val started = System.currentTimeMillis()

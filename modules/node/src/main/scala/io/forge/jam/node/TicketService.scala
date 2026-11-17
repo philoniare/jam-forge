@@ -4,10 +4,12 @@ import java.util.concurrent.ExecutorService
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{JamBytes, LittleEndian}
-import io.forge.jam.core.primitives.{BandersnatchPublicKey, Hash}
+import io.forge.jam.core.primitives.{BandersnatchPublicKey, Ed25519PublicKey, Hash}
+import io.forge.jam.core.types.epoch.ValidatorKey
 import io.forge.jam.core.types.tickets.{RingVrfSignatureSize, TicketEnvelope}
 import io.forge.jam.crypto.BandersnatchVrf
 import io.forge.jam.network.{PeerConnection, MessageStream, PeerStreamHandler, StreamKind}
+import io.forge.jam.protocol.safrole.SafroleTransition
 import spire.math.UByte
 
 import java.util.concurrent.ConcurrentHashMap
@@ -36,8 +38,13 @@ final class TicketService(
     inbound: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
-    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    verifyTickets: TicketService.Verifier = TicketService.ringVerifier,
+    ringRootOf: List[BandersnatchPublicKey] => Option[JamBytes] = null
 ) extends LazyLogging:
+
+  private val ringRoot: List[BandersnatchPublicKey] => Option[JamBytes] =
+    if ringRootOf != null then ringRootOf else keys => BandersnatchVrf.generateRingRoot(keys, chain.config.ringSize)
 
   /** Tickets accepted as proxy (or generated for ourselves as proxy) and
     * waiting for their CE 132 send, with their contest epoch.
@@ -102,7 +109,9 @@ final class TicketService(
       catch
         case _: java.util.concurrent.RejectedExecutionException => generating.set(false) // shutting down
 
-  def shutdown(): Unit = if validatorKeys.nonEmpty then generator.shutdownNow(): Unit
+  def shutdown(): Unit =
+    if validatorKeys.nonEmpty then generator.shutdownNow(): Unit
+    deferredRound.incrementAndGet(): Unit // a round still running stops at its next batch
 
   /** Register the validator keys this node holds, enabling ticket generation
     * for them.
@@ -170,8 +179,8 @@ final class TicketService(
     val pending = view.validators.nextEpoch // γ_k: the ring for next epoch's contest
     val commitment = view.gamma.z // γ_z: ring root the STF verifies against
     val entropy = TicketService.contestEntropy(view)
-    val ringKeys = pending.map(_.bandersnatch).toList
-    val ringSize = ringKeys.size
+    val ringSize = chain.config.ringSize
+    val ringKeys = pending.map(_.bandersnatch).toList.padTo(ringSize, BandersnatchPublicKey(new Array[Byte](32)))
 
     val epoch = view.timeslot / chain.config.epochLength
     var produced = 0
@@ -220,27 +229,30 @@ final class TicketService(
       stream.onMessage { msg =>
         val asProxy = stream.kind == StreamKind.TicketDistributionStep1
         if TicketCodec.decode(msg).isLeft then misbehaved(connection, Offence.Malformed)
+        val sender = senderKey(connection)
         val admitted = inbound.submit(connection, msg.length.toLong) {
-          if receive(msg, asProxy, peerLabel(connection)) then stream.finish() else stream.reset()
+          if receive(msg, asProxy, peerLabel(connection), sender) then stream.finish() else stream.reset()
         }
         if !admitted then stream.reset()
       }
 
-  /** A CE 131 (`asProxy`) or CE 132 message from the peer `from`; false when the ticket was not taken. */
-  private[node] def receive(msg: Array[Byte], asProxy: Boolean, from: String): Boolean =
+  private[node] def receive(
+      msg: Array[Byte],
+      asProxy: Boolean,
+      from: String,
+      sender: Option[Ed25519PublicKey] = None
+  ): Boolean =
     try
       TicketCodec.decode(msg) match
         case Left(err) =>
           logger.warn(s"CE131/132: $err")
           false
         case Right((epoch, env)) =>
-          val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
-          if epoch == currentEpoch then accept(epoch, env, asProxy, from)
+          val view = chain.stateView()
+          val currentEpoch = view.timeslot / chain.config.epochLength
+          if epoch == currentEpoch then accept(view, epoch, env, asProxy, from)
           else if epoch == currentEpoch + 1 then
-            // The sender's head reached the new epoch before ours: its
-            // proof is against the next epoch's η_2/γ_z, which our state
-            // will hold once we import that epoch's first block.
-            defer(epoch, env, asProxy, from)
+            defer(view, epoch, env, asProxy, from, sender)
           else
             // JAMNP-S CE 131/132: reset when the state needed to verify
             // the ticket is not known.
@@ -251,85 +263,211 @@ final class TicketService(
         logger.warn(s"ticket handler failed: ${e.getMessage}")
         false
 
-  /** Tickets received for the epoch after our head's, checked once our head
-    * enters that epoch: each distinct ticket once, with whether a copy came on CE 131 and who sent it.
-    */
-  private val deferred = new ConcurrentHashMap[(Long, TicketEnvelope), (Boolean, String)]()
+  private final class Deferred(
+      val epoch: Long,
+      val id: Hash,
+      val env: TicketEnvelope,
+      @volatile var asProxy: Boolean,
+      val peer: String,
+      val root: JamBytes,
+      val entropy: Hash
+  )
 
-  /** The most tickets kept for the next epoch. They cannot be verified before our head is in that epoch, and a
-    * contest has at most validators × attempts valid tickets (one id per ring member and attempt), so no more than
-    * that many unverified ones are worth holding.
-    */
-  private val maxDeferred: Int = chain.config.validatorCount * chain.config.ticketsPerValidator
+  private val deferredLock = new Object
+  private val deferred = scala.collection.mutable.LinkedHashMap.empty[Hash, Deferred]
+  private val deferredByPeer = scala.collection.mutable.Map.empty[String, Int]
 
-  /** Keep a ticket of the next epoch for when our head gets there; false when the buffer is full. */
-  private def defer(epoch: Long, env: TicketEnvelope, asProxy: Boolean, from: String): Boolean =
-    val key = (epoch, env)
-    deferred.synchronized {
-      // Dropping entries of epochs our head has passed happens in processDeferred; these are all `epoch` or older.
-      if deferred.containsKey(key) || deferred.size < maxDeferred then
-        deferred.merge(key, (asProxy, from), (old, nu) => (old._1 || nu._1, old._2))
-        true
-      else
-        logger.debug(s"ticket from $from for epoch $epoch not kept: $maxDeferred already wait for that epoch")
-        false
-    }
+  private val maxDeferred: Int = 2 * chain.config.epochLength + chain.config.ringSize
 
-  private[node] def deferredCount: Int = deferred.size
+  private def maxDeferredPerPeer(pendingSize: Int): Int =
+    2 * SafroleTransition.maxTicketEntries(pendingSize, chain.config)
+
+  private def predictedPending(view: io.forge.jam.protocol.state.TrieBackedJamState): IndexedSeq[Option[ValidatorKey]] =
+    val offenders = view.psi.offenders.toSet
+    view.validators.queue.map(k => Option.when(!offenders.contains(k.ed25519))(k))
+
+  @volatile private var predictedRoot: (List[BandersnatchPublicKey], JamBytes) = null
+
+  private def ringRootFor(keys: List[BandersnatchPublicKey]): Option[JamBytes] =
+    val cached = predictedRoot
+    if cached != null && cached._1 == keys then Some(cached._2)
+    else
+      val root = ringRoot(keys)
+      root.foreach(r => predictedRoot = (keys, r))
+      root
+
+  private def defer(
+      view: io.forge.jam.protocol.state.TrieBackedJamState,
+      epoch: Long,
+      env: TicketEnvelope,
+      asProxy: Boolean,
+      from: String,
+      sender: Option[Ed25519PublicKey]
+  ): Boolean =
+    val pending = predictedPending(view)
+    def refuse(why: String): Boolean =
+      logger.debug(s"ticket from $from for epoch $epoch not kept: $why")
+      false
+    if pending.isEmpty then refuse("no pending set")
+    else if env.attempt.toInt >= SafroleTransition.maxTicketEntries(pending.size, chain.config) then
+      refuse(s"entry index ${env.attempt.toInt} out of range")
+    else if env.signature.length != RingVrfSignatureSize then refuse("proof length")
+    else
+      BandersnatchVrf.ringVrfOutput(env.signature.toArray).map(Hash(_)) match
+        case None => refuse("proof output does not decode")
+        case Some(id) =>
+          val known = deferredLock.synchronized {
+            deferred.get(id).map { d =>
+              if asProxy then d.asProxy = true
+              true
+            }
+          }
+          if known.isDefined then true
+          else if sender.exists(k => !pending.exists(_.exists(_.ed25519 == k))) then
+            refuse("sender is not a validator of the pending set")
+          else if asProxy && !pending.lift(TicketService.proxyIndexFor(id, pending.size)).flatten.exists(vk =>
+              validatorKeys.exists(_.ed25519Key == vk.ed25519)
+            )
+          then refuse("CE 131 to the wrong proxy")
+          else
+            val peer = sender.map(k => JamBytes(k.bytes).toHex).getOrElse(from)
+            val perPeer = maxDeferredPerPeer(pending.size)
+            val reserved = deferredLock.synchronized {
+              val held = deferredByPeer.getOrElse(peer, 0)
+              if held >= perPeer || deferred.size + reservedTotal >= maxDeferred then false
+              else
+                deferredByPeer.update(peer, held + 1)
+                reservedTotal += 1
+                true
+            }
+            if !reserved then refuse(s"its sender has $perPeer kept or all $maxDeferred are taken")
+            else
+              var kept = false
+              try
+                val zero = BandersnatchPublicKey(new Array[Byte](32))
+                val ring = pending.map(_.map(_.bandersnatch).getOrElse(zero)).toList.padTo(chain.config.ringSize, zero)
+                val entropy = view.entropy.pool.lift(1).getOrElse(Hash.zero) // η_1 now, η'_2 in the next epoch
+                ringRootFor(ring) match
+                  case None => refuse("ring root of the pending set")
+                  case Some(root) =>
+                    val verified = verifyTickets(Seq(env), root, entropy, chain.config.ringSize).headOption.flatten
+                    if !verified.contains(id) then refuse("ring proof does not verify against the pending set")
+                    else
+                      deferredLock.synchronized {
+                        deferred.get(id) match
+                          case Some(d) => if asProxy then d.asProxy = true
+                          case None =>
+                            deferred.put(id, Deferred(epoch, id, env, asProxy, peer, root, entropy))
+                            kept = true
+                      }
+                      true
+              finally
+                deferredLock.synchronized {
+                  reservedTotal -= 1
+                  if !kept then release(peer)
+                }
+
+  private var reservedTotal = 0
+
+  private def release(peer: String): Unit =
+    deferredByPeer.get(peer).foreach(n => if n <= 1 then deferredByPeer.remove(peer) else deferredByPeer.update(peer, n - 1))
+
+  private def take(d: Deferred): Boolean =
+    if deferred.get(d.id).exists(_ eq d) then
+      deferred.remove(d.id)
+      release(d.peer)
+      true
+    else false
+
+  private[node] def deferredCount: Int = deferredLock.synchronized(deferred.size)
   private[node] def pendingForwardCount: Int = pendingForwards.size
 
-  /** Verify and pool deferred tickets whose epoch our head has reached;
-    * drop those that are now stale. Called after every import.
-    */
+  private lazy val deferredWorker = threads.single("jam-tickets-deferred")
+  private val deferredRound = new java.util.concurrent.atomic.AtomicLong()
+
   def processDeferred(): Unit =
-    if deferred.isEmpty then return
-    val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
-    val it = deferred.entrySet().iterator()
-    while it.hasNext do
-      val entry = it.next()
-      val (epoch, env) = entry.getKey
-      val (asProxy, from) = entry.getValue
-      if epoch <= currentEpoch then
-        it.remove()
-        if epoch == currentEpoch && !accept(epoch, env, asProxy, from) then
-          logger.debug(s"deferred ticket for epoch $epoch rejected")
+    val due = deferredLock.synchronized(deferred.nonEmpty) && {
+      val currentEpoch = chain.stateView().timeslot / chain.config.epochLength
+      deferredLock.synchronized(deferred.valuesIterator.exists(_.epoch <= currentEpoch))
+    }
+    if due then
+      val round = deferredRound.incrementAndGet()
+      try
+        deferredWorker.execute { () =>
+          try takeInDeferred(round)
+          catch case e: Exception => logger.error(s"deferred tickets: ${e.getMessage}", e)
+        }
+      catch case _: java.util.concurrent.RejectedExecutionException => () // shutting down
+
+  private def takeInDeferred(round: Long): Unit =
+    val view = chain.stateView()
+    val epoch = view.timeslot / chain.config.epochLength
+    val entropy = TicketService.contestEntropy(view)
+    val root = view.gamma.z
+    val due = deferredLock.synchronized {
+      deferred.values.filter(_.epoch < epoch).toList.foreach(take)
+      deferred.values.filter(_.epoch == epoch).toList
+    }
+    val (checked, unchecked) = due.partition(d => d.root == root && d.entropy == entropy)
+    checked.foreach(d => if deferredLock.synchronized(take(d)) then admit(view, epoch, d.id, d.env, d.asProxy, d.peer))
+    val batches = unchecked.grouped(TicketService.DeferredBatch)
+    while batches.hasNext && deferredRound.get == round do
+      val batch = batches.next()
+      val ids = verifyTickets(batch.map(_.env), root, entropy, chain.config.ringSize)
+      batch.zip(ids).foreach { (d, id) =>
+        if deferredLock.synchronized(take(d)) then
+          if id.contains(d.id) then admit(view, epoch, d.id, d.env, d.asProxy, d.peer)
+          else logger.debug(s"deferred ticket ${d.id.toHex.take(18)} for epoch $epoch does not verify; dropped")
+      }
+    if checked.nonEmpty || unchecked.nonEmpty then
+      logger.debug(s"deferred tickets for epoch $epoch: ${checked.size} pooled, ${unchecked.size} checked again")
 
   private def peerLabel(conn: PeerConnection): String =
     try JamBytes(conn.peerKey).toHex.take(16)
     catch case _: Exception => "?"
+
+  private def senderKey(conn: PeerConnection): Option[Ed25519PublicKey] =
+    try Option(conn.peerKey).filter(_.length == 32).map(Ed25519PublicKey(_))
+    catch case _: Exception => None
 
   /** Verify a ticket for the current epoch against γ_z and η_2 and pool it.
     * A CE 131 ticket is queued for CE 132 forwarding only when we hold the
     * key of its proxy validator (JAMNP-S CE 131: "verify that they are the
     * correct proxy"). False when a check fails.
     */
-  private def accept(epoch: Long, env: TicketEnvelope, asProxy: Boolean, from: String): Boolean =
-    val view = chain.stateView()
+  private def accept(
+      view: io.forge.jam.protocol.state.TrieBackedJamState,
+      epoch: Long,
+      env: TicketEnvelope,
+      asProxy: Boolean,
+      from: String
+  ): Boolean =
     val entropy = TicketService.contestEntropy(view)
-    BandersnatchVrf.verifyRingProof(
-      env.signature,
-      view.gamma.z,
-      entropy,
-      env.attempt,
-      view.validators.nextEpoch.size
-    ) match
+    verifyTickets(Seq(env), view.gamma.z, entropy, chain.config.ringSize).headOption.flatten match
       case None =>
         logger.warn(
           s"CE131/132 ticket from $from for epoch $epoch failed ring verification against η_2 ${entropy.toHex.take(18)}; dropped"
         )
         false
-      case Some(result) =>
-        val id = Hash(result.ticketId.toArray)
-        if asProxy && !holdsProxyKey(view, id) then
-          logger.debug(s"CE131 ticket ${id.toHex.take(18)} sent to the wrong proxy — rejected")
-          false
-        else
-          pools.addTicket(id, env, epoch, entropy)
-          // Forward a ticket once: a replayed one is already queued or was already sent to every validator.
-          if asProxy && proxied.putIfAbsent(id, epoch) == null then
-            proxied.values.removeIf(_ < epoch)
-            pendingForwards.add((epoch, env))
-          true
+      case Some(id) => admit(view, epoch, id, env, asProxy, from)
+
+  private def admit(
+      view: io.forge.jam.protocol.state.TrieBackedJamState,
+      epoch: Long,
+      id: Hash,
+      env: TicketEnvelope,
+      asProxy: Boolean,
+      from: String
+  ): Boolean =
+    if asProxy && !holdsProxyKey(view, id) then
+      logger.debug(s"CE131 ticket ${id.toHex.take(18)} from $from sent to the wrong proxy — rejected")
+      false
+    else
+      pools.addTicket(id, env, epoch, TicketService.contestEntropy(view))
+      if asProxy && proxied.putIfAbsent(id, epoch) == null then
+        proxied.values.removeIf(_ < epoch)
+        pendingForwards.add((epoch, env))
+      true
 
   /** True when we hold the Ed25519 key of `id`'s proxy in γ_k. */
   private def holdsProxyKey(view: io.forge.jam.protocol.state.TrieBackedJamState, id: Hash): Boolean =
@@ -458,6 +596,18 @@ final class TicketService(
     )
 
 object TicketService:
+  type Verifier = (Seq[TicketEnvelope], JamBytes, Hash, Int) => Seq[Option[Hash]]
+
+  val DeferredBatch: Int = 64
+
+  val ringVerifier: Verifier = (envs, root, entropy, ringSize) =>
+    def single(e: TicketEnvelope): Option[Hash] =
+      BandersnatchVrf.verifyRingProof(e.signature, root, entropy, e.attempt, ringSize).map(r => Hash(r.ticketId.toArray))
+    if envs.sizeIs < 2 then envs.map(single)
+    else
+      BandersnatchVrf.verifyRingProofs(envs.map(e => (e.signature, e.attempt)), root, entropy, ringSize) match
+        case Some(ids) => ids.map(id => Some(Hash(id.toArray)))
+        case None      => envs.map(single)
   /** η_2 of `view`: the entropy the current epoch's ticket contest uses. */
   def contestEntropy(view: io.forge.jam.protocol.state.TrieBackedJamState): Hash =
     view.entropy.pool.lift(2).getOrElse(Hash.zero)

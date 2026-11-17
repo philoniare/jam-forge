@@ -19,6 +19,9 @@ trait NodeFixture:
       given Decoder[Genesis] = Genesis.decoder
       decode[Genesis](Files.readString(genesisPath)).toOption
 
+  protected def headersOf(chain: ChainManager, blocks: List[Array[Byte]]): List[Array[Byte]] =
+    blocks.map(b => chain.headerCodec.encode(chain.decodeBlock(b).fold(e => throw new IllegalArgumentException(e), identity).header))
+
   protected def tempDir(prefix: String): Path = Files.createTempDirectory(prefix)
 
   /** Delete `dir` and everything in it. */

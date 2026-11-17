@@ -49,7 +49,10 @@ object FuzzSpecGenesis:
     dst.iota = iota
     dst.gammaK = validators
     dst.gammaZ = BandersnatchVrf
-      .generateRingRoot(validators.map(_.bandersnatch).toList, config.validatorCount)
+      .generateRingRoot(
+        validators.map(_.bandersnatch).toList.padTo(config.ringSize, BandersnatchPublicKey(new Array[Byte](32))),
+        config.ringSize
+      )
       .getOrElse(throw new IllegalStateException("ring root"))
     dst.gammaS = TicketsOrKeys.Keys(fallbackKeys(entropy(2), validators, config.epochLength))
     dst.gammaA = List.empty

@@ -4,6 +4,8 @@ import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.network.PeerConnection
 
+import scala.util.control.NonFatal
+
 final class CheckpointSync(
     chain: ChainManager,
     sync: SyncService,
@@ -47,8 +49,15 @@ final class CheckpointSync(
           s"checkpoint sync: starting at ${targetHash.toHex.take(18)} slot=$targetSlot, the parent of checkpoint " +
             s"${checkpoint.toHex.take(18)}; ${ancestors.size} ancestor(s); downloading state ${stateRoot.toHex.take(18)}"
         )
-        _ <- chain.downloadState(targetHash, targetSlot, stateRoot, statePeers, StateDownload.request(targetHash), misbehaved(_, Offence.BadProof))
-        head <- chain.startAt(target._3, stateRoot, ancestors.map(_._3), grandpaSetId)
+        _ <- chain.downloadState(
+          targetHash,
+          targetSlot,
+          stateRoot,
+          statePeers,
+          StateDownload.request(targetHash, malformed = misbehaved(_, Offence.Malformed)),
+          misbehaved(_, Offence.BadProof)
+        )
+        head <- chain.startAt(target._3, stateRoot, ancestors, grandpaSetId)
       yield head
     result match
       case Left(CheckpointSync.AtGenesis) =>
@@ -78,9 +87,9 @@ final class CheckpointSync(
     }
 
   private def ancestorsOf(peers: List[PeerConnection], parent: Hash, startSlot: Long)
-      : Either[String, List[(Hash, io.forge.jam.core.types.block.Block, Array[Byte])]] =
+      : Either[String, List[Array[Byte]]] =
     val window = chain.config.maxLookupAnchorAge
-    val out = List.newBuilder[(Hash, io.forge.jam.core.types.block.Block, Array[Byte])]
+    val out = List.newBuilder[Array[Byte]]
     var count = 0
     var cursor = parent
     var reached = startSlot
@@ -89,18 +98,19 @@ final class CheckpointSync(
     var conn = untried.nextOption()
     while !complete && conn.isDefined do
       val batch = chained(conn.get, cursor, CheckpointSync.AncestorsPerRequest).getOrElse(Nil)
+        .map((_, b, _) => (b.header.slot.toLong, b.header.parent, chain.headerCodec.encode(b.header)))
       if batch.isEmpty then conn = untried.nextOption()
       else
-        val wanted = batch.takeWhile((_, b, _) => startSlot - b.header.slot.toLong <= window)
-        out ++= wanted
+        val wanted = batch.takeWhile((slot, _, _) => startSlot - slot <= window)
+        out ++= wanted.map(_._3)
         count += wanted.size
         if wanted.size < batch.size then
-          out += batch(wanted.size)
+          out += batch(wanted.size)._3
           complete = true
         else
-          val (_, last, _) = batch.last
-          cursor = last.header.parent
-          reached = last.header.slot.toLong
+          val (lastSlot, lastParent, _) = batch.last
+          cursor = lastParent
+          reached = lastSlot
           complete = startsAtGenesis(cursor)
     if complete then Right(out.result())
     else
@@ -109,7 +119,36 @@ final class CheckpointSync(
           s"had the block before (the window reaches back to slot ${math.max(0L, startSlot - window)})"
       )
 
-object CheckpointSync:
+object CheckpointSync extends LazyLogging:
   val AncestorsPerRequest: Int = 64
+
+  def untilStarted(
+      attempt: () => Either[String, ChainHead],
+      running: () => Boolean,
+      started: () => Unit,
+      retryMillis: Long,
+      sleep: Long => Unit = Thread.sleep
+  ): Unit =
+    var lastFault: Option[String] = None
+    try
+      while running() do
+        val outcome =
+          try attempt()
+          catch
+            case NonFatal(e) =>
+              val what = s"${e.getClass.getName}: ${e.getMessage}"
+              if !lastFault.contains(what) then
+                lastFault = Some(what)
+                logger.error(s"checkpoint sync attempt failed: $what; retrying every $retryMillis ms", e)
+              else logger.debug(s"checkpoint sync attempt failed again: $what")
+              Left(what)
+        outcome match
+          case Right(_) =>
+            try started()
+            catch case NonFatal(e) => logger.error("checkpoint sync: handing the started chain over failed", e)
+          case Left(why) =>
+            logger.debug(s"checkpoint sync not yet possible: $why")
+            sleep(retryMillis)
+    catch case _: InterruptedException => ()
   private val AtGenesis = "the checkpoint's parent is genesis"
   private val ShortAncestry = "short ancestor set"

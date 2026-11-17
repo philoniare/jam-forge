@@ -54,7 +54,7 @@ final class RpcServer(
             ()
       )
     channel = bootstrap.bind(bind).sync().channel()
-    worker.scheduleWithFixedDelay(() => refreshAll(), RefreshMillis, RefreshMillis, TimeUnit.MILLISECONDS)
+    worker.scheduleWithFixedDelay(refreshTask(refreshAll()), RefreshMillis, RefreshMillis, TimeUnit.MILLISECONDS)
     logger.info(s"RPC (JIP-2, WebSocket) on ${bind.getHostString}:$boundPort")
     this
 
@@ -76,9 +76,10 @@ final class RpcServer(
     worker.shutdownNow()
     ()
 
+  private val refreshTask = new Periodic("RPC subscriptions refresh")
+
   private def refreshAll(): Unit =
-    try if !sessions.isEmpty then api.refresh(sessions.values.toArray(Array.empty[RpcSession]).toSeq)
-    catch case e: Exception => logger.warn(s"RPC subscriptions: ${e.getMessage}")
+    if !sessions.isEmpty then api.refresh(sessions.values.toArray(Array.empty[RpcSession]).toSeq)
 
   private def refreshOne(session: RpcSession): Unit =
     try worker.execute(() => api.refresh(List(session)))

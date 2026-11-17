@@ -23,11 +23,10 @@ import org.rocksdb.{BlockBasedTableConfig, Cache, ColumnFamilyHandle, DBOptions,
   * @param cacheBytes        capacity of the shared block cache, which also accounts for the write buffers
   * @param writeBufferBytes  total size of all write buffers at which the largest is flushed
   */
-final class RocksDbMemory(val cacheBytes: Long, val writeBufferBytes: Long):
+final class RocksDbMemory(val cacheBytes: Long, val writeBufferBytes: Long, val highPriorityPoolRatio: Double = 0.0):
   RocksDB.loadLibrary()
 
-  /** Shared by every table of every store opened with this budget. Lives as long as the process. */
-  val blockCache: Cache = new LRUCache(cacheBytes)
+  val blockCache: Cache = new LRUCache(cacheBytes, -1, false, highPriorityPoolRatio)
 
   private val writeBuffers = new WriteBufferManager(writeBufferBytes, blockCache)
 
@@ -118,12 +117,14 @@ object RocksDbMemory:
     */
   final case class Settings(
       cacheBytes: Long = 256L * 1024 * 1024,
-      writeBufferBytes: Long = 96L * 1024 * 1024
+      writeBufferBytes: Long = 96L * 1024 * 1024,
+      highPriorityPoolRatio: Double = 0.0
   )
 
   object Settings:
     val CacheBytesProperty = "jam.db.cacheBytes"
     val WriteBufferBytesProperty = "jam.db.writeBufferBytes"
+    val HighPriorityPoolRatioProperty = "jam.db.highPriorityPoolRatio"
 
     val process: ProcessSettings[Settings] = new ProcessSettings(lookup =>
       def bytes(property: String, default: Long): Long =
@@ -131,10 +132,14 @@ object RocksDbMemory:
       val defaults = Settings()
       Settings(
         cacheBytes = bytes(CacheBytesProperty, defaults.cacheBytes),
-        writeBufferBytes = bytes(WriteBufferBytesProperty, defaults.writeBufferBytes)
+        writeBufferBytes = bytes(WriteBufferBytesProperty, defaults.writeBufferBytes),
+        highPriorityPoolRatio = lookup(HighPriorityPoolRatioProperty)
+          .flatMap(_.trim.toDoubleOption)
+          .filter(r => r >= 0.0 && r < 1.0)
+          .getOrElse(defaults.highPriorityPoolRatio)
       )
     )
 
   lazy val shared: RocksDbMemory =
     val settings = Settings.process.current
-    new RocksDbMemory(cacheBytes = settings.cacheBytes, writeBufferBytes = settings.writeBufferBytes)
+    new RocksDbMemory(settings.cacheBytes, settings.writeBufferBytes, settings.highPriorityPoolRatio)

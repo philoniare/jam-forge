@@ -10,7 +10,7 @@ import io.forge.jam.protocol.state.TrieBackedJamStateBridges.DisputeBridge
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
-import io.forge.jam.protocol.pipeline.ExtrinsicHashing
+import io.forge.jam.protocol.pipeline.{BlockPipeline, ExtrinsicHashing}
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleInput, TicketsOrKeys}
 import io.forge.jam.vrfs.BandersnatchWrapper
@@ -92,12 +92,16 @@ final class BlockAuthor(
         )
       else List.empty
 
+    val disputes = if withDisputes then BlockAuthor.disputes(pools, preView, chain) else DisputeBuilder.empty
+
     // Run Safrole for the target slot (with the real ticket extrinsic) to
     // obtain the posterior sealer sequence and header markers. The view is a
     // throwaway (never committed). A rejected ticket set falls back to an
-    // empty extrinsic rather than stalling authoring.
+    // empty extrinsic rather than stalling authoring. Its offenders are ψ'_o, this block's disputes included, as
+    // the import's (BlockPipeline.posteriorOffenders, GP eq:blacklistfilter).
     def runSafrole(tickets: List[(Hash, TicketEnvelope)]) =
       val v = chain.stateViewOf(best)
+      v.postOffenders = BlockPipeline.posteriorOffenders(v.psi.offenders, disputes.dispute)
       SafroleTransition
         .stfView(
           SafroleInput(
@@ -174,8 +178,6 @@ final class BlockAuthor(
       logger.info(s"dropping ${provided.size} preimage(s) already provided")
       pools.removePreimages(provided)
 
-    // Verdicts on reports someone judged invalid, with their culprits and faults; checked against the Disputes STF.
-    val disputes = if withDisputes then BlockAuthor.disputes(pools, preView, chain) else DisputeBuilder.empty
     if !disputes.isEmpty then
       logger.warn(
         s"authoring ${disputes.dispute.verdicts.size} verdict(s), ${disputes.dispute.culprits.size} culprit(s), " +

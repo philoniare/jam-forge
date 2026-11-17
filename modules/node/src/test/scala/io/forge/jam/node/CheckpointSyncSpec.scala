@@ -60,6 +60,13 @@ class CheckpointSyncSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       b.chain.hasBlock(a.chain.headerHashOf(blocks(27))) shouldBe true // an ancestor: header only
       b.chain.stateAt(a.chain.headerHashOf(blocks(27))) shouldBe None
       b.chain.blocksDescending(head.hash, 10).size shouldBe 1 // older bodies are not kept, so not served
+      val rpc = new RpcApi(b.chain, b.spec.genesisHeaderHash, () => 0, () => false, b.preimages.submit)
+      def b64(h: Hash) = java.util.Base64.getEncoder.encodeToString(h.bytes.toArray)
+      val status = rpc.handle(
+        s"""{"jsonrpc":"2.0","id":1,"method":"workPackageStatus","params":["${b64(head.hash)}","${b64(Hash(Array.fill[Byte](32)(7)))}","${b64(a.chain.headerHashOf(blocks(26)))}"]}""",
+        new RpcSession(_ => ())
+      ).get
+      status.hcursor.downField("error").get[Int]("code") shouldBe Right(1)
 
       chainOfA.drop(29).foreach(bytes => b.chain.importBlock(bytes).isRight shouldBe true)
       b.chain.best.hash shouldBe a.chain.best.hash
@@ -270,6 +277,144 @@ class CheckpointSyncSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("a peer answering a block request with more blocks than it was asked for is charged and not used") {
+    withNodes(2, "checkpoint-overlong") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      author(Seq(a), 1 to 12)
+      val genesisHash = a.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get
+      val blocks = a.chain.blocksAscending(genesisHash, 100).map(bytes => a.chain.decodeBlock(bytes).toOption.get)
+      val checkpointHash = a.chain.headerHashOf(blocks(9))
+      val overlong: JamNode => Byte => Option[PeerStreamHandler] = node =>
+        case StreamKind.BlockRequest =>
+          Some((_, stream) =>
+            stream.onMessage { msg =>
+              val (from, _, max) = SyncCodec.decodeBlockRequest(msg).toOption.get
+              stream.send(node.chain.blocksDescending(from, max.toInt + 10).toArray.flatten)
+              stream.finish()
+            }
+          )
+        case StreamKind.StateRequest => Some(node.sync.stateRequestHandler)
+        case _                       => None
+      val (_, bToOverlong) = join(a, b, overlong)
+      b.sync.hold()
+      new CheckpointSync(b.chain, b.sync, checkpointHash, () => List(bToOverlong)).attempt().isLeft shouldBe true
+      b.scores.points(a.identity.publicKeyBytes) shouldBe (Offence.Malformed.points.toDouble +- 0.5)
+      b.chain.atGenesis shouldBe true
+    }
+  }
+
+  test("a state response of more than two messages is a failed, charged response") {
+    withNodes(2, "checkpoint-state-extra") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      author(Seq(a), 1 to 6)
+      val genesisHash = a.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get
+      val blocks = a.chain.blocksAscending(genesisHash, 100).map(bytes => a.chain.decodeBlock(bytes).toOption.get)
+      val checkpointHash = a.chain.headerHashOf(blocks(4))
+      val chatty: JamNode => Byte => Option[PeerStreamHandler] = node =>
+        case StreamKind.BlockRequest => Some(node.sync.blockRequestHandler)
+        case StreamKind.StateRequest =>
+          Some((_, stream) =>
+            stream.onMessage { msg =>
+              val (h, start, end, max) = SyncCodec.decodeStateRequest(msg).toOption.get
+              val (boundary, pairs) = node.chain.stateAt(h).get.range(start, end, max.toInt)
+              stream.send(SyncCodec.encodeBoundaryNodes(boundary))
+              stream.send(SyncCodec.encodeStatePairs(pairs))
+              stream.send(new Array[Byte](1000))
+              stream.finish()
+            }
+          )
+        case _ => None
+      val (_, bToChatty) = join(a, b, chatty)
+      var charged = List.empty[Offence]
+      b.sync.hold()
+      new CheckpointSync(b.chain, b.sync, checkpointHash, () => List(bToChatty), (_, o) => charged ::= o)
+        .attempt().isLeft shouldBe true
+      charged shouldBe List(Offence.Malformed)
+      b.chain.atGenesis shouldBe true
+    }
+  }
+
+  test("an attempt that throws is logged and retried, and the sync still ends") {
+    var calls = 0
+    var started = 0
+    var running = true
+    val sleeps = scala.collection.mutable.ListBuffer.empty[Long]
+    CheckpointSync.untilStarted(
+      () =>
+        calls += 1
+        if calls <= 2 then throw new IllegalStateException("store closed") else Right(ChainHead(Hash.zero, 0L, Hash.zero))
+      ,
+      running = () => running,
+      started = () => { started += 1; running = false },
+      retryMillis = 7L,
+      sleep = ms => sleeps += ms
+    )
+    calls shouldBe 3
+    started shouldBe 1
+    sleeps.toList shouldBe List(7L, 7L)
+  }
+
+  test("a checkpoint start mid-epoch, holding fewer ancestors than back to the epoch's first block, follows the next set change") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis not available"))
+    val rotated = genesis.state.keyvals.map { kv =>
+      val k = kv.key.toArray
+      if k.head == 7.toByte && k.drop(1).forall(_ == 0) then
+        val v = kv.value.toArray.clone()
+        (0 until 6).foreach(i => System.arraycopy(ValidatorKeySet.dev(6 + i).ed25519Public, 0, v, 1 + i * 336 + 32, 32))
+        kv.copy(value = JamBytes(v))
+      else kv
+    }
+    val spec = ChainSpec(
+      id = "checkpoint-next-set",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = rotated,
+      bootnodes = Nil
+    )
+    val dirs = (0 until 2).map(i => tempDir(s"jam-checkpoint-next-set-$i"))
+    def node(i: Int) =
+      new JamNode(spec, NodeConfig(dataDir = dirs(i), slotTicking = false, ed25519Seed = Some(devKeys(i).ed25519Secret)))
+    val a = node(0)
+    var b = node(1)
+    try
+      Seq(a, b).foreach(_.chain.initializeOrRestore(spec))
+      author(Seq(a), 1 to 26)
+      val genesisHash = a.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get
+      val chainOfA = a.chain.blocksAscending(genesisHash, 100)
+      val blocks = chainOfA.map(bytes => a.chain.decodeBlock(bytes).toOption.get)
+      def keysAt(i: Int) = a.chain.stateViewAt(a.chain.headerHashOf(blocks(i))).get.validators.current.map(_.ed25519.bytes.toSeq)
+      blocks(11).header.epochMark.isDefined shouldBe true // slot 12 begins epoch 1
+      blocks(23).header.epochMark.isDefined shouldBe true // slot 24 begins epoch 2
+      keysAt(23) should not be keysAt(17)
+
+      val start = a.chain.headerHashOf(blocks(17))
+      val root = a.chain.postStateRoot(start).get
+      val (_, bToA) = join(a, b, serving)
+      b.chain.downloadState(start, 18L, root, List(bToA), StateDownload.request(start)).isRight shouldBe true
+      b.chain.startAt(chainOfA(17), root, headersOf(a.chain, chainOfA.slice(14, 17).reverse), grandpaSetId = Some(1L)).isRight shouldBe true
+      b.chain.hasBlock(a.chain.headerHashOf(blocks(11))) shouldBe false
+      val first = b.enableGrandpa(Some(devKeys(1)))
+      first.voterSet.setId shouldBe 1L
+      first.voterSet.keys.map(_.toSeq) shouldBe keysAt(17)
+
+      b.shutdown()
+      b = node(1)
+      b.chain.initializeOrRestore(spec)
+      val g = b.enableGrandpa(Some(devKeys(1)))
+      g.voterSet.setId shouldBe 1L
+      g.voterSet.base.hash shouldBe start
+
+      chainOfA.slice(18, 26).foreach(bytes => b.chain.importBlock(bytes).isRight shouldBe true)
+      b.chain.finalizeAdopting(a.chain.headerHashOf(blocks(24))).isRight shouldBe true
+      eventually("the voter to adopt set 2")(g.voterSet.setId == 2L)
+      g.voterSet.base.hash shouldBe a.chain.headerHashOf(blocks(23))
+      g.voterSet.keys.map(_.toSeq) shouldBe keysAt(23)
+    finally
+      Seq(a, b).foreach(_.shutdown())
+      dirs.foreach(cleanup)
+  }
+
   private def guaranteeAnchoredAt(node: JamNode, slot: Long, lookup: io.forge.jam.core.types.block.Block): io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic =
     import io.forge.jam.core.{Hashing, constants}
     import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, ServiceId, Timeslot, ValidatorIndex}
@@ -338,7 +483,7 @@ class CheckpointSyncSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       val start = a.chain.headerHashOf(blocks(18))
       val root = a.chain.postStateRoot(start).get
       b.chain.downloadState(start, 19L, root, List(bToA), StateDownload.request(start)).isRight shouldBe true
-      b.chain.startAt(chainOfA(18), root, chainOfA.slice(9, 18).reverse).isRight shouldBe true
+      b.chain.startAt(chainOfA(18), root, headersOf(a.chain, chainOfA.slice(9, 18).reverse)).isRight shouldBe true
 
       val (_, bToPruned) = join(a, b, prunedServing(keptFrom = 20))
       b.sync.fetchBlock(bToPruned, anchoredHash)

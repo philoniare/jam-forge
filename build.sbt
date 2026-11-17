@@ -97,6 +97,9 @@ def nativeLibJavaOptions(baseDir: File, extra: Seq[String] = Seq.empty): Seq[Str
     // Tests fork, so -Djam.fuzz.* given to sbt must be passed on or FuzzReportTraceSpec never sees it.
     sys.props.toSeq.collect { case (k, v) if k.startsWith("jam.fuzz.") => s"-D$k=$v" }.sorted ++ extra
 
+def jamDbProperties: Seq[String] =
+  sys.props.toSeq.collect { case (k, v) if k.startsWith("jam.db.") => s"-D$k=$v" }.sorted
+
 lazy val buildNativeLib = taskKey[Unit]("Build native Bandersnatch VRF library")
 lazy val buildEd25519ZebraLib = taskKey[Unit]("Build native Ed25519-Zebra library")
 lazy val buildErasureCodingLib = taskKey[Unit]("Build native Erasure Coding library")
@@ -271,7 +274,8 @@ lazy val db = (project in file("modules/db"))
     ),
     scalacOptions ++= commonScalacOptions,
     Test / fork := true,
-    Test / baseDirectory := (ThisBuild / baseDirectory).value
+    Test / baseDirectory := (ThisBuild / baseDirectory).value,
+    Test / javaOptions ++= jamDbProperties
   )
 
 lazy val network = (project in file("modules/network"))
@@ -321,6 +325,7 @@ lazy val node = (project in file("modules/node"))
       recompilerLibJavaOptions((ThisBuild / baseDirectory).value)
     ),
     Test / javaOptions ++= sys.props.get("jam.bench.jvmOpts").toSeq.flatMap(_.trim.split("\\s+")).filter(_.nonEmpty),
+    Test / javaOptions ++= jamDbProperties,
     assembly / mainClass := Some("io.forge.jam.node.Main"),
     assembly / assemblyJarName := "jam-node.jar",
     fatJarSettings

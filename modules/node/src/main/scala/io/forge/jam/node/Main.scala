@@ -25,9 +25,14 @@ import io.forge.jam.pvm.PvmSettings
   *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
   * }}}
   *
-  * With `--author i` and no `--seed`, the node's network identity is dev
-  * validator i's Ed25519 key, as JAMNP-S expects of validators; peers then
-  * map the connection to validator index i (CE 131 proxying). Native crypto
+  * With `--author i` the node's network identity is dev validator i's Ed25519
+  * key (JIP-5 trivial seed for i), as JAMNP-S expects of validators; peers then
+  * map the connection to validator index i (CE 131 proxying). `--seed` or
+  * `--seed-file` with it is refused: it would give the node another identity.
+  * An unknown option, an option without its value, or an argument that is no
+  * option is refused before anything is opened. `--seed` on the command line is
+  * visible in the process list (a warning says so): `--seed-file` is the way to
+  * keep it out. Native crypto
   * libraries are looked up under `-Djam.base.dir` (default: the working
   * directory); a missing one stops the node before it joins the network.
   * `--submit-port N` opens the loopback preimage endpoint (`POST /preimage/<service-id>`).
@@ -75,16 +80,17 @@ object Main extends LazyLogging:
     BandersnatchVrf.baseDir.install(BandersnatchVrf.baseDir.fromSystemProperties)
 
   private def run(args: Array[String]): Unit =
+    val commandLine = parseCommandLine(args.toList).fold(fail, identity)
+    if commandLine.flags.contains("--help") then
+      println(Usage)
+      return
     installProcessSettings()
-    val (peerArgs, afterPeers) = extractRepeated("--peer", args.toList)
-    val (rpcOrigins, afterOrigins) = extractRepeated("--rpc-allow-origin", afterPeers)
-    val (flags, rest) = afterOrigins.partition(a => Set("--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys", "--fault-tamper-reports").contains(a))
-    val opts = parseArgs(rest, Map.empty)
-
-    if opts.contains("author") && opts.contains("validator-seed") then
-      fail("--author and --validator-seed are exclusive: give one source of validator keys")
-    if opts.contains("validator-seed") && (opts.contains("seed") || opts.contains("seed-file")) then
-      fail("--validator-seed sets the network identity too: drop --seed/--seed-file")
+    val peerArgs = commandLine.repeated("--peer")
+    val rpcOrigins = commandLine.repeated("--rpc-allow-origin")
+    val flags = commandLine.flags
+    val opts = commandLine.options
+    if opts.contains("seed") then
+      System.err.println("warning: --seed is visible in the process list to every user of this machine; give --seed-file <path> instead")
 
     // Derive validator keys first: this loads the native Bandersnatch and
     // Ed25519 libraries, so a missing library fails here, not after start.
@@ -130,7 +136,7 @@ object Main extends LazyLogging:
       listenPort = opts.get("port").map(_.toInt).getOrElse(DefaultPort),
       ed25519Seed = opts
         .get("seed")
-        .map(s => JamBytes.fromHexUnsafe(s).toArray)
+        .map(s => JamBytes.fromHexUnsafe(s.stripPrefix("0x")).toArray)
         .orElse(opts.get("seed-file").map(p => loadOrCreateSeed(Paths.get(p))))
         .orElse(authorKeys.map(_.ed25519Secret)),
       eraStartSeconds = opts
@@ -287,26 +293,105 @@ object Main extends LazyLogging:
     if colon <= 0 then fail(s"expected host:port, got: $s")
     new InetSocketAddress(s.substring(0, colon), s.substring(colon + 1).toInt)
 
-  /** Pulls every occurrence of a repeatable `--flag value` pair out of
-    * `args`, preserving the relative order of what's left for `parseArgs`.
-    */
-  private def extractRepeated(flag: String, args: List[String]): (List[String], List[String]) =
-    args match
-      case Nil => (Nil, Nil)
-      case f :: value :: rest if f == flag =>
-        val (values, remaining) = extractRepeated(flag, rest)
-        (value :: values, remaining)
-      case other :: rest =>
-        val (values, remaining) = extractRepeated(flag, rest)
-        (values, other :: remaining)
+  private[node] final case class CommandLine(
+      options: Map[String, String],
+      repeated: Map[String, List[String]],
+      flags: Set[String]
+  )
 
-  private def parseArgs(args: List[String], acc: Map[String, String]): Map[String, String] =
-    args match
-      case Nil => acc
-      case key :: value :: rest if key.startsWith("--") =>
-        parseArgs(rest, acc + (key.stripPrefix("--") -> value))
-      case other :: _ =>
-        fail(s"unexpected argument: $other")
+  private val ValueOptions = Set(
+    "data", "spec", "port", "seed", "seed-file", "era-start", "author", "validator-seed", "bandersnatch-key",
+    "ed25519-key", "telemetry", "submit-port", "finality-peers", "sync-from", "rpc-port", "rpc-listen-ip"
+  )
+
+  private val RepeatedOptions = Set("--peer", "--rpc-allow-origin")
+
+  private val Flags = Set(
+    "--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys",
+    "--fault-tamper-reports", "--help"
+  )
+
+  private val Numbers: Map[String, (Long, Long)] = Map(
+    "port" -> (0L, 65535L),
+    "rpc-port" -> (0L, 65535L),
+    "submit-port" -> (0L, 65535L),
+    "author" -> (0L, Int.MaxValue.toLong),
+    "finality-peers" -> (1L, Int.MaxValue.toLong),
+    "era-start" -> (0L, Long.MaxValue)
+  )
+
+  private[node] def parseCommandLine(args: List[String]): Either[String, CommandLine] =
+    def missing(option: String) = s"$option needs a value"
+    @scala.annotation.tailrec
+    def loop(rest: List[String], acc: CommandLine): Either[String, CommandLine] =
+      rest match
+        case Nil => Right(acc)
+        case flag :: more if Flags.contains(flag) => loop(more, acc.copy(flags = acc.flags + flag))
+        case option :: more if RepeatedOptions.contains(option) =>
+          more match
+            case value :: after if !value.startsWith("--") =>
+              loop(after, acc.copy(repeated = acc.repeated.updated(option, acc.repeated(option) :+ value)))
+            case _ => Left(missing(option))
+        case option :: more if option.startsWith("--") && ValueOptions.contains(option.drop(2)) =>
+          val name = option.drop(2)
+          more match
+            case value :: after if !value.startsWith("--") =>
+              if acc.options.contains(name) then Left(s"$option is given twice")
+              else loop(after, acc.copy(options = acc.options.updated(name, value)))
+            case _ => Left(missing(option))
+        case option :: _ if option.startsWith("-") =>
+          Left(s"unknown option: $option (jam-node --help lists the options)")
+        case other :: _ => Left(s"unexpected argument: $other (every argument is an --option)")
+    loop(args, CommandLine(Map.empty, Map.empty.withDefaultValue(Nil), Set.empty)).flatMap(checked)
+
+  private def checked(cl: CommandLine): Either[String, CommandLine] =
+    val opts = cl.options
+    def has(name: String) = opts.contains(name)
+    val numbers = Numbers.toList.flatMap { (name, range) =>
+      opts.get(name).map { value =>
+        value.toLongOption.filter(n => n >= range._1 && n <= range._2).toRight(
+          s"--$name takes a whole number from ${range._1} to ${range._2}, not '$value'"
+        )
+      }
+    }
+    for
+      _ <- numbers.collectFirst { case Left(e) => e }.toLeft(())
+      _ <- opts.get("seed").filterNot(_.matches("(0x)?[0-9a-fA-F]{64}")).map(_ =>
+        "--seed takes a 32-byte Ed25519 seed as 64 hex digits (or use --seed-file <path>)"
+      ).toLeft(())
+      _ <- Either.cond(!(has("seed") && has("seed-file")), (), "--seed and --seed-file both name the network identity: give one")
+      _ <- Either.cond(
+        !(has("author") && has("validator-seed")),
+        (),
+        "--author and --validator-seed are exclusive: give one source of validator keys"
+      )
+      _ <- Either.cond(
+        !(has("validator-seed") && (has("seed") || has("seed-file"))),
+        (),
+        "--validator-seed sets the network identity too: drop --seed/--seed-file"
+      )
+      _ <- Either.cond(
+        !(has("author") && (has("seed") || has("seed-file"))),
+        (),
+        "--author i runs as dev validator i, whose Ed25519 key is the network identity: drop --seed/--seed-file " +
+          "(for keys of your own, use --validator-seed, or --ed25519-key with --bandersnatch-key)"
+      )
+    yield cl
+
+  private[node] val Usage: String =
+    """jam-node --data <data-dir> [--spec <chain-spec.json or URL>] [--port N (default 40000)]
+      |         [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
+      |         [--peer <64-hex-ed25519>@host:port ...]
+      |         [--author <validator-index> | --validator-seed <path>]
+      |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
+      |         [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
+      |         [--finality-peers N | --announced-finality] [--prune-history]
+      |         [--sync-from <header hash>[:<set id>]]
+      |         [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]]
+      |         [--fault-tamper-reports]
+      |jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
+      |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
+      |jam-node --help""".stripMargin
 
   private def fail(msg: String): Nothing =
     System.err.println(msg)
