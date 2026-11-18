@@ -125,7 +125,8 @@ object Loopback:
 
     def finish(): Unit =
       if !dead && !finished then
-        finished = true
+        val peerEnded = synchronized { finished = true; ended }
+        if peerEnded then uncount()
         val target = peer
         deliver.execute(() => target.end())
 
@@ -150,9 +151,9 @@ object Loopback:
       if first then onEnd()
 
     private def end(): Unit =
-      synchronized { ended = true }
       // Finished in both directions: the stream no longer counts against the connection.
-      if finished || dead then uncount()
+      val bothDone = synchronized { ended = true; finished || dead }
+      if bothDone then uncount()
       drain()
 
     /** Hand over what has arrived to whatever is registered: messages first, then the end, each once. Listeners run

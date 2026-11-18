@@ -49,6 +49,22 @@ class LoopbackSpec extends AnyFunSuite with Matchers:
     b.openStreamCount shouldBe 0
   }
 
+  test("a stream that sees the peer's FIN before finishing its own side stops counting once it finishes") {
+    val (a, b) = pair((_, stream) => stream.onMessage { m => stream.send(m); stream.finish() }: Unit)
+    val stream = a.openStream(kind).get(5, TimeUnit.SECONDS)
+    val seen = new Seen(stream)
+    stream.send("abc".getBytes)
+    seen.all shouldBe List("abc", "FIN")
+    a.openStreamCount shouldBe 1
+    stream.finish()
+    eventually(a.openStreamCount == 0 && b.openStreamCount == 0) shouldBe true
+  }
+
+  private def eventually(condition: => Boolean): Boolean =
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    while !condition && System.nanoTime() < deadline do Thread.sleep(5)
+    condition
+
   test("messages sent before a receiver is registered wait for it") {
     val (a, _) = pair((_, stream) => { stream.send("early".getBytes); stream.finish() })
     val stream = a.openStream(kind).get(5, TimeUnit.SECONDS)
