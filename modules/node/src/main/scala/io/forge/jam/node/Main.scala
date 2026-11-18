@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.net.InetSocketAddress
+import java.net.{InetAddress, InetSocketAddress}
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.SecureRandom
@@ -9,11 +9,13 @@ import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
 import io.forge.jam.crypto.BandersnatchVrf
 import io.forge.jam.db.RocksDbMemory
+import io.forge.jam.network.NodeIdentity
 import io.forge.jam.pvm.PvmSettings
 
 /** CLI entry point:
   * {{{
-  * jam-node --data <data-dir> [--spec <chain-spec.json or URL>] [--port N (default 40000)]
+  * jam-node (--data <data-dir> | --temp) [--spec <chain-spec.json or URL>] [--port N (default 40000)]
+  *          [--listen-ip IP (default 0.0.0.0)] [--external-ip IP]
   *          [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
   *          [--peer <64-hex-ed25519>@host:port ...]
   *          [--author <validator-index> | --validator-seed <path>]
@@ -84,13 +86,52 @@ object Main extends LazyLogging:
     if commandLine.flags.contains("--help") then
       println(Usage)
       return
+    if commandLine.flags.contains("--version") then
+      println(VersionText)
+      return
+    systemProperties(commandLine).foreach((name, value) => System.setProperty(name, value))
     installProcessSettings()
+    commandLine.command match
+      case Some(GenKeys) =>
+        println(genKeys())
+        System.err.println(
+          "keep the seed secret: write it to a file only you can read (chmod 600) and start with --validator-seed <file>"
+        )
+        return
+      case Some(ListKeys) =>
+        println(listKeys(commandLine).fold(fail, identity))
+        return
+      case _ => ()
     val peerArgs = commandLine.repeated("--peer")
     val rpcOrigins = commandLine.repeated("--rpc-allow-origin")
     val flags = commandLine.flags
     val opts = commandLine.options
+    if opts.get("pvm-backend").contains("recompiler") && !io.forge.jam.pvm.ExecutionMode.nativeAvailable then
+      fail(
+        "--pvm-backend recompiler: the recompiler library is not available; name it with " +
+          "-Djam.pvm.recompiler.lib=<path to libpvm_recompiler> (it runs on Linux and macOS, x86-64 and AArch64), " +
+          "or use --pvm-backend interpreter"
+      )
+    val listenIp = opts.get("listen-ip").map(v => parseIp("--listen-ip", v).fold(fail, identity)).getOrElse(JamNode.AnyAddress)
+    if !listenIp.isAnyLocalAddress && !isOwnAddress(listenIp) then
+      fail(s"--listen-ip ${listenIp.getHostAddress} is not an address of this machine (0.0.0.0 or :: listens on all of them)")
+    val externalIp = opts.get("external-ip").map(v => parseIp("--external-ip", v).fold(fail, identity))
     if opts.contains("seed") then
       System.err.println("warning: --seed is visible in the process list to every user of this machine; give --seed-file <path> instead")
+
+    val temporaryData = Option.when(flags.contains("--temp"))(newTempDataDir())
+    val dataDirGiven = temporaryData.orElse(opts.get("data").map(Paths.get(_)))
+    val running = new java.util.concurrent.atomic.AtomicReference[JamNode]()
+    Runtime.getRuntime.addShutdownHook(
+      new Thread(
+        () =>
+          Option(running.get).foreach(_.shutdown())
+          temporaryData.foreach(deleteTree)
+        ,
+        "jam-shutdown"
+      )
+    )
+    temporaryData.foreach(d => logger.info(s"data in the temporary directory $d, deleted on exit (--temp)"))
 
     // Derive validator keys first: this loads the native Bandersnatch and
     // Ed25519 libraries, so a missing library fails here, not after start.
@@ -100,8 +141,8 @@ object Main extends LazyLogging:
       if givenKeys.nonEmpty && !opts.contains("author") then
         if opts.contains("seed") || opts.contains("seed-file") then
           fail(s"--${givenKeys.head} makes this node a validator, whose network identity is its Ed25519 key: drop --seed/--seed-file")
-        val dir = opts.getOrElse("data", fail(s"--${givenKeys.head} needs --data <dir> to keep the node's other keys in"))
-        Some(Paths.get(dir, "validator.seed").toString)
+        val dir = dataDirGiven.getOrElse(fail(s"--${givenKeys.head} needs --data <dir> (or --temp) to keep the node's other keys in"))
+        Some(dir.resolve("validator.seed").toString)
       else None
     }
     val authorKeys = opts
@@ -119,9 +160,9 @@ object Main extends LazyLogging:
         case None    => fail("--print-keys needs --author, --validator-seed, --bandersnatch-key or --ed25519-key")
 
     val specPath = opts.getOrElse("spec", DefaultSpecUrl)
-    val dataDir = opts.getOrElse("data", fail("--data <dir> is required"))
+    val dataDir = dataDirGiven.getOrElse(fail("--data <dir> is required (or --temp, for a temporary one)"))
 
-    val loadedSpec = ChainSpec.load(localSpec(specPath, Paths.get(dataDir))) match
+    val loadedSpec = ChainSpec.load(localSpec(specPath, dataDir)) match
       case Right(s)  => s
       case Left(err) => fail(s"failed to load chain spec: $err")
 
@@ -132,8 +173,10 @@ object Main extends LazyLogging:
 
     val syncFrom = opts.get("sync-from").map(v => parseSyncFrom(v).fold(fail, identity))
     val config = NodeConfig(
-      dataDir = Paths.get(dataDir),
+      dataDir = dataDir,
       listenPort = opts.get("port").map(_.toInt).getOrElse(DefaultPort),
+      listenIp = listenIp,
+      externalIp = externalIp,
       ed25519Seed = opts
         .get("seed")
         .map(s => JamBytes.fromHexUnsafe(s.stripPrefix("0x")).toArray)
@@ -159,6 +202,7 @@ object Main extends LazyLogging:
     )
 
     val node = new JamNode(spec, config).start()
+    running.set(node)
     authorKeys.foreach { k =>
       node.enableAuthoring(Seq(k))
       node.enableGuaranteeing(Seq(k))
@@ -167,7 +211,14 @@ object Main extends LazyLogging:
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
-    opts.get("rpc-port").foreach(p => node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1"), rpcOrigins))
+    val rpcMethods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
+    opts.get("rpc-port").foreach(p =>
+      node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1"), rpcOrigins, rpcMethods)
+    )
+    opts.get("metrics-port").foreach { p =>
+      val host = opts.get("metrics-listen-ip").map(v => parseIp("--metrics-listen-ip", v).fold(fail, identity).getHostAddress)
+      node.enableMetrics(p.toInt, host.getOrElse("127.0.0.1"))
+    }
     node.onSlot { slot =>
       val best = node.chain.best
       val fin = node.chain.finalized
@@ -177,7 +228,6 @@ object Main extends LazyLogging:
       )
     }
 
-    Runtime.getRuntime.addShutdownHook(new Thread(() => node.shutdown()))
     Thread.currentThread().join()
 
   private[node] def parseSyncFrom(value: String): Either[String, (io.forge.jam.core.primitives.Hash, Option[Long])] =
@@ -197,15 +247,92 @@ object Main extends LazyLogging:
               case Some(n) => Right((hash, Some(n)))
               case None => Left(s"--sync-from: the GRANDPA set id after ':' must be a non-negative integer, got '$id'")
 
-  /** A validator's public keys and the JAMNP-S peer name its Ed25519 key gives, as JSON. */
-  private def publicKeysJson(k: ValidatorKeySet): String =
-    def hex(b: Array[Byte]) = "0x" + JamBytes(b).toHex
-    s"""{
-       |  "bandersnatch": "${hex(k.bandersnatchPublic)}",
-       |  "ed25519": "${hex(k.ed25519Public)}",
-       |  "bls": "${hex(k.blsPublic)}",
-       |  "peer_id": "${io.forge.jam.network.NodeIdentity.altName(k.ed25519Public)}"
-       |}""".stripMargin
+  private def publicKeysJson(k: ValidatorKeySet, seed: Option[Array[Byte]] = None): String =
+    jsonObject(
+      seed.map(s => "seed" -> hex(s)).toList ++ List(
+        "bandersnatch" -> hex(k.bandersnatchPublic),
+        "ed25519" -> hex(k.ed25519Public),
+        "bls" -> hex(k.blsPublic),
+        "peer_id" -> NodeIdentity.altName(k.ed25519Public)
+      )
+    )
+
+  private def networkKeysJson(secret: Array[Byte]): String =
+    val public = NodeIdentity.fromSeed(secret).publicKeyBytes
+    jsonObject(List("ed25519" -> hex(public), "peer_id" -> NodeIdentity.altName(public)))
+
+  private def hex(b: Array[Byte]): String = "0x" + JamBytes(b).toHex
+
+  private def jsonObject(fields: List[(String, String)]): String =
+    fields.map((name, value) => s"""  "$name": "$value"""").mkString("{\n", ",\n", "\n}")
+
+  private[node] def genKeys(): String =
+    val seed = new Array[Byte](32)
+    new SecureRandom().nextBytes(seed)
+    publicKeysJson(ValidatorKeySet.fromSeed(seed), Some(seed))
+
+  private[node] def listKeys(cl: CommandLine): Either[String, String] =
+    val o = cl.options
+    o.get("validator-seed").map(v => readSeed("--validator-seed", v, hexAllowed = true).map(s => publicKeysJson(ValidatorKeySet.fromSeed(s))))
+      .orElse(o.get("author").map(i => Right(publicKeysJson(ValidatorKeySet.dev(i.toInt)))))
+      .orElse(o.get("seed").map(v => readSeed("--seed", v, hexAllowed = true).map(networkKeysJson)))
+      .orElse(o.get("seed-file").map(p => readSeed("--seed-file", p, hexAllowed = false).map(networkKeysJson)))
+      .getOrElse(Left(s"$ListKeys needs one of $ListKeysSources"))
+
+  private def readSeed(option: String, hexOrPath: String, hexAllowed: Boolean): Either[String, Array[Byte]] =
+    if hexAllowed && hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then
+      System.err.println(s"warning: $option given as hex is visible in the process list; give the path of a file instead")
+      Right(JamBytes.fromHexUnsafe(hexOrPath.stripPrefix("0x")).toArray)
+    else
+      val path = Paths.get(hexOrPath)
+      if !Files.isRegularFile(path) then Left(s"$option $path: no such file (expected a 32-byte hex seed or the path of one)")
+      else
+        warnIfExposed(path)
+        val text = Files.readString(path).trim.stripPrefix("0x")
+        JamBytes.fromHex(text).toOption.map(_.toArray) match
+          case None => Left(s"$path: not hex (expected a 32-byte hex seed)")
+          case Some(seed) if seed.length != 32 => Left(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
+          case Some(seed) => Right(seed)
+
+  private[node] def newTempDataDir(): Path = Files.createTempDirectory("jam-node-")
+
+  private[node] def deleteTree(dir: Path): Unit =
+    if Files.exists(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS) then
+      val walk = Files.walk(dir)
+      try
+        walk.sorted(java.util.Comparator.reverseOrder()).forEach { p =>
+          try Files.deleteIfExists(p): Unit
+          catch case e: java.io.IOException => System.err.println(s"could not delete $p: $e")
+        }
+      finally walk.close()
+
+  private[node] val VersionText: String =
+    s"${BuildInfo.name} ${BuildInfo.version}${BuildInfo.gitSha.fold("")(sha => s" ($sha)")} " +
+      s"(Gray Paper ${JamNode.GrayPaperVersion})"
+
+  private[node] def systemProperties(cl: CommandLine): Map[String, String] =
+    cl.options.get("pvm-backend").map { backend =>
+      PvmSettings.ExecutionModeProperty -> (if backend == "interpreter" then "interpreted" else "recompiled")
+    }.toMap
+
+  private[node] def parseIp(option: String, value: String): Either[String, InetAddress] =
+    val dotted = """(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})""".r
+    val literal = value.stripPrefix("[").stripSuffix("]")
+    val parsed = literal match
+      case dotted(a, b, c, d) if List(a, b, c, d).forall(_.toInt <= 255) =>
+        Some(InetAddress.getByAddress(List(a, b, c, d).map(_.toInt.toByte).toArray))
+      case v6 if v6.contains(':') =>
+        try Some(InetAddress.ofLiteral(v6))
+        catch case _: IllegalArgumentException => None
+      case _ => None
+    parsed match
+      case None => Left(s"$option takes an IPv4 or IPv6 address (such as 0.0.0.0, 192.0.2.1, :: or 2001:db8::1), not '$value'")
+      case Some(ip) if ip.isMulticastAddress => Left(s"$option: $value is a multicast address")
+      case Some(ip) => Right(ip)
+
+  private def isOwnAddress(ip: InetAddress): Boolean =
+    ip.isLoopbackAddress || (try java.net.NetworkInterface.getByInetAddress(ip) != null
+    catch case _: java.io.IOException => false)
 
   /** `spec` itself, or for an http(s) URL the file it is downloaded to in `dataDir` (the last good download when
     * this one fails).
@@ -296,29 +423,44 @@ object Main extends LazyLogging:
   private[node] final case class CommandLine(
       options: Map[String, String],
       repeated: Map[String, List[String]],
-      flags: Set[String]
+      flags: Set[String],
+      command: Option[String] = None
   )
+
+  private val GenKeys = "gen-keys"
+  private val ListKeys = "list-keys"
+
+  private val Commands = Set(GenKeys, ListKeys)
+
+  private val ListKeysOptions = List("validator-seed", "seed", "seed-file", "author")
+  private val ListKeysSources = "--validator-seed, --seed, --seed-file or --author"
 
   private val ValueOptions = Set(
     "data", "spec", "port", "seed", "seed-file", "era-start", "author", "validator-seed", "bandersnatch-key",
-    "ed25519-key", "telemetry", "submit-port", "finality-peers", "sync-from", "rpc-port", "rpc-listen-ip"
+    "ed25519-key", "telemetry", "submit-port", "finality-peers", "sync-from", "rpc-port", "rpc-listen-ip",
+    "listen-ip", "external-ip", "pvm-backend", "metrics-port", "metrics-listen-ip", "rpc-methods"
   )
 
   private val RepeatedOptions = Set("--peer", "--rpc-allow-origin")
 
   private val Flags = Set(
     "--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys",
-    "--fault-tamper-reports", "--help"
+    "--fault-tamper-reports", "--help", "--version", "--temp"
   )
+
+  private val InformationFlags = Set("--help", "--version")
 
   private val Numbers: Map[String, (Long, Long)] = Map(
     "port" -> (0L, 65535L),
     "rpc-port" -> (0L, 65535L),
     "submit-port" -> (0L, 65535L),
+    "metrics-port" -> (0L, 65535L),
     "author" -> (0L, Int.MaxValue.toLong),
     "finality-peers" -> (1L, Int.MaxValue.toLong),
     "era-start" -> (0L, Long.MaxValue)
   )
+
+  private val PvmBackends = List("interpreter", "recompiler")
 
   private[node] def parseCommandLine(args: List[String]): Either[String, CommandLine] =
     def missing(option: String) = s"$option needs a value"
@@ -341,7 +483,12 @@ object Main extends LazyLogging:
             case _ => Left(missing(option))
         case option :: _ if option.startsWith("-") =>
           Left(s"unknown option: $option (jam-node --help lists the options)")
-        case other :: _ => Left(s"unexpected argument: $other (every argument is an --option)")
+        case command :: more if Commands.contains(command) =>
+          acc.command match
+            case Some(first) => Left(s"one command at a time: $first and $command")
+            case None        => loop(more, acc.copy(command = Some(command)))
+        case other :: _ =>
+          Left(s"unexpected argument: $other (every argument is an --option, or one of the commands ${Commands.toList.sorted.mkString(", ")})")
     loop(args, CommandLine(Map.empty, Map.empty.withDefaultValue(Nil), Set.empty)).flatMap(checked)
 
   private def checked(cl: CommandLine): Either[String, CommandLine] =
@@ -354,10 +501,58 @@ object Main extends LazyLogging:
         )
       }
     }
+    def besides(allowed: Set[String]): List[String] =
+      (opts.keySet -- allowed).toList.sorted.map("--" + _) ++ (cl.flags -- InformationFlags).toList.sorted ++
+        cl.repeated.keys.toList.sorted
     for
       _ <- numbers.collectFirst { case Left(e) => e }.toLeft(())
       _ <- opts.get("seed").filterNot(_.matches("(0x)?[0-9a-fA-F]{64}")).map(_ =>
         "--seed takes a 32-byte Ed25519 seed as 64 hex digits (or use --seed-file <path>)"
+      ).toLeft(())
+      _ <- cl.command match
+        case Some(GenKeys) =>
+          besides(Set("data")).headOption.map(o => s"$GenKeys takes no options but --data: drop $o").toLeft(())
+        case Some(ListKeys) =>
+          val sources = ListKeysOptions.filter(has)
+          for
+            _ <- besides(ListKeysOptions.toSet + "data").headOption
+              .map(o => s"$ListKeys does not take $o (it takes one of $ListKeysSources)")
+              .toLeft(())
+            _ <- Either.cond(sources.nonEmpty, (), s"$ListKeys needs one of $ListKeysSources")
+            _ <- Either.cond(
+              sources.size == 1,
+              (),
+              s"$ListKeys takes one of $ListKeysSources, not ${sources.map("--" + _).mkString(" and ")}"
+            )
+          yield ()
+        case _ => runChecks(cl)
+    yield cl
+
+  private def runChecks(cl: CommandLine): Either[String, Unit] =
+    val opts = cl.options
+    def has(name: String) = opts.contains(name)
+    def ip(name: String, check: InetAddress => Option[String]): Either[String, Unit] =
+      opts.get(name).fold(Right(())) { value =>
+        parseIp(s"--$name", value).flatMap(address => check(address).toLeft(()))
+      }
+    for
+      _ <- opts.get("pvm-backend").filterNot(PvmBackends.contains).map(v =>
+        s"--pvm-backend takes ${PvmBackends.mkString(" or ")}, not '$v'"
+      ).toLeft(())
+      _ <- Either.cond(
+        !(cl.flags.contains("--temp") && has("data")),
+        (),
+        "--temp and --data are exclusive: --temp runs on a new temporary data directory, deleted on exit"
+      )
+      _ <- ip("listen-ip", _ => None)
+      _ <- ip(
+        "external-ip",
+        a => Option.when(a.isAnyLocalAddress)(s"--external-ip is the address peers reach this node at: not ${opts("external-ip")}")
+      )
+      _ <- Either.cond(!has("metrics-listen-ip") || has("metrics-port"), (), "--metrics-listen-ip needs --metrics-port")
+      _ <- ip("metrics-listen-ip", _ => None)
+      _ <- opts.get("rpc-methods").filter(RpcMethods.parse(_).isEmpty).map(v =>
+        s"--rpc-methods takes safe, unsafe or auto, not '$v'"
       ).toLeft(())
       _ <- Either.cond(!(has("seed") && has("seed-file")), (), "--seed and --seed-file both name the network identity: give one")
       _ <- Either.cond(
@@ -376,10 +571,11 @@ object Main extends LazyLogging:
         "--author i runs as dev validator i, whose Ed25519 key is the network identity: drop --seed/--seed-file " +
           "(for keys of your own, use --validator-seed, or --ed25519-key with --bandersnatch-key)"
       )
-    yield cl
+    yield ()
 
   private[node] val Usage: String =
-    """jam-node --data <data-dir> [--spec <chain-spec.json or URL>] [--port N (default 40000)]
+    """jam-node (--data <data-dir> | --temp) [--spec <chain-spec.json or URL>] [--port N (default 40000)]
+      |         [--listen-ip IP (default 0.0.0.0)] [--external-ip IP]
       |         [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
       |         [--peer <64-hex-ed25519>@host:port ...]
       |         [--author <validator-index> | --validator-seed <path>]
@@ -387,11 +583,31 @@ object Main extends LazyLogging:
       |         [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
       |         [--finality-peers N | --announced-finality] [--prune-history]
       |         [--sync-from <header hash>[:<set id>]]
-      |         [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]]
+      |         [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]
+      |                       [--rpc-methods safe|unsafe|auto (default auto: unsafe ones on loopback only)]]
+      |         [--metrics-port N [--metrics-listen-ip IP (default 127.0.0.1)]]
+      |         [--pvm-backend interpreter|recompiler]
       |         [--fault-tamper-reports]
       |jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
       |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
-      |jam-node --help""".stripMargin
+      |jam-node gen-keys
+      |jam-node list-keys (--validator-seed <hex or path> | --seed <hex> | --seed-file <path> | --author <index>)
+      |jam-node --version
+      |jam-node --help
+      |
+      |  --temp                 run on a new temporary data directory, deleted when the node exits
+      |  --listen-ip IP         address the QUIC listener binds to; 0.0.0.0 and :: take IPv4 and IPv6 peers
+      |  --external-ip IP       address peers reach this node at (the public one behind NAT): reported as its
+      |                         endpoint, and checked against a validator's on-chain metadata
+      |  --pvm-backend B        run guest code on the interpreter, or the recompiler (native code; needs
+      |                         -Djam.pvm.recompiler.lib); default: the recompiler where it is available
+      |  --metrics-port N       Prometheus metrics at GET /metrics, and GET /health: JSON with best and finalized
+      |                         slots, peers and syncing, 200 while the node follows the chain, 503 when not
+      |  gen-keys               print a new random validator seed and its session keys (Ed25519, Bandersnatch,
+      |                         BLS); keep the seed in a file (chmod 600) and run with --validator-seed <file>
+      |  list-keys              print the public keys a seed gives the node: a validator's for --validator-seed
+      |                         and --author, the network identity's for --seed and --seed-file
+      |  --version              print the node's name and version""".stripMargin
 
   private def fail(msg: String): Nothing =
     System.err.println(msg)

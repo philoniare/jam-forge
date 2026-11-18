@@ -22,16 +22,21 @@ final class ImportFetcher(
     timeoutMs: Long = ImportFetcher.TimeoutMillis,
     maxPeers: Int = ImportFetcher.MaxPeersAsked,
     /** Last resort: rebuild the segments from erasure-coded shards (CE 139/140), verified. */
-    recover: (Hash, Seq[Int]) => Option[Map[Int, (Array[Byte], List[Array[Byte]])]] = (_, _) => None,
-    lied: PeerConnection => Unit = _ => ()
+    recover: (Hash, Seq[Int], ImportFetcher.Importer) => Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
+      (_, _, _) => None,
+    lied: PeerConnection => Unit = _ => (),
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   type Fetched = (IndexedSeq[IndexedSeq[Array[Byte]]], IndexedSeq[IndexedSeq[List[Array[Byte]]]])
 
-  /** Per work item, the imported segments and their justifications, in import order. */
-  def fetch(imports: IndexedSeq[IndexedSeq[Import]]): Either[String, Fetched] =
+  def fetch(
+      imports: IndexedSeq[IndexedSeq[Import]],
+      submission: Option[Telemetry.EventRef] = None
+  ): Either[String, Fetched] =
     val byRoot = imports.flatten.groupBy(_.segmentsRoot).view.mapValues(_.map(_.index).distinct.sorted).toMap
-    val got = byRoot.map { (root, indices) => root -> fetchRoot(root, indices) }
+    val importer = ImportFetcher.Importer(submission, imports)
+    val got = byRoot.map { (root, indices) => root -> fetchRoot(root, indices, importer) }
     got.collectFirst { case (root, None) => root } match
       case Some(root) => Left(s"imported segments of ${root.toHex.take(18)} not available from us or any peer")
       case None =>
@@ -42,7 +47,11 @@ final class ImportFetcher(
         ))
 
   /** The segments at `indices` of `root`, each with its proof, verified; None when no source has them all. */
-  private def fetchRoot(root: Hash, indices: Seq[Int]): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
+  private def fetchRoot(
+      root: Hash,
+      indices: Seq[Int],
+      importer: ImportFetcher.Importer
+  ): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
     def verified(found: Seq[(Array[Byte], List[Array[Byte]])]): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
       Option.when(
         found.size == indices.size &&
@@ -50,20 +59,39 @@ final class ImportFetcher(
       )(indices.zip(found).toMap)
     segments.getWithProofs(root, indices).flatMap(verified).orElse {
       peers(root).iterator.filter(_.isOpen).take(maxPeers).map { conn =>
-        StreamRequest
-          .collect(conn, StreamKind.SegmentRequest, ImportFetcher.encodeRequest(root, indices), timeoutMs)
-          .flatMap(ImportFetcher.decodeResponse(_, indices.size))
+        val sending =
+          telemetry.flatMap(_.sendingSegmentRequest(importer.submission, conn.peerKey, indices.map(importer.position(root, _))))
+        val got = StreamRequest
+          .collectOrWhy(
+            conn,
+            StreamKind.SegmentRequest,
+            ImportFetcher.encodeRequest(root, indices),
+            timeoutMs,
+            () => telemetry.foreach(_.segmentRequestSent(sending))
+          )
+          .flatMap(ImportFetcher.decodeResponse(_, indices.size).toRight("malformed answer"))
           .flatMap { found =>
             val ok = verified(found)
             if ok.isEmpty then lied(conn)
             if ok.isEmpty then logger.warn(s"CE148: peer ${JamNode.hex(conn.peerKey).take(16)} sent segments of ${root.toHex.take(18)} that do not verify")
-            ok
+            ok.toRight("segments that do not verify against their segments-root")
           }
+        telemetry.foreach(t => got.fold(why => t.segmentRequestFailed(sending, why), _ => t.segmentsTransferred(sending)))
+        got.toOption
       }.collectFirst { case Some(found) => found }
-    }.orElse(recover(root, indices))
+    }.orElse(recover(root, indices, importer))
 
 object ImportFetcher:
   val TimeoutMillis: Long = 5000
+
+  final case class Importer(submission: Option[Telemetry.EventRef], imports: IndexedSeq[IndexedSeq[Import]]):
+    private lazy val positions: Map[(Hash, Int), Int] =
+      imports.flatten.zipWithIndex.reverse.map((i, n) => (i.segmentsRoot, i.index) -> n).toMap
+
+    def position(root: Hash, index: Int): Int = positions.getOrElse((root, index), index)
+
+  object Importer:
+    val none: Importer = Importer(None, IndexedSeq.empty)
   val MaxPeersAsked: Int = 6
 
   /** CE 148 request, one group: `Segments-Root ++ len++[Segment Index (u16)]`. */

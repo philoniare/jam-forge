@@ -20,6 +20,7 @@ enum ComputeReportError:
   case AuthTraceOversize(length: Int)
   /** Availability-specifier construction failed. */
   case AvailabilityFailed(message: String)
+  case SegmentRootLookupMismatch(expected: Set[Hash], supplied: Set[Hash])
 
 /** How a work-item's Refine error ranks against a wrong export count when its digest result is chosen.
   *
@@ -47,7 +48,8 @@ final case class ComputedReport(
     bundle: WorkPackageBundle,
     bundleBytes: Array[Byte],
     exportedSegments: IndexedSeq[Array[Byte]],
-    pagedProofs: IndexedSeq[Array[Byte]]
+    pagedProofs: IndexedSeq[Array[Byte]],
+    refineCosts: IndexedSeq[io.forge.jam.protocol.pvmhost.RefineCost] = IndexedSeq.empty
 )
 
 /** The work-report computation function Xi: runs Is-Authorized,
@@ -61,6 +63,18 @@ class ComputeReport(
 ):
 
   private val isAuthorizedExecutor = new IsAuthorizedExecutor(config)
+
+  def authorize(
+      workPackage: WorkPackage,
+      coreIndex: Int,
+      accounts: HistoricalLookupService
+  ): Either[ComputeReportError, IsAuthorizedResult] =
+    val auth = isAuthorizedExecutor.execute(workPackage, coreIndex, accounts)
+    auth.result match
+      case ExecutionResult.Ok(trace) if trace.length > constants.Cmaxreportvarsize =>
+        Left(ComputeReportError.AuthTraceOversize(trace.length))
+      case ExecutionResult.Ok(_) => Right(auth)
+      case other => Left(ComputeReportError.AuthorizationFailed(other))
   private val refineExecutor = new RefineExecutor(config)
 
   /** Compute the work report for `workPackage` on `coreIndex`.
@@ -80,16 +94,24 @@ class ComputeReport(
       importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
       extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
       justifications: IndexedSeq[IndexedSeq[List[Array[Byte]]]],
-      accounts: HistoricalLookupService
+      accounts: HistoricalLookupService,
+      authorized: Option[IsAuthorizedResult] = None,
+      deadlineMillis: Option[Long] = None
   ): Either[ComputeReportError, ComputedReport] =
-    val auth = isAuthorizedExecutor.execute(workPackage, coreIndex, accounts)
+    val boxplus = workPackage.items.iterator.flatMap(_.importSegments)
+      .filter(s => (s.index.toInt & ComputeReport.BoxplusFlag) != 0).map(_.treeRoot).toSet
+    if segmentRootLookup.keySet != boxplus then
+      return Left(ComputeReportError.SegmentRootLookupMismatch(boxplus, segmentRootLookup.keySet))
+    val auth = authorized match
+      case Some(done) => done
+      case None => authorize(workPackage, coreIndex, accounts) match
+          case Right(done) => done
+          case Left(err) => return Left(err)
     val authTrace = auth.result match
       case ExecutionResult.Ok(trace) => trace.toArray
       case other => return Left(ComputeReportError.AuthorizationFailed(other))
-
-    if authTrace.length > constants.Cmaxreportvarsize then
-      return Left(ComputeReportError.AuthTraceOversize(authTrace.length))
     val digests = Vector.newBuilder[WorkResult]
+    val refineCosts = Vector.newBuilder[io.forge.jam.protocol.pvmhost.RefineCost]
     val allExports = Vector.newBuilder[Array[Byte]]
     var cumulativeOutputSize: Long = authTrace.length.toLong
     var exportOffset: Long = 0L
@@ -103,9 +125,11 @@ class ComputeReport(
         importSegments = importSegments,
         extrinsicData = extrinsicData,
         exportSegmentOffset = exportOffset,
-        accounts = accounts
+        accounts = accounts,
+        deadlineMillis = deadlineMillis
       )
 
+      refineCosts += refineResult.cost
       val declaredExports = item.exportCount.toInt
       val zeroSegments =
         IndexedSeq.fill(declaredExports)(new Array[Byte](Csegmentsize.toInt))
@@ -177,6 +201,13 @@ class ComputeReport(
             bundle = bundle,
             bundleBytes = bundleBytes,
             exportedSegments = exported,
-            pagedProofs = AvailabilitySpecifier.pagedProofs(exported)
+            pagedProofs = AvailabilitySpecifier.pagedProofs(exported),
+            refineCosts = refineCosts.result()
           )
         )
+
+object ComputeReport:
+  final class DeadlinePassed(val deadlineMillis: Long)
+      extends RuntimeException(s"refine ran past its deadline (${deadlineMillis} ms since the epoch)")
+
+  val BoxplusFlag: Int = 0x8000

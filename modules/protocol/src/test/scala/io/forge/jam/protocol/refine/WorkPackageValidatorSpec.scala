@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.refine
 
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, constants}
+import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.{Gas, Hash, ServiceId, Timeslot}
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.history.HistoricalBeta
@@ -46,10 +47,17 @@ class WorkPackageValidatorSpec extends AnyFunSuite with Matchers:
     items = List(item)
   )
 
+  private val service0 = io.forge.jam.core.types.service.ServiceInfo(
+    codeHash = h("code"), balance = 1000L, minItemGas = 1_000_000L, minMemoGas = 0L, bytesUsed = 0L, items = 0
+  )
+
   private val chain = WorkPackageValidator.ChainContext(
     authPool = List(IsAuthorizedExecutor.authorizerHashOf(wp)),
     recentHistory = List(anchor),
-    slot = 12L
+    headStateRoot = anchor.stateRoot,
+    slot = 12L,
+    services = Map(0L -> service0).get,
+    knownPackages = Set.empty
   )
 
   private def check(p: WorkPackage = wp, core: Int = 0, c: WorkPackageValidator.ChainContext = chain) =
@@ -68,6 +76,27 @@ class WorkPackageValidatorSpec extends AnyFunSuite with Matchers:
     check(wp.copy(context = wp.context.copy(stateRoot = h("bad")))).isLeft shouldBe true
     check(wp.copy(context = wp.context.copy(beefyRoot = h("bad")))).isLeft shouldBe true
     check(wp.copy(context = wp.context.copy(anchorSlot = Timeslot(11)))).isLeft shouldBe true
+  }
+
+  test("a package anchored at the head is checked against the head's posterior state root, as the reports STF does (β†)") {
+    val atHead = chain.copy(recentHistory = List(anchor.copy(stateRoot = Hash.zero)))
+    check(c = atHead) shouldBe Right(())
+    check(c = atHead.copy(headStateRoot = h("other"))).left.toOption.get should include("state root")
+    val newer = HistoricalBeta(h("newer"), h("beefy2"), Hash.zero, 11L, Nil)
+    check(c = chain.copy(recentHistory = List(anchor, newer), headStateRoot = h("other"))) shouldBe Right(())
+  }
+
+  test("a package already reported or waiting in the pipeline is refused, as the reports STF refuses it") {
+    val hash = Hashing.blake2b256(wp.encode.toArray)
+    check(c = chain.copy(knownPackages = Set(hash))).left.toOption.get should include("already")
+  }
+
+  test("each item's service must exist, with the item's code hash, and get at least its minimum accumulate gas") {
+    check(c = chain.copy(services = _ => None)).left.toOption.get should include("service 0")
+    check(c = chain.copy(services = Map(0L -> service0.copy(codeHash = h("other"))).get)).left.toOption.get should
+      include("code hash")
+    check(c = chain.copy(services = Map(0L -> service0.copy(minItemGas = 1_000_001L)).get)).left.toOption.get should
+      include("minimum")
   }
 
   test("the lookup anchor must be within the maximum lookup-anchor age and not in the future") {

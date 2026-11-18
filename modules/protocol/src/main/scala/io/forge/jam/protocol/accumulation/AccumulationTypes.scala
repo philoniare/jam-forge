@@ -515,5 +515,6 @@ final case class AccumulationOneResult(
     deferredTransfers: List[DeferredTransfer],
     yieldHash: Option[JamBytes],
     gasUsed: Long,
-    provisions: Set[(Long, JamBytes)]
+    provisions: Set[(Long, JamBytes)],
+    cost: io.forge.jam.protocol.pvmhost.AccumulateCost = io.forge.jam.protocol.pvmhost.AccumulateCost.zero
 )

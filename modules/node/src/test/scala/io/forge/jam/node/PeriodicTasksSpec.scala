@@ -35,6 +35,47 @@ class PeriodicTasksSpec extends AnyFunSuite with Matchers with NodeFixture:
     finally exec.shutdownNow(): Unit
   }
 
+  test("a failure that keeps repeating is logged at warn again once a period, with the count since the last line") {
+    val logger = org.slf4j.LoggerFactory.getLogger(classOf[Periodic]).asInstanceOf[ch.qos.logback.classic.Logger]
+    val seen = new ch.qos.logback.core.read.ListAppender[ch.qos.logback.classic.spi.ILoggingEvent]()
+    seen.start()
+    logger.addAppender(seen)
+    try
+      var now = 1_000_000L
+      val guard = new Periodic("state store sync", repeatLogMillis = 60_000L, clock = () => now)
+      def failing(): Unit = guard.run(throw new java.io.IOException("No space left on device"))
+      def lines(level: ch.qos.logback.classic.Level) =
+        seen.list.toArray.toList.collect {
+          case e: ch.qos.logback.classic.spi.ILoggingEvent if e.getLevel == level => e.getFormattedMessage
+        }
+      import ch.qos.logback.classic.Level.{ERROR, WARN}
+
+      failing()
+      lines(ERROR).size shouldBe 1
+      (1 to 11).foreach { _ => now += 5_000L; failing() }
+      lines(WARN) shouldBe Nil
+      now += 5_000L
+      failing()
+      lines(WARN).size shouldBe 1
+      lines(WARN).head should include("state store sync")
+      lines(WARN).head should include("12 more failure(s)")
+      lines(WARN).head should include("No space left on device")
+      now += 1_000L
+      failing()
+      lines(WARN).size shouldBe 1
+      now += 1_000L
+      guard.run(throw new IllegalStateException("store closed"))
+      lines(ERROR).size shouldBe 2
+      now += 60_000L
+      failing()
+      lines(WARN).size shouldBe 2
+      lines(WARN)(1) should include("1 more failure(s)")
+      lines(ERROR).size shouldBe 2
+      guard.run(())
+      lines(WARN).size shouldBe 2
+    finally logger.detachAppender(seen): Unit
+  }
+
   test("connectivity upkeep keeps running after a step throws") {
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(

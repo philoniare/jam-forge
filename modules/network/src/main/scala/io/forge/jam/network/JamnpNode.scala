@@ -619,8 +619,10 @@ final class JamnpNode(
     else nonBuilders.size < ordinaryLimit && sameAddress < config.maxInboundPerAddress
   }
 
-  def boundPort: Int =
-    serverChannel.localAddress().asInstanceOf[InetSocketAddress].getPort
+  def boundPort: Int = boundAddress.getPort
+
+  def boundAddress: InetSocketAddress =
+    serverChannel.localAddress().asInstanceOf[InetSocketAddress]
 
   private def sslServer(): QuicSslContext =
     QuicSslContextBuilder
@@ -691,9 +693,13 @@ final class JamnpNode(
       })
       .build()
 
+    val family = bindAddress.getAddress match
+      case a: java.net.Inet4Address if !a.isAnyLocalAddress => io.netty.channel.socket.InternetProtocolFamily.IPv4
+      case a: java.net.Inet6Address if !a.isAnyLocalAddress => io.netty.channel.socket.InternetProtocolFamily.IPv6
+      case _                                                 => null
     val bootstrap = new Bootstrap()
       .group(group)
-      .channel(classOf[NioDatagramChannel])
+      .channelFactory(() => if family == null then new NioDatagramChannel() else new NioDatagramChannel(family))
       .handler(codec)
     if config.reusePort then
       bootstrap.option(

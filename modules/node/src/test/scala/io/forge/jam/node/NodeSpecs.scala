@@ -132,6 +132,14 @@ class GenesisBootstrapSpec extends AnyFunSuite with Matchers:
       node2.chain.initializeOrRestore(spec) shouldBe false // restored
       node2.chain.best.stateRoot shouldBe expectedRoot
       node2.shutdownStorageOnly()
+
+      val reset = spec.copy(explicitGenesisHash = Some(io.forge.jam.core.primitives.Hash(Array.fill[Byte](32)(7))))
+      val node3 = new JamNode(reset, NodeConfig(dataDir = dir))
+      try
+        val refused = intercept[IllegalStateException](node3.chain.initializeOrRestore(reset))
+        refused.getMessage should include(spec.genesisHeaderHash.toHex.take(18))
+        refused.getMessage should include(reset.genesisHeaderHash.toHex.take(18))
+      finally node3.shutdownStorageOnly()
     finally
       Files
         .walk(dir)

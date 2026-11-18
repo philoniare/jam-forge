@@ -81,11 +81,16 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
 
     val dirA = tempDir("jam-pi-a")
     val dirB = tempDir("jam-pi-b")
+    val telemetryA = new TelemetryCollector
+    val telemetryB = new TelemetryCollector
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(specA, NodeConfig(dataDir = dirA, slotTicking = false)).start()
-      nodeB = new JamNode(specB, NodeConfig(dataDir = dirB, slotTicking = false)).start()
+      nodeA = new JamNode(specA, NodeConfig(dataDir = dirA, slotTicking = false, telemetry = Some(telemetryA.address))).start()
+      nodeB = new JamNode(specB, NodeConfig(dataDir = dirB, slotTicking = false, telemetry = Some(telemetryB.address))).start()
+      val connected = System.currentTimeMillis() + 20000
+      while (telemetryA.nodeInformation.isEmpty || telemetryB.nodeInformation.isEmpty) && System.currentTimeMillis() < connected do
+        Thread.sleep(20)
 
       nodeA.pools.addPreimage(Preimage(requester = ServiceId(serviceId.toInt), blob = JamBytes(blob)))
 
@@ -99,9 +104,29 @@ class PreimageFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
       val pooled = nodeB.pools.takePreimages()
       pooled should not be empty
       Hashing.blake2b256(pooled.head.blob.toArray) shouldBe hash
+
+      val keyA = nodeA.identity.publicKeyBytes
+      val keyB = nodeB.identity.publicKeyBytes
+      def same(a: Array[Byte], b: Array[Byte]) = java.util.Arrays.equals(a, b)
+      def announcement(service: Long, length: Long): Array[Byte] =
+        io.forge.jam.core.LittleEndian.encode(service, 4) ++ hash.bytes.toArray ++ io.forge.jam.core.LittleEndian.encode(length, 4)
+      telemetryA.await("191 on A")(
+        telemetryA.all(191)(body => same(body, keyB ++ Array[Byte](0) ++ announcement(serviceId, blob.length))).headOption
+      )
+      telemetryB.await("191 on B")(
+        telemetryB.all(191)(body => same(body, keyA ++ Array[Byte](1) ++ announcement(serviceId, blob.length))).headOption
+      )
+      val sending = telemetryB.await("193 on B")(telemetryB.all(193)(body => same(body, keyA ++ hash.bytes.toArray)).headOption)
+      telemetryB.await("196 on B")(telemetryB.referring(196, sending.id).headOption)
+      telemetryB.await("198 on B")(telemetryB.referring(198, sending.id).headOption).u32(8) shouldBe blob.length.toLong
+      val receiving = telemetryA.await("194 on A")(telemetryA.all(194)(body => same(body, keyB)).headOption)
+      telemetryA.await("197 on A")(telemetryA.referring(197, receiving.id).headOption).bytes(8, 32) shouldBe hash.bytes.toArray
+      telemetryA.await("198 on A")(telemetryA.referring(198, receiving.id).headOption).u32(8) shouldBe blob.length.toLong
     finally
       if nodeA != null then nodeA.shutdown()
       if nodeB != null then nodeB.shutdown()
+      telemetryA.close()
+      telemetryB.close()
       cleanup(dirA)
       cleanup(dirB)
   }

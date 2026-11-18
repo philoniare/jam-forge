@@ -15,10 +15,13 @@ object WorkPackageValidator:
   final case class ChainContext(
       /** The authorizer pool of the core. */
       authPool: List[Hash],
-      /** Recent blocks. */
+      /** β: recent blocks, the newest (the head's) with a zero state root until the next block sets it. */
       recentHistory: List[HistoricalBeta],
+      headStateRoot: Hash,
       /** The slot the report would be included at. */
-      slot: Long
+      slot: Long,
+      services: Long => Option[io.forge.jam.core.types.service.ServiceInfo],
+      knownPackages: Set[Hash]
   )
 
   /** Top bit of an import index: the root is a work-package hash, not a segments-root. */
@@ -43,7 +46,10 @@ object WorkPackageValidator:
     )
     val boxplus = items.flatMap(_.importSegments).filter(s => (s.index.toInt & BoxplusFlag) != 0).map(_.treeRoot).distinct
     val ctx = wp.context
-    lazy val anchor = chain.recentHistory.find(_.headerHash == ctx.anchor)
+    lazy val anchor =
+      val recent = chain.recentHistory
+      val dagger = if recent.isEmpty then recent else recent.init :+ recent.last.copy(stateRoot = chain.headStateRoot)
+      dagger.find(_.headerHash == ctx.anchor)
     val lookupSlot = ctx.lookupAnchorSlot.toLong
     for
       _ <- check(coreIndex >= 0 && coreIndex < config.coresCount, s"core $coreIndex out of range")
@@ -57,6 +63,18 @@ object WorkPackageValidator:
       _ <- check(sum(i => unsigned(i.refineGasLimit.toLong)) <= config.maxRefineGas, "refine gas over the package limit")
       _ <- check(boxplus.size + ctx.prerequisites.size <= config.maxDependencies, "too many dependencies")
       _ <- check(chain.authPool.contains(IsAuthorizedExecutor.authorizerHashOf(wp)), "authorizer not in the core's pool")
+      _ <- check(!chain.knownPackages.contains(RefineFetch.workPackageHash(wp)), "package already reported or queued")
+      _ <- items.zipWithIndex.foldLeft[Either[String, Unit]](Right(())) { case (acc, (item, i)) =>
+        val id = item.service.toInt.toLong & 0xffffffffL
+        acc.flatMap(_ =>
+          chain.services(id) match
+            case None => Left(s"service $id of item $i does not exist")
+            case Some(svc) if svc.codeHash != item.codeHash => Left(s"code hash of item $i is not service $id's")
+            case Some(svc) if unsigned(item.accumulateGasLimit.toLong) < BigInt(svc.minItemGas) =>
+              Left(s"accumulate gas of item $i is below service $id's minimum ${svc.minItemGas}")
+            case _ => Right(())
+        )
+      }
       _ <- check(anchor.isDefined, "anchor not in recent history")
       _ <- check(anchor.forall(_.stateRoot == ctx.stateRoot), "anchor state root mismatch")
       _ <- check(anchor.forall(_.beefyRoot == ctx.beefyRoot), "anchor beefy root mismatch")

@@ -19,6 +19,8 @@ import scala.util.control.NonFatal
 import scala.jdk.CollectionConverters.*
 
 object ChainManager:
+  val KeptAccumulateCosts: Int = 64
+
   /** Side-branch blocks stored without a seal check, in all. They are an honest fork's blocks only when the fork
     * is more than an epoch deep and not finalized, which a node can then still follow for this many blocks past the
     * point where seals stop being checkable.
@@ -304,6 +306,12 @@ final class ChainManager(
 
   def onImported(listener: (ChainHead, Block) => Unit): Unit =
     importListeners.add(listener)
+    ()
+
+  private val sealedSideListeners = new java.util.concurrent.CopyOnWriteArrayList[(Hash, Block) => Unit]()
+
+  def onSealedSideBlock(listener: (Hash, Block) => Unit): Unit =
+    sealedSideListeners.add(listener)
     ()
 
   private val abandonListeners = new java.util.concurrent.CopyOnWriteArrayList[(List[Block], List[Block]) => Unit]()
@@ -654,6 +662,11 @@ final class ChainManager(
               "block store invariant: genesis head present but its hash lookup failed on restore"
             )
           )
+        if genesisHash != spec.genesisHeaderHash then
+          throw new IllegalStateException(
+            s"the data directory holds the chain with genesis ${genesisHash.toHex}, but the chain spec's genesis is " +
+              s"${spec.genesisHeaderHash.toHex}: start the new chain with an empty data directory"
+          )
         loadStoredChain(genesisHash, bestHash, root)
         resumeStatePruning()
         maybeSweepState(now = true)
@@ -939,6 +952,20 @@ final class ChainManager(
     awaitStatePruning()
     trieBackend.storedCounts
 
+  private val accumulateCosts =
+    java.util.Collections.synchronizedMap(
+      new java.util.LinkedHashMap[Hash, Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost]](16, 0.75f, false) {
+        override def removeEldestEntry(e: java.util.Map.Entry[Hash, Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost]]) =
+          size > ChainManager.KeptAccumulateCosts
+      }
+    )
+
+  private def noteAccumulateCosts(hash: Hash, costs: Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost]): Unit =
+    accumulateCosts.put(hash, costs): Unit
+
+  def takeAccumulateCosts(hash: Hash): Option[Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost]] =
+    Option(accumulateCosts.remove(hash))
+
   /** Import a block: extends the best head directly, or is stored as a side
     * branch and adopted via reorg when its branch becomes strictly heavier
     * (ticket-sealed count, then height) and holds no equivocation. A side-branch
@@ -947,9 +974,10 @@ final class ChainManager(
     */
   def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, ChainHead] =
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
+    val sealedSide = mutable.ListBuffer.empty[(Hash, Block)]
     val result = commit {
       newEquivocation = None
-      val imported = importUnderCommit(blockBytes, source, events)
+      val imported = importUnderCommit(blockBytes, source, events, sealedSide)
       newEquivocation.foreach { slot =>
         newEquivocation = None
         leaveEquivocatedSlot(slot, events)
@@ -959,12 +987,19 @@ final class ChainManager(
       imported
     }
     events.foreach((head, block) => postImportBus.publish(head, block))
+    sealedSide.foreach { (hash, block) =>
+      sealedSideListeners.forEach { l =>
+        try l(hash, block)
+        catch case NonFatal(e) => logger.error("side-branch block listener failed", e)
+      }
+    }
     result
 
   private def importUnderCommit(
       blockBytes: Array[Byte],
       source: Option[Ed25519PublicKey],
-      events: mutable.ListBuffer[(ChainHead, Block)]
+      events: mutable.ListBuffer[(ChainHead, Block)],
+      sealedSide: mutable.ListBuffer[(Hash, Block)]
   ): Either[ChainError, ChainHead] =
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
@@ -994,6 +1029,7 @@ final class ChainManager(
                 val height = parentHeight + 1
                 meta.putHeight(hash, height)
                 recordForkChoiceMeta(hash, block, sealChecked = !unverifiable)
+                if !unverifiable then sealedSide += ((hash, block))
                 leafMap.remove(parent)
                 if blockStore.children(hash).isEmpty then
                   leafMap.put(hash, ChainHead(hash, block.header.slot.toLong, Hash.zero))
@@ -1034,9 +1070,10 @@ final class ChainManager(
         meta.markInvalid(headerHashOf(block))
         Left(ChainError.InvalidBlock(error, message))
       case ImportResult.Failed(message, _) => Left(ChainError.ImportFailed(message))
-      case ImportResult.Success(postRoot, _) =>
+      case done @ ImportResult.Success(postRoot, _) =>
         faultAfterStateSave()
         val hash = headerHashOf(block)
+        noteAccumulateCosts(hash, done.accumulateCosts)
         val slot = block.header.slot.toLong
         storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
         if unverified.nonEmpty then unverified.untrack(hash) // validated now (a reorg replayed it)

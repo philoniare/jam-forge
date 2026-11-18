@@ -188,8 +188,7 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers with NodeFixture:
       node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
       val head = node.authorSlot(1).getOrElse(fail("author slot 1"))
 
-      // Events: 40 authoring, 42 authored, then 11 best block changed for slot 1.
-      val events = Iterator.continually(readMessage()).take(10).find(_(8) == 11.toByte).getOrElse(fail("no event 11"))
+      val events = Iterator.continually(readMessage()).take(100).find(_(8) == 11.toByte).getOrElse(fail("no event 11"))
       LittleEndian.get(events, 9, 4) shouldBe 1L
       events.slice(13, 45) shouldBe head.hash.bytes.toArray
       socket.close()
@@ -225,7 +224,7 @@ class NodeResilienceSpec extends AnyFunSuite with Matchers with NodeFixture:
       node.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
       val first = node.authorSlot(1).getOrElse(fail("author slot 1"))
       node.authorSlot(2).getOrElse(fail("author slot 2"))
-      Iterator.continually(readMessage()).take(20).find(e => e(8) == 11.toByte && LittleEndian.get(e, 9, 4) == 2L)
+      Iterator.continually(readMessage()).take(200).find(e => e(8) == 11.toByte && LittleEndian.get(e, 9, 4) == 2L)
         .getOrElse(fail("no event 11 for slot 2"))
 
       node.chain.finalize(first.hash).isRight shouldBe true

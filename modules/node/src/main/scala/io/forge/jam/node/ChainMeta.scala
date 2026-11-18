@@ -32,6 +32,13 @@ final class ChainMeta(store: BlockStore):
   def finalizedSlot: Option[Long] = long("finalized_slot")
   def finalizedSlot_=(slot: Long): Unit = putLong("finalized_slot", slot)
 
+  def lastAuthoredSlot: Option[Long] = long("author:last_slot")
+
+  def putLastAuthoredSlot(slot: Long): Unit =
+    store.setMetaSynced("author:last_slot", java.nio.ByteBuffer.allocate(8).putLong(slot).array())
+
+  def dropLastAuthoredSlot(): Unit = store.deleteMeta("author:last_slot")
+
   def finalizedRoot: Option[Hash] = hash("finalized_root")
   def finalizedRoot_=(root: Hash): Unit = putHash("finalized_root", root)
 

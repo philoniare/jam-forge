@@ -121,6 +121,17 @@ docker run -d --name jam-forge --network host -v jam-forge-data:/data \
   `/data/validator.seed`. The Ed25519 key is also the node's network identity.
 - Add `--print-keys` to print the public keys and exit. A node with validator keys votes in GRANDPA.
 - QUIC on UDP 40000 (`--port` to change). Leave out `--bandersnatch-key` to only follow the chain.
+- `--listen-ip` binds the listener to one address (default `0.0.0.0`; it and `::` take IPv4 and IPv6 peers);
+  `--external-ip` is the address peers reach the node at behind NAT, reported as its endpoint (a validator whose
+  on-chain metadata names another one is warned).
+- `--metrics-port 9615 --metrics-listen-ip 0.0.0.0` serves Prometheus metrics at `/metrics` and a health check at
+  `/health` (JSON: best and finalized slots, peers, syncing; HTTP 200 while the node follows the chain, 503 when not).
+  Without `--metrics-listen-ip` they listen on loopback only.
+- `gen-keys` prints a new validator seed and its keys; `list-keys --validator-seed <file>` prints the keys a seed
+  gives; `--version` prints the version; `--pvm-backend interpreter|recompiler` chooses how guest code runs; `--temp`
+  runs on a throwaway data directory (not with `--data`, so not with the image's entrypoint).
+- The image runs as uid/gid 10001, which owns `/data`. A volume an earlier image (which ran as root) wrote must be
+  handed over once: `docker run --rm -u 0 -v jam-forge-data:/data --entrypoint chown <image> -R 10001:10001 /data`.
 
 ---
 

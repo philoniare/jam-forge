@@ -20,6 +20,8 @@ object ImportResult:
   final case class Success(
       postStateRoot: Hash,
       headerHash: Hash
+  )(
+      val accumulateCosts: Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost] = Map.empty
   ) extends ImportResult
 
   /** The block was checked and is invalid: importing it again gives the same answer. */
@@ -196,7 +198,7 @@ class BlockImporter(
             if gcAfterImport then StageTimers.time("trie-gc")(trieStore.gc())
           }
 
-          ImportResult.Success(trie.rootHash, result.headerHash)
+          ImportResult.Success(trie.rootHash, result.headerHash)(result.accumulateCosts)
     catch
       case e: Throwable if BlockImporter.isFatalCrash(e) =>
         throw e

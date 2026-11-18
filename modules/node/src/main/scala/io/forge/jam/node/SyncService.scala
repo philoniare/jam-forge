@@ -189,7 +189,8 @@ final class SyncService(
     threads: NodeThreads = new NodeThreads,
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
     observer: SyncService.ImportObserver = SyncService.ImportObserver.none,
-    scores: PeerScores = new PeerScores()
+    scores: PeerScores = new PeerScores(),
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
   import SyncCodec.*
 
@@ -341,7 +342,10 @@ final class SyncService(
     * grid neighbour at an epoch change).
     */
   def closeAnnouncementStream(conn: PeerConnection): Unit =
-    Option(upStreams.get(conn)).foreach(_.close())
+    Option(upStreams.get(conn)).foreach { s =>
+      closedHere.put(s, "the peer is no longer a grid neighbour")
+      s.close()
+    }
 
   /** Both sides send their handshake as soon as the stream is open (JAMNP-S
     * UP 0). A UP kind has one stream per connection: when a second one
@@ -358,17 +362,22 @@ final class SyncService(
     announceStreams.forEach(s => if s.ne(stream) && streamConnection.get(s) == conn then dropDuplicate(s))
     streamConnection.put(stream, conn)
     announceStreams.add(stream)
+    val opened = telemetry.flatMap(_.blockAnnouncementStreamOpened(conn.peerKey, remote = side == "accepted"))
     stream.onClosed { () =>
       announceStreams.remove(stream)
       streamConnection.remove(stream)
       if upStreams.remove(conn, stream) then
         peerFinals.remove(conn)
         peerBestHeads.remove(conn)
+      val ours = Option(closedHere.remove(stream))
+      if conn.isOpen then
+        telemetry.foreach(_.blockAnnouncementStreamClosed(opened, remote = ours.isEmpty, ours.getOrElse("closed by the peer")))
     }
     val waiting = new AnnouncementMailbox(SyncService.MaxWaitingAnnouncements)
     def malformed(reason: String): Unit =
       logger.debug(s"UP0: bad message from $side peer: $reason")
       misbehaved(conn, Offence.Malformed)
+      closedHere.put(stream, s"malformed message: $reason")
       stream.reset()
     def decoded[A](decode: => Either[String, A]): Either[String, A] =
       try decode
@@ -403,22 +412,34 @@ final class SyncService(
   /** The connection each UP 0 stream belongs to. */
   private val streamConnection = new ConcurrentHashMap[MessageStream, PeerConnection]()
 
+  private val closedHere = new ConcurrentHashMap[MessageStream, String]()
+
   private def dropDuplicate(old: MessageStream): Unit =
     logger.debug(s"UP0: stream ${old.id} superseded by a newer stream on the same connection; resetting")
     announceStreams.remove(old)
     streamConnection.remove(old)
+    closedHere.put(old, "superseded by a newer stream")
     old.reset()
 
   /** Announce a newly imported/authored block on all UP 0 streams. */
   def announce(headerBytes: Array[Byte]): Unit =
     val msg = encodeAnnouncement(headerBytes, ourFinal)
-    announceStreams.forEach(_.send(msg))
+    lazy val announced =
+      (io.forge.jam.core.Hashing.blake2b256(headerBytes), io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4))
+    announceStreams.forEach { s =>
+      s.send(msg)
+      telemetry.foreach { t =>
+        val conn = streamConnection.get(s)
+        if conn != null then t.blockAnnounced(conn.peerKey, remote = false, announced._2, announced._1)
+      }
+    }
 
   /** `headerBytes` holds at least `MinAnnouncedHeaderBytes`, so its parent hash and slot can be read. */
   private def onAnnouncement(conn: PeerConnection, headerBytes: Array[Byte], peerFinal: HashSlot): Unit =
     peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
     val slot = io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)
+    telemetry.foreach(_.blockAnnounced(conn.peerKey, remote = true, slot, headerHash))
     notePeerBest(conn, HashSlot(headerHash, slot))
     if !chain.hasBlock(headerHash) then
       // The header starts with its parent's hash: when we hold the parent, the announced block is all we lack.
@@ -454,6 +475,10 @@ final class SyncService(
   def blockRequestHandler: io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
       var asked = false
+      val receiving = telemetry.flatMap(_.receivingBlockRequest(conn.peerKey))
+      def refuse(why: String): Unit =
+        telemetry.foreach(_.blockRequestFailed(receiving, why))
+        stream.reset()
       stream.onMessage { msg =>
         // One request per stream; reading up to 256 blocks from the store is not event-loop work.
         if asked then stream.reset()
@@ -462,32 +487,43 @@ final class SyncService(
           decodeBlockRequest(msg) match
             case Left(err) =>
               logger.warn(s"CE128: $err")
-              stream.reset()
+              refuse(s"malformed request: $err")
             case Right((from, ascending, maxBlocks)) =>
+              telemetry.foreach(_.blockRequestReceived(receiving, from, ascending, maxBlocks))
               val taken = serving.submit(conn, msg.length.toLong) {
                 try
-                  if !chain.hasBlock(from) || !chain.canBeFinalized(from) then stream.reset()
+                  if !chain.hasBlock(from) || !chain.canBeFinalized(from) then refuse("block not served: unknown or not on a chain that can be finalized")
                   else
                     val max = math.min(maxBlocks, MaxBlocksPerResponse).toInt
                     val blocks =
                       if ascending then chain.blocksAscending(from, max)
                       else chain.blocksDescending(from, max)
-                    if blocks.isEmpty && !ascending then stream.reset()
+                    if blocks.isEmpty && !ascending then refuse("block body not held")
                     else
                       val out = new java.io.ByteArrayOutputStream()
-                      blocks.iterator
+                      val sent = blocks.iterator
                         .takeWhile(b => out.size == 0 || out.size + b.length <= MaxBlockResponseBytes)
-                        .foreach(b => out.write(b))
+                        .map { b => out.write(b); b }
+                        .toList
                       stream.send(out.toByteArray)
                       stream.finish()
+                      telemetry.foreach(t => reportTransferred(t, receiving, sent))
                 catch
                   case e: Exception =>
                     logger.warn(s"CE128 handler failed: ${e.getMessage}")
-                    stream.reset()
+                    refuse(s"failed here: ${e.getMessage}")
               }
               // Too many requests waiting (from this peer, or in all): refused.
-              if !taken then stream.reset()
+              if !taken then refuse("too many requests waiting")
       }
+
+  private def reportTransferred(t: Telemetry, request: Option[Telemetry.EventRef], blocks: List[Array[Byte]]): Unit =
+    val last = blocks.size - 1
+    blocks.zipWithIndex.foreach { (bytes, i) =>
+      chain.decodeBlock(bytes).foreach { b =>
+        t.blockTransferred(request, b.header.slot.toLong, Telemetry.blockOutline(b, bytes.length, chain.headerHashOf(b)), i == last)
+      }
+    }
 
   /** How many blocks to ask for, descending from a block at `slot` that we lack: every block we could still use
     * has a slot above our finalized one, and slots are distinct along a chain, so the gap to our finalized slot is
@@ -602,6 +638,7 @@ final class SyncService(
       announced: Boolean = false,
       strict: Boolean = false
   ): Option[List[Array[Byte]]] =
+    val sending = telemetry.flatMap(_.sendingBlockRequest(conn.peerKey, from, ascending, maxBlocks.toLong))
     // The response is one message; a peer that keeps sending is not buffered without limit.
     StreamRequest.exchange(
       conn,
@@ -610,10 +647,12 @@ final class SyncService(
       10_000,
       () => 20_000,
       maxMessages = if strict then 1 else SyncService.MaxResponseMessages,
-      excessFails = strict
+      excessFails = strict,
+      onSent = () => telemetry.foreach(_.blockRequestSent(sending))
     ) match
       case Left(failure) =>
         logger.warn(s"block request failed: ${failure.message}")
+        telemetry.foreach(_.blockRequestFailed(sending, failure.message))
         failure match
           case StreamRequest.Failure.TimedOut  => misbehaved(conn, Offence.Unanswered)
           case StreamRequest.Failure.Excess(_) => misbehaved(conn, Offence.Malformed)
@@ -631,6 +670,11 @@ final class SyncService(
               Nil
         }
         if announced && blocks.isEmpty && !malformed then misbehaved(conn, Offence.Unanswered)
+        telemetry.foreach { t =>
+          if malformed then t.blockRequestFailed(sending, "undecodable response")
+          else if blocks.isEmpty then t.blockRequestFailed(sending, "no block in the response")
+          else reportTransferred(t, sending, blocks)
+        }
         Some(blocks)
 
   private def importFetched(conn: PeerConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =

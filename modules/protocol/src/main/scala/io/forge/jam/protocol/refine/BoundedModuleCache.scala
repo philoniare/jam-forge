@@ -16,8 +16,10 @@ final class BoundedModuleCache(maxSize: Int):
       override def removeEldestEntry(
           eldest: java.util.Map.Entry[JamBytes, InterpretedModule]
       ): Boolean =
-        size() > maxSize
+        this.size() > maxSize
     }
+
+  def size: Int = underlying.synchronized(underlying.size())
 
   /** Returns the cached module for `key`, compiling and caching it via
     * `compile` on a miss. `compile` may return `None` (e.g. malformed code);
@@ -26,10 +28,10 @@ final class BoundedModuleCache(maxSize: Int):
   def getOrCompile(
       key: JamBytes
   )(compile: => Option[InterpretedModule]): Option[InterpretedModule] =
-    val cached = underlying.get(key)
+    val cached = underlying.synchronized(underlying.get(key))
     if cached != null then Some(cached)
     else
       compile.map { module =>
-        underlying.put(key, module)
+        underlying.synchronized(underlying.put(key, module))
         module
       }

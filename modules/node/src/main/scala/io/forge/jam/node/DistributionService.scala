@@ -40,7 +40,8 @@ final class DistributionService(
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
-    askOrder: List[PeerConnection] => List[PeerConnection] = identity
+    askOrder: List[PeerConnection] => List[PeerConnection] = identity,
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   // Open connections only: a connection leaves on its connection-down callback ([[untrackConnection]]), so the set
@@ -101,9 +102,11 @@ final class DistributionService(
 
   def workReportHandler: io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
+      val receiving = telemetry.flatMap(_.receivingGuarantee(conn.peerKey))
       stream.onMessage { msg =>
         decodeItem[GuaranteeExtrinsic](msg) match
           case Right(g) =>
+            telemetry.foreach(_.guaranteeReceived(receiving, Telemetry.guaranteeOutline(g)))
             val admitted = inbound.submit(conn, msg.length.toLong) {
               val taken =
                 try receiveGuarantee(g)
@@ -117,6 +120,7 @@ final class DistributionService(
             if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE135 payload: $err")
+            telemetry.foreach(_.guaranteeReceiveFailed(receiving, s"undecodable: $err"))
             misbehaved(conn, Offence.Malformed)
             stream.reset()
       }
@@ -138,8 +142,47 @@ final class DistributionService(
   def distributeGuarantee(conn: PeerConnection, g: GuaranteeExtrinsic): Unit =
     sendItem(conn, StreamKind.WorkReportDistribution, g.encode.toArray)
 
-  def distributeGuaranteeToAll(g: GuaranteeExtrinsic): Unit =
-    connections.forEach(c => if c.isOpen then distributeGuarantee(c, g))
+  def distributeGuaranteeToAll(
+      g: GuaranteeExtrinsic,
+      built: Option[Telemetry.EventRef] = None,
+      distributed: () => Unit = () => ()
+  ): Unit =
+    broadcast(StreamKind.WorkReportDistribution, g.encode.toArray, distributed) { conn =>
+      val sending = telemetry.flatMap(_.sendingGuarantee(built, conn.peerKey))
+      (why => telemetry.foreach(_.guaranteeSendFailed(sending, why)), () => telemetry.foreach(_.guaranteeSent(sending)))
+    }
+
+  private def broadcast(kind: Byte, payload: Array[Byte], done: () => Unit)(
+      watch: PeerConnection => (String => Unit, () => Unit)
+  ): Unit =
+    val targets = connections.asScala.filter(_.isOpen).toList
+    if targets.isEmpty then done()
+    else
+      val left = new java.util.concurrent.atomic.AtomicInteger(targets.size)
+      def settled(): Unit = if left.decrementAndGet() == 0 then done()
+      targets.foreach { conn =>
+        val (failed, sent) = watch(conn)
+        OneShotSend.submit(
+          egress,
+          conn,
+          () => conn.openStream(kind),
+          List(payload),
+          why => {
+            logger.warn(s"distribution on ${StreamKind.name(kind)} failed: $why")
+            failed(why)
+            settled()
+          },
+          () => {
+            logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+            failed("not sent: shutting down")
+            settled()
+          },
+          sent = () => {
+            sent()
+            settled()
+          }
+        )
+      }
 
   // =========================================================================
   // CE 136 — work-report request
@@ -182,6 +225,7 @@ final class DistributionService(
       stream.onMessage { msg =>
         DistributionService.decodeAssurance(msg, coresCount) match
           case Right((anchor, bitfield, signature)) =>
+            telemetry.foreach(_.assuranceReceived(conn.peerKey, anchor))
             val admitted = inbound.submit(conn, msg.length.toLong) {
               val signer =
                 try assurerIndex(conn, anchor, bitfield, signature)
@@ -198,6 +242,7 @@ final class DistributionService(
             if !admitted then stream.reset()
           case Left(err) =>
             logger.warn(s"bad CE141 payload: $err")
+            telemetry.foreach(_.assuranceReceiveFailed(conn.peerKey, s"undecodable: $err"))
             misbehaved(conn, Offence.Malformed)
             stream.reset()
       }
@@ -223,7 +268,17 @@ final class DistributionService(
     sendItem(conn, StreamKind.AssuranceDistribution, DistributionService.encodeAssurance(a))
 
   def distributeAssuranceToAll(a: AssuranceExtrinsic): Unit =
-    connections.forEach(c => if c.isOpen then distributeAssurance(c, a))
+    val distributing = telemetry.flatMap(_.distributingAssurance(a.anchor, a.bitfield.toArray))
+    broadcast(
+      StreamKind.AssuranceDistribution,
+      DistributionService.encodeAssurance(a),
+      () => telemetry.foreach(_.assuranceDistributed(distributing))
+    ) { conn =>
+      (
+        why => telemetry.foreach(_.assuranceSendFailed(distributing, conn.peerKey, why)),
+        () => telemetry.foreach(_.assuranceSent(distributing, conn.peerKey))
+      )
+    }
 
   // =========================================================================
   // helpers

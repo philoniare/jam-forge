@@ -1,7 +1,7 @@
 package io.forge.jam.node
 
 
-import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, constants}
+import io.forge.jam.core.{ChainConfig, Hashing, JamBytes, LittleEndian, constants}
 import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, Hash, ServiceId, Timeslot, ValidatorIndex}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.context.Context
@@ -20,7 +20,8 @@ import spire.math.{UInt, UShort}
   * author pools and includes it; assurers distribute CE 141 assurances; the
   * next authored block makes the report available and accumulation executes
   * the service's PVM code — the complete guarantee → assure → accumulate
-  * pipeline over JAMNP.
+  * pipeline over JAMNP. Both nodes report to a JIP-3 telemetry server, and each
+  * step's events are checked as the server decodes them.
   */
 class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
 
@@ -108,7 +109,7 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
       AssuranceExtrinsic(parent, JamBytes(bitfield), ValidatorIndex(vi), Ed25519Signature(sig))
     }.toList
 
-  test("guarantee -> inclusion -> assurances -> availability -> accumulation over JAMNP") {
+  test("guarantee -> inclusion -> assurances -> availability -> accumulation over JAMNP, each step on JIP-3 telemetry") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
     )
@@ -124,15 +125,27 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
 
     val dirA = tempDir("jam-flow-a")
     val dirB = tempDir("jam-flow-b")
+    val telemetryA = new TelemetryCollector
+    val telemetryB = new TelemetryCollector
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false, telemetry = Some(telemetryA.address))).start()
       // B sends the validators' assurances (CE 141), which are taken from a validator only: it is validator 1.
       nodeB = new JamNode(
         spec,
-        NodeConfig(dataDir = dirB, slotTicking = false, ed25519Seed = Some(devKeys(1).ed25519Secret))
+        NodeConfig(
+          dataDir = dirB,
+          slotTicking = false,
+          ed25519Seed = Some(devKeys(1).ed25519Secret),
+          telemetry = Some(telemetryB.address)
+        )
       ).start()
+      val connected = System.currentTimeMillis() + 20000
+      while (telemetryA.nodeInformation.isEmpty || telemetryB.nodeInformation.isEmpty) && System.currentTimeMillis() < connected do
+        Thread.sleep(20)
+      telemetryA.nodeInformation.isDefined shouldBe true
+      telemetryB.nodeInformation.isDefined shouldBe true
       nodeA.enableAuthoring(devKeys)
 
       val connBtoA =
@@ -200,12 +213,91 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
       // B follows the whole chain.
       awaitSync(nodeA, nodeB)
       nodeB.chain.best.stateRoot shouldBe nodeA.chain.best.stateRoot
+
+      checkTelemetry(nodeA, nodeB, telemetryA, telemetryB, guarantee, accumulatedAt = nodeA.chain.best.hash)
     finally
       if nodeA != null then nodeA.shutdown()
       if nodeB != null then nodeB.shutdown()
+      telemetryA.close()
+      telemetryB.close()
       cleanup(dirA)
       cleanup(dirB)
   }
+
+  private def same(a: Array[Byte], b: Array[Byte]): Boolean = java.util.Arrays.equals(a, b)
+
+  private def checkTelemetry(
+      nodeA: JamNode,
+      nodeB: JamNode,
+      a: TelemetryCollector,
+      b: TelemetryCollector,
+      guarantee: GuaranteeExtrinsic,
+      accumulatedAt: Hash
+  ): Unit =
+    val keyA = nodeA.identity.publicKeyBytes
+    val keyB = nodeB.identity.publicKeyBytes
+
+    val connectingIn = a.await("21 connecting in")(a.all(21)().headOption)
+    a.await("23 connected in, from B")(a.referring(23, connectingIn.id).find(e => same(e.bytes(8, 32), keyB)))
+    val connectingOut = b.await("24 connecting out, to A")(b.all(24)(body => same(body.take(32), keyA)).headOption)
+    b.await("26 connected out")(b.referring(26, connectingOut.id).headOption)
+
+    b.await("60 on B: opened here")(b.all(60)(body => same(body.take(32), keyA) && body(32) == 0).headOption)
+    a.await("60 on A: opened by B")(a.all(60)(body => same(body.take(32), keyB) && body(32) == 1).headOption)
+    val announced = b.await("62 on B: slot 4 announced by A")(
+      b.all(62)(body => same(body.take(32), keyA) && body(32) == 1 && LittleEndian.get(body, 33, 4) == 4L).headOption
+    )
+    announced.bytes(37, 32) shouldBe accumulatedAt.bytes.toArray
+    a.await("62 on A: slot 4 announced to B")(
+      a.all(62)(body => same(body.take(32), keyB) && body(32) == 0 && LittleEndian.get(body, 33, 4) == 4L).headOption
+    )
+
+    val sending = b.await("63 on B: a block request to A")(b.all(63)(body => same(body.take(32), keyA)).headOption)
+    b.await("66 on B: request sent")(b.referring(66, sending.id).headOption)
+    val transferred = b.await("68 on B: a block received")(b.referring(68, sending.id).headOption)
+    transferred.body.length shouldBe 8 + 4 + Telemetry.blockOutline(0, Hash.zero, 0, 0, 0, 0, 0, 0).length + 1
+    val receiving = a.await("64 on A: a block request from B")(a.all(64)(body => same(body, keyB)).headOption)
+    a.await("67 on A: request received")(a.referring(67, receiving.id).headOption)
+    a.await("68 on A: a block sent")(a.referring(68, receiving.id).headOption)
+
+    val importing = b.await("43 on B: importing slot 4")(b.all(43)(body => LittleEndian.get(body, 0, 4) == 4L).headOption)
+    importing.bytes(8, 32) shouldBe accumulatedAt.bytes.toArray
+    b.await("45 on B")(b.referring(45, importing.id).headOption)
+    val executedOnB = b.await("47 on B")(b.referring(47, importing.id).headOption)
+
+    val authoring = a.await("40 on A: slot 4")(a.all(40)(body => LittleEndian.get(body, 0, 4) == 4L).headOption)
+    a.await("42 on A")(a.referring(42, authoring.id).headOption)
+    val executedOnA = a.await("47 on A")(a.referring(47, authoring.id).headOption)
+    for executed <- List(executedOnA, executedOnB) do
+      val (count, used) = io.forge.jam.core.codec.JamCodecs.decodeCompactInteger(executed.body, 8)
+      val entry = 4 + Telemetry.accumulateCost(io.forge.jam.protocol.pvmhost.AccumulateCost.zero).length
+      executed.body.length shouldBe 8 + used + count.toInt * entry
+      val service0 = (0 until count.toInt).map(i => 8 + used + i * entry).find(at => executed.u32(at) == 0L)
+        .getOrElse(fail("service 0 is not among the accumulated services"))
+      executed.u32(service0 + 4) should be >= 1L // accumulate calls
+      executed.u32(service0 + 12) shouldBe 1L // items accumulated
+      executed.u64(service0 + 16) should be > 0L // gas used
+
+    val generating = a.await("80 on A: tickets for epoch 1")(a.all(80)(body => LittleEndian.get(body, 0, 4) == 1L).headOption)
+    val generated = a.await("82 on A")(a.referring(82, generating.id).headOption)
+    generated.body.length shouldBe 8 + 1 + 3 * 32
+    generated.body(8) shouldBe 3.toByte
+
+    val reportHash = Hashing.blake2b256(guarantee.report.encode.toArray).bytes.toArray
+    val receivingGuarantee = a.await("110 on A: a guarantee from B")(a.all(110)(body => same(body, keyB)).headOption)
+    val outline = a.await("112 on A")(a.referring(112, receivingGuarantee.id).headOption)
+    outline.bytes(8, 32) shouldBe reportHash
+    outline.u32(40) shouldBe 3L
+    outline.body.length shouldBe 8 + 32 + 4 + 1 + 2 * guarantee.signatures.size
+    val discarded = a.await("113 on A: reported on chain")(a.all(113)(body => same(body.take(32), reportHash)).headOption)
+    discarded.body.last shouldBe Telemetry.GuaranteeDiscard.ReportedOnChain.toByte
+
+    eventually(10)(a.all(131)(body => same(body.take(32), keyB)).size >= 5) shouldBe true
+
+  private def eventually(seconds: Int)(cond: => Boolean): Boolean =
+    val deadline = System.currentTimeMillis() + seconds * 1000L
+    while !cond && System.currentTimeMillis() < deadline do Thread.sleep(20)
+    cond
 
   private def awaitSync(a: JamNode, b: JamNode): Unit =
     val deadline = System.currentTimeMillis() + 30000

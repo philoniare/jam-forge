@@ -18,11 +18,23 @@ import io.forge.jam.protocol.state.{StateKey, StateKeys}
 final case class RpcError(code: Int, message: String, data: Json = Json.Null)
 
 object RpcError:
+  val UnsafeMethodCode: Int = -32601
+
+  val LimitExceededCode: Int = -32005
+
   def invalidParams(why: String): RpcError = RpcError(-32602, "Invalid params", Json.fromString(why))
   val methodNotFound: RpcError = RpcError(-32601, "Method not found")
   val invalidRequest: RpcError = RpcError(-32600, "Invalid request")
   val parseError: RpcError = RpcError(-32700, "Parse error")
   def other(why: String): RpcError = RpcError(0, why)
+  def unsafeRefused(method: String): RpcError =
+    RpcError(
+      UnsafeMethodCode,
+      "Method not allowed",
+      Json.fromString(s"$method is unsafe and this RPC serves safe methods only (--rpc-methods)")
+    )
+  val limitExceeded: RpcError =
+    RpcError(LimitExceededCode, "Limit exceeded", Json.fromString("too many requests from this address; retry later"))
   def blockUnavailable(h: Hash): RpcError =
     RpcError(1, s"The block with header hash ${h.toHex} is not available", RpcApi.blob(h.bytes.toArray))
   def reportUnavailable(h: Hash): RpcError =
@@ -41,7 +53,7 @@ final class RpcSubscription(
 
   @volatile var readAt: Hash = null
 
-final class RpcSession(val send: Json => Unit):
+final class RpcSession(val send: Json => Unit, val unsafeAllowed: Boolean = true):
   val subscriptions = new ConcurrentHashMap[java.lang.Long, RpcSubscription]()
 
 final class RpcApi(
@@ -82,6 +94,7 @@ final class RpcApi(
             val id = request("id")
             val parsed = for
               method <- request("method").flatMap(_.asString).toRight(RpcError.invalidRequest)
+              _ <- Either.cond(session.unsafeAllowed || !Unsafe.contains(method), (), RpcError.unsafeRefused(method))
               params <- request("params") match
                 case None                 => Right(Vector.empty)
                 case Some(p) if p.isNull  => Right(Vector.empty)
@@ -479,6 +492,13 @@ object RpcApi:
   )
 
   private val Slow = Set("submitWorkPackage", "submitWorkPackageBundle", "fetchSegments", "fetchWorkPackageSegments")
+
+  val Unsafe: Set[String] = Slow + "submitPreimage"
+
+  def refusal(text: String, error: RpcError): Option[Json] =
+    parse(text).toOption.flatMap(_.asObject) match
+      case Some(request) => request("id").map(failure(_, error))
+      case None          => Some(failure(Json.Null, error))
 
   val MaxStatusWalk: Int = 64
 

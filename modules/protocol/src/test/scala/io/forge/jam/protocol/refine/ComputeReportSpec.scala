@@ -86,12 +86,13 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
   private def compute(
       wp: WorkPackage,
       accounts: HistoricalLookupService,
-      precedence: RefineErrorPrecedence = RefineErrorPrecedence.ExportCountFirst
+      precedence: RefineErrorPrecedence = RefineErrorPrecedence.ExportCountFirst,
+      lookup: Map[Hash, Hash] = Map.empty
   ): Either[ComputeReportError, ComputedReport] =
     new ComputeReport(config, precedence).compute(
       workPackage = wp,
       coreIndex = 1,
-      segmentRootLookup = Map.empty,
+      segmentRootLookup = lookup,
       importSegments = IndexedSeq(IndexedSeq.empty),
       extrinsicData = IndexedSeq(IndexedSeq.empty),
       justifications = IndexedSeq(IndexedSeq.empty),
@@ -211,6 +212,54 @@ class ComputeReportSpec extends AnyFunSuite with Matchers:
     computed.exportedSegments.head.exists(_ != 0) shouldBe true
     computed.pagedProofs.size shouldBe 1
     computed.pagedProofs.head.length shouldBe Csegmentsize.toInt
+  }
+
+  test("GP Ξ: a segment-root lookup naming a package the items do not import by hash (⊞) is an error") {
+    val extra = Map(Hash(Array.fill[Byte](32)(7)) -> Hash(Array.fill[Byte](32)(8)))
+    compute(workPackageWith(exportCount = 0), accountsWith(haltEcho), lookup = extra).left.toOption.get shouldBe
+      a[ComputeReportError.SegmentRootLookupMismatch]
+  }
+
+  test("GP Ξ: a package importing by hash (⊞) needs that package in the segment-root lookup") {
+    val imported = Hash(Array.fill[Byte](32)(9))
+    val base = workPackageWith(exportCount = 0)
+    val wp = base.copy(items = base.items.map(_.copy(importSegments = List(WorkItemImportSegment(imported, UShort(0x8000))))))
+    compute(wp, accountsWith(haltEcho)).left.toOption.get shouldBe a[ComputeReportError.SegmentRootLookupMismatch]
+  }
+
+  test("is-authorized runs on its own, and a report computed from its result does not run it again") {
+    val wp = workPackageWith(exportCount = 0)
+    val cr = new ComputeReport(config)
+    val auth = cr.authorize(wp, 1, accountsWith(haltEcho)).toOption.get
+    val serviceOnly = new TwoServiceLookup(Map(42L -> Map(serviceCodeHash -> haltEcho)))
+    cr.authorize(wp, 1, serviceOnly).left.toOption.get shouldBe a[ComputeReportError.AuthorizationFailed]
+    val computed = cr.compute(
+      wp, 1, Map.empty, IndexedSeq(IndexedSeq.empty), IndexedSeq(IndexedSeq.empty), IndexedSeq(IndexedSeq.empty),
+      serviceOnly, authorized = Some(auth)
+    )
+    computed.toOption.get.report.authGasUsed.toLong shouldBe auth.gasUsed
+  }
+
+  test("is-authorized and refine reserve from the in-core memory budget, never the one block import uses") {
+    import io.forge.jam.pvm.memory.InstanceMemoryBudget
+    InstanceMemoryBudget.global.resetPeak()
+    InstanceMemoryBudget.inCore.resetPeak()
+    compute(workPackageWith(exportCount = 0), accountsWith(haltEcho)).isRight shouldBe true
+    InstanceMemoryBudget.inCore.peakBytes should be > 0L
+    InstanceMemoryBudget.global.peakBytes shouldBe 0L
+  }
+
+  private val hostCallLoop = preimageOf(Array[Byte](10, 0, 40, 0xfe.toByte), Array[Byte](5))
+
+  test("a refine past its wall-clock deadline is abandoned at its next host call, not reported") {
+    val wp = workPackageWith(exportCount = 0)
+    compute(wp, accountsWith(hostCallLoop)).toOption.get.report.results.head.result shouldBe ExecutionResult.OOG
+    intercept[ComputeReport.DeadlinePassed] {
+      new ComputeReport(config).compute(
+        wp, 1, Map.empty, IndexedSeq(IndexedSeq.empty), IndexedSeq(IndexedSeq.empty), IndexedSeq(IndexedSeq.empty),
+        accountsWith(hostCallLoop), deadlineMillis = Some(0L)
+      )
+    }
   }
 
   test("fails with AuthorizationFailed when the auth code is unavailable") {

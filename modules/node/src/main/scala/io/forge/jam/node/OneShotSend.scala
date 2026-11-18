@@ -44,7 +44,9 @@ object OneShotSend:
       ()
 
   /** Queue the send on `egress`. `peer` identifies who the stream is opened to (null when unknown: no per-peer
-    * limit then); `failed` is told why a send did not happen. Returns at once; throws nothing.
+    * limit then); `failed` is told why a send did not happen. `settled` is told once whether the messages were
+    * written and the stream finished, whatever stopped it otherwise (egress shutting down included). Returns at
+    * once; throws nothing.
     */
   def submit(
       egress: ExecutorService,
@@ -53,9 +55,13 @@ object OneShotSend:
       messages: Seq[Array[Byte]],
       failed: String => Unit,
       rejected: () => Unit = () => (),
-      openTimeoutMillis: Long = OpenTimeoutSeconds * 1000
+      openTimeoutMillis: Long = OpenTimeoutSeconds * 1000,
+      settled: Boolean => Unit = _ => (),
+      sent: () => Unit = () => ()
   ): Unit =
-    queue(egress, rejected)(() => send(peer, open, messages, failed, openTimeoutMillis, _ => ()))
+    queue(egress, () => { rejected(); settled(false) })(() =>
+      send(peer, open, messages, failed, openTimeoutMillis, ok => { settled(ok); if ok then sent() })
+    )
 
   def submitEach(
       egress: ExecutorService,

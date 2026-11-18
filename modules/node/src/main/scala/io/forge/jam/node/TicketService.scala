@@ -40,7 +40,8 @@ final class TicketService(
     threads: NodeThreads = new NodeThreads,
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
     verifyTickets: TicketService.Verifier = TicketService.ringVerifier,
-    ringRootOf: List[BandersnatchPublicKey] => Option[JamBytes] = null
+    ringRootOf: List[BandersnatchPublicKey] => Option[JamBytes] = null,
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   private val ringRoot: List[BandersnatchPublicKey] => Option[JamBytes] =
@@ -186,6 +187,9 @@ final class TicketService(
     var produced = 0
     pending.zipWithIndex.foreach { case (vk, index) =>
       bsByPublic.get(vk.bandersnatch).foreach { keys =>
+        val generating = telemetry.flatMap(_.generatingTickets(epoch + 1))
+        val outputs = scala.collection.mutable.ListBuffer.empty[Array[Byte]]
+        var failure: Option[String] = None
         for attemptInt <- 0 until chain.config.ticketsPerValidator do
           val attempt = UByte(attemptInt)
           BandersnatchVrf.createRingProof(
@@ -197,6 +201,7 @@ final class TicketService(
           ) match
             case None =>
               logger.warn(s"ring proof failed for validator index $index attempt $attemptInt")
+              failure = failure.orElse(Some(s"ring proof failed for attempt $attemptInt"))
             case Some(proof) =>
               // Verify our own proof to learn the ticket id (the VRF output).
               BandersnatchVrf.verifyRingProof(
@@ -208,14 +213,21 @@ final class TicketService(
               ) match
                 case None =>
                   logger.warn(s"self-verification failed for index $index attempt $attemptInt")
+                  failure = failure.orElse(Some(s"ring proof of attempt $attemptInt does not verify"))
                 case Some(result) =>
                   val id = Hash(result.ticketId.toArray)
+                  outputs += id.bytes.toArray
                   val envelope = TicketEnvelope(attempt, proof)
                   pools.addTicket(id, envelope, epoch, entropy)
                   ownTickets.put(id, (keys, attempt))
                   ownTicketEnvelopes.put(id, envelope)
                   ticketEpoch.put(id, epoch)
                   produced += 1
+        telemetry.foreach { t =>
+          failure match
+            case Some(why) => t.ticketGenerationFailed(generating, why)
+            case None      => t.ticketsGenerated(generating, outputs.toList)
+        }
       }
     }
     if produced > 0 then
@@ -228,7 +240,14 @@ final class TicketService(
     def onStream(connection: PeerConnection, stream: MessageStream): Unit =
       stream.onMessage { msg =>
         val asProxy = stream.kind == StreamKind.TicketDistributionStep1
-        if TicketCodec.decode(msg).isLeft then misbehaved(connection, Offence.Malformed)
+        val decoded = TicketCodec.decode(msg)
+        telemetry.foreach { t =>
+          decoded.flatMap(d => TicketService.vrfOutput(d._2).toRight("proof output does not decode").map(d -> _)) match
+            case Right(((epoch, env), output)) =>
+              t.ticketTransferred(connection.peerKey, remote = true, ce132 = !asProxy, epoch + 1, env.attempt.toInt, output)
+            case Left(why) => t.ticketTransferFailed(connection.peerKey, remote = true, ce132 = !asProxy, why)
+        }
+        if decoded.isLeft then misbehaved(connection, Offence.Malformed)
         val sender = senderKey(connection)
         val admitted = inbound.submit(connection, msg.length.toLong) {
           if receive(msg, asProxy, peerLabel(connection), sender) then stream.finish() else stream.reset()
@@ -591,9 +610,27 @@ final class TicketService(
       peer,
       open,
       List(payload),
-      why => logger.warn(s"ticket distribution on ${StreamKind.name(kind)} failed: $why"),
-      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+      why => {
+        logger.warn(s"ticket distribution on ${StreamKind.name(kind)} failed: $why")
+        reportSend(peer, kind, payload, Some(why))
+      },
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)"),
+      sent = () => reportSend(peer, kind, payload, None)
     )
+
+  private def reportSend(peer: AnyRef, kind: Byte, payload: Array[Byte], failed: Option[String]): Unit =
+    (telemetry, peer) match
+      case (Some(t), conn: PeerConnection) =>
+        val ce132 = kind == StreamKind.TicketDistributionStep2
+        failed match
+          case Some(why) => t.ticketTransferFailed(conn.peerKey, remote = false, ce132, why)
+          case None =>
+            TicketCodec.decode(payload).foreach { (epoch, env) =>
+              TicketService.vrfOutput(env).foreach(out =>
+                t.ticketTransferred(conn.peerKey, remote = false, ce132, epoch + 1, env.attempt.toInt, out)
+              )
+            }
+      case _ => ()
 
 object TicketService:
   type Verifier = (Seq[TicketEnvelope], JamBytes, Hash, Int) => Seq[Option[Hash]]
@@ -608,6 +645,10 @@ object TicketService:
       BandersnatchVrf.verifyRingProofs(envs.map(e => (e.signature, e.attempt)), root, entropy, ringSize) match
         case Some(ids) => ids.map(id => Some(Hash(id.toArray)))
         case None      => envs.map(single)
+  def vrfOutput(env: TicketEnvelope): Option[Hash] =
+    try BandersnatchVrf.ringVrfOutput(env.signature.toArray).map(Hash(_))
+    catch case _: Exception => None
+
   /** η_2 of `view`: the entropy the current epoch's ticket contest uses. */
   def contestEntropy(view: io.forge.jam.protocol.state.TrieBackedJamState): Hash =
     view.entropy.pool.lift(2).getOrElse(Hash.zero)

@@ -55,7 +55,8 @@ object StreamRequest extends LazyLogging:
       until: Until = Until.Closed,
       maxMessages: Int = DefaultMaxMessages,
       excessFails: Boolean = false,
-      maxBytes: Long = Long.MaxValue
+      maxBytes: Long = Long.MaxValue,
+      onSent: () => Unit = () => ()
   ): Either[Failure, List[Array[Byte]]] =
     val opened =
       try
@@ -63,7 +64,7 @@ object StreamRequest extends LazyLogging:
         else Right(conn.openStream(kind).get(openTimeoutMs, TimeUnit.MILLISECONDS))
       catch case e: Exception => Left(Failure.NotOpened(describe(e)))
     opened.flatMap { stream =>
-      val result = answer(stream, request, responseTimeoutMs, until, maxMessages, excessFails, maxBytes)
+      val result = answer(stream, request, responseTimeoutMs, until, maxMessages, excessFails, maxBytes, onSent)
       if !result.exists(_.nonEmpty) then
         try stream.reset()
         catch case e: Exception => logger.debug(s"reset of ${StreamKind.name(kind)} failed: ${e.getMessage}")
@@ -81,7 +82,8 @@ object StreamRequest extends LazyLogging:
       until: Until,
       maxMessages: Int,
       excessFails: Boolean,
-      maxBytes: Long
+      maxBytes: Long,
+      onSent: () => Unit
   ): Either[Failure, List[Array[Byte]]] =
     val messages = mutable.ListBuffer.empty[Array[Byte]]
     val done = new CompletableFuture[List[Array[Byte]]]()
@@ -114,6 +116,7 @@ object StreamRequest extends LazyLogging:
         stream.finish()
         Right(())
       catch case e: Exception => Left(Failure.NotSent(describe(e)))
+    sent.foreach(_ => onSent())
     sent.flatMap { _ =>
       try
         val wait = responseTimeoutMs()
@@ -136,3 +139,15 @@ object StreamRequest extends LazyLogging:
   /** The response messages; None when the peer reset, sent nothing, or did not answer in time. */
   def collect(conn: PeerConnection, kind: Byte, payload: Array[Byte], timeoutMs: Long): Option[List[Array[Byte]]] =
     exchange(conn, kind, Seq(payload), timeoutMs, () => timeoutMs).toOption.filter(_.nonEmpty)
+
+  def collectOrWhy(
+      conn: PeerConnection,
+      kind: Byte,
+      payload: Array[Byte],
+      timeoutMs: Long,
+      onSent: () => Unit
+  ): Either[String, List[Array[Byte]]] =
+    exchange(conn, kind, Seq(payload), timeoutMs, () => timeoutMs, onSent = onSent) match
+      case Left(failure)                 => Left(failure.message)
+      case Right(answer) if answer.isEmpty => Left("refused: no answer")
+      case Right(answer)                 => Right(answer)

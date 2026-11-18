@@ -579,6 +579,8 @@ final case class AccumulationOutputData(
     accumulationStats: Map[ServiceId, ServiceAccumulation] = Map.empty,
     commitments: List[(Long, JamBytes)] = List.empty,
     accumulationTransferCounts: Map[ServiceId, Int] = Map.empty
+)(
+    val accumulateCosts: Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost] = Map.empty
 )
 
 object AccumulationOutputData:
@@ -587,13 +589,13 @@ object AccumulationOutputData:
   given Codec[AccumulationOutputData] =
     compactBytes
       .xmap(
-        ok => AccumulationOutputData(ok),
+        ok => AccumulationOutputData(ok)(),
         a => a.ok
       )
 
   given Decoder[AccumulationOutputData] = Decoder.instance { cursor =>
     for ok <- cursor.get[String]("ok")
-    yield AccumulationOutputData(JamBytes(parseHex(ok)))
+    yield AccumulationOutputData(JamBytes(parseHex(ok)))()
   }
 
 /** Output from the accumulation STF. Uses generic StfResult type with
@@ -605,7 +607,7 @@ type AccumulationOutput = StfResult[AccumulationOutputData, Nothing]
 object AccumulationOutput:
   given Decoder[AccumulationOutput] = Decoder.instance { cursor =>
     for ok <- cursor.get[String]("ok")
-    yield StfResult.success(AccumulationOutputData(JamBytes(parseHex(ok))))
+    yield StfResult.success(AccumulationOutputData(JamBytes(parseHex(ok)))())
   }
 
 // Custom codec for AccumulationOutput (StfResult[AccumulationOutputData, Nothing])

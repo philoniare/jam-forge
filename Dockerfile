@@ -74,11 +74,21 @@ COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.
 COPY --from=node-builder /build/modules/node/target/scala-3.3.7/jam-node.jar /app/
 
 ENV LD_LIBRARY_PATH=/app/lib
+# The node runs as an unprivileged user, uid and gid 10001, which owns /data. A host directory mounted there must be
+# writable by it (chown -R 10001:10001 <dir>, or run with --user set to the directory's owner); so must a volume made
+# by an earlier image that ran as root.
+RUN groupadd --system --gid 10001 jam \
+    && useradd --system --uid 10001 --gid jam --home-dir /data --no-create-home --shell /usr/sbin/nologin jam \
+    && mkdir -p /data \
+    && chown jam:jam /data
 # Node data (chain, keys, downloaded spec) lives in /data; a later --data overrides it.
 VOLUME ["/data"]
 # JAMNP-S (QUIC); publish with -p 40000:40000/udp or run with --network host.
 EXPOSE 40000/udp
-# With the recompiler library named here guest code runs natively; -Djam.pvm.executionMode=interpreted turns that off.
+# Numeric, so a runtime that requires a non-root user (Kubernetes runAsNonRoot) can tell it is one.
+USER 10001:10001
+# With the recompiler library named here guest code runs natively; --pvm-backend interpreter turns that off.
+# Metrics (--metrics-port N) listen on loopback unless --metrics-listen-ip 0.0.0.0 is given too.
 ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-Djam.pvm.recompiler.lib=/app/lib/libpvm_recompiler.so", "-jar", "/app/jam-node.jar", "--data", "/data"]
 
 # Stage 3: Runtime image (default target: the conformance fuzz target)

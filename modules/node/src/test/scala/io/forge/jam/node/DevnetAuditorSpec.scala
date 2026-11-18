@@ -306,8 +306,9 @@ class DevnetAuditorSpec extends AnyFunSuite with Matchers with NodeFixture:
       auditorA.auditReport(tampered) shouldBe false
       auditorB.auditReport(tampered) shouldBe false
 
-      // A restarts. Announcements and judgments are never resent, so what A had recorded for the unfinalized block
-      // must come back with it, and so must its dispute evidence and what it knows of included reports.
+      // A restarts. Announcements and judgments A had taken are not sent to it again, so what it had recorded for the
+      // unfinalized block must come back with it, and so must its dispute evidence and what it knows of included
+      // reports.
       nodeA.pools.addJudgment(reportHash, 0L, 5, false, new Array[Byte](64))
       val announcedBefore = auditorA.announcementsFor(reportHash)
       val judgesBefore = auditorA.judgesOf(reportHash)

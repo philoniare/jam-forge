@@ -17,7 +17,8 @@ import io.forge.jam.vrfs.BandersnatchWrapper
 import spire.math.UInt
 
 /** Authors blocks when one of this node's validator keys owns the sealing
-  * slot
+  * slot. `guard` is asked before a block is made for a slot and once it is sealed: a node's guard
+  * ([[EquivocationGuard]]) keeps it from sealing two blocks for one slot.
   */
 final class BlockAuthor(
     chain: ChainReader,
@@ -25,7 +26,8 @@ final class BlockAuthor(
     pools: ExtrinsicPools = new ExtrinsicPools,
     /** Own tickets (id bytes → keys, attempt), populated by TicketService. */
     ownTickets: java.util.concurrent.ConcurrentHashMap[Hash, (ValidatorKeySet, spire.math.UByte)] =
-      new java.util.concurrent.ConcurrentHashMap()
+      new java.util.concurrent.ConcurrentHashMap(),
+    guard: AuthoringGuard = AuthoringGuard.none
 ) extends LazyLogging:
 
   private val ourBandersnatchKeys: Map[BandersnatchPublicKey, ValidatorKeySet] =
@@ -63,11 +65,12 @@ final class BlockAuthor(
     Option(ownTickets.get(id)).orElse(derivedTicketIds(sealEntropy).get(id))
 
   /** Try to author a block for `slot` on top of the current best head.
-    * Returns the block when one of our keys owns the slot.
+    * Returns the block when one of our keys owns the slot and the guard lets it be sealed.
     */
   def tryAuthor(slot: Long, withDisputes: Boolean = true): Option[Block] =
     val best = chain.best
     if slot <= best.slot then return None
+    if !guard.mayAuthor(slot) then return None
 
     val preView = chain.stateViewOf(best)
     if slot <= preView.timeslot then return None
@@ -194,6 +197,7 @@ final class BlockAuthor(
       disputes = disputes.dispute,
       slot = slot,
       parent = best.hash,
+      parentStateRoot = best.stateRoot,
       assurances = pools.takeAssurances(best.hash),
       guarantees = pools.guaranteesByArrival,
       ancestry = ancestors,
@@ -248,6 +252,9 @@ final class BlockAuthor(
     val seal =
       BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
     val block = Block(unsealed.copy(seal = JamBytes(seal)), extrinsic)
+    if !guard.sealing(slot, Hashing.blake2b256(headerCodec.encode(block.header)), block) then
+      logger.warn(s"block for slot $slot sealed but not released: this node may no longer author the slot")
+      return None
 
     pools.removeTickets(includedTickets.map(_._1))
     logger.info(

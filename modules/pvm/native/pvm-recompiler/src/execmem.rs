@@ -25,20 +25,14 @@ impl ExecMem {
         let len = (code.len() + page - 1) & !(page - 1);
 
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT;
+        let (flags, prot) = (
+            libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+        );
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
+        let (flags, prot) = (libc::MAP_PRIVATE | libc::MAP_ANON, libc::PROT_READ | libc::PROT_WRITE);
 
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                flags,
-                -1,
-                0,
-            )
-        };
+        let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0) };
         if ptr == libc::MAP_FAILED {
             return None;
         }
@@ -55,6 +49,10 @@ impl ExecMem {
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
                 std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+                if libc::mprotect(ptr, len, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                    libc::munmap(ptr, len);
+                    return None;
+                }
                 dynasmrt::cache_control::synchronize_icache(std::slice::from_raw_parts(ptr as *const u8, code.len()));
             }
         }
@@ -72,5 +70,29 @@ impl Drop for ExecMem {
         unsafe {
             libc::munmap(self.ptr, self.len);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn protection_of(addr: usize) -> Option<String> {
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        maps.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (lo, hi) = fields.next()?.split_once('-')?;
+            let perms = fields.next()?;
+            let (lo, hi) = (usize::from_str_radix(lo, 16).ok()?, usize::from_str_radix(hi, 16).ok()?);
+            (lo <= addr && addr < hi).then(|| perms.to_string())
+        })
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn emitted_code_is_executable_and_not_writable() {
+        let mem = ExecMem::from_code(&[0xc3; 16]).expect("mapped");
+        assert_eq!(protection_of(mem.as_ptr() as usize).as_deref(), Some("r-xp"));
     }
 }

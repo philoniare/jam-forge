@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
@@ -12,6 +12,7 @@ import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.core.types.workpackage.{AvailabilityAssignment, WorkReport}
 import io.forge.jam.crypto.{BandersnatchVrf, Ed25519ZebraWrapper}
+import io.forge.jam.network.{Loopback, MessageStream, PeerConnection, PeerStreamHandler, StreamKind}
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.vrfs.BandersnatchWrapper
 import org.scalatest.funsuite.AnyFunSuite
@@ -27,9 +28,12 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private final class FakeChain(real: ChainManager, block: Block, blockHash: Hash, report: WorkReport) extends ChainReader:
     @volatile var parentStateMissing = false
+
+    @volatile var bestSlot: Option[Long] = None
+    @volatile var finalizedSlot: Option[Long] = None
     def config: ChainConfig = real.config
-    def best: ChainHead = real.best
-    def finalized: ChainHead = real.finalized
+    def best: ChainHead = bestSlot.fold(real.best)(s => real.best.copy(slot = s))
+    def finalized: ChainHead = finalizedSlot.fold(real.finalized)(s => real.finalized.copy(slot = s))
     def nextBlockSlot: Long = real.nextBlockSlot
     def hasBlock(h: Hash): Boolean = h == blockHash || real.hasBlock(h)
     def block(h: Hash): Option[Block] = if h == blockHash then Some(block) else real.block(h)
@@ -51,7 +55,7 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
     private[node] def ancestorsOf(parent: Hash, parentPostRoot: Hash, slot: Long) = real.ancestorsOf(parent, parentPostRoot, slot)
 
   private final class Fixture(
-      val auditor: AuditorService,
+      make: () => AuditorService,
       val chain: FakeChain,
       val store: InMemoryRoleStore,
       val block: Block,
@@ -59,9 +63,21 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       val report: Hash,
       val now: AtomicLong,
       ticks: AtomicInteger,
-      hold: Hold
+      hold: Hold,
+      distribution: DistributionService
   ):
+    @volatile var auditor: AuditorService = make()
     val items: Seq[(Int, Hash)] = Seq(0 -> report)
+
+    def restart(): Unit =
+      auditor.shutdown()
+      auditor = make()
+
+    def connect(keys: ValidatorKeySet, failFirst: Int = 0): Peer =
+      val peer = new Peer
+      val (toPeer, _) = Loopback.pair(new Array[Byte](32), keys.ed25519Public, _ => None, peer.handlers)
+      distribution.trackConnection(new Flaky(toPeer, new AtomicInteger(failFirst), peer.opens))
+      peer
     val y: Array[Byte] = BandersnatchVrf.getVrfOutput(block.header.entropySource.toArray).get
 
     def at(n: Int): Unit = now.set(n * TrancheSeconds * 1000L + 1000L)
@@ -108,6 +124,39 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
     def judge(v: Int, valid: Boolean = true): Unit =
       auditor.receiveJudgment(AuditFlood.judgment(v, devKeys(v), report, valid))
 
+  private final class Peer:
+    val announcements = new ConcurrentLinkedQueue[(Array[Byte], Array[Byte])]()
+    val judgments = new ConcurrentLinkedQueue[Array[Byte]]()
+    val opens = new AtomicInteger()
+    def received: (Int, Int) = (announcements.size, judgments.size)
+    val handlers: Byte => Option[PeerStreamHandler] = kind =>
+      if kind == StreamKind.AuditAnnouncement then
+        Some((_: PeerConnection, stream: MessageStream) =>
+          val parts = scala.collection.mutable.ListBuffer.empty[Array[Byte]]
+          stream.onMessage { m =>
+            parts += m
+            if parts.size == 2 then
+              announcements.add((parts(0), parts(1)))
+              stream.finish()
+          }
+          ()
+        )
+      else if kind == StreamKind.JudgmentPublication then
+        Some((_: PeerConnection, stream: MessageStream) =>
+          stream.onMessage { m => judgments.add(m); stream.finish() }
+          ()
+        )
+      else None
+
+  private final class Flaky(inner: PeerConnection, failures: AtomicInteger, opens: AtomicInteger) extends PeerConnection:
+    export inner.{initiator, openedAtMillis, peerKey, peerPublicKey, negotiatedAlpn, holdInbound, releaseInbound}
+    export inner.{heldInboundBytes, pendingOutboundBytes, droppedOutboundMessages, close, isOpen, openStreamCount}
+    export inner.remoteAddress
+    def openStream(kind: Byte): CompletableFuture[? <: MessageStream] =
+      opens.incrementAndGet()
+      if failures.getAndDecrement() > 0 then CompletableFuture.failedFuture(new java.io.IOException("stream refused"))
+      else inner.openStream(kind)
+
   private final class Hold:
     @volatile var latches: Option[(CountDownLatch, CountDownLatch)] = None
     def apply(): Unit = latches.foreach { (entered, release) =>
@@ -124,7 +173,8 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private def withAuditorKeys(
       ownKeys: Seq[ValidatorKeySet],
-      vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte]
+      vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte],
+      audit: Option[WorkReport => Option[Boolean]] = None
   )(body: Fixture => Unit): Unit =
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(
@@ -170,22 +220,25 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
           hold()
         now.get
       val store = new InMemoryRoleStore
-      val auditor = new AuditorService(
-        chain,
-        node.distribution,
-        node.shards,
-        node.pools,
-        ownKeys,
-        egress,
-        trancheOrigin = (_, _) => 0L,
-        clock = clock,
-        tickMillis = TickMillis,
-        store = store,
-        threads = threads,
-        vrfSign = vrfSign
-      )
-      try body(Fixture(auditor, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold))
-      finally auditor.shutdown()
+      val make = () =>
+        new AuditorService(
+          chain,
+          node.distribution,
+          node.shards,
+          node.pools,
+          ownKeys,
+          egress,
+          trancheOrigin = (_, _) => 0L,
+          clock = clock,
+          tickMillis = TickMillis,
+          store = store,
+          threads = threads,
+          vrfSign = vrfSign,
+          audit = audit
+        )
+      val f = Fixture(make, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold, node.distribution)
+      try body(f)
+      finally f.auditor.shutdown()
     finally
       threads.close()
       egress.shutdownNow()
@@ -393,5 +446,87 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       f.at(2)
       (0 until 20).foreach(_ => f.settle())
       later.get shouldBe 2
+    }
+  }
+
+
+  private def withOwnJudgment(audits: AtomicInteger = new AtomicInteger())(body: Fixture => Unit): Unit =
+    val audit: WorkReport => Option[Boolean] = _ => { audits.incrementAndGet(); Some(true) }
+    withAuditorKeys(Seq(devKeys(1)), BandersnatchWrapper.ietfVrfSign, Some(audit)) { f =>
+      f.track()
+      f.settle()
+      eventually("our positive judgment") { f.drain(); f.auditor.judgesOf(f.report)._1 == Set(1) }
+      f.auditor.announcersOf(f.report, 0) shouldBe Set(1)
+      body(f)
+    }
+
+  private def checkOurs(f: Fixture, peer: Peer): Unit =
+    val (head, evidence) = peer.announcements.peek
+    head.toSeq shouldBe encodeHead(f.blockHash, 0, f.announcement(1, 0)).toSeq
+    BandersnatchVrf.ietfVrfVerify(devKeys(1).bandersnatchPublic, initialInput(f.y), Array.emptyByteArray, evidence)
+      .isDefined shouldBe true
+    peer.judgments.peek.toSeq shouldBe AuditFlood.judgment(1, devKeys(1), f.report, valid = true).toSeq
+
+  test("our announcement and judgment reach a validator that connects after they were made, once while finality keeps up") {
+    withOwnJudgment() { f =>
+      val late = f.connect(devKeys(2))
+      eventually("both to reach the validator that connected late")(late.received == (1, 1))
+      checkOurs(f, late)
+      (0 until 10).foreach(_ => f.settle())
+      late.received shouldBe (1, 1)
+      val other = f.connect(ValidatorKeySet.dev(9))
+      (0 until 10).foreach(_ => f.settle())
+      other.received shouldBe (0, 0)
+    }
+  }
+
+  test("a send that failed is tried again after a back-off") {
+    withOwnJudgment() { f =>
+      val flaky = f.connect(devKeys(3), failFirst = 2)
+      eventually("both sends to fail")(flaky.opens.get >= 2)
+      (0 until 5).foreach(_ => f.settle())
+      flaky.received shouldBe (0, 0)
+      flaky.opens.get shouldBe 2 // not again before the back-off
+      f.now.addAndGet(AuditorService.ResendBaseMillis)
+      eventually("the retries to get through")(flaky.received == (1, 1))
+      checkOurs(f, flaky)
+    }
+  }
+
+  test("while finality lags they go to every connected validator again at a short interval; once finalized, to nobody") {
+    withOwnJudgment() { f =>
+      val peer = f.connect(devKeys(2))
+      eventually("the first sends")(peer.received == (1, 1))
+      f.now.addAndGet(AuditorService.LagResendMillis)
+      (0 until 5).foreach(_ => f.settle())
+      peer.received shouldBe (1, 1) // finality keeps up: delivered once is enough
+      f.chain.bestSlot = Some(f.block.header.slot.toLong + AuditorService.FinalityLagSlots + 1)
+      eventually("a resend while finality lags")(peer.received == (2, 2))
+      (0 until 5).foreach(_ => f.settle())
+      peer.received shouldBe (2, 2)
+      f.now.addAndGet(AuditorService.LagResendMillis)
+      eventually("another resend")(peer.received == (3, 3))
+      f.chain.finalizedSlot = Some(f.block.header.slot.toLong)
+      f.settle()
+      val sent = peer.received
+      val after = f.connect(devKeys(3))
+      f.now.addAndGet(2 * AuditorService.LagResendMillis)
+      (0 until 10).foreach(_ => f.settle())
+      peer.received shouldBe sent
+      after.received shouldBe (0, 0)
+    }
+  }
+
+  test("after a restart our judgment of an unfinalized block is sent again, without auditing it again") {
+    val audits = new AtomicInteger()
+    withOwnJudgment(audits) { f =>
+      f.restart()
+      f.track()
+      f.settle()
+      val peer = f.connect(devKeys(2))
+      eventually("our announcement and judgment after the restart")(peer.received._1 >= 1 && peer.received._2 >= 1)
+      checkOurs(f, peer)
+      audits.get shouldBe 1
+      f.auditor.auditedStateConsistent shouldBe true
     }
   }

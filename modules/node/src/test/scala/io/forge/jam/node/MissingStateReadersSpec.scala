@@ -71,6 +71,23 @@ class MissingStateReadersSpec extends AnyFunSuite with Matchers with LoopbackFix
     }
   }
 
+  test("refine lookup: a preimage found once is not read from the anchor's state again for the same package") {
+    withNodes(1, "lookup-cache") { nodes =>
+      val node = nodes.head
+      author(nodes, 1 to 2)
+      val best = node.chain.best
+      val code = node.chain.stateViewOf(best).accumulation.serviceAccounts.find(_.id == 0).get.data.service.codeHash
+      val lookup = new StateHistoricalLookup(node.chain).forAnchor(best.stateRoot)
+      val first = lookup.historicalLookup(0L, best.slot, code)
+      first shouldBe defined
+      val root = node.chain.stateBackendForTesting.readNode(best.stateRoot).get
+      node.chain.stateBackendForTesting.loseNodesForTesting(Hash.wrapUnchecked(root.left.toArrayUnsafe))
+      node.chain.stateBackendForTesting.loseNodesForTesting(Hash.wrapUnchecked(root.right.toArrayUnsafe))
+      lookup.historicalLookup(0L, best.slot, code).map(_.toSeq) shouldBe first.map(_.toSeq)
+      lookup.anchorLost shouldBe false
+    }
+  }
+
   test("BEEFY: a commitment on a block whose state is no longer whole is not acted on, and nothing escapes") {
     withBrokenBest("missing-state-beefy") { (node, best) =>
       val beefy = new BeefyService(node.chain, node.distribution, None)

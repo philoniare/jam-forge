@@ -45,6 +45,7 @@ object AuthoringPlan:
       disputes: Dispute,
       slot: Long,
       parent: Hash,
+      parentStateRoot: Hash,
       assurances: List[AssuranceExtrinsic],
       guarantees: List[GuaranteeExtrinsic],
       ancestry: List[AncestorHeader],
@@ -65,7 +66,7 @@ object AuthoringPlan:
       else singlyValid.foldLeft(List.empty[AssuranceExtrinsic])((acc, a) => if assure(acc :+ a)._2.isRight then acc :+ a else acc)
     AssuranceBridge.apply(view, assure(chosenAssurances)._1)
 
-    // 4. Reports, on the cores as the assurances left them.
+    io.forge.jam.protocol.pipeline.BlockPipeline.recordParentStateRoot(view, parentStateRoot)
     val reportPre = ReportBridge.extract(view)
     def report(gs: List[GuaranteeExtrinsic]) =
       ReportTransition.stfInternal(

@@ -3,7 +3,7 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorService, TimeUnit}
 
 import com.typesafe.scalalogging.LazyLogging
-import io.forge.jam.core.{Hashing, constants}
+import io.forge.jam.core.{Hashing, JamBytes, constants}
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
 import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Block
@@ -43,7 +43,10 @@ final class AuditorService(
     misbehaved: (Array[Byte], Offence) => Unit = (_, _) => (),
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
-    vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte] = BandersnatchWrapper.ietfVrfSign
+    vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte] = BandersnatchWrapper.ietfVrfSign,
+    audit: Option[WorkReport => Option[Boolean]] = None,
+    finalityLagSlots: Long = AuditorService.FinalityLagSlots,
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -90,6 +93,11 @@ final class AuditorService(
 
     val laterSignatures = mutable.Map.empty[(Int, Hash), Array[Byte]]
     var laterSignedFor: Int = -1
+
+    val outgoing = mutable.LinkedHashMap.empty[(Int, Int), AuditorService.Outgoing]
+
+    lazy val auditorKeys: Set[JamBytes] = validators.iterator.map(JamBytes(_)).toSet
+
     def available: Seq[(Int, WorkReport, Hash)] =
       q.indices.flatMap(c => q(c).zip(reportHashes(c)).map((w, h) => (c, w, h)))
 
@@ -113,6 +121,10 @@ final class AuditorService(
 
   /** Peer messages waiting for the audit thread. */
   private[node] def queuedMessages: Int = intake.queued
+
+  private val auditsDoneCount = new java.util.concurrent.atomic.AtomicLong()
+
+  def auditsDone: Long = auditsDoneCount.get
   private val tracked = mutable.LinkedHashMap.empty[Hash, Tracked]
   private val positive = mutable.Map.empty[Hash, mutable.Set[Int]]
   private val negative = mutable.Map.empty[Hash, mutable.Set[Int]]
@@ -120,6 +132,8 @@ final class AuditorService(
 
   /** Tracked blocks already disregarded: fork choice is told once, not at every tick. */
   private val disregarded = mutable.Set.empty[Hash]
+
+  private val ownJudgments = mutable.LinkedHashMap.empty[(Hash, Int), AuditorService.Outgoing]
 
   /** Announcements for blocks we do not track yet, per announcing peer and by (block, tranche), oldest first: at
     * most [[AuditorService.PendingAnnouncementsPerPeer]] per validator of the sets around the head.
@@ -232,24 +246,41 @@ final class AuditorService(
   private var recordsDroppedTo = -1L
 
   private def restore(t: Tracked): Unit =
-    val own = ownIndices(t).map(_._1).toSet
+    val own = ownIndices(t).toMap
+    val ownHeads = mutable.Map.empty[(Int, Int), Array[Byte]]
+    val ownEvidence = mutable.Map.empty[(Int, Int), Array[Byte]]
+    def rest(b: java.nio.ByteBuffer): Array[Byte] =
+      val out = new Array[Byte](b.remaining)
+      b.get(out)
+      out
     store.scan(AuditorService.blockPrefix(t.slot, t.hash)).foreach { (_, bytes) =>
       val b = java.nio.ByteBuffer.wrap(bytes)
       val kind = b.get()
       val v = b.getInt
       if kind == AuditorService.AnnouncementRecord then
-        val head = new Array[Byte](b.remaining)
-        b.get(head)
+        val head = rest(b)
         decodeHead(head).foreach { (_, n, a) =>
           remember(t, v, n, a)
-          if own(v) then a.items.foreach((_, h) => t.ours.getOrElseUpdate(v, mutable.Map.empty).put(h, n))
+          if own.contains(v) then
+            a.items.foreach((_, h) => t.ours.getOrElseUpdate(v, mutable.Map.empty).put(h, n))
+            ownHeads.put((n, v), head)
         }
+      else if kind == AuditorService.EvidenceRecord then
+        val n = b.getInt
+        if own.contains(v) then ownEvidence.put((n, v), rest(b))
       else
         val valid = b.get() == 1
-        val report = new Array[Byte](32)
-        b.get(report)
-        (if valid then positive else negative).getOrElseUpdate(Hash(report), mutable.Set.empty) += v
-        if own(v) then verdicts.putIfAbsent(Hash(report), java.lang.Boolean.valueOf(valid)): Unit
+        val report = Hash(rest(b).take(32))
+        (if valid then positive else negative).getOrElseUpdate(report, mutable.Set.empty) += v
+        own.get(v).foreach { keys =>
+          verdicts.putIfAbsent(report, java.lang.Boolean.valueOf(valid))
+          if !ownJudgments.contains((report, v)) then
+            val (_, message) = signJudgment(report, t.epoch, v, keys, valid)
+            ownJudgments.put((report, v), new AuditorService.Outgoing(StreamKind.JudgmentPublication, List(message)))
+        }
+    }
+    ownHeads.foreach { (k, head) =>
+      ownEvidence.get(k).foreach(e => t.outgoing.put(k, new AuditorService.Outgoing(StreamKind.AuditAnnouncement, List(head, e))))
     }
 
   /** q of eq:auditselection: per core, the report in ρ that this block's assurances made available. */
@@ -282,6 +313,7 @@ final class AuditorService(
       t.lastTranche = n
       updateAudited(t, n)
     }
+    resend(finalizedSlot, now)
 
   /** Our keys in the block's prior validator set, by index. */
   private def ownIndices(t: Tracked): Seq[(Int, ValidatorKeySet)] =
@@ -342,18 +374,33 @@ final class AuditorService(
     val a = Announcement(items, sig)
     val mine = t.ours.getOrElseUpdate(v, mutable.Map.empty)
     items.foreach((_, h) => mine.put(h, n))
-    recordAnnouncement(t, v, n, a)
-    val head = encodeHead(t.hash, n, a)
-    distribution.peers.foreach(c => sendTwo(c, StreamKind.AuditAnnouncement, head, evidence))
+    recordAnnouncement(
+      t,
+      v,
+      n,
+      a,
+      List(
+        AuditorService.evidenceKey(t.slot, t.hash, n, v) ->
+          java.nio.ByteBuffer.allocate(9 + evidence.length).put(AuditorService.EvidenceRecord).putInt(v).putInt(n).put(evidence).array()
+      )
+    )
+    val out = new AuditorService.Outgoing(StreamKind.AuditAnnouncement, List(encodeHead(t.hash, n, a), evidence))
+    t.outgoing.put((n, v), out)
+    broadcast(out)
 
-  private def recordAnnouncement(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
+  private def recordAnnouncement(
+      t: Tracked,
+      v: Int,
+      n: Int,
+      a: Announcement,
+      more: List[(String, Array[Byte])] = Nil
+  ): Unit =
     remember(t, v, n, a)
     val head = encodeHead(t.hash, n, a)
     store.write(
-      List(
-        AuditorService.announcementKey(t.slot, t.hash, n, v) ->
-          java.nio.ByteBuffer.allocate(5 + head.length).put(AuditorService.AnnouncementRecord).putInt(v).put(head).array()
-      )
+      (AuditorService.announcementKey(t.slot, t.hash, n, v) ->
+        java.nio.ByteBuffer.allocate(5 + head.length).put(AuditorService.AnnouncementRecord).putInt(v).put(head).array()) ::
+        more
     )
 
   private def remember(t: Tracked, v: Int, n: Int, a: Announcement): Unit =
@@ -374,13 +421,14 @@ final class AuditorService(
         case None if inFlight.add(reportHash) =>
           workers.execute(() =>
             val outcome =
-              try auditOutcome(w)
+              try audit.fold(auditOutcome(w))(_(w))
               catch
                 case e: Exception =>
                   // Our own failure says nothing about the report: no judgment, retried while still tracked.
                   logger.warn(s"audit of ${reportHash.toHex.take(18)} failed: $e"); None
             outcome match
               case Some(valid) =>
+                auditsDoneCount.incrementAndGet()
                 verdicts.put(reportHash, java.lang.Boolean.valueOf(valid))
                 exec.execute(() =>
                   guarded {
@@ -404,8 +452,9 @@ final class AuditorService(
         case None => ()
     }
 
-  /** Stop auditing finalized blocks once audited, or after `GiveUpTranches` without: a node that was cut off missed
-    * the others' announcements and judgments, which are never resent, so it would retry forever and keep their state.
+  /** Stop auditing finalized blocks once audited, or after `GiveUpTranches` without: a node that was cut off may have
+    * missed the others' announcements and judgments, which are not resent once a block is finalized, so it would
+    * retry forever and keep their state.
     */
   private def forgetFinalized(finalizedSlot: Long, now: Long): Unit =
     if finalizedSlot > recordsDroppedTo then
@@ -428,6 +477,9 @@ final class AuditorService(
         gone.foreach { h =>
           positive.remove(h); negative.remove(h); verdicts.remove(h); announcementCounts.remove(h)
         }
+        if gone.nonEmpty then
+          val goneSet = gone.toSet
+          ownJudgments.filterInPlace((k, _) => !goneSet(k._1))
         pools.removeJudgments(gone)
       }
 
@@ -569,7 +621,8 @@ final class AuditorService(
             importSegments = bundle.importSegments,
             extrinsicData = bundle.extrinsicData,
             justifications = bundle.justifications,
-            accounts = anchored
+            accounts = anchored,
+            deadlineMillis = Some(System.currentTimeMillis() + AuditorService.ReExecutionWaitMillis)
           )
           .left
           .map(e => s"re-execution refused: $e")
@@ -589,7 +642,7 @@ final class AuditorService(
       totalBudgetMs: Long = 15000,
       maxPeers: Int = 3
   ): Option[Array[Byte]] =
-    AuditorService.fetchBundleDirect(erasureRoot, peers, totalBudgetMs, maxPeers)
+    AuditorService.fetchBundleDirect(erasureRoot, peers, totalBudgetMs, maxPeers, telemetry)
 
   // =========================================================================
   // CE 144 — audit announcements
@@ -764,9 +817,23 @@ final class AuditorService(
 
   /** Sign, record and send our judgment as validator `v` of the set of `epochIndex`. */
   private def publishJudgment(reportHash: Hash, epochIndex: Long, v: Int, keys: ValidatorKeySet, valid: Boolean): Unit =
+    val (signature, message) = signJudgment(reportHash, epochIndex, v, keys, valid)
+    recordJudgment(reportHash, epochIndex, v, valid, signature, tally = true)
+    val out = new AuditorService.Outgoing(StreamKind.JudgmentPublication, List(message))
+    ownJudgments.put((reportHash, v), out)
+    broadcast(out)
+    if valid then logger.info(s"published positive judgment for ${reportHash.toHex.take(18)} as validator $v")
+    else logger.warn(s"published NEGATIVE judgment for ${reportHash.toHex.take(18)} as validator $v")
+
+  private def signJudgment(
+      reportHash: Hash,
+      epochIndex: Long,
+      v: Int,
+      keys: ValidatorKeySet,
+      valid: Boolean
+  ): (Array[Byte], Array[Byte]) =
     val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
     val signature = Ed25519ZebraWrapper.sign(keys.ed25519Secret, context ++ reportHash.bytes)
-    recordJudgment(reportHash, epochIndex, v, valid, signature, tally = true)
     val epoch = epochIndex.toInt
     val msg = new java.io.ByteArrayOutputStream(103)
     msg.write(epoch & 0xff); msg.write((epoch >> 8) & 0xff)
@@ -775,9 +842,7 @@ final class AuditorService(
     msg.write(if valid then 1 else 0)
     msg.write(reportHash.bytes.toArray)
     msg.write(signature)
-    distribution.peers.foreach(sendOneShot(_, StreamKind.JudgmentPublication, msg.toByteArray))
-    if valid then logger.info(s"published positive judgment for ${reportHash.toHex.take(18)} as validator $v")
-    else logger.warn(s"published NEGATIVE judgment for ${reportHash.toHex.take(18)} as validator $v")
+    (signature, msg.toByteArray)
 
   /** Pool a genuine judgment by validator `v` of the set of `epoch` as dispute evidence, and with `tally` (its
     * epoch is the tracked block's) count it among the positive or negative judgments.
@@ -863,7 +928,8 @@ final class AuditorService(
     else logger.warn(s"bad CE145 length ${msg.length}")
 
   /** Keep a genuine judgment whose report no tracked block holds: the block that makes the report available may
-    * not be imported yet, and judgments are not resent. Anyone can replay a validator's old judgments and a
+    * not be imported yet, and a judgment taken is not sent to us again (unless finality lags). Anyone can replay a
+    * validator's old judgments and a
     * validator can sign any hash, so each validator's oldest goes when it has more than a few waiting.
     */
   private def keepJudgment(reportHash: Hash, epoch: Long, v: Int, valid: Boolean, signature: Array[Byte]): Unit =
@@ -928,33 +994,50 @@ final class AuditorService(
   // helpers
   // =========================================================================
 
-  /** Two messages then FIN on a fresh stream (CE 144). */
-  private def sendTwo(conn: PeerConnection, kind: Byte, first: Array[Byte], second: Array[Byte]): Unit =
+  private def broadcast(out: AuditorService.Outgoing): Unit =
+    val now = clock()
+    distribution.peers.foreach(send(out, _, now))
+
+  private def send(out: AuditorService.Outgoing, conn: PeerConnection, now: Long): Unit =
+    val key = JamBytes(conn.peerKey)
+    val connection = conn.openedAtMillis
+    out.begin(key, connection, now)
     OneShotSend.submit(
       egress,
       conn,
-      () => conn.openStream(kind),
-      List(first, second),
-      why => logger.debug(s"send on ${StreamKind.name(kind)} failed: $why")
+      () => conn.openStream(out.kind),
+      out.messages,
+      why => logger.debug(s"send on ${StreamKind.name(out.kind)} to ${key.toHex.take(16)} failed: $why"),
+      () => logger.debug(s"egress rejected ${StreamKind.name(out.kind)} send (shutting down)"),
+      settled = sent => out.settle(key, connection, sent, clock())
     )
 
-  private def sendOneShot(conn: PeerConnection, kind: Byte, payload: Array[Byte]): Unit =
-    submitSend(() => conn.openStream(kind), kind, payload, conn)
-
-  private[node] def submitSend(
-      open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
-      kind: Byte,
-      payload: Array[Byte],
-      peer: AnyRef = null
-  ): Unit =
-    OneShotSend.submit(
-      egress,
-      peer,
-      open,
-      List(payload),
-      why => logger.warn(s"send on ${StreamKind.name(kind)} failed: $why"),
-      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
-    )
+  private def resend(finalizedSlot: Long, now: Long): Unit =
+    if ownJudgments.nonEmpty || tracked.valuesIterator.exists(_.outgoing.nonEmpty) then
+      val best = chain.best
+      val bestEpoch = best.slot / chain.config.epochLength
+      val live = tracked.valuesIterator.filter(t => t.slot > finalizedSlot && t.epoch + 1 >= bestEpoch).toList
+      val conns = if live.isEmpty then Nil else distribution.openConnections
+      if conns.nonEmpty then
+        val lagging = best.slot - finalizedSlot > finalityLagSlots
+        val targets = conns.flatMap { c =>
+          val key = JamBytes(c.peerKey)
+          Option.when(live.exists(_.auditorKeys(key)) || isValidator(c.peerPublicKey))((c, key))
+        }
+        var budget = AuditorService.MaxResendsPerTick
+        def offer(out: AuditorService.Outgoing): Unit =
+          targets.foreach { (c, key) =>
+            if budget > 0 && out.due(key, c.openedAtMillis, now, lagging) then
+              budget -= 1
+              send(out, c, now)
+          }
+        live.foreach(_.outgoing.valuesIterator.foreach(offer))
+        if ownJudgments.nonEmpty then
+          val liveReports = live.iterator.flatMap(_.reportSet).toSet
+          ownJudgments.foreach((k, out) => if liveReports(k._1) then offer(out))
+        val sent = AuditorService.MaxResendsPerTick - budget
+        if sent > 0 then
+          logger.debug(s"resent $sent audit announcement(s) and judgment(s)${if lagging then " (finality lags)" else ""}")
 
 object AuditorService extends LazyLogging:
   /** How long an audit waits for its re-execution on the refine pool, queueing included: several tranches. A pool
@@ -965,14 +1048,70 @@ object AuditorService extends LazyLogging:
   /** Audits fetching their bundles at once. */
   val FetchThreads: Int = 4
 
+  val FinalityLagSlots: Long = 10L
+
+  val ResendBaseMillis: Long = 2_000L
+  val ResendMaxMillis: Long = 64_000L
+
+  val LagResendMillis: Long = 4_000L
+
+  val MaxResendsPerTick: Int = 256
+
   private val RecordPrefix = "role:audit:"
   private val AnnouncementRecord: Byte = 0
   private val TallyRecord: Byte = 1
+
+  private val EvidenceRecord: Byte = 2
 
   private def blockPrefix(slot: Long, block: Hash): String = f"$RecordPrefix$slot%016x:${block.toHex}:"
 
   private def announcementKey(slot: Long, block: Hash, tranche: Int, validator: Int): String =
     f"${blockPrefix(slot, block)}a:$tranche%02x:$validator%04x"
+
+  private def evidenceKey(slot: Long, block: Hash, tranche: Int, validator: Int): String =
+    f"${blockPrefix(slot, block)}e:$tranche%02x:$validator%04x"
+
+  private[node] final class Outgoing(val kind: Byte, val messages: List[Array[Byte]]):
+    private val peers = new ConcurrentHashMap[JamBytes, Outgoing.Peer]()
+
+    def due(key: JamBytes, connection: Long, now: Long, lagging: Boolean): Boolean =
+      val p = peers.get(key)
+      if p == null then true
+      else if p.sending then false
+      else if lagging then now - p.sentAt >= LagResendMillis
+      else if p.delivered then p.connection != connection
+      else now >= p.retryAt
+
+    def begin(key: JamBytes, connection: Long, now: Long): Unit =
+      peers.compute(
+        key,
+        (_, p) => Option(p).getOrElse(Outgoing.Fresh).copy(sending = true, sentAt = now, connection = connection)
+      ): Unit
+
+    def settle(key: JamBytes, connection: Long, sent: Boolean, now: Long): Unit =
+      peers.computeIfPresent(
+        key,
+        (_, p) =>
+          if p.connection != connection then p.copy(sending = false)
+          else if sent then p.copy(sending = false, delivered = true, failures = 0)
+          else
+            val failures = p.failures + 1
+            p.copy(sending = false, delivered = false, failures = failures, retryAt = now + backoff(failures))
+      ): Unit
+
+  private[node] object Outgoing:
+    private[AuditorService] final case class Peer(
+        connection: Long,
+        sending: Boolean,
+        delivered: Boolean,
+        sentAt: Long,
+        retryAt: Long,
+        failures: Int
+    )
+    private val Fresh = Peer(0L, sending = false, delivered = false, sentAt = 0L, retryAt = 0L, failures = 0)
+
+  private[node] def backoff(failures: Int): Long =
+    math.min(ResendMaxMillis, ResendBaseMillis << math.min(math.max(failures - 1, 0), 16))
 
   private def tallyKey(slot: Long, block: Hash, report: Hash, validator: Int): String =
     f"${blockPrefix(slot, block)}j:${report.toHex}:$validator%04x"
@@ -1037,14 +1176,15 @@ object AuditorService extends LazyLogging:
       erasureRoot: Hash,
       peers: Iterable[PeerConnection],
       totalBudgetMs: Long = 15000,
-      maxPeers: Int = 3
+      maxPeers: Int = 3,
+      telemetry: Option[Telemetry] = None
   ): Option[Array[Byte]] =
     val deadline = System.currentTimeMillis() + totalBudgetMs
     val perPeer = totalBudgetMs / math.max(1, maxPeers)
     val candidates = peers.iterator.filter(_.isOpen).take(maxPeers)
     var result: Option[Array[Byte]] = None
     while result.isEmpty && candidates.hasNext && System.currentTimeMillis() < deadline do
-      result = fetchBundleFrom(candidates.next(), erasureRoot, math.min(deadline, System.currentTimeMillis() + perPeer))
+      result = fetchBundleFrom(candidates.next(), erasureRoot, math.min(deadline, System.currentTimeMillis() + perPeer), telemetry)
     result
 
   /** One CE 147 request/response attempt against `conn`, bounded by the
@@ -1057,10 +1197,12 @@ object AuditorService extends LazyLogging:
   private[node] def fetchBundleFrom(
       conn: PeerConnection,
       erasureRoot: Hash,
-      deadline: Long
+      deadline: Long,
+      telemetry: Option[Telemetry] = None
   ): Option[Array[Byte]] =
     def left = deadline - System.currentTimeMillis()
-    StreamRequest
+    val sending = telemetry.flatMap(_.sendingBundleRequest(conn.peerKey))
+    val got = StreamRequest
       .exchange(
         conn,
         StreamKind.BundleRequest,
@@ -1068,7 +1210,11 @@ object AuditorService extends LazyLogging:
         left,
         () => left,
         StreamRequest.Until.FirstMessage,
-        maxMessages = 1
+        maxMessages = 1,
+        onSent = () => telemetry.foreach(_.bundleRequestSent(sending))
       )
-      .toOption
-      .flatMap(_.headOption) // empty: the peer holds nothing, or declined
+      .left
+      .map(_.message)
+      .flatMap(_.headOption.toRight("refused: no bundle")) // empty: the peer holds nothing, or declined
+    telemetry.foreach(t => got.fold(why => t.bundleRequestFailed(sending, why), _ => t.bundleTransferred(sending)))
+    got.toOption

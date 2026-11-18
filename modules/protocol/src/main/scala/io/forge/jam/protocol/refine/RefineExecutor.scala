@@ -16,7 +16,8 @@ import io.forge.jam.protocol.pvmhost.ServiceCode
 final case class RefineResult(
     result: ExecutionResult,
     exports: List[Array[Byte]],
-    gasUsed: Long
+    gasUsed: Long,
+    cost: io.forge.jam.protocol.pvmhost.RefineCost = io.forge.jam.protocol.pvmhost.RefineCost.zero
 )
 
 /** Executes the Refine invocation function Psi_R: resolves the work item's code via
@@ -48,7 +49,31 @@ class RefineExecutor(val config: ChainConfig):
       importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
       extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
       exportSegmentOffset: Long,
-      accounts: HistoricalLookupService
+      accounts: HistoricalLookupService,
+      deadlineMillis: Option[Long] = None
+  ): RefineResult =
+    val probe = new io.forge.jam.protocol.pvmhost.RunProbe
+    val r = run(
+      coreIndex, workItemIndex, workPackage, authorizerTrace, importSegments, extrinsicData, exportSegmentOffset,
+      accounts, deadlineMillis, probe
+    )
+    val total = io.forge.jam.protocol.pvmhost.ExecCost(r.gasUsed, probe.elapsedNanos)
+    RefineResult(r.result, r.exports, r.gasUsed,
+      if probe.meter == null then io.forge.jam.protocol.pvmhost.RefineCost.zero.copy(total = total, compileNanos = probe.compileNanos)
+      else io.forge.jam.protocol.pvmhost.RefineCost.of(total, probe.compileNanos, probe.meter)
+    )
+
+  private def run(
+      coreIndex: Int,
+      workItemIndex: Int,
+      workPackage: WorkPackage,
+      authorizerTrace: Array[Byte],
+      importSegments: IndexedSeq[IndexedSeq[Array[Byte]]],
+      extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
+      exportSegmentOffset: Long,
+      accounts: HistoricalLookupService,
+      deadlineMillis: Option[Long],
+      probe: io.forge.jam.protocol.pvmhost.RunProbe
   ): RefineResult =
     val workItem = workPackage.items(workItemIndex)
     val serviceId = workItem.service.toLong
@@ -97,6 +122,7 @@ class RefineExecutor(val config: ChainConfig):
         // Psi_M: Y(p, a) = none → panic with zero gas used.
         return RefineResult(ExecutionResult.Panic, Nil, 0L)
       case Some(m) => m
+    probe.codeReady()
 
     val context = new RefineContext(
       config = config,
@@ -114,9 +140,19 @@ class RefineExecutor(val config: ChainConfig):
     val gasLimit =
       val limit = workItem.refineGasLimit.toLong
       if limit < 0 then Long.MaxValue else limit
-    val hostCalls = new RefineHostCalls(context)
+    val hostCalls = new io.forge.jam.protocol.pvmhost.HostCallMeter(
+      new RefineHostCalls(context),
+      io.forge.jam.protocol.pvmhost.RefineCost.category,
+      5
+    )
+    probe.meter = hostCalls
     val (exitReason, gasUsed, output) =
-      PvmRunner.run(module, inputData, gasLimit, entryPc = 0, hostCalls)
+      PvmRunner.run(
+        module, inputData, gasLimit, entryPc = 0, hostCalls,
+        preDispatch = deadlineMillis.map(d => () => if System.currentTimeMillis() > d then throw new ComputeReport.DeadlinePassed(d)),
+        memoryBudget = io.forge.jam.pvm.memory.InstanceMemoryBudget.inCore,
+        abstainOnInternalError = true
+      )
 
     exitReason match
       case PvmRunner.PvmExit.OutOfGas =>

@@ -7,6 +7,7 @@ import io.forge.jam.core.primitives.{Gas, Hash, ServiceId}
 import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.AccumulationBridge
+import io.forge.jam.protocol.pvmhost.AccumulateCost
 
 import scala.collection.mutable
 
@@ -56,7 +57,7 @@ object AccumulationTransition:
           config = config
         )
         view.accumulation.accumulated = rotateAccumulated(accumulated, Set.empty, config)
-        Some(StfResult.success(AccumulationOutputData(KeccakCommitmentMerkle.computeCommitmentRoot(Set.empty))))
+        Some(StfResult.success(AccumulationOutputData(KeccakCommitmentMerkle.computeCommitmentRoot(Set.empty))()))
 
   private[accumulation] def accumulate(
       input: AccumulationInput,
@@ -187,7 +188,7 @@ object AccumulationTransition:
           assembled.accumulationStats,
           commitmentsList,
           assembled.accumulationTransferCounts
-        )
+        )(assembled.costs)
       )
     )(assembled.removedAccounts)
 
@@ -397,7 +398,8 @@ object AccumulationTransition:
       state: AccumulationState,
       accumulationStats: Map[ServiceId, ServiceAccumulation],
       accumulationTransferCounts: Map[ServiceId, Int],
-      removedAccounts: Set[Long]
+      removedAccounts: Set[Long],
+      costs: Map[Long, AccumulateCost]
   )
 
   private def assemblePostState(
@@ -485,11 +487,18 @@ object AccumulationTransition:
     val removedAccounts = newPartialState.accounts match
       case changed: LazyAccounts => changed.removedIds.toSet
       case _                     => Set.empty[Long]
+    val costs = outerResult.costs.map { (serviceId, cost) =>
+      serviceId -> cost.copy(
+        transfers = transferCountsPerService.getOrElse(serviceId, 0),
+        items = workItemsPerService.getOrElse(serviceId, 0)
+      )
+    }
     AssembledPostState(
       state = finalState,
       accumulationStats = accumulationStats,
       accumulationTransferCounts = accumulationTransferCounts,
-      removedAccounts = removedAccounts
+      removedAccounts = removedAccounts,
+      costs = costs
     )
 
   /** Edit ready queue records by removing accumulated reports and pruning
@@ -545,7 +554,8 @@ object AccumulationTransition:
       gasUsedMap: Map[Long, Long],
       commitments: Set[Commitment],
       privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty,
-      transferCountMap: Map[Long, Int] = Map.empty
+      transferCountMap: Map[Long, Int] = Map.empty,
+      costs: Map[Long, AccumulateCost] = Map.empty
   )
 
   /** Snapshot of privilege state values at a point in time. Also includes
@@ -694,7 +704,8 @@ object AccumulationTransition:
       gasUsedMap = mergedGasUsed,
       commitments = parallelResult.commitments ++ outerResult.commitments,
       privilegeSnapshots = mergedSnapshots,
-      transferCountMap = mergedTransferCounts
+      transferCountMap = mergedTransferCounts,
+      costs = mergeBy(parallelResult.costs, outerResult.costs)(_ + _)
     )
 
   /** Result of parallel accumulation execution.
@@ -704,7 +715,8 @@ object AccumulationTransition:
       gasUsedMap: Map[Long, Long],
       commitments: Set[Commitment],
       deferredTransfers: List[DeferredTransfer] = List.empty,
-      privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty
+      privilegeSnapshots: Map[Long, PrivilegeSnapshot] = Map.empty,
+      costs: Map[Long, AccumulateCost] = Map.empty
   )
 
   private def executeAccumulation(
@@ -779,7 +791,8 @@ object AccumulationTransition:
       run.gasUsedMap,
       run.commitments,
       run.deferredTransfers,
-      run.privilegeSnapshots
+      run.privilegeSnapshots,
+      run.costs
     )
 
   private def groupOperandsByService(
@@ -857,7 +870,8 @@ object AccumulationTransition:
       privilegeSnapshots: Map[Long, PrivilegeSnapshot],
       commitments: Set[Commitment],
       deferredTransfers: List[DeferredTransfer],
-      provisions: Set[(Long, JamBytes)]
+      provisions: Set[(Long, JamBytes)],
+      costs: Map[Long, AccumulateCost]
   )
 
   private def runServices(
@@ -871,6 +885,7 @@ object AccumulationTransition:
       blockStorage: Option[ServiceStorageView]
   ): ServiceRunResults =
     val gasUsedMap = mutable.Map.empty[Long, Long]
+    val costs = mutable.Map.empty[Long, AccumulateCost]
     val commitments = mutable.Set.empty[Commitment]
     val newDeferredTransfers = mutable.ListBuffer.empty[DeferredTransfer]
     val allProvisions = mutable.Set.empty[(Long, JamBytes)]
@@ -915,6 +930,7 @@ object AccumulationTransition:
       val prevGas = gasUsedMap.getOrElse(serviceId, 0L)
       val newGas = prevGas + execResult.gasUsed
       gasUsedMap(serviceId) = newGas
+      costs(serviceId) = costs.get(serviceId).fold(execResult.cost)(_ + execResult.cost)
 
       // Capture privilege snapshot including staging set and auth queues
       privilegeSnapshots(serviceId) = PrivilegeSnapshot(
@@ -946,7 +962,8 @@ object AccumulationTransition:
       privilegeSnapshots = privilegeSnapshots.toMap,
       commitments = commitments.toSet,
       deferredTransfers = newDeferredTransfers.toList,
-      provisions = allProvisions.toSet
+      provisions = allProvisions.toSet,
+      costs = costs.toMap
     )
 
   private[accumulation] final case class PrivilegeResolution(

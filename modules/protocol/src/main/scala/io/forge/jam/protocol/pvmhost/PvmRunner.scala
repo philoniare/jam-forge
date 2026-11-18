@@ -3,7 +3,7 @@ package io.forge.jam.protocol.pvmhost
 import io.forge.jam.protocol.pipeline.StageTimers
 import io.forge.jam.protocol.HostCallPanic
 import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
-import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
+import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule, PvmInternalError}
 import io.forge.jam.pvm.memory.InstanceMemoryBudget
 import io.forge.jam.pvm.types.ProgramCounter
 
@@ -17,6 +17,9 @@ trait HostCallDispatcher:
 object PvmRunner:
 
   val trace: Boolean = java.lang.Boolean.getBoolean("jam.trace.refine")
+
+  final class InternalFailure(val error: PvmInternalError)
+      extends RuntimeException(s"PVM internal error: ${error.describe}", error.cause)
 
   /** Outcome of a PVM run.
     *
@@ -48,12 +51,18 @@ object PvmRunner:
       hostCalls: HostCallDispatcher,
       executionMode: ExecutionMode = ExecutionMode.default,
       preDispatch: Option[() => Unit] = None,
-      memoryBudget: InstanceMemoryBudget = InstanceMemoryBudget.global
+      memoryBudget: InstanceMemoryBudget = InstanceMemoryBudget.global,
+      abstainOnInternalError: Boolean = false,
+      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind] = _.run()
   ): (PvmExit, Long, Array[Byte]) =
     // Reserved before the instance's memory is allocated and held until the run is over, so the instances running
     // at once (services of one accumulation batch, refine, is-authorized) stay within the process-wide budget.
     val reservation = memoryBudget.reserve(instanceBytes(module, inputData.length))
-    try runReserved(module, inputData, gasLimit, entryPc, hostCalls, executionMode, preDispatch, reservation)
+    try
+      runReserved(
+        module, inputData, gasLimit, entryPc, hostCalls, executionMode, preDispatch, reservation,
+        abstainOnInternalError, interpreterStep
+      )
     finally reservation.close()
 
   /** Bytes a new instance of `module` allocates up front: the read-write region with the declared heap, the stack
@@ -72,7 +81,9 @@ object PvmRunner:
       hostCalls: HostCallDispatcher,
       executionMode: ExecutionMode,
       preDispatch: Option[() => Unit],
-      reservation: InstanceMemoryBudget.Reservation
+      reservation: InstanceMemoryBudget.Reservation,
+      abstainOnInternalError: Boolean,
+      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind]
   ): (PvmExit, Long, Array[Byte]) =
     // Recompiled: run straight from the module, with no interpreter instance to build, describe and copy back
     // from. Step tracing needs the interpreter, and a run the native path declines takes the long way below.
@@ -137,7 +148,7 @@ object PvmRunner:
       case None => ()
 
     while continueExecution do
-      instance.run() match
+      interpreterStep(instance) match
         case Right(InterruptKind.Finished) =>
           exit = PvmExit.Halt
           continueExecution = false
@@ -178,7 +189,8 @@ object PvmRunner:
           recent.addLast(s"pc=${instance.programCounter.map(_.value).getOrElse(-1)} r0=0x${instance.reg(0).toHexString} r1=0x${instance.reg(1).toHexString}")
           if recent.size > 40 then recent.removeFirst()
 
-        case Left(_) =>
+        case Left(err) =>
+          if abstainOnInternalError then throw new InternalFailure(err)
           exit = PvmExit.Panic
           continueExecution = false
 

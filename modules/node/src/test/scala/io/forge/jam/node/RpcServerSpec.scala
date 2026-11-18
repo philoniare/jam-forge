@@ -37,13 +37,25 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     withServerAllowing(Nil)(body)
 
   private def withServerAllowing(origins: Seq[String])(body: (JamNode, RpcServer, Client) => Unit): Unit =
+    withServerUsing(origins)(body)
+
+  private def withServerUsing(
+      origins: Seq[String] = Nil,
+      methods: RpcMethods = RpcMethods.Auto,
+      limits: RpcServer.Limits = RpcServer.Limits()
+  )(body: (JamNode, RpcServer, Client) => Unit): Unit =
     withNodes(1, "rpc-server") { nodes =>
       author(nodes, 1 to 1)
-      val server = nodes.head.enableRpc(0, allowedOrigins = origins)
+      val server = nodes.head.enableRpc(0, allowedOrigins = origins, methods = methods, limits = limits)
       val client = new Client(server.boundPort)
       try body(nodes.head, server, client)
       finally client.close()
     }
+
+  private def request(id: Int, method: String, params: String = ""): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"$method","params":[$params]}"""
+
+  private def errorCode(response: Json): Option[Int] = response.hcursor.downField("error").get[Int]("code").toOption
 
   test("a request is answered, and a subscription is told of each new head after its id") {
     withServer { (node, _, client) =>
@@ -136,5 +148,91 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
         allowed.send("""{"jsonrpc":"2.0","id":2,"method":"bestBlock","params":[]}""")
         allowed.next().hcursor.get[Int]("id") shouldBe Right(2)
       finally allowed.close()
+    }
+  }
+
+  private val unsafeCalls: List[(String, String)] =
+    val blob = "\"" + java.util.Base64.getEncoder.encodeToString(Array[Byte](1, 2, 3)) + "\""
+    val hash = "\"" + java.util.Base64.getEncoder.encodeToString(new Array[Byte](32)) + "\""
+    List(
+      "submitPreimage" -> s"0,$blob",
+      "submitWorkPackage" -> s"0,$blob,[]",
+      "submitWorkPackageBundle" -> s"0,$blob",
+      "fetchSegments" -> s"$hash,[0]",
+      "fetchWorkPackageSegments" -> s"$hash,[0]"
+    )
+
+  test("an RPC serving safe methods only refuses the unsafe ones with a JSON-RPC error and answers the rest") {
+    withServerUsing(methods = RpcMethods.Safe) { (_, _, client) =>
+      unsafeCalls.zipWithIndex.foreach { case ((method, params), i) =>
+        client.send(request(i + 1, method, params))
+        val answer = client.next()
+        withClue(s"$method: ") {
+          answer.hcursor.get[Int]("id") shouldBe Right(i + 1)
+          errorCode(answer) shouldBe Some(RpcError.UnsafeMethodCode)
+          answer.hcursor.downField("error").get[String]("message") shouldBe Right("Method not allowed")
+        }
+      }
+      client.send(request(10, "bestBlock"))
+      client.next().hcursor.downField("result").get[Long]("slot") shouldBe Right(1L)
+    }
+  }
+
+  test("auto, the default, serves the unsafe methods on a loopback address only; unsafe serves them anywhere") {
+    withServerUsing() { (_, _, client) =>
+      unsafeCalls.zipWithIndex.foreach { case ((method, params), i) =>
+        client.send(request(i + 1, method, params))
+        withClue(s"$method: ")(errorCode(client.next()) should not be Some(RpcError.UnsafeMethodCode))
+      }
+    }
+    def at(ip: String) = java.net.InetAddress.getByName(ip)
+    for loopback <- List("127.0.0.1", "127.0.0.2", "::1") do
+      RpcMethods.allowsUnsafe(RpcMethods.Auto, at(loopback)) shouldBe true
+      RpcMethods.allowsUnsafe(RpcMethods.Safe, at(loopback)) shouldBe false
+    for other <- List("0.0.0.0", "::", "10.1.2.3", "192.168.1.20", "2001:db8::1") do
+      RpcMethods.allowsUnsafe(RpcMethods.Auto, at(other)) shouldBe false
+      RpcMethods.allowsUnsafe(RpcMethods.Unsafe, at(other)) shouldBe true
+    RpcMethods.parse("safe") shouldBe Some(RpcMethods.Safe)
+    RpcMethods.parse("unsafe") shouldBe Some(RpcMethods.Unsafe)
+    RpcMethods.parse("auto") shouldBe Some(RpcMethods.Auto)
+    RpcMethods.parse("all") shouldBe None
+  }
+
+  test("one address may hold only so many connections; the next is refused at the handshake until one closes") {
+    withServerUsing(limits = RpcServer.Limits(connectionsPerIp = 2)) { (_, server, first) =>
+      val second = new Client(server.boundPort)
+      try
+        eventually("two connections")(server.connectionCount == 2)
+        val refused = intercept[java.util.concurrent.ExecutionException](new Client(server.boundPort))
+        refused.getCause match
+          case e: java.net.http.WebSocketHandshakeException => e.getResponse.statusCode shouldBe 429
+          case other                                         => fail(s"not refused at the handshake: $other")
+        server.connectionCount shouldBe 2
+        second.send(request(1, "bestBlock"))
+        second.next().hcursor.get[Int]("id") shouldBe Right(1)
+        first.close()
+        eventually("the closed connection to be forgotten")(server.connectionCount == 1)
+        val third = new Client(server.boundPort)
+        try
+          third.send(request(2, "bestBlock"))
+          third.next().hcursor.get[Int]("id") shouldBe Right(2)
+        finally third.close()
+      finally second.close()
+    }
+  }
+
+  test("requests from one address over its rate are answered with an error, in order, and the connection stays") {
+    withServerUsing(limits = RpcServer.Limits(requestsPerSecond = 0.01, burst = 3)) { (_, server, client) =>
+      (1 to 5).foreach(i => client.send(request(i, "bestBlock")))
+      val answers = (1 to 5).map(_ => client.next())
+      answers.map(_.hcursor.get[Int]("id").toOption.get) shouldBe (1 to 5)
+      answers.take(3).foreach(_.hcursor.downField("result").get[Long]("slot") shouldBe Right(1L))
+      answers.drop(3).foreach(errorCode(_) shouldBe Some(RpcError.LimitExceededCode))
+      val other = new Client(server.boundPort)
+      try
+        other.send(request(6, "bestBlock"))
+        errorCode(other.next()) shouldBe Some(RpcError.LimitExceededCode)
+      finally other.close()
+      server.connectionCount should be >= 1
     }
   }

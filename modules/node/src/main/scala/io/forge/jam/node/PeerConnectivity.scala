@@ -68,6 +68,18 @@ private[node] final class PeerConnectivity(
   private val redialTask = new Periodic("peer redial")
   private val upkeepTask = new Periodic("connectivity upkeep")
 
+  @volatile private var heldValidatorKeys: Set[JamBytes] = Set.empty
+
+  def holdValidatorKeys(keys: Set[JamBytes]): Unit = heldValidatorKeys = keys
+
+  private def ownKeys: Set[JamBytes] = heldValidatorKeys + JamBytes(identity.publicKeyBytes)
+
+  private val connectivityWatch = new LowConnectivityWatch(nodeConfig.lowConnectivityGraceMillis)
+
+  def validatorConnectivity: Option[ValidatorConnectivity] = connectivityWatch.current
+
+  def holdsWholeValidatorSet: Boolean = connectivity.exists(v => v.current.nonEmpty && v.current.subsetOf(ownKeys))
+
   def start(): Unit =
     spec.bootnodes.foreach(bn => dialTargets.add(new DialTarget(bn.address, Some(bn.ed25519Key))))
     dialTargets.forEach(t => dial(t, initial = true))
@@ -240,6 +252,7 @@ private[node] final class PeerConnectivity(
           finally d.inFlight = false
         }
     }
+    watchValidatorConnectivity(now)
     // UP 0 may be opened by either side. A connection kept after a duplicate was closed, or an accepted one whose
     distribution.openConnections.foreach { c =>
       val wanted = announcementWanted(c.peerKey)
@@ -254,6 +267,15 @@ private[node] final class PeerConnectivity(
       else if gridRestrictsAnnouncements && !wanted && open && c.initiator then sync.closeAnnouncementStream(c)
     }
     connectedAt.keySet.removeIf(c => !c.isOpen)
+
+  private def watchValidatorConnectivity(now: Long): Unit =
+    val own = ownKeys
+    connectivity.filter(_.current.exists(own.contains)) match
+      case Some(v) =>
+        val others = v.current.filterNot(own.contains)
+        val connected = others.count(k => liveConnectionTo(k.toArrayUnsafe).nonEmpty)
+        connectivityWatch.observe(connected, others.size, now): Unit
+      case None => connectivityWatch.clear()
 
   /** When a peer is reached over two connections, one dialed by each side,
     * keep the one opened by the preferred initiator P(a, b) and close the

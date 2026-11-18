@@ -111,7 +111,8 @@ final class SegmentRecovery(
     chain: ChainReader,
     shards: ShardService,
     exports: ExportIndex,
-    peers: () => Iterable[PeerConnection]
+    peers: () => Iterable[PeerConnection],
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   /** Segments `indices` of `segmentsRoot` with their proofs, verified against the root; None when they cannot be
@@ -122,13 +123,17 @@ final class SegmentRecovery(
   def recover(
       segmentsRoot: Hash,
       indices: Seq[Int],
-      localOnly: Boolean = false
+      localOnly: Boolean = false,
+      importer: ImportFetcher.Importer = ImportFetcher.Importer.none
   ): Option[Map[Int, (Array[Byte], List[Array[Byte]])]] =
     exports.get(segmentsRoot) match
       case None =>
         logger.debug(s"no known report exported ${segmentsRoot.toHex.take(18)}; cannot rebuild its segments")
         None
       case Some(entry) =>
+        telemetry.foreach(_.segmentsRootMapped(importer.submission, segmentsRoot, entry.erasureRoot))
+        def importSegmentId(segment: Int): Int =
+          if segment >= entry.exports then 0x8000 + (segment - entry.exports) else importer.position(segmentsRoot, segment)
         val pages = indices.map(_ / ImportResolver.PageSize).distinct.map(entry.exports + _)
         val wanted = (indices ++ pages).distinct.toList
         val total = entry.exports + ImportResolver.pagedProofCount(entry.exports)
@@ -144,7 +149,8 @@ final class SegmentRecovery(
           conn =>
             sets
               .flatMap(_.zipWithIndex.collect { case (vk, v) if vk.ed25519 == conn.peerPublicKey => v })
-              .map(DaShards.shardIndexFor(entry.core, _, chain.config))
+              .map(DaShards.shardIndexFor(entry.core, _, chain.config)),
+          SegmentTrace(importer.submission, importSegmentId)
         )
         rebuilt match
           case Left(err) =>
@@ -158,6 +164,16 @@ final class SegmentRecovery(
                 .justificationFromPagedProof(byIndex(entry.exports + i / ImportResolver.PageSize), i, entry.exports)
                 .filter(ImportResolver.verify(segmentsRoot, i, seg, _))
               i -> proof.map(seg -> _)
+            }
+            telemetry.foreach { t =>
+              val (good, bad) = out.partition(_._2.isDefined)
+              if good.nonEmpty then t.segmentsVerified(importer.submission, good.map((i, _) => importer.position(segmentsRoot, i)))
+              if bad.nonEmpty then
+                t.segmentVerificationFailed(
+                  importer.submission,
+                  bad.map((i, _) => importer.position(segmentsRoot, i)),
+                  "the rebuilt segment does not verify against its segments-root"
+                )
             }
             if out.forall(_._2.isDefined) then Some(out.map((i, sp) => i -> sp.get).toMap)
             else

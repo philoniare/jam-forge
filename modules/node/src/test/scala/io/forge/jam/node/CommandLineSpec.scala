@@ -28,6 +28,14 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     refused("--data", "/d", "stray") should include("unexpected argument: stray")
   }
 
+  test("--rpc-methods takes safe, unsafe or auto, and --help names it") {
+    for value <- List("safe", "unsafe", "auto") do
+      parse("--rpc-port", "9944", "--rpc-methods", value).map(_.options.get("rpc-methods")) shouldBe Right(Some(value))
+    refused("--rpc-methods", "all") should include("--rpc-methods takes safe, unsafe or auto")
+    refused("--rpc-methods") should include("--rpc-methods needs a value")
+    Main.Usage should include("--rpc-methods safe|unsafe|auto")
+  }
+
   test("numbers and the seed are checked") {
     refused("--port", "abc") should include("--port takes a whole number")
     refused("--port", "70000") should include("--port takes a whole number")
@@ -44,4 +52,67 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     refused("--author", "2", "--validator-seed", "/tmp/x") should include("exclusive")
     refused("--validator-seed", "/tmp/x", "--seed", "ab" * 32) should include("--validator-seed sets the network identity")
     parse("--author", "2", "--ed25519-key", "/tmp/k").isRight shouldBe true
+  }
+
+  test("--version prints the node's name and the version the build gave it") {
+    parse("--version").map(_.flags) shouldBe Right(Set("--version"))
+    val built = sys.props.getOrElse("jam.build.version", cancel("-Djam.build.version not given (sbt passes it)"))
+    BuildInfo.version shouldBe built
+    Main.VersionText.linesIterator.next() should startWith(s"jam-forge $built")
+  }
+
+  test("--listen-ip and --external-ip take an IPv4 or IPv6 address, never a host name") {
+    def ip(option: String, value: String) = Main.parseIp(option, value).fold(e => fail(e), identity)
+    parse("--listen-ip", "0.0.0.0").isRight shouldBe true
+    parse("--listen-ip", "::").isRight shouldBe true
+    parse("--listen-ip", "[::1]").isRight shouldBe true
+    parse("--external-ip", "203.0.113.7").isRight shouldBe true
+    parse("--external-ip", "2001:db8::7").isRight shouldBe true
+    ip("--listen-ip", "::").isAnyLocalAddress shouldBe true
+    ip("--listen-ip", "[::1]") shouldBe java.net.InetAddress.getByAddress(Array.fill[Byte](15)(0) :+ 1.toByte)
+    ip("--external-ip", "::ffff:10.0.0.1") shouldBe java.net.InetAddress.getByAddress(Array[Byte](10, 0, 0, 1))
+    refused("--listen-ip", "localhost") should include("--listen-ip takes an IPv4 or IPv6 address")
+    refused("--listen-ip", "256.1.1.1") should include("--listen-ip takes an IPv4 or IPv6 address")
+    refused("--listen-ip", "8080") should include("--listen-ip takes an IPv4 or IPv6 address")
+    refused("--listen-ip", "224.0.0.1") should include("multicast")
+    refused("--external-ip", "2001:db8::zz") should include("--external-ip takes an IPv4 or IPv6 address")
+    refused("--external-ip", "0.0.0.0") should include("--external-ip is the address peers reach this node at")
+    refused("--external-ip", "::") should include("--external-ip is the address peers reach this node at")
+  }
+
+  test("--pvm-backend names the interpreter or the recompiler, as the execution mode property says it") {
+    def properties(args: String*) = Main.systemProperties(parse(args*).fold(e => fail(e), identity))
+    properties("--pvm-backend", "interpreter") shouldBe Map("jam.pvm.executionMode" -> "interpreted")
+    properties("--pvm-backend", "recompiler") shouldBe Map("jam.pvm.executionMode" -> "recompiled")
+    properties("--data", "/d") shouldBe Map.empty
+    refused("--pvm-backend", "jit") should include("--pvm-backend takes interpreter or recompiler, not 'jit'")
+  }
+
+  test("--temp runs on a temporary data directory, so it cannot be given with --data") {
+    parse("--temp").map(_.flags) shouldBe Right(Set("--temp"))
+    refused("--temp", "--data", "/d") should include("--temp and --data are exclusive")
+  }
+
+  test("--metrics-port takes a port, and --metrics-listen-ip an address only with it") {
+    parse("--metrics-port", "9615").map(_.options) shouldBe Right(Map("metrics-port" -> "9615"))
+    parse("--metrics-port", "9615", "--metrics-listen-ip", "0.0.0.0").isRight shouldBe true
+    refused("--metrics-port", "x") should include("--metrics-port takes a whole number")
+    refused("--metrics-listen-ip", "0.0.0.0") should include("--metrics-listen-ip needs --metrics-port")
+    refused("--metrics-port", "1", "--metrics-listen-ip", "example.org") should include(
+      "--metrics-listen-ip takes an IPv4 or IPv6 address"
+    )
+  }
+
+  test("gen-keys and list-keys are commands, each taking only its own options") {
+    parse("gen-keys").map(_.command) shouldBe Right(Some("gen-keys"))
+    parse("--data", "/data", "gen-keys").map(_.command) shouldBe Right(Some("gen-keys"))
+    parse("--data", "/d").map(_.command) shouldBe Right(None)
+    parse("list-keys", "--validator-seed", "/k").map(_.command) shouldBe Right(Some("list-keys"))
+    refused("gen-keys", "--author", "1") should include("gen-keys takes no options but --data: drop --author")
+    refused("gen-keys", "--grandpa") should include("gen-keys takes no options but --data: drop --grandpa")
+    refused("list-keys") should include("list-keys needs one of --validator-seed, --seed, --seed-file or --author")
+    refused("list-keys", "--seed", "ab" * 32, "--validator-seed", "/k") should include("list-keys takes one of")
+    refused("list-keys", "--validator-seed", "/k", "--port", "1") should include("list-keys does not take --port")
+    refused("gen-keys", "list-keys") should include("one command at a time")
+    refused("stray") should include("unexpected argument: stray")
   }

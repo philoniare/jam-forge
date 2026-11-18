@@ -153,5 +153,7 @@ object InstanceMemoryBudget:
     PvmSettings.current.instanceMemoryBytes
       .getOrElse(math.max(64L << 20, Runtime.getRuntime.maxMemory() / 4))
 
-  /** The budget every accumulate, refine and is-authorized run in this process shares. */
+  /** The budget accumulation runs in this process share: block import and authoring. */
   val global: InstanceMemoryBudget = new InstanceMemoryBudget(defaultLimit)
+
+  val inCore: InstanceMemoryBudget = new InstanceMemoryBudget(math.max(64L << 20, defaultLimit / 2))

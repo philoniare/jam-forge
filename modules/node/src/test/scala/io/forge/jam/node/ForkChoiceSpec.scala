@@ -253,8 +253,11 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       val longer = nodeA.chain.importBlock(b3)
       withClue(s"import of 3': $longer") { longer.isLeft shouldBe true }
       nodeA.chain.best.hash shouldBe head1
+      nodeA.authoringStopped.isDefined shouldBe true
+      nodeA.authorSlot(4) shouldBe None
       // The chain goes on from block 1.
-      nodeA.authorSlot(4).isDefined shouldBe true
+      val b4 = nodeA.chain.encodeBlock(bareA.tryAuthor(4).getOrElse(fail("author 4")))
+      nodeA.chain.importBlock(b4).isRight shouldBe true
       nodeA.chain.parentHash(nodeA.chain.best.hash) shouldBe Some(head1)
     finally
       if nodeA != null then nodeA.shutdownStorageOnly()

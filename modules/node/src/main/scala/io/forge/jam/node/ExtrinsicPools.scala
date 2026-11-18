@@ -79,6 +79,21 @@ final class ExtrinsicPools(
 
   private def reportHashOf(g: GuaranteeExtrinsic): Hash = Hashing.blake2b256(g.report.encode.toArray)
 
+  @volatile private var guaranteeDiscarded: (GuaranteeExtrinsic, Int) => Unit = (_, _) => ()
+  @volatile private var preimageDiscarded: (Preimage, Int) => Unit = (_, _) => ()
+
+  def onDiscard(guarantee: (GuaranteeExtrinsic, Int) => Unit, preimage: (Preimage, Int) => Unit): Unit =
+    guaranteeDiscarded = guarantee
+    preimageDiscarded = preimage
+
+  private def discardGuarantee(reportHash: Hash, reason: Int): Unit =
+    val g = guarantees.remove(reportHash)
+    if g != null then guaranteeDiscarded(g, reason)
+
+  private def discardPreimage(key: (Long, Hash), reason: Int): Unit =
+    val p = preimages.remove(key)
+    if p != null then preimageDiscarded(p, reason)
+
   /** Whether a guarantee of the same work report is pooled. */
   def hasGuarantee(g: GuaranteeExtrinsic): Boolean = guarantees.containsKey(reportHashOf(g))
 
@@ -96,8 +111,8 @@ final class ExtrinsicPools(
             .map(_.getKey)
             .minByOption(h => Option(guaranteeArrival.get(h)).fold(Long.MinValue)(_.longValue))
         if guarantees.values.asScala.count(_.report.coreIndex.toInt == core) >= maxGuaranteesPerCore then
-          oldest(_.report.coreIndex.toInt == core).foreach(guarantees.remove)
-        if guarantees.size >= maxGuarantees then oldest(_ => true).foreach(guarantees.remove)
+          oldest(_.report.coreIndex.toInt == core).foreach(discardGuarantee(_, Telemetry.GuaranteeDiscard.TooMany))
+        if guarantees.size >= maxGuarantees then oldest(_ => true).foreach(discardGuarantee(_, Telemetry.GuaranteeDiscard.TooMany))
         guaranteeArrival.keySet.retainAll(guarantees.keySet)
         guaranteeSeq += 1
         guaranteeArrival.put(reportHash, guaranteeSeq)
@@ -263,13 +278,13 @@ final class ExtrinsicPools(
       newBestHash: Hash
   ): Unit =
     includedGuarantees.foreach { g =>
-      guarantees.remove(Hashing.blake2b256(g.report.encode.toArray))
+      discardGuarantee(Hashing.blake2b256(g.report.encode.toArray), Telemetry.GuaranteeDiscard.ReportedOnChain)
     }
     includedAssurances.foreach { a =>
       assurances.remove((a.validatorIndex.toInt, a.anchor))
     }
     includedPreimages.foreach { p =>
-      preimages.remove((p.requester.toLong, Hashing.blake2b256(p.blob.toArray)))
+      discardPreimage((p.requester.toLong, Hashing.blake2b256(p.blob.toArray)), Telemetry.PreimageDiscard.ProvidedOnChain)
     }
     // Assurances only ever anchor at the parent of the next block: drop stale.
     assurances.keySet.asScala.filterNot(_._2 == newBestHash).toList.foreach(assurances.remove)
@@ -286,14 +301,14 @@ final class ExtrinsicPools(
 
   private def preimageKey(p: Preimage): (Long, Hash) = (p.requester.toLong, Hashing.blake2b256(p.blob.toArray))
 
-  def clearGuarantees(): Unit = guarantees.clear()
+  def clearGuarantees(): Unit = guarantees.keySet.asScala.toList.foreach(discardGuarantee(_, Telemetry.GuaranteeDiscard.Other))
 
   /** Drop guarantees made before `slot`: with `slot` the first slot of the rotation before the best block's, they
     * can go in no later block (their rotation is neither that block's nor the one before it).
     */
   def pruneGuaranteesBefore(slot: Long): Unit =
-    guarantees.values.removeIf(_.slot.toLong < slot)
-    ()
+    guarantees.entrySet.asScala.toList.collect { case e if e.getValue.slot.toLong < slot => e.getKey }
+      .foreach(discardGuarantee(_, Telemetry.GuaranteeDiscard.CannotBeReported))
 
   def pendingGuarantees: List[GuaranteeExtrinsic] = guarantees.values.asScala.toList
 
@@ -308,18 +323,18 @@ final class ExtrinsicPools(
   def pendingPreimages: List[Preimage] = preimages.values.asScala.toList
 
   def removePreimages(ps: Iterable[Preimage]): Unit =
-    ps.foreach(p => preimages.remove((p.requester.toLong, Hashing.blake2b256(p.blob.toArray))))
+    ps.foreach(p => discardPreimage((p.requester.toLong, Hashing.blake2b256(p.blob.toArray)), Telemetry.PreimageDiscard.Other))
 
   def removeAssurances(as: Iterable[AssuranceExtrinsic]): Unit =
     as.foreach(a => assurances.remove((a.validatorIndex.toInt, a.anchor), a))
 
   def removeGuarantees(gs: Iterable[GuaranteeExtrinsic]): Unit =
-    gs.foreach(g => guarantees.remove(Hashing.blake2b256(g.report.encode.toArray)))
+    gs.foreach(g => discardGuarantee(Hashing.blake2b256(g.report.encode.toArray), Telemetry.GuaranteeDiscard.CannotBeReported))
 
   def clear(): Unit =
-    guarantees.clear()
+    clearGuarantees()
     assurances.clear()
-    preimages.clear()
+    preimages.keySet.asScala.toList.foreach(discardPreimage(_, Telemetry.PreimageDiscard.Other))
 
   def guaranteeCount: Int = guarantees.size
   def assuranceCount: Int = assurances.size

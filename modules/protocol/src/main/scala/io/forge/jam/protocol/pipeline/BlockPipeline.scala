@@ -34,7 +34,8 @@ final case class BlockPipelineResult(
     accumulateRoot: Option[Hash],
     accumulationStats: Map[ServiceId, ServiceAccumulation],
     accumulationTransferCounts: Map[ServiceId, Int],
-    headerHash: Hash
+    headerHash: Hash,
+    accumulateCosts: Map[Long, io.forge.jam.protocol.pvmhost.AccumulateCost] = Map.empty
 )
 
 object BlockPipeline:
@@ -199,7 +200,7 @@ object BlockPipeline:
     }.reported
 
     // Step 5: Update beta before Reports
-    time("x/updateRecentHistoryPartial")(recordParentStateRoot(block, view))
+    time("x/updateRecentHistoryPartial")(recordParentStateRoot(view, block.header.parentStateRoot))
 
     // Step 6: Reports
     time("reports") {
@@ -278,16 +279,17 @@ object BlockPipeline:
         accumulateRoot = Some(accumulateRoot),
         accumulationStats = accumulated.accumulationStats,
         accumulationTransferCounts = accumulated.accumulationTransferCounts,
-        headerHash = run.header.hash
+        headerHash = run.header.hash,
+        accumulateCosts = accumulated.accumulateCosts
       )
     )
 
-  private def recordParentStateRoot(block: Block, view: TrieBackedJamState): Unit =
+  def recordParentStateRoot(view: TrieBackedJamState, parentStateRoot: Hash): Unit =
     val recentHistory = view.beta
     val history = recentHistory.history
     if history.nonEmpty then
       val updatedHistory = history.updated(
         history.length - 1,
-        history.last.copy(stateRoot = block.header.parentStateRoot)
+        history.last.copy(stateRoot = parentStateRoot)
       )
       view.beta = recentHistory.copy(history = updatedHistory)

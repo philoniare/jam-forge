@@ -46,7 +46,8 @@ final class PreimageService(
     serving: InboundWork = InboundWork.direct,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
-    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => ()
+    misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
   private val announcedMeta =
@@ -83,8 +84,11 @@ final class PreimageService(
         val taken = inbound.submit(connection, msg.length.toLong) {
           try
             PreimageCodec.decodeAnnouncement(msg) match
-              case Left(err) => logger.warn(err)
+              case Left(err) =>
+                logger.warn(err)
+                telemetry.foreach(_.preimageAnnouncementFailed(connection.peerKey, remote = true, err))
               case Right((serviceId, hash, length)) =>
+                telemetry.foreach(_.preimageAnnounced(connection.peerKey, remote = true, serviceId, hash, length))
                 announcedMeta.put(hash, (serviceId, length))
                 val view = chain.stateView()
                 val infoKey =
@@ -92,7 +96,12 @@ final class PreimageService(
                 val solicited = view.storage.readTrie(infoKey).exists(StateKey.isUnprovidedRequest)
                 if solicited && pools.findPreimage(hash).isEmpty then
                   requestPreimage(connection, serviceId, hash, length)
-          catch case e: Exception => logger.warn(s"CE142 handler failed: ${e.getMessage}")
+                else if !solicited && pools.findPreimage(hash).isEmpty then
+                  forgotten(serviceId, hash, length, Telemetry.AnnouncedPreimageForget.NotRequested)
+          catch
+            case e: Exception =>
+              logger.warn(s"CE142 handler failed: ${e.getMessage}")
+              telemetry.foreach(_.preimageAnnouncementFailed(connection.peerKey, remote = true, s"failed here: ${e.getMessage}"))
           stream.finish()
         }
         if !taken then stream.reset()
@@ -106,7 +115,9 @@ final class PreimageService(
 
   def requestHandler: PeerStreamHandler = new PeerStreamHandler:
     def onStream(connection: PeerConnection, stream: MessageStream): Unit =
+      val receiving = telemetry.flatMap(_.receivingPreimageRequest(connection.peerKey))
       stream.onMessage { msg =>
+        if msg.length == 32 then telemetry.foreach(_.preimageRequestReceived(receiving, Hash(msg)))
         val taken = serving.submit(connection, msg.length.toLong) {
           val blob =
             try
@@ -123,9 +134,14 @@ final class PreimageService(
             case Some(b) =>
               stream.send(b)
               stream.finish()
-            case None => stream.reset() // not held: reject
+              telemetry.foreach(_.preimageTransferred(receiving, b.length.toLong))
+            case None =>
+              telemetry.foreach(_.preimageRequestFailed(receiving, if msg.length != 32 then "malformed request" else "not held"))
+              stream.reset() // not held: reject
         }
-        if !taken then stream.reset()
+        if !taken then
+          telemetry.foreach(_.preimageRequestFailed(receiving, "too many requests waiting"))
+          stream.reset()
       }
 
   private[node] def announcedMetaSize: Int = announcedMeta.size()
@@ -166,9 +182,14 @@ final class PreimageService(
         () => conn.openStream(StreamKind.PreimageAnnouncement),
         StreamKind.PreimageAnnouncement,
         payload,
-        conn
+        conn,
+        why => telemetry.foreach(_.preimageAnnouncementFailed(conn.peerKey, remote = false, why)),
+        () => telemetry.foreach(_.preimageAnnounced(conn.peerKey, remote = false, serviceId, hash, length))
       )
     }
+
+  private def forgotten(serviceId: Long, hash: Hash, length: Long, reason: Int): Unit =
+    telemetry.foreach(_.announcedPreimageForgotten(serviceId, hash, length, reason))
 
   private def requestPreimage(
       conn: PeerConnection,
@@ -178,9 +199,10 @@ final class PreimageService(
   ): Unit =
     if !fetchingHashes.add(hash) then return
     val admitted = fetchGate.tryExecute(fetchExecutor) {
+          val sending = telemetry.flatMap(_.sendingPreimageRequest(conn.peerKey, hash))
           try
             // No blob (no response in time, a failed send, the peer closing): the stream is given up on both sides.
-            val blob = StreamRequest
+            val answer = StreamRequest
               .exchange(
                 conn,
                 StreamKind.PreimageRequest,
@@ -188,11 +210,26 @@ final class PreimageService(
                 10_000,
                 () => 10_000,
                 StreamRequest.Until.FirstMessage,
-                maxMessages = 1
+                maxMessages = 1,
+                onSent = () => telemetry.foreach(_.preimageRequestSent(sending))
               )
-              .toOption
-              .flatMap(_.headOption)
-              .orNull
+            val blob = answer.toOption.flatMap(_.headOption).orNull
+            telemetry.foreach { t =>
+              if blob != null && blob.length.toLong == expectedLength && Hashing.blake2b256(blob) == hash then
+                t.preimageTransferred(sending, blob.length.toLong)
+              else
+                t.preimageRequestFailed(
+                  sending,
+                  answer.fold(_.message, _ => if blob == null then "refused: no preimage" else "not the preimage announced")
+                )
+                forgotten(
+                  serviceId,
+                  hash,
+                  expectedLength,
+                  if blob != null && blob.length.toLong != expectedLength then Telemetry.AnnouncedPreimageForget.BadLength
+                  else Telemetry.AnnouncedPreimageForget.FailedToAcquire
+                )
+            }
             if blob != null && blob.length.toLong == expectedLength
               && Hashing.blake2b256(blob) == hash
             then
@@ -204,12 +241,16 @@ final class PreimageService(
             else
               logger.warn(s"CE143 response invalid for ${hash.toHex.take(18)}")
               if blob != null then misbehaved(conn, Offence.BadProof)
-          catch case e: Exception => logger.warn(s"CE143 fetch failed: ${e.getMessage}")
+          catch
+            case e: Exception =>
+              logger.warn(s"CE143 fetch failed: ${e.getMessage}")
+              telemetry.foreach(_.preimageRequestFailed(sending, s"failed here: ${e.getMessage}"))
           finally fetchingHashes.remove(hash)
     }
     if !admitted then
       fetchingHashes.remove(hash)
       logger.debug(s"CE143 fetch for ${hash.toHex.take(18)} not queued (fetch queue full or shutting down)")
+      forgotten(serviceId, hash, expectedLength, Telemetry.AnnouncedPreimageForget.TooMany)
 
   def shutdown(): Unit =
     fetchExecutor.shutdown()
@@ -219,15 +260,21 @@ final class PreimageService(
       open: () => java.util.concurrent.CompletableFuture[? <: MessageStream],
       kind: Byte,
       payload: Array[Byte],
-      peer: AnyRef = null
+      peer: AnyRef = null,
+      failed: String => Unit = _ => (),
+      sent: () => Unit = () => ()
   ): Unit =
     OneShotSend.submit(
       egress,
       peer,
       open,
       List(payload),
-      why => logger.warn(s"preimage announcement on ${StreamKind.name(kind)} failed: $why"),
-      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)")
+      why => {
+        logger.warn(s"preimage announcement on ${StreamKind.name(kind)} failed: $why")
+        failed(why)
+      },
+      () => logger.warn(s"egress rejected ${StreamKind.name(kind)} send (shutting down)"),
+      sent = sent
     )
 
 object PreimageService:

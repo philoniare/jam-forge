@@ -60,9 +60,12 @@ object WorkPackageBundle:
             Right(out)
 
         try
-          val extrinsics = wp.items.map { item =>
-            item.extrinsic.map { ref =>
-              take(ref.len.toInt).fold(e => throw new RuntimeException(e), identity)
+          val extrinsics = wp.items.zipWithIndex.map { (item, i) =>
+            item.extrinsic.zipWithIndex.map { (ref, j) =>
+              val blob = take(ref.len.toInt).fold(e => throw new RuntimeException(e), identity)
+              if io.forge.jam.core.Hashing.blake2b256(blob) != ref.hash then
+                throw new RuntimeException(s"extrinsic $j of item $i does not match its hash")
+              blob
             }.toIndexedSeq
           }.toIndexedSeq
 

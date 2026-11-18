@@ -42,6 +42,11 @@ object Connectivity:
         // getByAddress unwraps IPv4-mapped addresses (::ffff:a.b.c.d) to IPv4.
         Some(new InetSocketAddress(InetAddress.getByAddress(ip), port))
 
+  def addressBytes(address: InetAddress): Array[Byte] =
+    address.getAddress match
+      case v4 if v4.length == 4 => Array.fill[Byte](10)(0) ++ Array[Byte](-1, -1) ++ v4
+      case v6                   => v6
+
   /**
    * Epoch whose validator connectivity is in force at `slot`: the slot's own
    * epoch once its first block is finalized and max(⌊E/30⌋, 1) slots of it

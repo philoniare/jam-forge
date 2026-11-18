@@ -13,6 +13,9 @@ import io.forge.jam.network.{JamnpConfig, PeerConnection, JamnpNode, NodeIdentit
 final case class NodeConfig(
     dataDir: Path,
     listenPort: Int = 0,
+    listenIp: java.net.InetAddress = JamNode.AnyAddress,
+    externalIp: Option[java.net.InetAddress] = None,
+    lowConnectivityGraceMillis: Long = LowConnectivityWatch.DefaultGraceMillis,
     /** 32-byte Ed25519 seed; random identity when absent. */
     ed25519Seed: Option[Array[Byte]] = None,
     /** JAM-common-era override for devnets whose genesis starts "now". */
@@ -88,6 +91,24 @@ final class JamNode(
 
   private val stores = openStores()
 
+  val telemetry: Option[Telemetry] = nodeConfig.telemetry.map { address =>
+    new Telemetry(
+      address,
+      () =>
+        Telemetry.nodeInformation(
+          jamParameters = io.forge.jam.protocol.pvmhost.ConstantsBlob.build(spec.config),
+          genesisHash = spec.genesisHeaderHash,
+          peerId = identity.publicKeyBytes,
+          listenPort = listenPort,
+          recompiler = io.forge.jam.pvm.ExecutionMode.default == io.forge.jam.pvm.ExecutionMode.Recompiled,
+          implementationVersion = JamNode.ImplementationVersion,
+          grayPaperVersion = JamNode.GrayPaperVersion,
+          note = s"chain=${spec.id}",
+          advertisedAddress = nodeConfig.externalIp
+        )
+    )
+  }
+
   /** Every pool of the node and its services: closed, newest first and each waited for, before the stores are. */
   private val threads = new NodeThreads
   private val trieBackend: RocksDbTrieBackend = stores._1
@@ -128,39 +149,43 @@ final class JamNode(
     if offence != Offence.Unanswered then telemetry.foreach(_.peerMisbehaved(key, offence.toString))
   private val misbehaved: (PeerConnection, Offence) => Unit = (conn, offence) => reportFault(conn.peerKey, offence)
 
+  private val importedBlocks = new java.util.concurrent.atomic.AtomicLong()
+  private val importFailures = new java.util.concurrent.atomic.AtomicLong()
+
+  private def countImportFailure(outcome: Either[ChainError, ChainHead]): Unit = outcome match
+    case Left(_: ChainError.InvalidBlock | _: ChainError.ImportFailed) => importFailures.incrementAndGet(): Unit
+    case _                                                            => ()
+
   private val importTelemetry = new SyncService.ImportObserver:
     def importing(blockBytes: Array[Byte]): AnyRef | Null =
       telemetry.flatMap { t =>
         chain.decodeBlock(blockBytes).toOption.filterNot(b => chain.hasBlock(chain.headerHashOf(b))).map { block =>
-          val x = block.extrinsic
-          t.importing(
-            block.header.slot.toLong,
-            Telemetry.blockOutline(
-              blockBytes.length,
-              chain.headerHashOf(block),
-              x.tickets.size,
-              x.preimages.size,
-              x.preimages.map(_.blob.length.toLong).sum,
-              x.guarantees.size,
-              x.assurances.size,
-              x.disputes.verdicts.size
-            )
-          )
+          val hash = chain.headerHashOf(block)
+          (t.importing(block.header.slot.toLong, Telemetry.blockOutline(block, blockBytes.length, hash)), hash)
         }
       }.orNull
     def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit =
+      countImportFailure(outcome)
       (handle, telemetry) match
-        case (ref: Option[?], Some(t)) =>
+        case ((ref: Option[?], hash: Hash), Some(t)) =>
           val importing = ref.collect { case r: Telemetry.EventRef => r }
           outcome match
-            case Right(_)                           => t.blockVerified(importing)
+            case Right(_) =>
+              t.blockVerified(importing)
+              t.blockExecuted(importing, chain.takeAccumulateCosts(hash).getOrElse(Map.empty))
             case Left(e: ChainError.InvalidBlock)   => t.blockVerificationFailed(importing, e.message)
             case Left(e: ChainError.ImportFailed)   => t.blockExecutionFailed(importing, e.message)
             case Left(_)                            => ()
         case _ => ()
-  val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry, scores)
+  val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry, scores, telemetry)
   private val roleStore = RoleStore.over(blockStore)
   val pools = new ExtrinsicPools(store = roleStore)
+  telemetry.foreach { t =>
+    pools.onDiscard(
+      (g, reason) => t.guaranteeDiscarded(Telemetry.guaranteeOutline(g), reason),
+      (p, reason) => t.preimageDiscarded(io.forge.jam.core.Hashing.blake2b256(p.blob.toArray), p.blob.length.toLong, reason)
+    )
+  }
   val distribution = new DistributionService(
     pools,
     spec.config.coresCount,
@@ -170,9 +195,10 @@ final class JamNode(
     inbound = inbound,
     threads = threads,
     misbehaved = misbehaved,
-    askOrder = scores.leastFaultedFirst(_)(_.peerKey)
+    askOrder = scores.leastFaultedFirst(_)(_.peerKey),
+    telemetry = telemetry
   )
-  val shards = new ShardService(shardStore, spec.config, inbound, threads, misbehaved)
+  val shards = new ShardService(shardStore, spec.config, inbound, threads, misbehaved, telemetry = telemetry)
   val segments = new SegmentPool()
   val tickets = new TicketService(
     chain,
@@ -182,7 +208,8 @@ final class JamNode(
     forwardTargets = () => peers.currentValidatorConnections,
     inbound = inbound,
     threads = threads,
-    misbehaved = misbehaved
+    misbehaved = misbehaved,
+    telemetry = telemetry
   )
   val preimages = new PreimageService(
     chain,
@@ -192,7 +219,8 @@ final class JamNode(
     inbound = inbound,
     serving = serving,
     threads = threads,
-    misbehaved = misbehaved
+    misbehaved = misbehaved,
+    telemetry = telemetry
   )
 
   val slotClock = new SlotClock(
@@ -227,23 +255,6 @@ final class JamNode(
 
   @volatile private var assuranceTimer: java.util.concurrent.ScheduledExecutorService = null
   @volatile private var ticketsSentGeneration: Int = 0
-
-  val telemetry: Option[Telemetry] = nodeConfig.telemetry.map { address =>
-    new Telemetry(
-      address,
-      () =>
-        Telemetry.nodeInformation(
-          jamParameters = io.forge.jam.protocol.pvmhost.ConstantsBlob.build(spec.config),
-          genesisHash = spec.genesisHeaderHash,
-          peerId = identity.publicKeyBytes,
-          listenPort = listenPort,
-          recompiler = io.forge.jam.pvm.ExecutionMode.default == io.forge.jam.pvm.ExecutionMode.Recompiled,
-          implementationVersion = JamNode.ImplementationVersion,
-          grayPaperVersion = JamNode.GrayPaperVersion,
-          note = s"chain=${spec.id}"
-        )
-    )
-  }
   private val headsReport = new Object
   private var lastBest: Hash = Hash.zero
   private var lastFinalized: Hash = Hash.zero
@@ -253,7 +264,7 @@ final class JamNode(
   @volatile private var slotCallback: Long => Unit = _ => ()
   @volatile private var author: Option[BlockAuthor] = None
   @volatile private var guarantor: Option[GuarantorService] = None
-  private lazy val segmentRecovery = new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers)
+  private lazy val segmentRecovery = new SegmentRecovery(chain, shards, exportIndex, () => distribution.peers, telemetry)
 
   /** Erasure roots of recently included reports with exports, by segments-root. */
   private[node] val exportIndex = new ExportIndex(store = roleStore)
@@ -271,12 +282,33 @@ final class JamNode(
   /** Hook invoked at every slot boundary (after any authoring attempt). */
   def onSlot(f: Long => Unit): Unit = slotCallback = f
 
+  private[node] def blockAuthor: Option[BlockAuthor] = author
+
+  @volatile private var authoringGuard: Option[EquivocationGuard] = None
+  private val watchingForTwins = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  def authoringStopped: Option[String] = authoringGuard.flatMap(_.stopped)
+
+  private def sealerOf(hash: Hash, block: io.forge.jam.core.types.block.Block): Option[Array[Byte]] =
+    chain.stateViewAt(hash).flatMap(_.validators.current.lift(block.header.authorIndex.toInt)).map(_.bandersnatch.bytes.toArray)
+
   /** Enable block authoring with this node's validator keys, including
-    * Safrole ticket generation for ticketed sealing.
+    * Safrole ticket generation for ticketed sealing. A slot is sealed for once, across restarts, and authoring stops
+    * when a block sealed with these keys elsewhere is imported ([[EquivocationGuard]]).
     */
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
     tickets.setValidatorKeys(keys)
-    author = Some(new BlockAuthor(chain, keys, pools, tickets.ownTickets))
+    val guard = new EquivocationGuard(
+      chain.meta,
+      keys,
+      why => telemetry.foreach(_.peerMisbehaved(identity.publicKeyBytes, s"duplicate authoring: $why"))
+    )
+    authoringGuard = Some(guard)
+    if watchingForTwins.compareAndSet(false, true) then
+      chain.onImported((head, block) => authoringGuard.foreach(_.observe(head.hash, block, () => sealerOf(head.hash, block))))
+      chain.onSealedSideBlock((hash, block) => authoringGuard.foreach(_.observe(hash, block, () => None)))
+    author = Some(new BlockAuthor(chain, keys, pools, tickets.ownTickets, guard))
+    peers.holdValidatorKeys(keys.map(k => JamBytes(k.ed25519Public)).toSet)
     if !keys.exists(k => java.util.Arrays.equals(k.ed25519Public, identity.publicKeyBytes)) then
       logger.warn(
         "network identity is not one of the authoring validators' Ed25519 keys; " +
@@ -307,7 +339,9 @@ final class JamNode(
         exportIndex.bundleLength(root).flatMap(length => shards.reconstructBundle(root, length, Nil).toOption),
       serving = serving,
       threads = threads,
-      misbehaved = misbehaved
+      misbehaved = misbehaved,
+      dialValidators = dialGuarantors,
+      telemetry = telemetry
     )
     guarantor = Some(g)
     network.registerPeerHandler(
@@ -372,7 +406,8 @@ final class JamNode(
       inbound = inbound,
       guarantorsFirst = guarantorIndex.first,
       misbehaved = reportFault,
-      threads = threads
+      threads = threads,
+      telemetry = telemetry
     )
     a.onDisregard(h =>
       chain.disregard(h) match
@@ -409,10 +444,16 @@ final class JamNode(
           // got there first: side branch, already imported) or a failure of ours leaves the pools as they are.
           case Left(ChainError.InvalidBlock(error, _)) if hasContent(block) =>
             // The contents were checked against the state transitions before sealing, so this should not happen.
-            // Should it, the block's own items go, guarantees first, then the rest, and disputes are left out.
+            authoringGuard.foreach(_.withdraw(slot))
             def retry(): Option[ChainHead] =
-              a.tryAuthor(slot, withDisputes = false)
-                .flatMap(b => importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))).toOption)
+              a.tryAuthor(slot, withDisputes = false).flatMap { b =>
+                importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))) match
+                  case Right(head) => Some(head)
+                  case Left(ChainError.InvalidBlock(_, _)) =>
+                    authoringGuard.foreach(_.withdraw(slot))
+                    None
+                  case Left(_) => None
+              }
             val x = block.extrinsic
             val withoutGuarantees =
               if x.guarantees.isEmpty then None
@@ -524,24 +565,11 @@ final class JamNode(
       authoring: Option[Telemetry.EventRef]
   ): Either[ChainError, ChainHead] =
     val bytes = chain.encodeBlock(block)
-    telemetry.foreach { t =>
-      val x = block.extrinsic
-      t.authored(
-        authoring,
-        Telemetry.blockOutline(
-          bytes.length,
-          chain.headerHashOf(block),
-          x.tickets.size,
-          x.preimages.size,
-          x.preimages.map(_.blob.length.toLong).sum,
-          x.guarantees.size,
-          x.assurances.size,
-          x.disputes.verdicts.size
-        )
-      )
-    }
+    val hash = chain.headerHashOf(block)
+    telemetry.foreach(_.authored(authoring, Telemetry.blockOutline(block, bytes.length, hash)))
     importAndAnnounce(bytes) match
       case Right(head) =>
+        telemetry.foreach(_.blockExecuted(authoring, chain.takeAccumulateCosts(hash).getOrElse(Map.empty)))
         pools.pruneAfterImport(
           block.extrinsic.guarantees,
           block.extrinsic.assurances,
@@ -550,6 +578,7 @@ final class JamNode(
         )
         Right(head)
       case Left(err) =>
+        countImportFailure(Left(err))
         logger.error(s"authored block failed to import: $err")
         telemetry.foreach(_.authoringFailed(authoring, err.message))
         Left(err)
@@ -563,6 +592,7 @@ final class JamNode(
 
     noteRecentValidators()
     chain.onImported((_, _) => noteRecentValidators())
+    chain.onImported((_, _) => importedBlocks.incrementAndGet(): Unit)
 
     if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
@@ -656,12 +686,15 @@ final class JamNode(
       .registerPeerHandler(StreamKind.PreimageAnnouncement, preimages.announceHandler)
       .registerPeerHandler(StreamKind.PreimageRequest, preimages.requestHandler)
       .registerPeerHandler(StreamKind.StateRequest, sync.stateRequestHandler)
-      .start(new InetSocketAddress("0.0.0.0", nodeConfig.listenPort))
+      .start(new InetSocketAddress(nodeConfig.listenIp, nodeConfig.listenPort))
 
     logger.info(
       s"node up: chain=${spec.id} alpn=${JamnpConfig(spec.alpnPrefix).alpn} " +
-        s"port=$listenPort identity=${identity.altName}"
+        s"port=$listenPort listen=${JamNode.endpointText(boundAddress)} " +
+        s"advertised=${advertisedEndpoint.fold("unspecified (no --external-ip)")(JamNode.endpointText)} " +
+        s"identity=${identity.altName}"
     )
+    checkAdvertisedEndpoint()
     telemetry.foreach { t =>
       t.start()
       threads
@@ -686,6 +719,28 @@ final class JamNode(
     slotCallback(slot)
 
   def listenPort: Int = network.boundPort
+
+  def boundAddress: InetSocketAddress = network.boundAddress
+
+  def advertisedEndpoint: Option[InetSocketAddress] = nodeConfig.externalIp.map(new InetSocketAddress(_, listenPort))
+
+  private def checkAdvertisedEndpoint(): Unit =
+    advertisedEndpoint.foreach { advertised =>
+      val validators = chain.stateView().validators
+      val own = JamBytes(identity.publicKeyBytes)
+      (validators.current.iterator ++ validators.nextEpoch.iterator)
+        .find(v => JamBytes(v.ed25519.bytes.toArray) == own)
+        .foreach { v =>
+          Connectivity.endpoint(v.metadata.toArray) match
+            case Some(onChain) if onChain == advertised => ()
+            case onChain =>
+              logger.warn(
+                s"this validator's metadata on chain names ${onChain.fold("no endpoint")(JamNode.endpointText)}, " +
+                  s"but it is reached at ${JamNode.endpointText(advertised)} (--external-ip): other validators dial " +
+                  "the endpoint in the metadata"
+              )
+        }
+    }
 
   /** Keep a connection to `address` (redialed when lost), as for a bootnode. */
   def addPeer(address: InetSocketAddress, expectedEd25519: Option[Array[Byte]] = None): Unit =
@@ -735,13 +790,36 @@ final class JamNode(
 
   private def handToGuarantors(core: Int, kind: Byte, messages: Seq[Array[Byte]]): Either[String, Unit] =
     val (cores, validators) = GuarantorService.assignments(chain.stateView(), chain.nextBlockSlot, spec.config)
-    val assigned = validators.zip(cores).collect { case (v, c) if c == core => JamBytes(v.ed25519.bytes.toArray) }.toSet
-    val guarantors = distribution.peers.filter(c => assigned.contains(JamBytes(c.peerKey))).distinctBy(_.peerPublicKey)
-    if guarantors.isEmpty then Left(s"no connection to a guarantor of core $core")
+    val assigned = validators.zip(cores).collect { case (v, c) if c == core => v }
+    val keys = assigned.map(v => JamBytes(v.ed25519.bytes.toArray)).toSet
+    val connected = distribution.peers.filter(c => keys.contains(JamBytes(c.peerKey))).distinctBy(_.peerPublicKey)
+    val guarantors = if connected.nonEmpty then connected else dialGuarantors(assigned)
+    if guarantors.isEmpty then Left(s"no guarantor of core $core could be reached")
     else
       val taken = guarantors.count(conn => StreamRequest.exchange(conn, kind, messages, 5_000, () => 10_000).isRight)
       logger.info(s"RPC ${StreamKind.name(kind)} for core $core handed to $taken of ${guarantors.size} connected guarantor(s)")
       if taken > 0 then Right(()) else Left(s"no guarantor of core $core took the work-package")
+
+  private lazy val guarantorDialer = threads.cached("jam-guarantor-dial")
+
+  private def dialGuarantors(validators: Seq[io.forge.jam.core.types.epoch.ValidatorKey]): List[PeerConnection] =
+    val dials = validators.flatMap { v =>
+      Connectivity.endpoint(v.metadata.toArray).map { address =>
+        val key = v.ed25519.bytes.toArray
+        (address, java.util.concurrent.CompletableFuture.supplyAsync(() => connectPeer(address, Some(key)), guarantorDialer))
+      }
+    }
+    val deadline = System.currentTimeMillis() + JamNode.GuarantorDialMillis
+    val reached = dials.flatMap { (address, f) =>
+      try Some(f.get(math.max(1L, deadline - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS))
+      catch
+        case e: Exception =>
+          val cause = Option(e.getCause).getOrElse(e)
+          logger.debug(s"guarantor at $address not reached: ${cause.getClass.getSimpleName} ${Option(cause.getMessage).getOrElse("")}")
+          None
+    }.toList
+    logger.info(s"dialed ${reached.size} of ${validators.size} guarantor(s) (${dials.size} with an endpoint)")
+    reached
 
   private def fetchSegments(segmentsRoot: Hash, indices: Seq[Int]): Option[IndexedSeq[Array[Byte]]] =
     segments.get(segmentsRoot, indices).orElse {
@@ -913,8 +991,16 @@ final class JamNode(
   private val grandpaLock = new Object
   @volatile private var rpcServer: Option[RpcServer] = None
 
-  def enableRpc(port: Int, host: String = "127.0.0.1", allowedOrigins: Seq[String] = Nil): RpcServer =
-    val server = new RpcServer(new java.net.InetSocketAddress(host, port), rpcApi, threads, allowedOrigins.toSet).start()
+  def enableRpc(
+      port: Int,
+      host: String = "127.0.0.1",
+      allowedOrigins: Seq[String] = Nil,
+      methods: RpcMethods = RpcMethods.Auto,
+      limits: RpcServer.Limits = RpcServer.Limits()
+  ): RpcServer =
+    val server =
+      new RpcServer(new java.net.InetSocketAddress(host, port), rpcApi, threads, allowedOrigins.toSet, methods, limits)
+        .start()
     rpcServer = Some(server)
     server
 
@@ -932,6 +1018,37 @@ final class JamNode(
       slow = threads.fixed("jam-rpc-slow", 2, numbered = true)
     )
   @volatile private var submitServer: Option[SubmitServer] = None
+  @volatile private var metricsServer: Option[MetricsServer] = None
+
+  def enableMetrics(port: Int, host: String = "127.0.0.1"): MetricsServer =
+    val server =
+      new MetricsServer(new InetSocketAddress(host, port), () => metrics, () => health, threads.single("jam-metrics")).start()
+    metricsServer = Some(server)
+    server
+
+  def validatorConnectivity: Option[ValidatorConnectivity] = peers.validatorConnectivity
+
+  def health: NodeHealth =
+    val (best, finalized) = chain.heads
+    val peerCount = distribution.peerCount
+    val syncing = catchingUp
+    val behind = if nodeConfig.slotTicking then slotClock.currentSlot - best.slot else 0L
+    val following = !syncing && (peerCount > 0 || peers.holdsWholeValidatorSet) && behind <= JamNode.HealthLagSlots
+    NodeHealth(best, finalized, peerCount, syncing, following, validatorConnectivity)
+
+  def metrics: NodeMetrics =
+    val h = health
+    val keys = distribution.peers.map(c => JamBytes(c.peerKey)).distinct
+    NodeMetrics(
+      health = h,
+      validatorPeers = keys.count(k => peers.isValidator(k.toArrayUnsafe)),
+      importedBlocks = importedBlocks.get,
+      importFailures = importFailures.get,
+      guaranteesMade = guarantor.fold(0L)(_.guaranteesMade),
+      auditsDone = auditor.fold(0L)(_.auditsDone),
+      telemetryDroppedEvents = telemetry.fold(0L)(_.droppedEvents),
+      queuedSubmissions = guarantor.fold(0)(_.queuedSubmissions)
+    )
 
   /** Port of the local submission endpoint, when it runs. */
   def submitPort: Option[Int] = submitServer.map(_.boundPort)
@@ -965,6 +1082,7 @@ final class JamNode(
     step("peers (begin)")(peers.beginShutdown())
     step("submission endpoint")(submitServer.foreach(_.stop()))
     step("RPC server")(rpcServer.foreach(_.stop()))
+    step("metrics server")(metricsServer.foreach(_.stop()))
     step("GRANDPA")(grandpaService.foreach(_.shutdown()))
     step("BEEFY")(beefyService.foreach(_.shutdown()))
     step("auditor")(auditor.foreach(_.shutdown()))
@@ -1023,11 +1141,34 @@ object JamNode:
   /** Upper bound on the redial backoff. */
   val MaxRedialMillis: Long = 16000L
 
+  val GuarantorDialMillis: Long = 5000L
+
   /** How long an accepted connection may go without UP 0 before we open it. */
   val UpZeroGraceMillis: Long = 3000L
 
-  val ImplementationVersion: String = "0.1.0"
+  val ImplementationVersion: String = BuildInfo.version
   val GrayPaperVersion: String = "0.8.0"
+
+  val AnyAddress: java.net.InetAddress = java.net.InetAddress.getByAddress(Array[Byte](0, 0, 0, 0))
+
+  val HealthLagSlots: Long = 10L
+
+  def endpointText(address: InetSocketAddress): String =
+    address.getAddress match
+      case v6: java.net.Inet6Address =>
+        val b = v6.getAddress
+        val groups = (0 until 8).map(i => ((b(2 * i) & 0xff) << 8) | (b(2 * i + 1) & 0xff))
+        val (start, length) = (0 until 8).foldLeft((0, 0)) { case (best @ (_, bestLength), i) =>
+          val run = groups.drop(i).takeWhile(_ == 0).size
+          if (i == 0 || groups(i - 1) != 0) && run > bestLength then (i, run) else best
+        }
+        val hex = groups.map(Integer.toHexString)
+        val text =
+          if length < 2 then hex.mkString(":")
+          else hex.take(start).mkString(":") + "::" + hex.drop(start + length).mkString(":")
+        s"[$text]:${address.getPort}"
+      case a if a != null => s"${a.getHostAddress}:${address.getPort}"
+      case _              => s"${address.getHostString}:${address.getPort}"
 
   private[node] def hex(bytes: Array[Byte]): String =
     bytes.map(b => f"${b & 0xff}%02x").mkString

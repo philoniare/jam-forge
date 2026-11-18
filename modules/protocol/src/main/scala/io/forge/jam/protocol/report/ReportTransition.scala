@@ -391,18 +391,18 @@ object ReportTransition:
     input: ReportInput
   ): ValidationResult =
     val packageHashes = guarantees.map(_.report.packageSpec.hash)
-    val historyHashes = preState.recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet
-    val availHashes = preState.availAssignments.flatten.map(_.report.packageSpec.hash).toSet
-    val allPipelinedHashes = historyHashes ++
-      preState.readyQueuePackageHashes ++
-      preState.accumulatedPackageHashes ++
-      availHashes ++
-      input.knownPackages
+    val allPipelinedHashes = pipelinedPackages(preState) ++ input.knownPackages
     for
       // Check for duplicates within batch
       _ <- ensure(packageHashes.distinct.size == packageHashes.size, ReportErrorCode.DuplicatePackage)
       _ <- ensure(!packageHashes.exists(allPipelinedHashes.contains), ReportErrorCode.DuplicatePackage)
     yield ()
+
+  def pipelinedPackages(preState: ReportState): Set[Hash] =
+    preState.recentBlocks.history.flatMap(_.reported.map(_.hash)).toSet ++
+      preState.readyQueuePackageHashes ++
+      preState.accumulatedPackageHashes ++
+      preState.availAssignments.flatten.map(_.report.packageSpec.hash)
 
   /**
    * Validate anchor recency and context.

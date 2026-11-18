@@ -24,7 +24,8 @@ final class ShardService(
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
-    reconstructMillis: Long = ShardService.ReconstructMillis
+    reconstructMillis: Long = ShardService.ReconstructMillis,
+    telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
   import ShardService.*
 
@@ -82,9 +83,15 @@ final class ShardService(
     */
   def shardDistributionHandler: io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
+      val receiving = telemetry.flatMap(_.receivingShardRequest(conn.peerKey))
+      val events = Served(
+        (root, index) => telemetry.foreach(_.shardRequestReceived(receiving, root, index)),
+        () => telemetry.foreach(_.shardsTransferred(receiving)),
+        why => telemetry.foreach(_.shardRequestFailed(receiving, why))
+      )
       stream.onMessage { msg =>
-        offLoop(conn, stream, msg) {
-          withCustody(stream, msg) { shards =>
+        offLoop(conn, stream, msg, events) {
+          withCustody(stream, msg, events) { shards =>
             stream.send(shards.bundleShard)
             stream.send(concat(shards.segmentShards))
             stream.send(encodeJustification(shards.justification, segmentShardSize))
@@ -92,15 +99,20 @@ final class ShardService(
         }
       }
 
-  private def offLoop(conn: PeerConnection, stream: MessageStream, msg: Array[Byte])(serve: => Unit): Unit =
+  private final case class Served(received: (Hash, Int) => Unit, transferred: () => Unit, failed: String => Unit)
+
+  private def offLoop(conn: PeerConnection, stream: MessageStream, msg: Array[Byte], events: Served)(serve: => Unit): Unit =
     val taken = work.submit(conn, msg.length.toLong) {
       try serve
       catch
         case e: Exception =>
           logger.warn(s"${StreamKind.name(stream.kind)} handler failed: ${e.getMessage}")
+          events.failed(s"failed here: ${e.getMessage}")
           stream.reset()
     }
-    if !taken then stream.reset()
+    if !taken then
+      events.failed("too many requests waiting")
+      stream.reset()
 
   /** CE 138: `Erasure-Root ++ Shard Index` → bundle shard, then the CE 137
     * justification with the segment-shard root appended. Served to any node;
@@ -108,9 +120,15 @@ final class ShardService(
     */
   def auditShardHandler: io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
+      val receiving = telemetry.flatMap(_.receivingBundleShardRequest(conn.peerKey))
+      val events = Served(
+        (root, index) => telemetry.foreach(_.bundleShardRequestReceived(receiving, root, index)),
+        () => telemetry.foreach(_.bundleShardTransferred(receiving)),
+        why => telemetry.foreach(_.bundleShardRequestFailed(receiving, why))
+      )
       stream.onMessage { msg =>
-        offLoop(conn, stream, msg) {
-          withCustody(stream, msg) { shards =>
+        offLoop(conn, stream, msg, events) {
+          withCustody(stream, msg, events) { shards =>
             stream.send(shards.bundleShard)
             stream.send(encodeJustification(DaShards.auditJustification(shards), segmentShardSize))
           }
@@ -121,19 +139,22 @@ final class ShardService(
     * `respond`, then FIN; a malformed request or a shard we don't hold is
     * rejected with a reset.
     */
-  private def withCustody(stream: MessageStream, msg: Array[Byte])(respond: ValidatorShards => Unit): Unit =
+  private def withCustody(stream: MessageStream, msg: Array[Byte], events: Served)(respond: ValidatorShards => Unit): Unit =
     val shards =
       if msg.length != 34 then None
       else
         val root = Hash(java.util.Arrays.copyOfRange(msg, 0, 32))
         val index = LittleEndian.get(msg, 32, 2).toInt
+        events.received(root, index)
         store.get(root, index).flatMap(b => DaShards.decode(b).toOption)
     shards match
       case Some(s) =>
         respond(s)
         stream.finish()
+        events.transferred()
       case None =>
         logger.debug(s"${StreamKind.name(stream.kind)}: no shard for request of ${msg.length} bytes")
+        events.failed(if msg.length != 34 then s"malformed request of ${msg.length} bytes" else "shard not held")
         stream.reset()
 
   /** CE 139 (`verified` false) and CE 140 (`verified` true): every requested
@@ -143,12 +164,20 @@ final class ShardService(
     */
   def segmentShardHandler(verified: Boolean): io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
-      stream.onMessage(msg => offLoop(conn, stream, msg)(serveSegmentShards(stream, msg, verified)))
+      val receiving = telemetry.flatMap(_.receivingSegmentShardRequest(conn.peerKey, ce140 = verified))
+      val events = Served(
+        (_, count) => telemetry.foreach(_.segmentShardRequestReceived(receiving, count)),
+        () => telemetry.foreach(_.segmentShardsTransferred(receiving)),
+        why => telemetry.foreach(_.segmentShardRequestFailed(receiving, why))
+      )
+      stream.onMessage(msg => offLoop(conn, stream, msg, events)(serveSegmentShards(stream, msg, verified, events)))
 
-  private def serveSegmentShards(stream: MessageStream, msg: Array[Byte], verified: Boolean): Unit =
+  private def serveSegmentShards(stream: MessageStream, msg: Array[Byte], verified: Boolean, events: Served): Unit =
+    val request = decodeSegmentShardRequest(msg)
+    request.foreach(groups => events.received(Hash.zero, groups.map(_._3.size).sum))
     val served =
       for
-        groups <- decodeSegmentShardRequest(msg)
+        groups <- request
         if groups.map(_._3.size).sum <= MaxSegmentShardsPerStream
         empty = Option(Vector.empty[(ValidatorShards, Int)])
         selected <- groups.foldLeft(empty) { case (acc, (root, index, segs)) =>
@@ -168,8 +197,10 @@ final class ShardService(
             stream.send(encodeJustification(DaShards.segmentJustification(s, i), segmentShardSize))
           }
         stream.finish()
+        events.transferred()
       case None =>
         logger.debug(s"${StreamKind.name(stream.kind)}: request not servable")
+        events.failed(if request.isEmpty then "malformed request" else "a shard asked for is not held, or too many")
         stream.reset()
 
   // =========================================================================
@@ -185,25 +216,32 @@ final class ShardService(
       shardIndex: Int,
       timeoutMs: Long = 10000
   ): Option[ValidatorShards] =
-    request(conn, StreamKind.ShardDistribution, encodeShardRequest(erasureRoot, shardIndex), timeoutMs)
+    val sending = telemetry.flatMap(_.sendingShardRequest(conn.peerKey, erasureRoot, shardIndex))
+    val payload = encodeShardRequest(erasureRoot, shardIndex)
+    val got = request(conn, StreamKind.ShardDistribution, payload, timeoutMs)(() => telemetry.foreach(_.shardRequestSent(sending)))
       .flatMap {
         case List(bundle, segments, justification) if segments.length % segmentShardSize == 0 =>
           val decoded = decodeJustification(justification, segmentShardSize).map { j =>
             ValidatorShards(shardIndex, bundle, segments.grouped(segmentShardSize).toIndexedSeq, j)
           }
           if decoded.isEmpty then misbehaved(conn, Offence.Malformed)
-          decoded
+          decoded.toRight("malformed justification")
         case _ =>
           misbehaved(conn, Offence.Malformed)
-          None
+          Left("malformed answer")
       }
-      .filter { shards =>
-        val ok = DaShards.verify(erasureRoot, config.validatorCount, shards)
-        if !ok then
-          logger.warn(s"shard $shardIndex failed verification against ${erasureRoot.toHex.take(18)}")
-          misbehaved(conn, Offence.BadProof)
-        ok
-      }
+      .filterOrElse(
+        { shards =>
+          val ok = DaShards.verify(erasureRoot, config.validatorCount, shards)
+          if !ok then
+            logger.warn(s"shard $shardIndex failed verification against ${erasureRoot.toHex.take(18)}")
+            misbehaved(conn, Offence.BadProof)
+          ok
+        },
+        "shards do not verify against the erasure root"
+      )
+    telemetry.foreach(t => got.fold(why => t.shardRequestFailed(sending, why), _ => t.shardsTransferred(sending)))
+    got.toOption
 
   /** CE 138: fetch and verify bundle shard `shardIndex` from `conn`. */
   def fetchAuditShard(
@@ -212,14 +250,19 @@ final class ShardService(
       shardIndex: Int,
       timeoutMs: Long = 10000
   ): Option[Array[Byte]] =
-    request(conn, StreamKind.AuditShardRequest, encodeShardRequest(erasureRoot, shardIndex), timeoutMs)
+    val sending = telemetry.flatMap(_.sendingBundleShardRequest(conn.peerKey, shardIndex))
+    val payload = encodeShardRequest(erasureRoot, shardIndex)
+    val got = request(conn, StreamKind.AuditShardRequest, payload, timeoutMs)(() => telemetry.foreach(_.bundleShardRequestSent(sending)))
       .flatMap {
         case List(bundle, justification) =>
           decodeJustification(justification, segmentShardSize)
             .filter(j => DaShards.verifyAuditShard(erasureRoot, config.validatorCount, shardIndex, bundle, j))
             .map(_ => bundle)
-        case _ => None
+            .toRight("bundle shard does not verify against the erasure root")
+        case _ => Left("malformed answer")
       }
+    telemetry.foreach(t => got.fold(why => t.bundleShardRequestFailed(sending, why), _ => t.bundleShardTransferred(sending)))
+    got.toOption
 
   /** CE 139/140: fetch segment shards `segmentIndexes` of shard `shardIndex`.
     * With `verified`, each shard's justification is checked against the
@@ -233,10 +276,15 @@ final class ShardService(
       segmentIndexes: List[Int],
       verified: Boolean,
       segmentCount: Int = 0,
-      timeoutMs: Long = 10000
+      timeoutMs: Long = 10000,
+      trace: SegmentTrace = SegmentTrace.none
   ): Option[IndexedSeq[Array[Byte]]] =
     val kind = if verified then StreamKind.SegmentShardRequestVerified else StreamKind.SegmentShardRequest
-    request(conn, kind, encodeSegmentShardRequest(List((erasureRoot, shardIndex, segmentIndexes))), timeoutMs)
+    val sending = telemetry.flatMap(
+      _.sendingSegmentShardRequest(trace.submission, conn.peerKey, verified, segmentIndexes.map(s => (trace.importSegmentId(s), shardIndex)))
+    )
+    val payload = encodeSegmentShardRequest(List((erasureRoot, shardIndex, segmentIndexes)))
+    val got = request(conn, kind, payload, timeoutMs)(() => telemetry.foreach(_.segmentShardRequestSent(sending))).toOption
       .flatMap {
         case shardsMsg :: justifications if shardsMsg.length == segmentIndexes.size * segmentShardSize =>
           val shards = shardsMsg.grouped(segmentShardSize).toIndexedSeq
@@ -259,6 +307,11 @@ final class ShardService(
             Option.when(ok)(shards)
         case _ => None
       }
+    telemetry.foreach { t =>
+      if got.isDefined then t.segmentShardsTransferred(sending)
+      else t.segmentShardRequestFailed(sending, "no answer, or shards that do not verify")
+    }
+    got
 
   /** Rebuild segments `indices` of a report's erasure-coded segments (its exports then their paged proofs,
     * `segmentCount` in all) from R shard indices: our own custody first, then CE 140 from `peers`, each shard
@@ -270,7 +323,8 @@ final class ShardService(
       indices: List[Int],
       peers: Iterable[PeerConnection],
       /** The shard indexes a peer is expected to hold for this report, asked for first. */
-      holds: PeerConnection => Seq[Int]
+      holds: PeerConnection => Seq[Int],
+      trace: SegmentTrace = SegmentTrace.none
   ): Either[String, IndexedSeq[Array[Byte]]] =
     val needed = DaShards.recoveryThreshold(config)
     val collected = new ConcurrentHashMap[Int, IndexedSeq[Array[Byte]]]()
@@ -287,7 +341,7 @@ final class ShardService(
             () =>
               holds(conn).distinct.foreach { idx =>
                 if collected.size < needed && idx >= 0 && idx < config.validatorCount && !collected.containsKey(idx) then
-                  fetchSegmentShards(conn, erasureRoot, idx, indices, verified = true, segmentCount)
+                  fetchSegmentShards(conn, erasureRoot, idx, indices, verified = true, segmentCount, trace = trace)
                     .foreach(collected.putIfAbsent(idx, _))
               },
             fetchPool
@@ -295,10 +349,18 @@ final class ShardService(
         catch case _: java.util.concurrent.RejectedExecutionException => CompletableFuture.completedFuture[Void](null)
       }
       done.foreach(f => try f.get() catch case _: Exception => ())
-    if collected.size < needed then Left(s"only ${collected.size}/$needed segment shards recoverable")
+    if collected.size < needed then
+      val why = s"only ${collected.size}/$needed segment shards recoverable"
+      telemetry.foreach { t =>
+        t.segmentReconstructionFailed(t.reconstructingSegments(trace.submission, indices.map(trace.importSegmentId), trivial = false), why)
+      }
+      Left(why)
     else
       val held = collected.entrySet.iterator
       val chosen = (0 until needed).map { _ => val e = held.next(); (e.getKey.intValue, e.getValue) }
+      val reconstructing = telemetry.flatMap(
+        _.reconstructingSegments(trace.submission, indices.map(trace.importSegmentId), trivial = chosen.forall(_._1 < needed))
+      )
       val rebuilt = indices.indices.map { k =>
         io.forge.jam.crypto.ErasureCoding
           .reconstruct(
@@ -309,8 +371,12 @@ final class ShardService(
           .map(d => java.util.Arrays.copyOf(d, io.forge.jam.core.constants.Csegmentsize.toInt))
       }
       rebuilt.collectFirst { case Left(e) => e } match
-        case Some(e) => Left(s"segment reconstruction failed: ${e.getMessage}")
-        case None    => Right(rebuilt.map(_.toOption.get))
+        case Some(e) =>
+          telemetry.foreach(_.segmentReconstructionFailed(reconstructing, String.valueOf(e.getMessage)))
+          Left(s"segment reconstruction failed: ${e.getMessage}")
+        case None =>
+          telemetry.foreach(_.segmentsReconstructed(reconstructing))
+          Right(rebuilt.map(_.toOption.get))
 
   /** Fetch enough bundle shards (local store first, then CE 138 from `peers`)
     * to reconstruct the audit bundle for a report. Peers are asked for `reconstructMillis` at most: with too few
@@ -374,7 +440,12 @@ final class ShardService(
     if collected.size < needed then
       val late = if left <= 0 then s" within ${reconstructMillis} ms" else ""
       Left(s"${ShardService.TooFewShards}: only ${collected.size}/$needed recoverable$late")
-    else DaShards.reconstructBundle(bundleLength, collected.toSeq, config)
+    else
+      val audit = peerList.nonEmpty
+      if audit then telemetry.foreach(_.reconstructingBundle(trivial = (0 until needed).forall(collected.contains)))
+      val rebuilt = DaShards.reconstructBundle(bundleLength, collected.toSeq, config)
+      if audit && rebuilt.isRight then telemetry.foreach(_.bundleReconstructed())
+      rebuilt
 
   // =========================================================================
   // helpers
@@ -393,8 +464,13 @@ final class ShardService(
       kind: Byte,
       payload: Array[Byte],
       timeoutMs: Long
-  ): Option[List[Array[Byte]]] =
-    StreamRequest.collect(conn, kind, payload, timeoutMs)
+  )(onSent: () => Unit): Either[String, List[Array[Byte]]] =
+    StreamRequest.collectOrWhy(conn, kind, payload, timeoutMs, onSent)
+
+final case class SegmentTrace(submission: Option[Telemetry.EventRef], importSegmentId: Int => Int)
+
+object SegmentTrace:
+  val none: SegmentTrace = SegmentTrace(None, identity)
 
 object ShardService:
 

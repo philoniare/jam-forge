@@ -78,17 +78,40 @@ object NodeThreads:
       t.setDaemon(true)
       t
 
-final class Periodic(task: String) extends LazyLogging:
+final class Periodic(
+    task: String,
+    repeatLogMillis: Long = Periodic.RepeatLogMillis,
+    clock: () => Long = () => System.currentTimeMillis()
+) extends LazyLogging:
   private val seen = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+  private var unlogged = 0L
+  private var lastLineMillis = 0L
 
   def run(body: => Unit): Unit =
     try body
     catch
       case scala.util.control.NonFatal(e) =>
         val what = s"${e.getClass.getName}: ${e.getMessage}"
+        val now = clock()
         if seen.size < Periodic.MaxDistinct && seen.add(what) then
-          logger.error(s"$task failed; it runs again at its next period, and this failure is not logged again: $what", e)
-        else logger.debug(s"$task failed again: $what")
+          synchronized { unlogged = 0; lastLineMillis = now }
+          logger.error(
+            s"$task failed; it runs again at its next period, and while this failure repeats it is logged once " +
+              s"every ${repeatLogMillis / 1000} s: $what",
+            e
+          )
+        else
+          val repeats = synchronized {
+            unlogged += 1
+            if now - lastLineMillis < repeatLogMillis then 0L
+            else
+              val n = unlogged
+              unlogged = 0
+              lastLineMillis = now
+              n
+          }
+          if repeats > 0 then logger.warn(s"$task is still failing: $repeats more failure(s) since the last line, the latest: $what")
+          else logger.debug(s"$task failed again: $what")
 
   def apply(body: => Unit): Runnable = () => run(body)
 
@@ -96,3 +119,5 @@ final class Periodic(task: String) extends LazyLogging:
 
 object Periodic:
   val MaxDistinct: Int = 64
+
+  val RepeatLogMillis: Long = 60_000L

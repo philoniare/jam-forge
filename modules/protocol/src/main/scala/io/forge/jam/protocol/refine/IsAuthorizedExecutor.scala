@@ -16,7 +16,8 @@ import spire.math.ULong
   */
 final case class IsAuthorizedResult(
     result: ExecutionResult,
-    gasUsed: Long
+    gasUsed: Long,
+    cost: io.forge.jam.protocol.pvmhost.IsAuthorizedCost = io.forge.jam.protocol.pvmhost.IsAuthorizedCost.zero
 )
 
 /** Host-call dispatcher for the is-authorized invocation only `gas` and
@@ -92,6 +93,23 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       accounts: HistoricalLookupService,
       executionMode: ExecutionMode = ExecutionMode.default
   ): IsAuthorizedResult =
+    val probe = new io.forge.jam.protocol.pvmhost.RunProbe
+    val r = run(workPackage, coreIndex, accounts, executionMode, probe)
+    IsAuthorizedResult(r.result, r.gasUsed,
+      io.forge.jam.protocol.pvmhost.IsAuthorizedCost(
+        io.forge.jam.protocol.pvmhost.ExecCost(r.gasUsed, probe.elapsedNanos),
+        probe.compileNanos,
+        probe.hostCalls
+      )
+    )
+
+  private def run(
+      workPackage: WorkPackage,
+      coreIndex: Int,
+      accounts: HistoricalLookupService,
+      executionMode: ExecutionMode,
+      probe: io.forge.jam.protocol.pvmhost.RunProbe
+  ): IsAuthorizedResult =
     val hostService = workPackage.authCodeHost.toLong
     val lookupAnchorTimeslot =
       workPackage.context.lookupAnchorSlot.toLong
@@ -126,6 +144,7 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       case None =>
         return IsAuthorizedResult(ExecutionResult.Panic, 0L)
       case Some(m) => m
+    probe.codeReady()
 
     // a = encode[2](c)
     val args = Array[Byte](
@@ -133,9 +152,14 @@ class IsAuthorizedExecutor(val config: ChainConfig):
       ((coreIndex >> 8) & 0xff).toByte
     )
 
-    val hostCalls = new IsAuthorizedHostCalls(config, workPackage)
+    val hostCalls = new io.forge.jam.protocol.pvmhost.HostCallMeter(new IsAuthorizedHostCalls(config, workPackage), _ => 0, 1)
+    probe.meter = hostCalls
     val (exit, gasUsed, output) =
-      PvmRunner.run(module, args, constants.Cpackageauthgas, entryPc = 0, hostCalls, executionMode)
+      PvmRunner.run(
+        module, args, constants.Cpackageauthgas, entryPc = 0, hostCalls, executionMode,
+        memoryBudget = io.forge.jam.pvm.memory.InstanceMemoryBudget.inCore,
+        abstainOnInternalError = true
+      )
 
     exit match
       case PvmRunner.PvmExit.OutOfGas =>

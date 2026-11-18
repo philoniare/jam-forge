@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.accumulation
 
 
-import io.forge.jam.protocol.pvmhost.ServiceCode
+import io.forge.jam.protocol.pvmhost.{AccumulateCost, ExecCost, HostCallMeter, ServiceCode}
 import io.forge.jam.protocol.state.StateKey
 import io.forge.jam.protocol.pipeline.StageTimers
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing, constants}
@@ -35,9 +35,11 @@ class AccumulationExecutor(
       executionMode: ExecutionMode = ExecutionMode.default,
       storageView: Option[ServiceStorageView] = None
   ): AccumulationOneResult =
+    val started = System.nanoTime()
+    def elapsed = System.nanoTime() - started
     val account = partialState.accounts.get(serviceId)
     if account.isEmpty then
-      return createEmptyResult(partialState, Some(serviceId), operands)
+      return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
 
     val acc = account.get
     val codeHash = acc.info.codeHash
@@ -47,15 +49,16 @@ class AccumulationExecutor(
       .orElse(readOwnPreimage(partialState, serviceId, codeHash.bytes.toArray, storageView))
 
     if preimage.isEmpty then
-      return createEmptyResult(partialState, Some(serviceId), operands)
+      return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
 
     // The process-wide module cache only returns a module built from identical code bytes, so the blob is read
     // without an extra copy of the preimage.
     val code = extractCodeBlob(preimage.get.toArrayUnsafe)
     if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
-    then return createEmptyResult(partialState, Some(serviceId), operands)
+    then return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
     val module: Option[InterpretedModule] =
       StageTimers.time("acc/service-module")(getOrCompileModule(code.get, JamBytes(codeHash.bytes.toArray)))
+    val compileNanos = elapsed
 
     // Apply incoming transfer balances before execution
     val transferBalance = operands.collect {
@@ -98,7 +101,8 @@ class AccumulationExecutor(
     )
 
     // Execute PVM
-    val execResult = StageTimers.time("acc/service-pvm")(executePvm(context, module, gasLimit, operands, executionMode))
+    val meter = new HostCallMeter(new AccumulationHostCalls(context, operands, config), AccumulateCost.category, 6)
+    val execResult = StageTimers.time("acc/service-pvm")(executePvm(context, module, gasLimit, operands, executionMode, meter))
 
     // Collapse state based on exit reason
     val finalState = StageTimers.time("acc/service-collapse")(context.collapse(execResult.exitReason))
@@ -121,7 +125,8 @@ class AccumulationExecutor(
       deferredTransfers = newDeferred,
       yieldHash = yieldHash,
       gasUsed = execResult.gasUsed,
-      provisions = context.getProvisions(execResult.exitReason)
+      provisions = context.getProvisions(execResult.exitReason),
+      cost = AccumulateCost.of(ExecCost(execResult.gasUsed, elapsed), compileNanos, meter)
     )
 
   /** Execute PVM code with host call handling.
@@ -131,7 +136,8 @@ class AccumulationExecutor(
       moduleOpt: Option[InterpretedModule],
       gasLimit: Long,
       operands: List[AccumulationOperand],
-      executionMode: ExecutionMode
+      executionMode: ExecutionMode,
+      hostCalls: HostCallMeter
   ): PvmExecResult =
     // Encode input data: timeslot, serviceIndex, operands count
     val inputData = JamCodecs.encodeCompactInteger(context.timeslot) ++
@@ -142,8 +148,6 @@ class AccumulationExecutor(
       return PvmExecResult(ExitReason.INVALID_CODE, 0L, None)
 
     val module = moduleOpt.get
-
-    val hostCalls = new AccumulationHostCalls(context, operands, config)
 
     val (exit, gasUsed, output) = PvmRunner.run(
       module = module,
@@ -222,7 +226,8 @@ class AccumulationExecutor(
   private def createEmptyResult(
       state: PartialState,
       serviceId: Option[Long],
-      operands: List[AccumulationOperand]
+      operands: List[AccumulationOperand],
+      elapsedNanos: Long
   ): AccumulationOneResult =
     val finalState = serviceId match
       case Some(sid) =>
@@ -245,7 +250,14 @@ class AccumulationExecutor(
         else state
       case None => state
 
-    AccumulationOneResult(finalState, List.empty, None, 0L, Set.empty)
+    AccumulationOneResult(
+      finalState,
+      List.empty,
+      None,
+      0L,
+      Set.empty,
+      AccumulateCost.zero.copy(calls = 1, total = ExecCost(0L, elapsedNanos))
+    )
 
 /** Result of PVM execution.
   */
