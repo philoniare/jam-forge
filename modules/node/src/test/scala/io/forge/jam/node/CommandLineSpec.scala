@@ -28,6 +28,18 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     refused("--data", "/d", "stray") should include("unexpected argument: stray")
   }
 
+  test("the data directory is --data, else JAM_DATA_DIR; --temp takes neither") {
+    def dir(env: Map[String, String], args: String*) =
+      Main.dataDirOf(parse(args*).fold(e => fail(e), identity), env.get)
+    dir(Map.empty, "--data", "/d") shouldBe Some(java.nio.file.Paths.get("/d"))
+    dir(Map("JAM_DATA_DIR" -> "/data"), "--data", "/d") shouldBe Some(java.nio.file.Paths.get("/d"))
+    dir(Map("JAM_DATA_DIR" -> "/data")) shouldBe Some(java.nio.file.Paths.get("/data"))
+    dir(Map("JAM_DATA_DIR" -> "")) shouldBe None
+    dir(Map.empty) shouldBe None
+    dir(Map("JAM_DATA_DIR" -> "/data"), "--temp") shouldBe None
+    Main.Usage should include("JAM_DATA_DIR")
+  }
+
   test("--rpc-methods takes safe, unsafe or auto, and --help names it") {
     for value <- List("safe", "unsafe", "auto") do
       parse("--rpc-port", "9944", "--rpc-methods", value).map(_.options.get("rpc-methods")) shouldBe Right(Some(value))

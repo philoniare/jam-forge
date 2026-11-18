@@ -22,10 +22,36 @@ import io.forge.jam.pvm.PvmSettings
   *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
   *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
   *          [--finality-peers N | --announced-finality] [--prune-history]
+  *          [--sync-from <header hash>[:<set id>]]   (join at this block, trusted, instead of replaying from genesis)
+  *          [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]
+  *                        [--rpc-methods safe|unsafe|auto (default auto)]]   (JIP-2 RPC over WebSocket)
+  *          [--metrics-port N [--metrics-listen-ip IP (default 127.0.0.1)]]   (GET /metrics and /health)
+  *          [--pvm-backend interpreter|recompiler]
   *          [--fault-tamper-reports]   (testing only: guarantee wrong reports, to exercise disputes)
   * jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
   *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
+  * jam-node gen-keys
+  * jam-node list-keys (--validator-seed <hex or path> | --seed <hex> | --seed-file <path> | --author <index>)
+  * jam-node --version
   * }}}
+  *
+  * `--version` prints the node's name and version (the build's) and exits. `gen-keys` prints a new random 32-byte
+  * validator seed and the session keys it derives (JIP-5: Ed25519, Bandersnatch, BLS) as JSON: written to a file, the
+  * seed is what `--validator-seed <file>` takes. `list-keys` prints the public keys a seed gives the node, read as the
+  * node reads it: `--validator-seed` (a path, or the hex itself) and `--author` give a validator's keys, `--seed` and
+  * `--seed-file` the network identity's Ed25519 key. Neither command creates a file or starts anything. Both take
+  * `--data`, which they ignore.
+  *
+  * `--listen-ip` is the address the QUIC listener binds to: 0.0.0.0 (the default) and :: take IPv4 and IPv6 peers
+  * where the machine has IPv6; any other address must be one of this machine's. `--external-ip` is the address peers
+  * reach the node at (behind NAT, the public one): reported as its endpoint (telemetry node information, the start-up
+  * log), and a validator whose on-chain metadata names another endpoint is warned. Both take IP addresses, not host
+  * names. Without `--data` the data directory is `JAM_DATA_DIR`'s, when that is set (the node image sets /data).
+  * `--temp` runs on a new temporary data directory, deleted when the node exits; it cannot be given with `--data`,
+  * and `JAM_DATA_DIR` is then not used. `--pvm-backend` chooses how guest code runs: `interpreter`, or `recompiler` (native code, which needs the
+  * recompiler library named by `-Djam.pvm.recompiler.lib`); without it the recompiler is used where it is available.
+  * `--metrics-port N` serves Prometheus metrics at `/metrics` and a JSON health check at `/health` (200 while the node
+  * follows the chain, 503 when it does not) on loopback, or on `--metrics-listen-ip`.
   *
   * With `--author i` the node's network identity is dev validator i's Ed25519
   * key (JIP-5 trivial seed for i), as JAMNP-S expects of validators; peers then
@@ -37,6 +63,13 @@ import io.forge.jam.pvm.PvmSettings
   * keep it out. Native crypto
   * libraries are looked up under `-Djam.base.dir` (default: the working
   * directory); a missing one stops the node before it joins the network.
+  * `--rpc-allow-origin <origin>` (repeatable, e.g. `http://localhost:3000`) lets web pages from that origin use the
+  * RPC; a browser's handshake from any other origin is refused, one without an `Origin` (any other client) is not.
+  * `--rpc-methods` says whether the RPC serves its unsafe methods (work-package, bundle and preimage submission, and
+  * segment recovery, which make the node take in work or fetch from the network for the caller): `safe` refuses them
+  * with a JSON-RPC error, `unsafe` serves them, and `auto` (the default) serves them only when `--rpc-listen-ip` is a
+  * loopback address. Each client address may hold a few connections and make a bounded rate of requests; beyond
+  * them it is refused (a 429 handshake, a JSON-RPC error), not cut off.
   * `--submit-port N` opens the loopback preimage endpoint (`POST /preimage/<service-id>`).
   * `--seed-file` keeps the network identity across restarts: the seed is read from the file, or generated and
   * written there (owner-only) when the file does not exist. `--prune-history` deletes finalized blocks once they
@@ -54,6 +87,9 @@ import io.forge.jam.pvm.PvmSettings
   * key is also the node's network identity.
   *
   * A node with validator keys also votes in GRANDPA, as if `--grandpa` were given.
+  *
+  * `--sync-from <header hash>:<set id>` also names the GRANDPA voter set id in force at the checkpoint, which the
+  * voter then uses. Without it the id is learned from the first commit that proves it.
   *
   * `--spec` may be an http(s) URL: the spec is downloaded at every start into `<data-dir>/spec.json`, and the copy
   * there is used when the download fails. Without `--spec` the node joins the public jamtoaster testnet.
@@ -82,6 +118,7 @@ object Main extends LazyLogging:
     BandersnatchVrf.baseDir.install(BandersnatchVrf.baseDir.fromSystemProperties)
 
   private def run(args: Array[String]): Unit =
+    // Nothing is opened, loaded or started before the command line is known to be whole.
     val commandLine = parseCommandLine(args.toList).fold(fail, identity)
     if commandLine.flags.contains("--help") then
       println(Usage)
@@ -89,6 +126,7 @@ object Main extends LazyLogging:
     if commandLine.flags.contains("--version") then
       println(VersionText)
       return
+    // Before any PVM class is loaded: the execution mode is read once, when ExecutionMode is first used.
     systemProperties(commandLine).foreach((name, value) => System.setProperty(name, value))
     installProcessSettings()
     commandLine.command match
@@ -116,11 +154,13 @@ object Main extends LazyLogging:
     if !listenIp.isAnyLocalAddress && !isOwnAddress(listenIp) then
       fail(s"--listen-ip ${listenIp.getHostAddress} is not an address of this machine (0.0.0.0 or :: listens on all of them)")
     val externalIp = opts.get("external-ip").map(v => parseIp("--external-ip", v).fold(fail, identity))
+    // A secret on the command line is in the process list, readable by every user of the machine.
     if opts.contains("seed") then
       System.err.println("warning: --seed is visible in the process list to every user of this machine; give --seed-file <path> instead")
 
+    // A temporary data directory is deleted once the node has stopped, by the same hook, so never under it.
     val temporaryData = Option.when(flags.contains("--temp"))(newTempDataDir())
-    val dataDirGiven = temporaryData.orElse(opts.get("data").map(Paths.get(_)))
+    val dataDirGiven = temporaryData.orElse(dataDirOf(commandLine, sys.env.get))
     val running = new java.util.concurrent.atomic.AtomicReference[JamNode]()
     Runtime.getRuntime.addShutdownHook(
       new Thread(
@@ -141,7 +181,7 @@ object Main extends LazyLogging:
       if givenKeys.nonEmpty && !opts.contains("author") then
         if opts.contains("seed") || opts.contains("seed-file") then
           fail(s"--${givenKeys.head} makes this node a validator, whose network identity is its Ed25519 key: drop --seed/--seed-file")
-        val dir = dataDirGiven.getOrElse(fail(s"--${givenKeys.head} needs --data <dir> (or --temp) to keep the node's other keys in"))
+        val dir = dataDirGiven.getOrElse(fail(s"--${givenKeys.head} needs --data <dir> (or $DataDirEnv, or --temp) to keep the node's other keys in"))
         Some(dir.resolve("validator.seed").toString)
       else None
     }
@@ -160,7 +200,7 @@ object Main extends LazyLogging:
         case None    => fail("--print-keys needs --author, --validator-seed, --bandersnatch-key or --ed25519-key")
 
     val specPath = opts.getOrElse("spec", DefaultSpecUrl)
-    val dataDir = dataDirGiven.getOrElse(fail("--data <dir> is required (or --temp, for a temporary one)"))
+    val dataDir = dataDirGiven.getOrElse(fail(s"--data <dir> is required (or $DataDirEnv=<dir>, or --temp for a temporary one)"))
 
     val loadedSpec = ChainSpec.load(localSpec(specPath, dataDir)) match
       case Right(s)  => s
@@ -230,6 +270,7 @@ object Main extends LazyLogging:
 
     Thread.currentThread().join()
 
+  /** `--sync-from <header hash>[:<set id>]`: the checkpoint's header hash and the GRANDPA set id, when given. */
   private[node] def parseSyncFrom(value: String): Either[String, (io.forge.jam.core.primitives.Hash, Option[Long])] =
     val (hex, setId) = value.indexOf(':') match
       case -1 => (value, None)
@@ -247,6 +288,9 @@ object Main extends LazyLogging:
               case Some(n) => Right((hash, Some(n)))
               case None => Left(s"--sync-from: the GRANDPA set id after ':' must be a non-negative integer, got '$id'")
 
+  /** A validator's public keys and the JAMNP-S peer name its Ed25519 key gives, as JSON; with the seed they derive
+    * from first, when given.
+    */
   private def publicKeysJson(k: ValidatorKeySet, seed: Option[Array[Byte]] = None): String =
     jsonObject(
       seed.map(s => "seed" -> hex(s)).toList ++ List(
@@ -257,6 +301,7 @@ object Main extends LazyLogging:
       )
     )
 
+  /** The network identity an Ed25519 secret key (`--seed`, `--seed-file`) gives: its public key and peer name. */
   private def networkKeysJson(secret: Array[Byte]): String =
     val public = NodeIdentity.fromSeed(secret).publicKeyBytes
     jsonObject(List("ed25519" -> hex(public), "peer_id" -> NodeIdentity.altName(public)))
@@ -266,11 +311,15 @@ object Main extends LazyLogging:
   private def jsonObject(fields: List[(String, String)]): String =
     fields.map((name, value) => s"""  "$name": "$value"""").mkString("{\n", ",\n", "\n}")
 
+  /** `gen-keys`: a new random 32-byte validator seed and the session keys it derives (JIP-5), as JSON. */
   private[node] def genKeys(): String =
     val seed = new Array[Byte](32)
     new SecureRandom().nextBytes(seed)
     publicKeysJson(ValidatorKeySet.fromSeed(seed), Some(seed))
 
+  /** `list-keys`: the public keys the one key source on the command line gives the node, as JSON. Reads only: a
+    * missing seed file is an error, not made.
+    */
   private[node] def listKeys(cl: CommandLine): Either[String, String] =
     val o = cl.options
     o.get("validator-seed").map(v => readSeed("--validator-seed", v, hexAllowed = true).map(s => publicKeysJson(ValidatorKeySet.fromSeed(s))))
@@ -279,6 +328,7 @@ object Main extends LazyLogging:
       .orElse(o.get("seed-file").map(p => readSeed("--seed-file", p, hexAllowed = false).map(networkKeysJson)))
       .getOrElse(Left(s"$ListKeys needs one of $ListKeysSources"))
 
+  /** A 32-byte seed given as hex (when `hexAllowed`) or as the path of a file holding the hex. */
   private def readSeed(option: String, hexOrPath: String, hexAllowed: Boolean): Either[String, Array[Byte]] =
     if hexAllowed && hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then
       System.err.println(s"warning: $option given as hex is visible in the process list; give the path of a file instead")
@@ -294,8 +344,10 @@ object Main extends LazyLogging:
           case Some(seed) if seed.length != 32 => Left(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
           case Some(seed) => Right(seed)
 
+  /** A new, empty data directory for `--temp`, readable by its owner only. */
   private[node] def newTempDataDir(): Path = Files.createTempDirectory("jam-node-")
 
+  /** Delete `dir` and everything in it, not following links out of it; nothing when it is gone already. */
   private[node] def deleteTree(dir: Path): Unit =
     if Files.exists(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS) then
       val walk = Files.walk(dir)
@@ -306,15 +358,20 @@ object Main extends LazyLogging:
         }
       finally walk.close()
 
+  /** The node's name and version, as `--version` prints them. */
   private[node] val VersionText: String =
     s"${BuildInfo.name} ${BuildInfo.version}${BuildInfo.gitSha.fold("")(sha => s" ($sha)")} " +
       s"(Gray Paper ${JamNode.GrayPaperVersion})"
 
+  /** The system properties the command line sets, before anything reads them: `--pvm-backend`'s execution mode. */
   private[node] def systemProperties(cl: CommandLine): Map[String, String] =
     cl.options.get("pvm-backend").map { backend =>
       PvmSettings.ExecutionModeProperty -> (if backend == "interpreter" then "interpreted" else "recompiled")
     }.toMap
 
+  /** An IP address literal: IPv4 dotted decimal, or IPv6 (in brackets or not; an IPv4-mapped one is the IPv4
+    * address). Never a host name, which would need a lookup. A multicast address is refused.
+    */
   private[node] def parseIp(option: String, value: String): Either[String, InetAddress] =
     val dotted = """(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})""".r
     val literal = value.stripPrefix("[").stripSuffix("]")
@@ -330,6 +387,7 @@ object Main extends LazyLogging:
       case Some(ip) if ip.isMulticastAddress => Left(s"$option: $value is a multicast address")
       case Some(ip) => Right(ip)
 
+  /** Whether `ip` is an address of one of this machine's interfaces. */
   private def isOwnAddress(ip: InetAddress): Boolean =
     ip.isLoopbackAddress || (try java.net.NetworkInterface.getByInetAddress(ip) != null
     catch case _: java.io.IOException => false)
@@ -402,6 +460,9 @@ object Main extends LazyLogging:
       Files.writeString(path, JamBytes(seed).toHex + "\n")
       seed
 
+  /** Who besides the owner can read the secret in `path`: None when nobody can, or when the file system has no
+    * such permissions to ask about.
+    */
   private[node] def exposedTo(path: Path): Option[String] =
     try
       val perms = Files.getPosixFilePermissions(path)
@@ -410,6 +471,9 @@ object Main extends LazyLogging:
       Option.when(who.nonEmpty)(who.mkString(" and "))
     catch case _: UnsupportedOperationException => None
 
+  /** A key file others can read is as good as published. The node still starts: the operator may have reasons
+    * (a test network's well-known keys), but should not find out from an incident.
+    */
   private def warnIfExposed(path: Path): Unit =
     exposedTo(path).foreach(who =>
       System.err.println(s"warning: $path holds a secret key and is readable by $who; restrict it with: chmod 600 $path")
@@ -420,6 +484,7 @@ object Main extends LazyLogging:
     if colon <= 0 then fail(s"expected host:port, got: $s")
     new InetSocketAddress(s.substring(0, colon), s.substring(colon + 1).toInt)
 
+  /** The command line, read whole: options with a value, repeatable options, flags, and the command, if any. */
   private[node] final case class CommandLine(
       options: Map[String, String],
       repeated: Map[String, List[String]],
@@ -427,20 +492,34 @@ object Main extends LazyLogging:
       command: Option[String] = None
   )
 
+  /** The environment variable naming the data directory when the command line gives none (the node image sets it). */
+  private[node] val DataDirEnv = "JAM_DATA_DIR"
+
+  /** The data directory: `--data`, else `JAM_DATA_DIR` when it is set; none with `--temp`, which makes its own. Being a
+    * default, `JAM_DATA_DIR` never makes a `--data` given after it a second one.
+    */
+  private[node] def dataDirOf(cl: CommandLine, env: String => Option[String]): Option[Path] =
+    if cl.flags.contains("--temp") then None
+    else cl.options.get("data").orElse(env(DataDirEnv).filter(_.nonEmpty)).map(Paths.get(_))
+
   private val GenKeys = "gen-keys"
   private val ListKeys = "list-keys"
 
+  /** Commands other than running the node. */
   private val Commands = Set(GenKeys, ListKeys)
 
+  /** The options `list-keys` reads a seed from, one of which it needs. */
   private val ListKeysOptions = List("validator-seed", "seed", "seed-file", "author")
   private val ListKeysSources = "--validator-seed, --seed, --seed-file or --author"
 
+  /** Options that take one value, by name without the leading `--`. */
   private val ValueOptions = Set(
     "data", "spec", "port", "seed", "seed-file", "era-start", "author", "validator-seed", "bandersnatch-key",
     "ed25519-key", "telemetry", "submit-port", "finality-peers", "sync-from", "rpc-port", "rpc-listen-ip",
     "listen-ip", "external-ip", "pvm-backend", "metrics-port", "metrics-listen-ip", "rpc-methods"
   )
 
+  /** Options that take a value and may be given more than once. */
   private val RepeatedOptions = Set("--peer", "--rpc-allow-origin")
 
   private val Flags = Set(
@@ -448,8 +527,10 @@ object Main extends LazyLogging:
     "--fault-tamper-reports", "--help", "--version", "--temp"
   )
 
+  /** Flags any command takes: they print and exit before the command runs. */
   private val InformationFlags = Set("--help", "--version")
 
+  /** Options whose value is a whole number, with its least and greatest value. */
   private val Numbers: Map[String, (Long, Long)] = Map(
     "port" -> (0L, 65535L),
     "rpc-port" -> (0L, 65535L),
@@ -460,8 +541,13 @@ object Main extends LazyLogging:
     "era-start" -> (0L, Long.MaxValue)
   )
 
+  /** `--pvm-backend` values. */
   private val PvmBackends = List("interpreter", "recompiler")
 
+  /** Read `args` whole, or say what is wrong with them: an option this node does not know, one without its value,
+    * one given twice, a value that is not what its option takes, an argument that is no option, or options that
+    * cannot be used together.
+    */
   private[node] def parseCommandLine(args: List[String]): Either[String, CommandLine] =
     def missing(option: String) = s"$option needs a value"
     @scala.annotation.tailrec
@@ -491,6 +577,7 @@ object Main extends LazyLogging:
           Left(s"unexpected argument: $other (every argument is an --option, or one of the commands ${Commands.toList.sorted.mkString(", ")})")
     loop(args, CommandLine(Map.empty, Map.empty.withDefaultValue(Nil), Set.empty)).flatMap(checked)
 
+  /** Values each option can take, and the combinations that cannot be made consistent. */
   private def checked(cl: CommandLine): Either[String, CommandLine] =
     val opts = cl.options
     def has(name: String) = opts.contains(name)
@@ -501,6 +588,7 @@ object Main extends LazyLogging:
         )
       }
     }
+    /** What the command line gives besides `allowed` options and the information flags. */
     def besides(allowed: Set[String]): List[String] =
       (opts.keySet -- allowed).toList.sorted.map("--" + _) ++ (cl.flags -- InformationFlags).toList.sorted ++
         cl.repeated.keys.toList.sorted
@@ -528,6 +616,7 @@ object Main extends LazyLogging:
         case _ => runChecks(cl)
     yield cl
 
+  /** What running the node takes that the commands do not. */
   private def runChecks(cl: CommandLine): Either[String, Unit] =
     val opts = cl.options
     def has(name: String) = opts.contains(name)
@@ -565,6 +654,8 @@ object Main extends LazyLogging:
         (),
         "--validator-seed sets the network identity too: drop --seed/--seed-file"
       )
+      // A validator's network identity is its Ed25519 key: peers map the connection to its validator index by it.
+      // Dev validator i's keys come from JIP-5's trivial seed for i, which no --seed can stand in for.
       _ <- Either.cond(
         !(has("author") && (has("seed") || has("seed-file"))),
         (),
@@ -607,7 +698,9 @@ object Main extends LazyLogging:
       |                         BLS); keep the seed in a file (chmod 600) and run with --validator-seed <file>
       |  list-keys              print the public keys a seed gives the node: a validator's for --validator-seed
       |                         and --author, the network identity's for --seed and --seed-file
-      |  --version              print the node's name and version""".stripMargin
+      |  --version              print the node's name and version
+      |  JAM_DATA_DIR=<dir>     the data directory when --data is not given (the node image sets /data); not used
+      |                         with --temp""".stripMargin
 
   private def fail(msg: String): Nothing =
     System.err.println(msg)
