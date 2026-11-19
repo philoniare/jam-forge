@@ -102,10 +102,31 @@ class NodeOperationsSpec extends AnyFunSuite with Matchers with NodeFixture:
       text should include("# TYPE jam_best_slot gauge")
       text should include("# HELP jam_peers ")
       text should include(s"""jam_build_info{version="${BuildInfo.version}"} 1""")
+      text should include("# TYPE jam_block_import_seconds histogram")
+      sample(text, "jam_block_import_seconds_count") shouldBe Some("1")
+      sample(text, """jam_block_import_seconds_bucket{le="+Inf"}""") shouldBe Some("1")
+      sample(text, "jam_block_import_seconds_sum").map(_.toDouble).exists(_ > 0.0) shouldBe true
+      text should include("# TYPE jam_trie_wal_sync_seconds histogram")
+      sample(text, "jam_trie_wal_sync_seconds_count").map(_.toLong).exists(_ >= 1L) shouldBe true
+      text should include("# TYPE jam_chain_meta_write_seconds histogram")
+      sample(text, "jam_chain_meta_write_seconds_count").map(_.toLong).exists(_ >= 1L) shouldBe true
+      sample(text, "jam_slots_behind_best_peer") shouldBe Some("0")
+      sample(text, "jam_sync_blocks_total") shouldBe Some("0")
+      sample(text, "jam_sync_answers_total") shouldBe Some("0")
+      eventually("b to import the announced block")(b.chain.best.slot == 1L)
+      val synced = b.metrics.prometheusText
+      sample(synced, "jam_sync_blocks_total") shouldBe Some("1")
+      sample(synced, "jam_sync_answers_total") shouldBe Some("1")
+      sample(synced, "jam_sync_fetch_seconds_total").map(_.toDouble).exists(_ > 0.0) shouldBe true
+      sample(synced, "jam_sync_import_seconds_total").map(_.toDouble).exists(_ > 0.0) shouldBe true
+      sample(synced, "jam_block_import_seconds_count") shouldBe Some("1")
+
+      val histograms = text.linesIterator.collect { case l if l.startsWith("# TYPE ") && l.endsWith(" histogram") => l.split(' ')(2) }.toSet
       val names = text.linesIterator.filterNot(_.startsWith("#")).filter(_.nonEmpty).map(_.takeWhile(c => c != ' ' && c != '{')).toList
       names.foreach { n =>
         n should fullyMatch regex "[a-zA-Z_:][a-zA-Z0-9_:]*"
-        text should include(s"# TYPE $n ")
+        val family = Seq("_bucket", "_sum", "_count").collectFirst { case x if n.endsWith(x) && histograms(n.dropRight(x.length)) => n.dropRight(x.length) }
+        text should include(s"# TYPE ${family.getOrElse(n)} ")
       }
       field(json(get(port, "/health")), "best").asNumber.flatMap(_.toLong) shouldBe Some(1L)
 
@@ -113,6 +134,28 @@ class NodeOperationsSpec extends AnyFunSuite with Matchers with NodeFixture:
       get(port, "/metricsx").statusCode shouldBe 404
       get(port, "/health", method = "POST").statusCode shouldBe 405
     }
+  }
+
+  test("/metrics reports how many slots the best peer is ahead, and the stage timers when they are on") {
+    val head = ChainHead(io.forge.jam.core.primitives.Hash.zero, 7L, io.forge.jam.core.primitives.Hash.zero)
+    val base = NodeMetrics(
+      health = NodeHealth(head, head, peers = 1, syncing = true, following = false, validatorConnectivity = None),
+      validatorPeers = 0,
+      importedBlocks = 0L,
+      importFailures = 0L,
+      guaranteesMade = 0L,
+      auditsDone = 0L,
+      telemetryDroppedEvents = 0L,
+      queuedSubmissions = 0,
+      slotsBehindBestPeer = 93L
+    )
+    sample(base.prometheusText, "jam_slots_behind_best_peer") shouldBe Some("93")
+    base.prometheusText should not include "jam_stage_"
+    val staged = base.copy(stages = List(("accumulation", 3L, 1_500_000L), ("pvm/host-3", 1L, 250L))).prometheusText
+    staged should include("# TYPE jam_stage_seconds_total counter")
+    staged should include("""jam_stage_seconds_total{stage="accumulation"} 0.0015""")
+    staged should include("""jam_stage_calls_total{stage="accumulation"} 3""")
+    staged should include("""jam_stage_seconds_total{stage="pvm/host-3"} 2.5E-7""")
   }
 
   test("a validator connected to fewer than 2/3 of the others is told so, in the log and in /health") {

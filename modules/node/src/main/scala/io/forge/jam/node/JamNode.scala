@@ -527,12 +527,14 @@ final class JamNode(
         )
       }
 
+  private def credibleBestSlots: List[Long] =
+    val claimed = sync.peerBestSlots
+    if nodeConfig.slotTicking then claimed.filter(_ <= slotClock.currentSlot + ChainManager.FutureSlotTolerance)
+    else claimed
+
   private def catchingUp: Boolean =
     if checkpointSyncing then return true
-    val claimed = sync.peerBestSlots
-    val peerBests =
-      if nodeConfig.slotTicking then claimed.filter(_ <= slotClock.currentSlot + ChainManager.FutureSlotTolerance)
-      else claimed
+    val peerBests = credibleBestSlots
     val best = chain.best.slot
     val holding = syncGate.holding(best, peerBests, System.currentTimeMillis())
     if holding != held then
@@ -1047,7 +1049,11 @@ final class JamNode(
       guaranteesMade = guarantor.fold(0L)(_.guaranteesMade),
       auditsDone = auditor.fold(0L)(_.auditsDone),
       telemetryDroppedEvents = telemetry.fold(0L)(_.droppedEvents),
-      queuedSubmissions = guarantor.fold(0)(_.queuedSubmissions)
+      queuedSubmissions = guarantor.fold(0)(_.queuedSubmissions),
+      slotsBehindBestPeer = math.max(0L, credibleBestSlots.maxOption.getOrElse(0L) - h.best.slot),
+      timings = chain.timings.snapshot,
+      sync = sync.stats,
+      stages = io.forge.jam.protocol.pipeline.StageTimers.timings
     )
 
   /** Port of the local submission endpoint, when it runs. */

@@ -41,12 +41,18 @@ final case class NodeMetrics(
     guaranteesMade: Long,
     auditsDone: Long,
     telemetryDroppedEvents: Long,
-    queuedSubmissions: Int
+    queuedSubmissions: Int,
+    slotsBehindBestPeer: Long = 0L,
+    timings: ChainTimings.Snapshot = ChainTimings.Snapshot.empty,
+    sync: SyncService.Stats = SyncService.Stats.zero,
+    stages: List[(String, Long, Long)] = Nil
 ):
   def prometheusText: String =
     val out = new StringBuilder
     def metric(name: String, kind: String, help: String, value: Long, labels: String = ""): Unit =
       out ++= s"# HELP $name $help\n# TYPE $name $kind\n$name$labels $value\n"
+    def seconds(name: String, help: String, nanos: Long): Unit =
+      out ++= s"# HELP $name $help\n# TYPE $name counter\n$name ${nanos / 1e9}\n"
     def flag(b: Boolean) = if b then 1L else 0L
     val h = health
     metric("jam_best_slot", "gauge", "Slot of the best block.", h.best.slot)
@@ -77,6 +83,36 @@ final case class NodeMetrics(
     metric("jam_telemetry_dropped_events_total", "counter", "JIP-3 telemetry events dropped since start.", telemetryDroppedEvents)
     metric("jam_queued_submissions", "gauge", "Work-package submissions waiting for a refine thread.", queuedSubmissions.toLong)
     metric(
+      "jam_slots_behind_best_peer",
+      "gauge",
+      "Slots from the best block to the highest best block a peer has announced; 0 when no peer is ahead.",
+      slotsBehindBestPeer
+    )
+    NodeMetrics.histogram(
+      out,
+      "jam_block_import_seconds",
+      "Time to execute and store one block on the best chain, without the commit that makes it durable.",
+      timings.blockImport
+    )
+    NodeMetrics.histogram(out, "jam_trie_wal_sync_seconds", "Time of the state trie's WAL sync, one per commit.", timings.walSync)
+    NodeMetrics.histogram(
+      out,
+      "jam_chain_meta_write_seconds",
+      "Time of the synced chain-metadata write, one per commit.",
+      timings.metaWrite
+    )
+    metric("jam_sync_answers_total", "counter", "Block requests (CE 128) answered by a peer since start.", sync.answers)
+    metric("jam_sync_blocks_total", "counter", "Blocks imported onto the best chain from block requests since start.", sync.blocks)
+    seconds("jam_sync_fetch_seconds_total", "Time block requests spent waiting for their answers.", sync.fetchNanos)
+    seconds("jam_sync_import_seconds_total", "Time spent importing the blocks of block-request answers.", sync.importNanos)
+    if stages.nonEmpty then
+      out ++= "# HELP jam_stage_seconds_total Time in each stage of block import (with -Djam.stageTimers=true).\n"
+      out ++= "# TYPE jam_stage_seconds_total counter\n"
+      stages.foreach((stage, _, nanos) => out ++= s"""jam_stage_seconds_total{stage="${NodeMetrics.labelValue(stage)}"} ${nanos / 1e9}\n""")
+      out ++= "# HELP jam_stage_calls_total Times each stage of block import ran (with -Djam.stageTimers=true).\n"
+      out ++= "# TYPE jam_stage_calls_total counter\n"
+      stages.foreach((stage, calls, _) => out ++= s"""jam_stage_calls_total{stage="${NodeMetrics.labelValue(stage)}"} $calls\n""")
+    metric(
       "jam_build_info",
       "gauge",
       "The node's version, as a label; always 1.",
@@ -86,6 +122,11 @@ final case class NodeMetrics(
     out.toString
 
 object NodeMetrics:
+  def histogram(out: StringBuilder, name: String, help: String, h: DurationHistogram.Snapshot): Unit =
+    out ++= s"# HELP $name $help\n# TYPE $name histogram\n"
+    h.bounds.indices.foreach(i => out ++= s"""${name}_bucket{le="${h.bounds(i)}"} ${h.cumulative(i)}\n""")
+    out ++= s"""${name}_bucket{le="+Inf"} ${h.count}\n${name}_sum ${h.sumSeconds}\n${name}_count ${h.count}\n"""
+
   def labelValue(s: String): String = s.flatMap {
     case '\\' => "\\\\"
     case '"'  => "\\\""

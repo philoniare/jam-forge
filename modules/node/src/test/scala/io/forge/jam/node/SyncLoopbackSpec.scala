@@ -76,6 +76,46 @@ class SyncLoopbackSpec extends AnyFunSuite with Matchers with NodeFixture:
     }
   }
 
+  test("a node catching up commits once per answer, not once per block, and announces what it imported") {
+    withNodes(blocks = 12) { (a, b, bToA, aToB) =>
+      val syncsBefore = b.chain.timings.snapshot.walSync.count
+      b.sync.openAnnouncementStream(bToA)
+      eventually("B reaches A's head")(b.chain.best.hash == a.chain.best.hash)
+      b.chain.best.stateRoot shouldBe a.chain.best.stateRoot
+      val stats = b.sync.stats
+      stats.blocks shouldBe 12L
+      (b.chain.timings.snapshot.walSync.count - syncsBefore) should be <= stats.answers
+      stats.answers should be < 12L
+      eventually("A to hear of B's head")(a.sync.peerBestSlots.contains(12L))
+    }
+  }
+
+  test("while an answer is imported the next ranges are fetched, two answers ahead at most") {
+    withNodes(blocks = 200) { (a, b, bToA, _) =>
+      val entered = new java.util.concurrent.CountDownLatch(1)
+      val release = new java.util.concurrent.CountDownLatch(1)
+      b.chain.faultAfterStateSave = () => { entered.countDown(); release.await() }
+      try
+        b.sync.openAnnouncementStream(bToA)
+        entered.await(20, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        eventually("the next two ranges to be fetched during the import")(b.sync.stats.answers == 4L)
+        Thread.sleep(500)
+        b.sync.stats.answers shouldBe 4L
+        b.chain.best.slot shouldBe 0L
+      finally
+        b.chain.faultAfterStateSave = () => ()
+        release.countDown()
+        val deadline = System.currentTimeMillis() + 60_000L
+        while System.currentTimeMillis() < deadline &&
+          !(b.chain.best.hash == a.chain.best.hash && a.sync.peerBestSlots.contains(200L))
+        do Thread.sleep(20)
+      eventually("B reaches A's head", seconds = 60)(b.chain.best.hash == a.chain.best.hash)
+      b.chain.best.stateRoot shouldBe a.chain.best.stateRoot
+      b.sync.stats.blocks shouldBe 200L
+      eventually("A to hear of B's head")(a.sync.peerBestSlots.contains(200L))
+    }
+  }
+
   private final class FlakyConnection(inner: io.forge.jam.network.PeerConnection) extends io.forge.jam.network.PeerConnection:
     @volatile var failing = false
     override def hashCode: Int =

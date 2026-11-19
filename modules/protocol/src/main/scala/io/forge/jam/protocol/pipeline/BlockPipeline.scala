@@ -19,7 +19,7 @@ import io.forge.jam.protocol.dispute.DisputeTransition
 import io.forge.jam.protocol.history.HistoryTransition
 import io.forge.jam.protocol.preimage.PreimageTransition
 import io.forge.jam.protocol.report.ReportTransition
-import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, ReportErrorCode, ReportInput}
+import io.forge.jam.protocol.report.ReportTypes.{Ancestry, ReportErrorCode, ReportInput}
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleErrorCode, SafroleInput, SafroleOutputData}
 import io.forge.jam.protocol.state.TrieBackedJamState
@@ -113,7 +113,7 @@ object BlockPipeline:
       view: TrieBackedJamState,
       skipAncestryValidation: Boolean = false,
       sharedExecutor: Option[AccumulationExecutor] = None,
-      ancestry: List[AncestorHeader] = List.empty,
+      ancestry: Ancestry = Ancestry.none,
       whileChecksRun: BlockPipelineResult => Unit = _ => (),
       extrinsicHashChecked: Boolean = false
   ): Either[PipelineError, BlockPipelineResult] =
@@ -138,7 +138,7 @@ object BlockPipeline:
       run: Run,
       skipAncestryValidation: Boolean,
       sharedExecutor: Option[AccumulationExecutor],
-      ancestry: List[AncestorHeader],
+      ancestry: Ancestry,
       extrinsicHashChecked: Boolean
   ): Either[PipelineError, BlockPipelineResult] = boundary:
     import StageTimers.time

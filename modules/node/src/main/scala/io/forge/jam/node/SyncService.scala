@@ -569,6 +569,13 @@ final class SyncService(
   /** Fetches waiting to be sent. */
   private[node] def pendingFetchCount: Int = fetches.size
 
+  private val answers = new java.util.concurrent.atomic.LongAdder
+  private val syncedBlocks = new java.util.concurrent.atomic.LongAdder
+  private val fetchNanos = new java.util.concurrent.atomic.LongAdder
+  private val importNanos = new java.util.concurrent.atomic.LongAdder
+
+  def stats: SyncService.Stats = SyncService.Stats(answers.sum, syncedBlocks.sum, fetchNanos.sum, importNanos.sum)
+
   private def schedulePump(): Unit =
     if pumpScheduled.compareAndSet(false, true) then
       try
@@ -595,23 +602,63 @@ final class SyncService(
           finish(request, answered = true)
       next = fetches.next()
 
-  private def fetchThenImport(request: FetchQueue.Request[PeerConnection]): Unit =
+  private def fetch(conn: PeerConnection, from: Hash, maxBlocks: Int, ascending: Boolean, announced: Boolean)
+      : Option[List[Array[Byte]]] =
+    val asked = System.nanoTime()
     val answer =
-      try exchange(request.peer, request.from, request.maxBlocks, request.ascending, request.announced)
+      try exchange(conn, from, maxBlocks, ascending, announced)
       catch
         case e: Exception =>
           logger.warn(s"block sync failed: ${e.getMessage}")
           None
+    fetchNanos.add(System.nanoTime() - asked)
+    if answer.isDefined then answers.increment()
+    answer
+
+  private def fetchThenImport(request: FetchQueue.Request[PeerConnection]): Unit =
+    val peer = request.peer
+    val room = new java.util.concurrent.Semaphore(SyncService.MaxAnswersAhead)
+    val continues = new java.util.concurrent.atomic.AtomicBoolean(true)
+    def timed(body: => Unit): Unit =
+      val importing = System.nanoTime()
+      try body
+      catch case e: Throwable => logger.error("block sync failed", e)
+      finally importNanos.add(System.nanoTime() - importing)
     try
-      importExecutor.execute { () =>
-        try answer.foreach(importFetched(request.peer, request.from, request.ascending, _))
-        catch case e: Throwable => logger.error("block sync failed", e)
-        finally
-          finish(request, answered = answer.isDefined)
-          pump()
-      }
+      var from = request.from
+      var answer = fetch(peer, from, request.maxBlocks, request.ascending, request.announced)
+      var more = true
+      while more do
+        val blocks = answer
+        val askedFrom = from
+        val next =
+          if !request.ascending || held || !peer.isOpen || !continues.get then None
+          else blocks.flatMap(_.lastOption).flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf)
+        next match
+          case Some(last) =>
+            room.acquire()
+            importExecutor.execute { () =>
+              try
+                if continues.get then
+                  var reached = false
+                  timed { reached = importFetched(peer, askedFrom, ascending = true, blocks.get, nextFetched = true) }
+                  if !reached then continues.set(false)
+              finally room.release()
+            }
+            from = last
+            answer = fetch(peer, last, SyncService.MaxBlocksPerRequest, ascending = true, announced = false)
+          case None =>
+            more = false
+            importExecutor.execute { () =>
+              try
+                if continues.get then
+                  timed(blocks.foreach(importFetched(peer, askedFrom, request.ascending, _, nextFetched = false)): Unit)
+              finally
+                finish(request, answered = blocks.isDefined)
+                pump()
+            }
     catch
-      case _: java.util.concurrent.RejectedExecutionException =>
+      case _: java.util.concurrent.RejectedExecutionException | _: InterruptedException =>
         fetches.finished(request, have = false): Unit // shutting down
 
   private def finish(request: FetchQueue.Request[PeerConnection], answered: Boolean): Unit =
@@ -677,49 +724,67 @@ final class SyncService(
         }
         Some(blocks)
 
-  private def importFetched(conn: PeerConnection, from: Hash, ascending: Boolean, blocks: List[Array[Byte]]): Unit =
+  private def importFetched(
+      conn: PeerConnection,
+      from: Hash,
+      ascending: Boolean,
+      blocks: List[Array[Byte]],
+      nextFetched: Boolean
+  ): Boolean =
     // Oldest first; skip blocks until one extends our best head.
     var imported = 0
     var stored = 0 // new to us, kept on a side branch
     var unknownParent = false
     val ordered = if ascending then blocks else blocks.reverse
-    ordered.foreach { blockBytes =>
+    val watch = (blockBytes: Array[Byte], run: () => Either[ChainError, ChainHead]) =>
       val watched = observer.importing(blockBytes)
-      val outcome = chain.importBlock(blockBytes, Some(conn.peerPublicKey))
+      val outcome = run()
       observer.imported(watched, outcome)
-      outcome match
-        case Right(_) =>
-          imported += 1
-          chain.decodeBlock(blockBytes).foreach { b =>
-            announce(chain.headerCodec.encode(b.header))
-          }
-        case Left(err) =>
-          if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
-          err match
-            case _: ChainError.InvalidBlock | ChainError.PreviouslyInvalid | ChainError.BodyMismatch =>
-              misbehaved(conn, Offence.InvalidBlock)
-            case _ => ()
-          if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
-          logger.debug(s"sync import skipped: $err")
-    }
+      outcome
+    var remaining = ordered
+    while remaining.nonEmpty do
+      val outcomes = chain.importBatch(remaining, Some(conn.peerPublicKey), SyncService.BatchBudgetNanos, watch)
+      val (done, rest) = remaining.splitAt(outcomes.size)
+      remaining = rest
+      done.lazyZip(outcomes).foreach { (blockBytes, outcome) =>
+        outcome match
+          case Right(_) =>
+            imported += 1
+            chain.decodeBlock(blockBytes).foreach { b =>
+              announce(chain.headerCodec.encode(b.header))
+            }
+          case Left(err) =>
+            if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
+            err match
+              case _: ChainError.InvalidBlock | ChainError.PreviouslyInvalid | ChainError.BodyMismatch =>
+                misbehaved(conn, Offence.InvalidBlock)
+              case _ => ()
+            if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
+            logger.debug(s"sync import skipped: $err")
+      }
     if imported > 0 then
+      syncedBlocks.add(imported.toLong)
       logger.info(s"synced $imported block(s); best=${chain.best.slot}")
     // The peer's blocks do not reach back to our head (a descending request), or more may follow (an
     // ascending one that brought some): go on from our head.
     val best = chain.best.hash
     val finalized = chain.finalized.hash
+    val advanced = ascending && imported + stored > 0
+    val last =
+      if advanced then ordered.lastOption.flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf).filter(chain.hasBlock)
+      else None
     if !ascending && imported == 0 && unknownParent then catchUp(conn)
-    else if ascending && imported + stored > 0 then
+    else if advanced then
       // More may follow. Go on from the last block of this answer: after our head when it extended our
       // chain, and along the peer's branch when the blocks are a fork we hold only as a side branch so far.
-      val last = ordered.lastOption.flatMap(b => chain.decodeBlock(b).toOption).map(chain.headerHashOf)
-      catchUpFrom(conn, last.filter(chain.hasBlock).getOrElse(best))
+      if !(nextFetched && last.isDefined) then catchUpFrom(conn, last.getOrElse(best))
     else if ascending && from == best && best != finalized then
       // Nothing after our best head: the peer may not have it at all (we are on a fork it never saw, or
       // one it cannot finalize, which CE 128 must not serve). Every chain shares the finalized block.
       logger.info("catch-up: the peer has nothing after our head; asking from our finalized block")
       catchUpFrom(conn, finalized)
     else if ascending && blocks.isEmpty then logger.info("catch-up: the peer returned no block after our head")
+    last.isDefined
 
   // =========================================================================
   // CE 129 — state request (trie range)
@@ -761,6 +826,10 @@ final class SyncService(
       }
 
 object SyncService:
+  final case class Stats(answers: Long, blocks: Long, fetchNanos: Long, importNanos: Long)
+  object Stats:
+    val zero: Stats = Stats(0L, 0L, 0L, 0L)
+
 
   trait ImportObserver:
     def importing(blockBytes: Array[Byte]): AnyRef | Null
@@ -780,6 +849,10 @@ object SyncService:
 
   /** The most blocks one CE 128 request asks for. */
   val MaxBlocksPerRequest: Int = 64
+
+  val BatchBudgetNanos: Long = 1_000_000_000L
+
+  val MaxAnswersAhead: Int = 2
 
   val MaxConcurrentFetches: Int = 4
 

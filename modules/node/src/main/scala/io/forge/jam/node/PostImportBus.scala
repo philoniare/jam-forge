@@ -3,16 +3,25 @@ package io.forge.jam.node
 import java.util.concurrent.{ArrayBlockingQueue, TimeUnit}
 import com.typesafe.scalalogging.LazyLogging
 
-final class PostImportBus[H, B](onEvent: (H, B) => Unit) extends LazyLogging:
-  private val queue = new ArrayBlockingQueue[(H, B)](1024)
+final class PostImportBus[H, B](onEvent: (H, B) => Unit, capacity: Int = 1024, maxWaitMillis: Long = 30_000L)
+    extends LazyLogging:
+  private val queue = new ArrayBlockingQueue[(H, B)](capacity)
   @volatile private var running = true
   private val thread = new Thread(() => drain(), "jam-post-import")
   thread.setDaemon(true)
   thread.start()
 
-  def publish(head: H, block: B): Unit =
-    if running && !queue.offer((head, block)) then
-      logger.warn("post-import bus queue full; dropping event for {}", head)
+  def publish(head: H, block: B, mayWait: Boolean = true): Unit =
+    if running then
+      val event = (head, block)
+      var placed = queue.offer(event)
+      if !placed && mayWait then
+        val deadline = System.nanoTime() + maxWaitMillis * 1_000_000L
+        try
+          while !placed && running && System.nanoTime() < deadline do
+            placed = queue.offer(event, 100, TimeUnit.MILLISECONDS)
+        catch case _: InterruptedException => Thread.currentThread().interrupt()
+      if !placed && running then logger.warn("post-import bus queue full; dropping event for {}", head)
 
   private def drain(): Unit =
     while running || !queue.isEmpty do

@@ -206,6 +206,112 @@ class AncestryCacheSpec extends AnyFunSuite with Matchers with NodeFixture:
     }
   }
 
+  private def checkWindowAgainstOracle(
+      chain: ChainManager,
+      h: Hash,
+      slot: Long,
+      root: Hash,
+      others: Iterable[(Hash, Long)],
+      rnd: scala.util.Random
+  ): Unit =
+    val expected = AncestryOracle.walk(chain.blockStore, chain.config, h, root, slot)
+    val window = chain.ancestryOf(h, root, slot)
+    withClue(s"ancestry of ${h.toHex.take(18)} for slot $slot: ") {
+      window.nonEmpty shouldBe expected.nonEmpty
+      val queries =
+        expected.flatMap { a =>
+          val r = a.postStateRoot.get
+          List((a.headerHash, a.slot, r), (a.headerHash, a.slot + 1, r), (a.headerHash, a.slot, randomHash(rnd)))
+        } ++ others.flatMap((o, s) => List((o, s, root), (o, s, Hash.zero))) ++ List((randomHash(rnd), slot - 1, root))
+      queries.foreach { (q, s, r) =>
+        withClue(s"anchor ${q.toHex.take(18)} at $s: ") {
+          window.containsLookupAnchor(q, s, r) shouldBe AncestryOracle.contains(expected, q, s, r)
+        }
+      }
+      queries.count((q, s, r) => window.containsLookupAnchor(q, s, r)) should be >= expected.size
+    }
+
+  test("the ancestor window answers the lookup-anchor check exactly as the walked set, on a random tree with forks") {
+    withChain(ChainConfig.TINY) { chain =>
+      val rnd = new scala.util.Random(20261119L)
+      val L = chain.config.maxLookupAnchorAge
+      val genesis = randomHash(rnd)
+      store(chain, genesis, headerBytes(Hash.zero, Hash.zero, 0L, rnd), Hash.zero, viaImport = true)
+      val blocks = scala.collection.mutable.ArrayBuffer((genesis, 0L))
+      (1 to 400).foreach { _ =>
+        val (parent, parentSlot) =
+          if rnd.nextInt(10) == 0 then blocks(rnd.nextInt(blocks.size))
+          else blocks(math.max(0, blocks.size - 1 - rnd.nextInt(6)))
+        val h = randomHash(rnd)
+        val slot = parentSlot + 1 + rnd.nextInt(3)
+        rnd.nextInt(50) match
+          case 0 => store(chain, h, headerBytes(randomHash(rnd), randomHash(rnd), slot, rnd), parent, rnd.nextBoolean())
+          case 1 => chain.blockStore.putBlock(h, parent, new Array[Byte](40), Array[Byte](1))
+          case _ => store(chain, h, headerBytes(parent, randomHash(rnd), slot, rnd), parent, rnd.nextBoolean())
+        blocks += ((h, slot))
+      }
+      rnd.shuffle(blocks.toList).foreach { (h, slot) =>
+        val others = (1 to 12).map(_ => blocks(rnd.nextInt(blocks.size)))
+        List(slot + 1, slot + L, slot + L + 1, slot + 2 * L).foreach { s =>
+          checkWindowAgainstOracle(chain, h, s, randomHash(rnd), others, rnd)
+        }
+      }
+      chain.ancestryOf(randomHash(rnd), randomHash(rnd), 10L).nonEmpty shouldBe false
+    }
+  }
+
+  test("the window follows the head block by block without walking again, and holds no more than the age allows") {
+    withChain(ChainConfig.TINY) { chain =>
+      val rnd = new scala.util.Random(77L)
+      val L = chain.config.maxLookupAnchorAge
+      val genesis = randomHash(rnd)
+      store(chain, genesis, headerBytes(Hash.zero, Hash.zero, 0L, rnd), Hash.zero, viaImport = true)
+      var parent = genesis
+      var parentSlot = 0L
+      val chainSoFar = scala.collection.mutable.ArrayBuffer((genesis, 0L))
+      (1 to 300).foreach { i =>
+        val slot = parentSlot + (if i == 200 then L + 5 else 1L + rnd.nextInt(3))
+        val priorRoot = randomHash(rnd)
+        val h = randomHash(rnd)
+        checkWindowAgainstOracle(chain, parent, slot, priorRoot, chainSoFar.takeRight(40), rnd)
+        store(chain, h, headerBytes(parent, priorRoot, slot, rnd), parent, viaImport = true)
+        chain.ancestorWindow.extend(h, slot, parent, priorRoot)
+        chain.ancestorWindow.size.toLong should be <= L + 1
+        chainSoFar += ((h, slot))
+        parent = h
+        parentSlot = slot
+      }
+      chain.ancestorWindow.rebuilds shouldBe 1L
+    }
+  }
+
+  test("asked about a block on another branch, the window is built again for it, and again when the head returns") {
+    withChain(ChainConfig.TINY) { chain =>
+      val rnd = new scala.util.Random(9L)
+      val trunk = storeLinearChain(chain, 10, rnd)
+      val (fork, forkSlot) = trunk.head
+      def branch(skip: Int): List[(Hash, Long)] =
+        var parent = fork
+        (1 to 30).map { i =>
+          val h = randomHash(rnd)
+          val slot = forkSlot + skip + i
+          store(chain, h, headerBytes(parent, randomHash(rnd), slot, rnd), parent, viaImport = true)
+          parent = h
+          (h, slot)
+        }.toList
+      val x = branch(0)
+      val y = branch(1)
+      val all = trunk ++ x ++ y
+      checkWindowAgainstOracle(chain, x.last._1, x.last._2 + 1, randomHash(rnd), all, rnd)
+      checkWindowAgainstOracle(chain, y.last._1, y.last._2 + 1, randomHash(rnd), all, rnd)
+      checkWindowAgainstOracle(chain, x.last._1, x.last._2 + 1, randomHash(rnd), all, rnd)
+      chain.ancestorWindow.rebuilds shouldBe 3L
+      chain.ancestorWindow.extend(randomHash(rnd), y.last._2 + 1, y.last._1, randomHash(rnd))
+      chain.ancestorWindow.size shouldBe 0
+      checkWindowAgainstOracle(chain, y.last._1, y.last._2 + 1, randomHash(rnd), all, rnd)
+    }
+  }
+
   private def medianMicros(runs: Int)(f: => Any): Double =
     val samples = (1 to runs).map { _ =>
       val t0 = System.nanoTime()
@@ -234,6 +340,17 @@ class AncestryCacheSpec extends AnyFunSuite with Matchers with NodeFixture:
         val index = new AncestorIndex(ancestry)
         anchors.count(a => index.containsLookupAnchor(a.headerHash, a.slot, Hash.zero))
       }
+      chain.ancestryOf(tip, root, tipSlot + 1).nonEmpty shouldBe true
+      var head = tip
+      var headSlot = tipSlot
+      val windowed = medianMicros(200) {
+        val next = randomHash(rnd)
+        chain.ancestorWindow.extend(next, headSlot + 1, head, root)
+        head = next
+        headSlot += 1
+        anchors.count(a => chain.ancestorWindow.at(head, root, headSlot + 1).containsLookupAnchor(a.headerHash, a.slot, Hash.zero))
+      }
+      info(f"per block with the window (extend + 341 lookup-anchor checks): median $windowed%.0f us")
       info(f"ancestorsOf, cached (L = 14,400): median $walk%.0f us; uncached store walk: median $oracle%.0f us")
       info(f"341 lookup-anchor checks: linear scan median $scan%.0f us; index build + lookups median $indexed%.0f us")
     }

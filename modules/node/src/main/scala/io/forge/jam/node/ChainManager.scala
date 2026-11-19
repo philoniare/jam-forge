@@ -8,7 +8,7 @@ import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
 import io.forge.jam.protocol.pipeline.{BlockPipeline, HeaderChecks, PipelineError}
-import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, ReportErrorCode}
+import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, Ancestry, ReportErrorCode}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
 import io.forge.jam.protocol.state.RawState
@@ -99,6 +99,11 @@ final class ChainManager(
   private[node] val headerLinks =
     new HeaderLinkCache(config.maxLookupAnchorAge + config.epochLength, h => blockStore.getHeader(h))
 
+  private[node] val ancestorWindow = new AncestorWindow(config.maxLookupAnchorAge, headerLinks.get)
+
+  private[node] def ancestryOf(parent: Hash, parentPostRoot: Hash, slot: Long): Ancestry =
+    synchronized(ancestorWindow.at(parent, parentPostRoot, slot))
+
   /** A change to the chain (import, reorg, finality, disregard): serialised, and its metadata (heads, state roots,
     * heights, fork-choice and validity marks) written as one atomic, synced batch after the state trie it points to
     * is durable. A crash anywhere leaves the chain as it was before the change or after it.
@@ -110,10 +115,21 @@ final class ChainManager(
       commitDepth += 1
       try
         val before = published._2
+        val started = System.nanoTime()
+        var bodyNanos = 0L
+        var syncNanos = -1L
         val result = blockStore.atomically { () =>
+          val syncing = System.nanoTime()
           trieBackend.syncWal()
+          syncNanos = System.nanoTime() - syncing
           faultBeforeMetaCommit()
-        }(f)
+        } {
+          try f
+          finally bodyNanos = System.nanoTime() - started
+        }
+        if outermost && syncNanos >= 0 then
+          timings.walSync.observeNanos(syncNanos)
+          timings.metaWrite.observeNanos(math.max(0L, System.nanoTime() - started - bodyNanos - syncNanos))
         if outermost then
           publishHeads()
           if published._2.hash != before.hash then finalizedMoved = Some(published._2)
@@ -129,6 +145,12 @@ final class ChainManager(
     }
     finalizedMoved.foreach(head => if !Thread.holdsLock(this) then tellFinalized(head))
     result
+
+  val timings = new ChainTimings
+
+  private def publishImported(events: Iterable[(ChainHead, Block)]): Unit =
+    val mayWait = !Thread.holdsLock(this)
+    events.foreach((head, block) => postImportBus.publish(head, block, mayWait))
 
   private val finalizedListeners = new java.util.concurrent.CopyOnWriteArrayList[ChainHead => Unit]()
 
@@ -441,7 +463,7 @@ final class ChainManager(
           }
           Right(r.toOption)
     }
-    events.foreach((head, block) => postImportBus.publish(head, block))
+    publishImported(events)
     result
 
   /** Finalize stored block `x` (GRANDPA), first reorging to the heaviest leaf containing it when it is off our best
@@ -450,7 +472,7 @@ final class ChainManager(
   def finalizeAdopting(x: Hash): Either[ChainError, ChainHead] =
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
     val result = commit(adoptAndFinalize(x, events, belowCurrent = false))
-    events.foreach((head, block) => postImportBus.publish(head, block))
+    publishImported(events)
     result
 
   private def adoptAndFinalize(
@@ -973,27 +995,51 @@ final class ChainManager(
     * it came from, for the per-peer cap on blocks whose seal cannot be checked.
     */
   def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, ChainHead] =
+    importBatch(List(blockBytes), source).head
+
+  def importBatch(
+      blocks: Seq[Array[Byte]],
+      source: Option[Ed25519PublicKey] = None,
+      budgetNanos: Long = Long.MaxValue,
+      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] = (_, run) => run()
+  ): Vector[Either[ChainError, ChainHead]] =
+    if blocks.isEmpty then return Vector.empty
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
     val sealedSide = mutable.ListBuffer.empty[(Hash, Block)]
-    val result = commit {
-      newEquivocation = None
-      val imported = importUnderCommit(blockBytes, source, events, sealedSide)
-      newEquivocation.foreach { slot =>
-        newEquivocation = None
-        leaveEquivocatedSlot(slot, events)
-        // Blocks the best chain has just left are not announced as imported heads.
-        events.filterInPlace((head, _) => blockRoot(head.hash).isDefined)
-      }
-      imported
+    val results = commit {
+      val started = System.nanoTime()
+      val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
+      val remaining = blocks.iterator
+      var more = true
+      while more && remaining.hasNext do
+        val blockBytes = remaining.next()
+        outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide))
+        more = System.nanoTime() - started < budgetNanos
+      outcomes.result()
     }
-    events.foreach((head, block) => postImportBus.publish(head, block))
+    publishImported(events)
     sealedSide.foreach { (hash, block) =>
       sealedSideListeners.forEach { l =>
         try l(hash, block)
         catch case NonFatal(e) => logger.error("side-branch block listener failed", e)
       }
     }
-    result
+    results
+
+  private def importOne(
+      blockBytes: Array[Byte],
+      source: Option[Ed25519PublicKey],
+      events: mutable.ListBuffer[(ChainHead, Block)],
+      sealedSide: mutable.ListBuffer[(Hash, Block)]
+  ): Either[ChainError, ChainHead] =
+    newEquivocation = None
+    val imported = importUnderCommit(blockBytes, source, events, sealedSide)
+    newEquivocation.foreach { slot =>
+      newEquivocation = None
+      leaveEquivocatedSlot(slot, events)
+      events.filterInPlace((head, _) => blockRoot(head.hash).isDefined)
+    }
+    imported
 
   private def importUnderCommit(
       blockBytes: Array[Byte],
@@ -1055,9 +1101,10 @@ final class ChainManager(
       bodyChecked: Boolean
   ): Either[ChainError, ChainHead] =
     if !bodyChecked && !bodyMatchesHeader(block) then return Left(ChainError.BodyMismatch)
+    val started = System.nanoTime()
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
-    val ancestry = ancestorsOf(parent, block.header.parentStateRoot, block.header.slot.toLong)
+    val ancestry = ancestorWindow.at(parent, block.header.parentStateRoot, block.header.slot.toLong)
     // The save belongs to this block at this height: what it replaces can be deleted once the parent's state is no
     // longer kept (see pruneHistory).
     val journalHeight = blockHeight(parent).getOrElse(0L) + 1
@@ -1078,6 +1125,7 @@ final class ChainManager(
         storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
         if unverified.nonEmpty then unverified.untrack(hash) // validated now (a reorg replayed it)
         headerLinks.advance(slot)
+        ancestorWindow.extend(hash, slot, parent, block.header.parentStateRoot)
         recordForkChoiceMeta(hash, block, sealChecked = true)
         blockStore.setHead(BlockStore.BestHead, hash)
         meta.stateRoot = postRoot
@@ -1092,6 +1140,7 @@ final class ChainManager(
           s"imported block ${hash.toHex.take(18)} slot=$slot root=${postRoot.toHex.take(18)}"
         )
         events += ((bestHead, block))
+        timings.blockImport.observeNanos(System.nanoTime() - started)
         Right(bestHead)
 
   private def anchoredBelowHistory(block: Block, cause: Option[PipelineError]): Boolean =
@@ -1263,7 +1312,7 @@ final class ChainManager(
           Left(ChainError.AlreadyFinalized(parent))
         case (Some(_), Some(parent)) => Right(leaveBestFrom(parent, events))
     }
-    events.foreach((head, block) => postImportBus.publish(head, block))
+    publishImported(events)
     result
 
   /** Rewind the best head to `parent` and adopt the heaviest branch that is now acceptable (no invalid block, no

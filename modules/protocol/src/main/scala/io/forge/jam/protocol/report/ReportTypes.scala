@@ -291,12 +291,22 @@ object ReportTypes:
    */
   final case class AncestorHeader(slot: Long, headerHash: Hash, postStateRoot: Option[Hash] = None)
 
+  trait Ancestry:
+    def nonEmpty: Boolean
+
+    def containsLookupAnchor(hash: Hash, slot: Long, postStateRoot: Hash): Boolean
+
+  object Ancestry:
+    val none: Ancestry = new AncestorIndex(Nil)
+    def of(ancestry: List[AncestorHeader]): Ancestry = new AncestorIndex(ancestry)
+    given Conversion[List[AncestorHeader], Ancestry] = of(_)
+
   /**
    * The ancestor set indexed by header hash, so the lookup-anchor check costs O(1) per guarantee instead of a scan
    * of A. `containsLookupAnchor` answers exactly `ancestry.exists(a => a.headerHash == hash && a.slot == slot &&
    * a.postStateRoot.forall(_ == postStateRoot))`; entries sharing a hash are all kept. Built on first use.
    */
-  final class AncestorIndex(ancestry: List[AncestorHeader]):
+  final class AncestorIndex(ancestry: List[AncestorHeader]) extends Ancestry:
     def nonEmpty: Boolean = ancestry.nonEmpty
 
     private lazy val byHash: java.util.HashMap[Hash, List[AncestorHeader]] =

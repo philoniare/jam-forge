@@ -16,12 +16,14 @@ object StageTimers:
   private final class Cell:
     val nanos = new LongAdder
     val calls = new LongAdder
+    @volatile var amount = false
   private val cells = new ConcurrentHashMap[String, Cell]()
   // First-use order, for a stable report.
   private val order = new java.util.concurrent.ConcurrentLinkedQueue[String]()
 
   def enabled: Boolean = on
   def enable(): Unit = on = true
+  def disable(): Unit = on = false
   def reset(): Unit =
     cells.clear()
     order.clear()
@@ -51,8 +53,18 @@ object StageTimers:
   def count(name: String, amount: Long): Unit =
     if on then
       val c = cell(name)
+      c.amount = true
       c.nanos.add(amount * 1_000_000L)
       c.calls.increment()
+
+  def timings: List[(String, Long, Long)] =
+    if !on then Nil
+    else
+      import scala.jdk.CollectionConverters.*
+      order.asScala.toList.flatMap { n =>
+        val c = cells.get(n)
+        if c == null || c.amount then None else Some((n, c.calls.sum, c.nanos.sum))
+      }
 
   /** (stage, calls, total ms, mean µs per call), in first-use order. */
   def snapshot: List[(String, Long, Double, Double)] =

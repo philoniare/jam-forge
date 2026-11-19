@@ -110,7 +110,7 @@ class BlockImporter(
   def importBlock(
       block: Block,
       preState: RawState,
-      ancestry: List[AncestorHeader] = List.empty,
+      ancestry: Ancestry = Ancestry.none,
       extrinsicHashChecked: Boolean = false
   ): ImportResult =
     if !importInFlight.compareAndSet(false, true) then
@@ -124,7 +124,7 @@ class BlockImporter(
   private def importBlockUnguarded(
       block: Block,
       preState: RawState,
-      ancestry: List[AncestorHeader],
+      ancestry: Ancestry,
       extrinsicHashChecked: Boolean
   ): ImportResult =
     try

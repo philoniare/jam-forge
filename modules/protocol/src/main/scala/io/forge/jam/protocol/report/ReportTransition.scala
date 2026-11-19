@@ -98,7 +98,7 @@ object ReportTransition:
     input: ReportInput,
     view: TrieBackedJamState,
     skipAncestryValidation: Boolean = false,
-    ancestry: List[AncestorHeader] = List.empty,
+    ancestry: Ancestry = Ancestry.none,
     signatures: Option[SignatureBatch] = None,
     deferSignatures: Option[DeferredSignatures] = None
   ): ReportOutput =
@@ -140,7 +140,7 @@ object ReportTransition:
     preState: ReportState,
     config: ChainConfig,
     skipAncestryValidation: Boolean = false,
-    ancestry: List[AncestorHeader] = List.empty,
+    ancestry: Ancestry = Ancestry.none,
     skipAnchorContext: Boolean = false,
     signatures: Option[SignatureBatch] = None,
     deferSignatures: Option[DeferredSignatures] = None,
@@ -191,7 +191,7 @@ object ReportTransition:
     input: ReportInput,
     preState: ReportState,
     config: ChainConfig,
-    ancestry: List[AncestorHeader],
+    ancestry: Ancestry,
     skipLookupAnchor: Boolean,
     skipAnchorContext: Boolean,
     signatures: SignatureBatch,
@@ -204,7 +204,7 @@ object ReportTransition:
       preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a.data.service))
       m.get
     }
-    val ancestorIndex = new AncestorIndex(ancestry)
+    val ancestorIndex = ancestry
     val cacheFor =
       rotationCaches(preState.currValidators, preState.prevValidators, preState.entropy, input.slot, config)
 
@@ -331,7 +331,7 @@ object ReportTransition:
     serviceOf: Long => Option[ServiceInfo],
     offendersSet: Set[Hash],
     cacheFor: RotationContext => RotationCache,
-    ancestry: AncestorIndex,
+    ancestry: Ancestry,
     skipLookupAnchor: Boolean,
     skipAnchorContext: Boolean,
     batchPackages: Map[Hash, Hash],
@@ -410,7 +410,7 @@ object ReportTransition:
   private def validateAnchor(
     guarantee: GuaranteeExtrinsic,
     recentBlocks: HistoricalBetaContainer,
-    ancestry: AncestorIndex,
+    ancestry: Ancestry,
     currentSlot: Long,
     config: ChainConfig,
     skipLookupAnchor: Boolean
