@@ -44,9 +44,10 @@ final class BlockAuthor(
     val cached = derivedTickets
     if cached != null && cached._1 == key then cached._2
     else
+      val entries = SafroleTransition.maxTicketEntries(chain.stateView().validators.current.size, chain.config)
       val ids = (for
         ks <- validators
-        attempt <- 0 until chain.config.ticketsPerValidator
+        attempt <- 0 until entries
         output <- BandersnatchVrf.getVrfOutput(
           BandersnatchWrapper.ietfVrfSign(
             ks.bandersnatchSecret,

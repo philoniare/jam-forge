@@ -280,8 +280,8 @@ class DevnetReportFlowSpec extends AnyFunSuite with Matchers with NodeFixture:
 
     val generating = a.await("80 on A: tickets for epoch 1")(a.all(80)(body => LittleEndian.get(body, 0, 4) == 1L).headOption)
     val generated = a.await("82 on A")(a.referring(82, generating.id).headOption)
-    generated.body.length shouldBe 8 + 1 + 3 * 32
-    generated.body(8) shouldBe 3.toByte
+    generated.body.length shouldBe 8 + 1 + 4 * 32
+    generated.body(8) shouldBe 4.toByte
 
     val reportHash = Hashing.blake2b256(guarantee.report.encode.toArray).bytes.toArray
     val receivingGuarantee = a.await("110 on A: a guarantee from B")(a.all(110)(body => same(body, keyB)).headOption)

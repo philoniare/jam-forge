@@ -122,7 +122,8 @@ class PeerFedBoundsSpec extends AnyFunSuite with Matchers with NodeFixture:
         .takeTickets(epoch, TicketService.contestEntropy(view), Set.empty, Int.MaxValue, Int.MaxValue)
         .map(_._2)
       valid.size should be >= 2
-      val maxTickets = spec.config.validatorCount * spec.config.ticketsPerValidator
+      val maxTickets = spec.config.validatorCount *
+        io.forge.jam.protocol.safrole.SafroleTransition.maxTicketEntries(spec.config.validatorCount, spec.config)
       val tickets = nodeB.tickets
 
       // One valid ticket replayed: every copy is accepted, one forward is queued.

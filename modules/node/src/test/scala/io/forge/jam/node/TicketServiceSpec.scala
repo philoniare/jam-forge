@@ -18,8 +18,7 @@ class TicketServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       StreamKind.TicketDistributionStep2 -> node.tickets.ticketHandler
     ).get
 
-  /** TINY: three attempts per validator. */
-  private val perValidator = 3
+  private val perValidator = 4
 
   private def generate(node: JamNode): Unit =
     node.tickets.setValidatorKeys(Seq(devKeys(0)))
@@ -63,6 +62,21 @@ class TicketServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       b.tickets.flushForwards()
       eventually("C to pool the tickets B forwarded")(c.pools.ticketCount == perValidator - ownProxy)
       c.tickets.pendingForwardCount shouldBe 0 // a CE 132 ticket is not forwarded again
+    }
+  }
+
+  test("a validator generates ⌈2E/V⌉ ticket entries, and an author finds each of them from its keys alone") {
+    withNodes(1, "tickets-entries") { nodes =>
+      val a = nodes.head
+      math.ceil(2.0 * a.chain.config.epochLength / devKeys.size).toInt shouldBe perValidator
+      generate(a)
+      val entropy = TicketService.contestEntropy(a.chain.stateView())
+      val own = a.pools.takeTickets(0L, entropy, Set.empty, Int.MaxValue, Int.MaxValue)
+      own.map(_._2.attempt.toInt).sorted shouldBe (0 until perValidator).toList
+      val restarted = new BlockAuthor(a.chain, Seq(devKeys(0)))
+      own.foreach { (id, envelope) =>
+        restarted.ownTicket(id, entropy.bytes.toArray).map(_._2.toInt) shouldBe Some(envelope.attempt.toInt)
+      }
     }
   }
 

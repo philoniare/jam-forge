@@ -190,7 +190,7 @@ final class TicketService(
         val generating = telemetry.flatMap(_.generatingTickets(epoch + 1))
         val outputs = scala.collection.mutable.ListBuffer.empty[Array[Byte]]
         var failure: Option[String] = None
-        for attemptInt <- 0 until chain.config.ticketsPerValidator do
+        for attemptInt <- 0 until SafroleTransition.maxTicketEntries(pending.size, chain.config) do
           val attempt = UByte(attemptInt)
           BandersnatchVrf.createRingProof(
             keys.bandersnatchSecret,
