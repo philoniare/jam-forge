@@ -24,6 +24,9 @@ object Abi:
   /** Maximum jump table entries Z_J = 2^24 */
   val VmMaximumJumpTableEntries: UInt = UInt(16 * 1024 * 1024)
 
+  /** The largest jump-table entry size z, in octets. */
+  inline val VmMaximumJumpTableEntrySize = 4
+
   /** Maximum import count */
   val VmMaximumImportCount: UInt = UInt(1024)
 

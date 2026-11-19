@@ -39,6 +39,10 @@ object RecompilerAbi:
       StaticTargetField.TargetInImm
     case _ => StaticTargetField.NoStaticTarget
 
+  private def isConditionalBranch(instr: Instruction): Boolean = instr match
+    case _: Instruction.Jump | _: Instruction.LoadImmAndJump => false
+    case other => staticTargetField(other) != StaticTargetField.NoStaticTarget
+
   /** Map one decoded `Instruction` to its generic tuple. `targetIndex` resolves
     * a byte-offset control-flow target to an instruction index (already
     * computed by `prepareProgram`); instructions with no control-flow target
@@ -318,8 +322,9 @@ object RecompilerAbi:
         case StaticTargetField.TargetInImm => mapped.imm == InvalidTarget
         case StaticTargetField.TargetInImm2 => mapped.imm2 == InvalidTarget
         case StaticTargetField.NoStaticTarget => false
+      val invalidFallThrough = i == n - 1 && isConditionalBranch(instrs(i))
       val raw =
-        if invalidTarget then mapInstruction(Instruction.Panic, targetIndex)
+        if invalidTarget || invalidFallThrough then mapInstruction(Instruction.Panic, targetIndex)
         else mapped
       opcodes(i) = raw.opcode; aArr(i) = raw.a; bArr(i) = raw.b; cArr(i) = raw.c
       pcArr(i) = byteOffsets(i)

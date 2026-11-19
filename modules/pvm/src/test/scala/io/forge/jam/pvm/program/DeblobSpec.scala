@@ -34,14 +34,21 @@ class DeblobSpec extends AnyFunSuite with Matchers:
     Deblob.isExactEncoding(b(0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff)) shouldBe true
   }
 
-  test("jump table: any z is framed, but entries must be register values (< 2^64)") {
+  test("jump table: the entry size z is at most 4") {
     // |j| = 1, z = 1, j = [0], code = [trap].
     Deblob.isExactEncoding(b(1, 1, 1, 0, 0, 1)) shouldBe true
     // z = 0: |j| entries of zero octets each.
     Deblob.isExactEncoding(b(5, 0, 1, 0, 1)) shouldBe true
-    // z = 9 with the ninth octet zero is fine; non-zero makes j_0 >= 2^64.
-    Deblob.isExactEncoding(b(1, 9, 1) ++ b(1, 0, 0, 0, 0, 0, 0, 0, 0) ++ b(0, 1)) shouldBe true
-    Deblob.isExactEncoding(b(1, 9, 1) ++ b(0, 0, 0, 0, 0, 0, 0, 0, 1) ++ b(0, 1)) shouldBe false
+    Deblob.deblob(b(1, 4, 1) ++ b(0, 0, 0, 0) ++ b(0, 1), 0L) shouldBe defined
+    // z > 4 is ∇ however the entries are framed, with or without entries.
+    for z <- Seq(5, 8, 9, 255) do
+      withClue(s"z=$z: ") {
+        val oneEntry = b(1, z, 1) ++ new Array[Byte](z) ++ b(0, 1)
+        Deblob.isExactEncoding(oneEntry) shouldBe false
+        Deblob.deblob(oneEntry, 0L) shouldBe None
+        ProgramBlob.fromCodeAndJumpTable(oneEntry) shouldBe None
+        Deblob.deblob(b(0, z, 1, 0, 1), 0L) shouldBe None
+      }
   }
 
   test("v_blob: the last instruction must be in T and every opcode in U") {

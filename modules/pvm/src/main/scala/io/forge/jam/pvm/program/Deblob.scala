@@ -1,9 +1,12 @@
 package io.forge.jam.pvm.program
 
+import io.forge.jam.pvm.Abi
+
 /** The `deblob` validity rules.
   *
   * deblob(p, ı) is ∇ unless:
-  *   - p = E(|j|) ⌢ E₁(z) ⌢ E(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k) for exactly one (c, k, j) ([[isExactEncoding]]);
+  *   - p = E(|j|) ⌢ E₁(z) ⌢ E(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k) for exactly one (c, k, j), with z ≤ 4
+  *     ([[isExactEncoding]]);
   *   - v_blob(c, k, 0): every instruction is a known opcode and the last one is in T ([[isValidCode]]);
   *   - v_inst(c, k, ı): ı is the start of an instruction with a known opcode ([[isValidEntry]]).
   *
@@ -16,7 +19,7 @@ object Deblob:
     *   - no octets follow the bitmask;
     *   - the padding bits of the last bitmask octet are zero (bits are packed LSB-first, data.md "Bit Sequence
     *     Encoding");
-    *   - each jump-table entry is a register value (< 2^64), which only constrains z > 8.
+    *   - the jump-table entry size z is at most 4.
     */
   def isExactEncoding(data: Array[Byte]): Boolean =
     readCanonicalVarint(data, 0) match
@@ -25,7 +28,8 @@ object Deblob:
         if afterJumpCount >= data.length then false
         else
           val z = data(afterJumpCount) & 0xff
-          readCanonicalVarint(data, afterJumpCount + 1) match
+          if z > Abi.VmMaximumJumpTableEntrySize then false
+          else readCanonicalVarint(data, afterJumpCount + 1) match
             case None => false
             case Some((codeLen, afterCodeLen)) =>
               val remaining = (data.length - afterCodeLen).toLong
@@ -39,7 +43,6 @@ object Deblob:
                 else
                   val jumpStart = afterCodeLen
                   val bitmaskStart = jumpStart + (jumpOctets + codeLen).toInt
-                  jumpEntriesFitRegister(data, jumpStart, jumpCount.toInt, z) &&
                   bitmaskPaddingIsZero(data, bitmaskStart, codeLen.toInt)
 
   /** v_blob(c, k, 0). */
@@ -67,20 +70,6 @@ object Deblob:
       else if l < 8 then value >= (1L << (7 * l))
       else java.lang.Long.compareUnsigned(value, 1L << 56) >= 0
     }
-
-  /** For z > 8 every entry's octets beyond the eighth must be zero, else the value is ≥ 2^64. */
-  private def jumpEntriesFitRegister(data: Array[Byte], start: Int, count: Int, z: Int): Boolean =
-    if z <= 8 then true
-    else
-      var ok = true
-      var e = 0
-      while ok && e < count do
-        var b = 8
-        while ok && b < z do
-          if data(start + e * z + b) != 0 then ok = false
-          b += 1
-        e += 1
-      ok
 
   private def bitmaskPaddingIsZero(data: Array[Byte], bitmaskStart: Int, codeLen: Int): Boolean =
     val used = codeLen & 7

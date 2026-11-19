@@ -79,6 +79,7 @@ object ProgramBlob:
 
     // Read jump table entry size (single byte)
     val jumpTableEntrySize = data(offset) & 0xFF
+    if jumpTableEntrySize > Abi.VmMaximumJumpTableEntrySize then return None
     offset += 1
 
     // Read code length (varint), |c| <= Z_C
