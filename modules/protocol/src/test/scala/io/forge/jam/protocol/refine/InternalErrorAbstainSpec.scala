@@ -30,3 +30,15 @@ class InternalErrorAbstainSpec extends AnyFunSuite with Matchers:
   test("a run that does not abstain (accumulation) still exits with Panic") {
     run(abstain = false)._1 shouldBe PvmRunner.PvmExit.Panic
   }
+
+  test("an interpreted run past its deadline throws between blocks, with no host call to check it at") {
+    val spin = InterpretedModule.createForTest(code = Array[Byte](40, 0), bitmask = Array[Byte](1))
+    def spinFor(deadlineMillis: Option[Long]) =
+      PvmRunner.run(
+        spin, Array.emptyByteArray, 900_000L, 0, noHostCalls,
+        executionMode = ExecutionMode.Interpreted,
+        deadlineMillis = deadlineMillis
+      )
+    spinFor(None)._1 shouldBe PvmRunner.PvmExit.OutOfGas
+    intercept[ComputeReport.DeadlinePassed](spinFor(Some(0L))).deadlineMillis shouldBe 0L
+  }

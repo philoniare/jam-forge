@@ -3,6 +3,8 @@ package io.forge.jam.node
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutorService, RejectedExecutionException, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
+import scala.util.control.NonFatal
+
 import io.forge.jam.network.MessageStream
 
 /** A one-shot send: open a stream, write the messages, finish. The egress thread only starts the open; the
@@ -45,8 +47,10 @@ object OneShotSend:
 
   /** Queue the send on `egress`. `peer` identifies who the stream is opened to (null when unknown: no per-peer
     * limit then); `failed` is told why a send did not happen. `settled` is told once whether the messages were
-    * written and the stream finished, whatever stopped it otherwise (egress shutting down included). Returns at
-    * once; throws nothing.
+    * written and the stream finished, whatever stopped it otherwise (egress shutting down, or its full queue
+    * dropping the send, included). `dropped` is told of that last case, before `settled` and on the thread whose
+    * submission took the send's place; `failed` is not, as the queue logs what it drops. Returns at once; throws
+    * nothing.
     */
   def submit(
       egress: ExecutorService,
@@ -57,9 +61,10 @@ object OneShotSend:
       rejected: () => Unit = () => (),
       openTimeoutMillis: Long = OpenTimeoutSeconds * 1000,
       settled: Boolean => Unit = _ => (),
-      sent: () => Unit = () => ()
+      sent: () => Unit = () => (),
+      dropped: () => Unit = () => ()
   ): Unit =
-    queue(egress, () => { rejected(); settled(false) })(() =>
+    queue(egress, () => { rejected(); settled(false) }, () => { dropped(); settled(false) })(() =>
       send(peer, open, messages, failed, openTimeoutMillis, ok => { settled(ok); if ok then sent() })
     )
 
@@ -73,12 +78,16 @@ object OneShotSend:
       openTimeoutMillis: Long = OpenTimeoutSeconds * 1000
   ): Unit =
     if messages.nonEmpty then
-      queue(egress, rejected)(() => new Sequence(peer, open, messages.toIndexedSeq, failed, openTimeoutMillis).advance())
+      queue(egress, rejected, () => ())(() =>
+        new Sequence(peer, open, messages.toIndexedSeq, failed, openTimeoutMillis).advance()
+      )
 
-  private def queue(egress: ExecutorService, rejected: () => Unit)(task: () => Unit): Unit =
+  private def queue(egress: ExecutorService, rejected: () => Unit, onDrop: () => Unit)(task: () => Unit): Unit =
     try
-      egress.submit(new Runnable { def run(): Unit = task() })
-      ()
+      egress.execute(new WorkLimits.Droppable {
+        def run(): Unit = try task() catch case NonFatal(_) => ()
+        def dropped(): Unit = onDrop()
+      })
     catch case _: RejectedExecutionException => rejected()
 
   private final class Sequence(

@@ -207,7 +207,6 @@ class ComputeReport(
         )
 
 object ComputeReport:
-  final class DeadlinePassed(val deadlineMillis: Long)
-      extends RuntimeException(s"refine ran past its deadline (${deadlineMillis} ms since the epoch)")
+  type DeadlinePassed = io.forge.jam.pvm.engine.RunDeadlinePassed
 
   val BoxplusFlag: Int = 0x8000

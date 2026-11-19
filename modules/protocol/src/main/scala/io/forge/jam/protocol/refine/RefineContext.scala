@@ -52,7 +52,8 @@ final class RefineContext(
     val extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]],
     val exportSegmentOffset: Long,
     val accounts: HistoricalLookupService,
-    val machineModuleCache: Option[BoundedModuleCache] = None
+    val machineModuleCache: Option[BoundedModuleCache] = None,
+    val deadlineMillis: Option[Long] = None
 ):
   /** m: integrated inner-PVM instances, keyed by machine index. */
   val innerPvms: mutable.LongMap[InnerPvm] = mutable.LongMap.empty

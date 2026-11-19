@@ -137,6 +137,49 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers with NodeFixture:
     a[RejectedExecutionException] should be thrownBy egress.execute(() => ())
   }
 
+  test("a broadcast whose sends a full egress queue drops is still reported distributed") {
+    import io.forge.jam.core.JamBytes
+    import io.forge.jam.core.primitives.{CoreIndex, Gas, Timeslot}
+    import io.forge.jam.core.types.context.Context
+    import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
+    import io.forge.jam.core.types.work.PackageSpec
+    import io.forge.jam.core.types.workpackage.WorkReport
+    import io.forge.jam.network.Loopback
+    import spire.math.{UInt, UShort}
+    val egress = WorkLimits.dropOldestExecutor("egress-spec", threads = 1, capacity = 1, daemon("egress-spec"))
+    val dist = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
+    val holding = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    try
+      egress.execute(() => { holding.countDown(); release.await() })
+      holding.await(5, TimeUnit.SECONDS) shouldBe true
+      for i <- 1 to 3 do
+        val (toPeer, _) = Loopback.pair(new Array[Byte](32), Array.fill[Byte](32)(i.toByte), _ => None, _ => None)
+        dist.trackConnection(toPeer)
+      val report = WorkReport(
+        packageSpec = PackageSpec(Hash.zero, UInt(0), Hash.zero, UShort(0), Hash.zero, UShort(0)),
+        context = Context(Hash.zero, Timeslot(UInt(0)), Hash.zero, Hash.zero, Hash.zero, Timeslot(UInt(0)), Hash.zero, Nil),
+        coreIndex = CoreIndex(0),
+        authorizerHash = Hash.zero,
+        authGasUsed = Gas(0),
+        authOutput = JamBytes.empty,
+        segmentRootLookup = Nil,
+        results = Nil
+      )
+      val distributed = new CountDownLatch(1)
+      dist.distributeGuaranteeToAll(
+        GuaranteeExtrinsic(report, Timeslot(UInt(1)), Nil),
+        distributed = () => distributed.countDown()
+      )
+      egress.dropped shouldBe 2L // three sends for a queue of one
+      release.countDown()
+      distributed.await(5, TimeUnit.SECONDS) shouldBe true
+    finally
+      release.countDown()
+      dist.shutdown()
+      egress.shutdownNow()
+  }
+
   test("requests waiting on a silent peer do not hold up the egress thread, and their queue is bounded") {
     val egress = WorkLimits.dropOldestExecutor("egress-spec", threads = 1, 128, daemon("egress-spec"))
     val dist = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)

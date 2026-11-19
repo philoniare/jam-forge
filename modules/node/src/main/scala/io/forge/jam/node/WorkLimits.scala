@@ -11,6 +11,8 @@ import java.util.concurrent.{
 }
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
+import scala.util.control.NonFatal
+
 import com.typesafe.scalalogging.LazyLogging
 
 /** Admission limit for work a peer can put on an executor's queue.
@@ -86,6 +88,9 @@ object WorkGate:
 
 object WorkLimits extends LazyLogging:
 
+  trait Droppable extends Runnable:
+    def dropped(): Unit
+
   /** A fixed pool whose queue holds at most `capacity` tasks. When it is full the task that has waited longest is
     * dropped to make room (drop-oldest): for sends that go stale, such as gossip, the newest is the one worth keeping.
     * Submitting never blocks, so it is safe from a network event loop. After shutdown a submission is rejected as
@@ -115,10 +120,16 @@ object WorkLimits extends LazyLogging:
       override def rejectedExecution(r: Runnable, e: ThreadPoolExecutor): Unit =
         if e.isShutdown then throw new RejectedExecutionException(s"$name is shut down")
         // Make room and retry (as ThreadPoolExecutor.DiscardOldestPolicy does), counting what was dropped.
-        if e.getQueue.poll() != null then
+        val oldest = e.getQueue.poll()
+        if oldest != null then
           val total = droppedCount.incrementAndGet()
           if (total & (total - 1)) == 0 then
             logger.warn(s"$name: queue full ($capacity tasks); $total oldest task(s) dropped so far")
+          oldest match
+            case task: Droppable =>
+              try task.dropped()
+              catch case NonFatal(err) => logger.warn(s"$name: a dropped task failed to give up: $err")
+            case _ => ()
         e.execute(r)
     })
 

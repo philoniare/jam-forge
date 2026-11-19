@@ -53,7 +53,8 @@ object PvmRunner:
       preDispatch: Option[() => Unit] = None,
       memoryBudget: InstanceMemoryBudget = InstanceMemoryBudget.global,
       abstainOnInternalError: Boolean = false,
-      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind] = _.run()
+      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind] = _.run(),
+      deadlineMillis: Option[Long] = None
   ): (PvmExit, Long, Array[Byte]) =
     // Reserved before the instance's memory is allocated and held until the run is over, so the instances running
     // at once (services of one accumulation batch, refine, is-authorized) stay within the process-wide budget.
@@ -61,7 +62,7 @@ object PvmRunner:
     try
       runReserved(
         module, inputData, gasLimit, entryPc, hostCalls, executionMode, preDispatch, reservation,
-        abstainOnInternalError, interpreterStep
+        abstainOnInternalError, interpreterStep, deadlineMillis
       )
     finally reservation.close()
 
@@ -83,7 +84,8 @@ object PvmRunner:
       preDispatch: Option[() => Unit],
       reservation: InstanceMemoryBudget.Reservation,
       abstainOnInternalError: Boolean,
-      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind]
+      interpreterStep: InterpretedInstance => Either[PvmInternalError, InterruptKind],
+      deadlineMillis: Option[Long]
   ): (PvmExit, Long, Array[Byte]) =
     // Recompiled: run straight from the module, with no interpreter instance to build, describe and copy back
     // from. Step tracing needs the interpreter, and a run the native path declines takes the long way below.
@@ -121,6 +123,7 @@ object PvmRunner:
 
     instance.setGas(gasLimit)
     val initialGas = gasLimit
+    deadlineMillis.foreach(instance.setDeadlineMillis)
 
     instance.setNextProgramCounter(ProgramCounter(entryPc))
 

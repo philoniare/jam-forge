@@ -12,7 +12,7 @@ import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
 import io.forge.jam.protocol.pvmhost.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
 import io.forge.jam.pvm.InterruptKind
-import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule}
+import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule, PvmInternalError}
 import io.forge.jam.pvm.memory.GuestRam
 import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
 import io.forge.jam.pvm.types.ProgramCounter
@@ -24,7 +24,8 @@ import spire.math.ULong
   * every other refine host call is implemented.
   */
 class RefineHostCalls(
-    val context: RefineContext
+    val context: RefineContext,
+    guestStep: GuestInstance => Either[PvmInternalError, InterruptKind] = _.run()
 ) extends HostCallDispatcher:
   private val config: ChainConfig = context.config
 
@@ -416,17 +417,17 @@ class RefineHostCalls(
           gasChargedFlag = guest.gasChargedFlag
         )
 
+        context.deadlineMillis.foreach(guestInstance.setDeadlineMillis)
+
         var outcome: InterruptKind = InterruptKind.Panic
         var running = true
         while running do
-          guestInstance.run() match
+          guestStep(guestInstance) match
             case Right(InterruptKind.Step) => // step tracing only; continue
             case Right(interrupt) =>
               outcome = interrupt
               running = false
-            case Left(_) =>
-              outcome = InterruptKind.Panic
-              running = false
+            case Left(err) => throw new PvmRunner.InternalFailure(err)
 
         val guestGasLeft = math.max(0L, guestInstance.gas)
         LittleEndian.put(block, 0, guestGasLeft, 8)

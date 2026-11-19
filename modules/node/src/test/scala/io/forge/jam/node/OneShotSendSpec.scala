@@ -46,6 +46,39 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
     finally egress.shutdownNow()
   }
 
+  test("a send dropped from a full egress queue is settled as not sent, at once") {
+    val egress = WorkLimits.dropOldestExecutor("egress-spec", threads = 1, capacity = 1, r => {
+      val t = new Thread(r, "egress-spec"); t.setDaemon(true); t
+    })
+    try
+      val holding = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      egress.execute(() => { holding.countDown(); release.await() })
+      holding.await(5, TimeUnit.SECONDS) shouldBe true
+      val settled = new ConcurrentLinkedQueue[(Int, Boolean)]()
+      val dropped = new ConcurrentLinkedQueue[Integer]()
+      def send(i: Int): Unit =
+        OneShotSend.submit(
+          egress,
+          new Object,
+          () => CompletableFuture.failedFuture[MessageStream](new RuntimeException("no peer")),
+          List(Array[Byte](1)),
+          _ => (),
+          settled = ok => { settled.add((i, ok)); () },
+          dropped = () => { dropped.add(i); () }
+        )
+      send(1) // waits in the queue
+      send(2) // takes its place
+      settled.toArray.toList shouldBe List((1, false))
+      dropped.toArray.toList shouldBe List(1)
+      egress.dropped shouldBe 1L
+      release.countDown()
+      eventually("the kept send to run")(settled.size == 2)
+      settled.toArray.toList shouldBe List((1, false), (2, false))
+      dropped.size shouldBe 1
+    finally egress.shutdownNow()
+  }
+
   test("sends waiting on one peer are capped, the rest dropped, and the count returns to zero when they time out") {
     val egress = singleThread("jam-egress")
     try

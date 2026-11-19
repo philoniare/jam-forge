@@ -46,6 +46,7 @@ final class AuditorService(
     vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte] = BandersnatchWrapper.ietfVrfSign,
     audit: Option[WorkReport => Option[Boolean]] = None,
     finalityLagSlots: Long = AuditorService.FinalityLagSlots,
+    maxResendsPerTick: Int = AuditorService.MaxResendsPerTick,
     telemetry: Option[Telemetry] = None
 ) extends LazyLogging:
 
@@ -1024,18 +1025,26 @@ final class AuditorService(
           val key = JamBytes(c.peerKey)
           Option.when(live.exists(_.auditorKeys(key)) || isValidator(c.peerPublicKey))((c, key))
         }
-        var budget = AuditorService.MaxResendsPerTick
+        val picked = new java.util.PriorityQueue[AuditorService.Resend](AuditorService.Resend.latestFirst)
+        var order = 0L
         def offer(out: AuditorService.Outgoing): Unit =
           targets.foreach { (c, key) =>
-            if budget > 0 && out.due(key, c.openedAtMillis, now, lagging) then
-              budget -= 1
-              send(out, c, now)
+            if out.due(key, c.openedAtMillis, now, lagging) then
+              val last = out.sentAt(key)
+              if picked.size < maxResendsPerTick then picked.add(AuditorService.Resend(last, order, out, c)): Unit
+              else if last < picked.peek.sentAt then
+                picked.poll()
+                picked.add(AuditorService.Resend(last, order, out, c)): Unit
+              order += 1
           }
         live.foreach(_.outgoing.valuesIterator.foreach(offer))
         if ownJudgments.nonEmpty then
           val liveReports = live.iterator.flatMap(_.reportSet).toSet
           ownJudgments.foreach((k, out) => if liveReports(k._1) then offer(out))
-        val sent = AuditorService.MaxResendsPerTick - budget
+        val sent = picked.size
+        picked.toArray(Array.empty[AuditorService.Resend]).sorted(AuditorService.Resend.earliestFirst).foreach { r =>
+          send(r.out, r.conn, now)
+        }
         if sent > 0 then
           logger.debug(s"resent $sent audit announcement(s) and judgment(s)${if lagging then " (finality lags)" else ""}")
 
@@ -1098,6 +1107,15 @@ object AuditorService extends LazyLogging:
             val failures = p.failures + 1
             p.copy(sending = false, delivered = false, failures = failures, retryAt = now + backoff(failures))
       ): Unit
+
+    def sentAt(key: JamBytes): Long =
+      val p = peers.get(key)
+      if p == null then 0L else p.sentAt
+
+  private final case class Resend(sentAt: Long, order: Long, out: Outgoing, conn: PeerConnection)
+  private object Resend:
+    val earliestFirst: Ordering[Resend] = Ordering.by(r => (r.sentAt, r.order))
+    val latestFirst: Ordering[Resend] = earliestFirst.reverse
 
   private[node] object Outgoing:
     private[AuditorService] final case class Peer(

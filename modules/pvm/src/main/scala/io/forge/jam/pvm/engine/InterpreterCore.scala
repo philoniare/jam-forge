@@ -18,6 +18,8 @@ import io.forge.jam.pvm.types.*
 object InterpreterCore:
   private val logger: Logger = Logger(classOf[InterpreterCore])
 
+  inline val DeadlineCheckBlocks = 16384
+
 abstract class InterpreterCore protected (
     val module: InterpretedModule,
     val regs: Array[Long],
@@ -34,6 +36,7 @@ abstract class InterpreterCore protected (
   private val TargetOutOfRange: UInt = UInt(0)
   protected var _gasChargedFlag: Boolean = false
   protected var _forcedOutOfGas: Boolean = false
+  private var _deadlineMillis: Long = Long.MaxValue
 
   // ==========================================================================
   // Variation points
@@ -79,6 +82,7 @@ abstract class InterpreterCore protected (
   final def setGas(value: Long): Unit = _gas = value
   final def gasChargedFlag: Boolean = _gasChargedFlag
   final def setGasChargedFlag(value: Boolean): Unit = _gasChargedFlag = value
+  final def setDeadlineMillis(deadline: Long): Unit = _deadlineMillis = deadline
   final def forceOutOfGas(): Unit = _forcedOutOfGas = true
   final def isForcedOutOfGas: Boolean = _forcedOutOfGas
 
@@ -95,6 +99,7 @@ abstract class InterpreterCore protected (
   final def run(): Either[PvmInternalError, InterruptKind] =
     try Right(runImpl())
     catch
+      case passed: RunDeadlinePassed => throw passed
       case NonFatal(e) =>
         InterpreterCore.logger.error(
           "PVM interpreter threw — this is an implementation bug, mapping to PANIC for consensus safety",
@@ -254,6 +259,9 @@ abstract class InterpreterCore protected (
     val isStepTracing = stepTracingEnabled
     // Only host calls set it, and they run between run() calls.
     val forcedOutOfGas = isGasMetered && _forcedOutOfGas
+    val deadline = _deadlineMillis
+    val hasDeadline = deadline != Long.MaxValue
+    var blocksToDeadlineCheck = 1
 
     // Main execution loop - optimized for JIT
     while true do
@@ -275,6 +283,13 @@ abstract class InterpreterCore protected (
 
       if isGasMetered then
         if !_gasChargedFlag then
+          if hasDeadline then
+            blocksToDeadlineCheck -= 1
+            if blocksToDeadlineCheck == 0 then
+              blocksToDeadlineCheck = InterpreterCore.DeadlineCheckBlocks
+              if System.currentTimeMillis() > deadline then
+                _compiledOffsetInt = offset
+                throw new RunDeadlinePassed(deadline)
           val static = compiled.blockCost
           val blockCost = if static >= 0 then static else module.blockGasCostAt(compiled.pc.toInt)
           if _gas < blockCost then

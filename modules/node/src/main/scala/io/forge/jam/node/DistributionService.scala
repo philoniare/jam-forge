@@ -180,6 +180,10 @@ final class DistributionService(
           sent = () => {
             sent()
             settled()
+          },
+          dropped = () => {
+            failed("not sent: the egress queue was full")
+            settled()
           }
         )
       }

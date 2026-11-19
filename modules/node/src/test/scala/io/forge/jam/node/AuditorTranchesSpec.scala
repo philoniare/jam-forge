@@ -1,6 +1,6 @@
 package io.forge.jam.node
 
-import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
@@ -64,7 +64,8 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       val now: AtomicLong,
       ticks: AtomicInteger,
       hold: Hold,
-      distribution: DistributionService
+      distribution: DistributionService,
+      val step: AtomicLong
   ):
     @volatile var auditor: AuditorService = make()
     val items: Seq[(Int, Hash)] = Seq(0 -> report)
@@ -174,7 +175,9 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
   private def withAuditorKeys(
       ownKeys: Seq[ValidatorKeySet],
       vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte],
-      audit: Option[WorkReport => Option[Boolean]] = None
+      audit: Option[WorkReport => Option[Boolean]] = None,
+      egressOf: () => ExecutorService = () => Executors.newSingleThreadExecutor(),
+      maxResendsPerTick: Int = AuditorService.MaxResendsPerTick
   )(body: Fixture => Unit): Unit =
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(
@@ -188,7 +191,7 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
     val dir = tempDir("jam-audit-tranches")
     var node: JamNode = null
     val threads = new NodeThreads
-    val egress = Executors.newSingleThreadExecutor()
+    val egress = egressOf()
     try
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false))
       node.chain.initializeOrRestore(spec)
@@ -214,11 +217,13 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       val now = new AtomicLong(1000L)
       val ticks = new AtomicInteger()
       val hold = new Hold
+      val step = new AtomicLong(0L)
       val clock: () => Long = () =>
         if Thread.currentThread.getName.startsWith("jam-audit") then
           ticks.incrementAndGet()
           hold()
-        now.get
+          now.addAndGet(step.get)
+        else now.get
       val store = new InMemoryRoleStore
       val make = () =>
         new AuditorService(
@@ -234,9 +239,10 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
           store = store,
           threads = threads,
           vrfSign = vrfSign,
-          audit = audit
+          audit = audit,
+          maxResendsPerTick = maxResendsPerTick
         )
-      val f = Fixture(make, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold, node.distribution)
+      val f = Fixture(make, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold, node.distribution, step)
       try body(f)
       finally f.auditor.shutdown()
     finally
@@ -450,9 +456,13 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
   }
 
 
-  private def withOwnJudgment(audits: AtomicInteger = new AtomicInteger())(body: Fixture => Unit): Unit =
+  private def withOwnJudgment(
+      audits: AtomicInteger = new AtomicInteger(),
+      egressOf: () => ExecutorService = () => Executors.newSingleThreadExecutor(),
+      maxResendsPerTick: Int = AuditorService.MaxResendsPerTick
+  )(body: Fixture => Unit): Unit =
     val audit: WorkReport => Option[Boolean] = _ => { audits.incrementAndGet(); Some(true) }
-    withAuditorKeys(Seq(devKeys(1)), BandersnatchWrapper.ietfVrfSign, Some(audit)) { f =>
+    withAuditorKeys(Seq(devKeys(1)), BandersnatchWrapper.ietfVrfSign, Some(audit), egressOf, maxResendsPerTick) { f =>
       f.track()
       f.settle()
       eventually("our positive judgment") { f.drain(); f.auditor.judgesOf(f.report)._1 == Set(1) }
@@ -490,6 +500,44 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       f.now.addAndGet(AuditorService.ResendBaseMillis)
       eventually("the retries to get through")(flaky.received == (1, 1))
       checkOurs(f, flaky)
+    }
+  }
+
+  test("a send dropped from a full egress queue is tried again after a back-off") {
+    val egress = WorkLimits.dropOldestExecutor("egress-spec", threads = 1, capacity = 1, r => {
+      val t = new Thread(r, "egress-spec"); t.setDaemon(true); t
+    })
+    withOwnJudgment(egressOf = () => egress) { f =>
+      val holding = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      egress.execute(() => { holding.countDown(); release.await() })
+      val peer =
+        try
+          holding.await(5, TimeUnit.SECONDS) shouldBe true
+          val late = f.connect(devKeys(2))
+          eventually("the queued announcement to be dropped")(egress.dropped == 1L)
+          (0 until 5).foreach(_ => f.settle())
+          egress.dropped shouldBe 1L // not again before the back-off
+          late
+        finally release.countDown()
+      eventually("the judgment that was kept")(peer.received == (0, 1))
+      f.now.addAndGet(AuditorService.ResendBaseMillis)
+      eventually("the dropped announcement to be sent again")(peer.received == (1, 1))
+      checkOurs(f, peer)
+    }
+  }
+
+  test("while finality lags and the budget is short, what was sent longest ago goes first: judgments are not starved") {
+    withOwnJudgment(maxResendsPerTick = 1) { f =>
+      val peer = f.connect(devKeys(2))
+      eventually("the first sends")(peer.received == (1, 1))
+      f.chain.bestSlot = Some(f.block.header.slot.toLong + AuditorService.FinalityLagSlots + 1)
+      f.step.set(AuditorService.LagResendMillis)
+      eventually("both to be sent again and again") {
+        val (announcements, judgments) = peer.received
+        announcements >= 4 && judgments >= 4
+      }
+      f.step.set(0L)
     }
   }
 

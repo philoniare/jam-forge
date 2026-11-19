@@ -134,7 +134,8 @@ class RefineExecutor(val config: ChainConfig):
       extrinsicData = extrinsicData,
       exportSegmentOffset = exportSegmentOffset,
       accounts = accounts,
-      machineModuleCache = Some(machineModuleCache)
+      machineModuleCache = Some(machineModuleCache),
+      deadlineMillis = deadlineMillis
     )
 
     val gasLimit =
@@ -151,7 +152,8 @@ class RefineExecutor(val config: ChainConfig):
         module, inputData, gasLimit, entryPc = 0, hostCalls,
         preDispatch = deadlineMillis.map(d => () => if System.currentTimeMillis() > d then throw new ComputeReport.DeadlinePassed(d)),
         memoryBudget = io.forge.jam.pvm.memory.InstanceMemoryBudget.inCore,
-        abstainOnInternalError = true
+        abstainOnInternalError = true,
+        deadlineMillis = deadlineMillis
       )
 
     exitReason match

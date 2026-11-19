@@ -71,7 +71,8 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
       accounts: HistoricalLookupService = new MapLookupService(Map.empty, Set.empty),
       importSegments: IndexedSeq[IndexedSeq[Array[Byte]]] = IndexedSeq(IndexedSeq.empty),
       extrinsicData: IndexedSeq[IndexedSeq[Array[Byte]]] = IndexedSeq(IndexedSeq.empty),
-      exportOffset: Long = 0L
+      exportOffset: Long = 0L,
+      deadlineMillis: Option[Long] = None
   ): RefineContext =
     val item = testWorkItem()
     new RefineContext(
@@ -83,7 +84,8 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
       importSegments = importSegments,
       extrinsicData = extrinsicData,
       exportSegmentOffset = exportOffset,
-      accounts = accounts
+      accounts = accounts,
+      deadlineMillis = deadlineMillis
     )
 
   private def newInstance(): MockPvmInstance =
@@ -773,6 +775,38 @@ class RefineHostCallsSpec extends AnyFunSuite with Matchers:
     hc.dispatch(HostCall.INVOKE, instance)
     ULong(instance.reg(7)) shouldBe HostCallResult.PANIC
     ctx.innerPvms(0L).pc shouldBe 0L
+  }
+
+  test("INVOKE throws an internal failure when the inner machine's interpreter fails, instead of reporting a panic") {
+    val bug = new IllegalStateException("simulated interpreter bug")
+    val ctx = newContext()
+    val hc = new RefineHostCalls(ctx, guestStep = _ => Left(io.forge.jam.pvm.engine.PvmInternalError(bug)))
+    createMachineWith(hc, guestBlob(Array[Byte](51, 7, 42, 50, 0), Array[Byte](9)), pc = 0L) shouldBe 0L
+
+    val instance = newInstance()
+    writeInvokeBlock(instance, 0x8000, gas = 100L, regs = Map(0 -> 0xffff0000L))
+    instance.setReg(7, 0L)
+    instance.setReg(8, 0x8000L)
+    val thrown = intercept[io.forge.jam.protocol.pvmhost.PvmRunner.InternalFailure](
+      chargeAndDispatch(hc, HostCall.INVOKE, instance)
+    )
+    thrown.getCause shouldBe theSameInstanceAs(bug)
+  }
+
+  test("INVOKE of a machine that loops without host calls is abandoned once the refine deadline has passed") {
+    val spin = guestBlob(Array[Byte](40, 0), Array[Byte](1))
+    def invoke(deadlineMillis: Option[Long]): MockPvmInstance =
+      val hc = new RefineHostCalls(newContext(deadlineMillis = deadlineMillis))
+      createMachineWith(hc, spin, pc = 0L) shouldBe 0L
+      val instance = newInstance()
+      writeInvokeBlock(instance, 0x8000, gas = 900_000L)
+      instance.setReg(7, 0L)
+      instance.setReg(8, 0x8000L)
+      chargeAndDispatch(hc, HostCall.INVOKE, instance)
+      instance
+    ULong(invoke(None).reg(7)) shouldBe HostCallResult.OOG
+    ULong(invoke(Some(System.currentTimeMillis() + 600_000L)).reg(7)) shouldBe HostCallResult.OOG
+    intercept[ComputeReport.DeadlinePassed](invoke(Some(0L))).deadlineMillis shouldBe 0L
   }
 
   test("INVOKE reports HOST on guest ecalli and resumes past it") {
