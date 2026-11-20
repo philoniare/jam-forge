@@ -3,7 +3,7 @@ package io.forge.jam.node
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.{ChainConfig, Hashing, JamBytes}
 import io.forge.jam.core.primitives.{Ed25519PublicKey, Hash}
-import io.forge.jam.core.trie.{MissingTrieNodeException, StateTrie, StateTrieStore}
+import io.forge.jam.core.trie.{BufferedTrieBackend, MissingTrieNodeException, StateTrie, StateTrieStore}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
@@ -43,6 +43,15 @@ object ChainManager:
 
   val StateSweepIntervalMillis: Long = 60L * 60 * 1000
 
+  val BatchStateDepthProperty = "jam.sync.batchStateDepth"
+
+  private[node] def batchStateDepth(config: ChainConfig, pruneOldState: Boolean, setting: Option[String]): Option[Long] =
+    if !pruneOldState then None
+    else
+      setting match
+        case None    => Some(config.maxLookupAnchorAge + config.epochLength)
+        case Some(s) => s.trim.toLongOption.filter(_ >= 0)
+
 /** Owns the canonical chain: the persistent state trie, block storage and the
   * best/finalized heads, and drives [[BlockImporter]] for every new block.
   *
@@ -76,7 +85,9 @@ final class ChainManager(
     "ChainManager never runs trie gc: open its RocksDbTrieBackend with trackGarbage = false"
   )
 
-  private val trieStore = new StateTrieStore(trieBackend)
+  private val stateBuffer = new BufferedTrieBackend(trieBackend)
+  private var bufferedTip: (Hash, Long) | Null = null
+  private val trieStore = new StateTrieStore(stateBuffer)
   private val importer =
     new BlockImporter(
       config,
@@ -885,6 +896,9 @@ final class ChainManager(
   /** Refuse side-branch blocks whose slot is more than [[ChainManager.FutureSlotTolerance]] ahead of `now()`. */
   def useWallClock(now: () => Long): Unit = wallClockSlot = Some(now)
 
+  @volatile private[node] var batchStateDepth: Option[Long] =
+    ChainManager.batchStateDepth(config, pruneOldState, Option(System.getProperty(ChainManager.BatchStateDepthProperty)))
+
   def nextBlockSlot: Long =
     val afterHead = best.slot + 1
     wallClockSlot.fold(afterHead)(now => math.max(now(), afterHead))
@@ -1010,11 +1024,19 @@ final class ChainManager(
       val started = System.nanoTime()
       val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
       val remaining = blocks.iterator
+      val several = blocks.sizeIs > 1
       var more = true
-      while more && remaining.hasNext do
-        val blockBytes = remaining.next()
-        outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide))
-        more = System.nanoTime() - started < budgetNanos
+      try
+        while more && remaining.hasNext do
+          val blockBytes = remaining.next()
+          outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide, several))
+          more = System.nanoTime() - started < budgetNanos
+        storeBufferedState()
+      catch
+        case t: Throwable =>
+          bufferedTip = null
+          stateBuffer.discard()
+          throw t
       outcomes.result()
     }
     publishImported(events)
@@ -1026,16 +1048,28 @@ final class ChainManager(
     }
     results
 
+  private def farBehindHead(slot: Long): Boolean =
+    batchStateDepth.exists(depth => wallClockSlot.exists(now => slot + depth < now()))
+
+  private def storeBufferedState(): Unit =
+    if stateBuffer.buffering then
+      val tip = bufferedTip
+      bufferedTip = null
+      if tip == null then stateBuffer.discard()
+      else trieBackend.withJournal(tip._1, tip._2)(stateBuffer.flush())
+
   private def importOne(
       blockBytes: Array[Byte],
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
-      sealedSide: mutable.ListBuffer[(Hash, Block)]
+      sealedSide: mutable.ListBuffer[(Hash, Block)],
+      inBatch: Boolean
   ): Either[ChainError, ChainHead] =
     newEquivocation = None
-    val imported = importUnderCommit(blockBytes, source, events, sealedSide)
+    val imported = importUnderCommit(blockBytes, source, events, sealedSide, inBatch)
     newEquivocation.foreach { slot =>
       newEquivocation = None
+      storeBufferedState()
       leaveEquivocatedSlot(slot, events)
       events.filterInPlace((head, _) => blockRoot(head.hash).isDefined)
     }
@@ -1045,7 +1079,8 @@ final class ChainManager(
       blockBytes: Array[Byte],
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
-      sealedSide: mutable.ListBuffer[(Hash, Block)]
+      sealedSide: mutable.ListBuffer[(Hash, Block)],
+      inBatch: Boolean
   ): Either[ChainError, ChainHead] =
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
@@ -1060,8 +1095,10 @@ final class ChainManager(
           val slot = block.header.slot.toLong
           wallClockSlot.map(_()).filter(now => slot > now + ChainManager.FutureSlotTolerance) match
             case Some(now) => Left(ChainError.FutureSlot(slot, now))
-            case None      => importOnBest(block, blockBytes, events, bodyChecked = true)
+            case None =>
+              importOnBest(block, blockBytes, events, bodyChecked = true, buffered = inBatch && farBehindHead(slot))
         else
+          storeBufferedState()
           (blockHeight(parent), blockStore.hasBlock(parent)) match
             case (Some(parentHeight), true) =>
               // Known parent on some branch: check what can be checked without executing it, store and evaluate.
@@ -1098,9 +1135,12 @@ final class ChainManager(
       block: Block,
       blockBytes: Array[Byte],
       events: mutable.ListBuffer[(ChainHead, Block)],
-      bodyChecked: Boolean
+      bodyChecked: Boolean,
+      buffered: Boolean = false
   ): Either[ChainError, ChainHead] =
     if !bodyChecked && !bodyMatchesHeader(block) then return Left(ChainError.BodyMismatch)
+    if !buffered then storeBufferedState()
+    else if !stateBuffer.buffering then stateBuffer.begin()
     val started = System.nanoTime()
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
@@ -1120,6 +1160,7 @@ final class ChainManager(
       case done @ ImportResult.Success(postRoot, _) =>
         faultAfterStateSave()
         val hash = headerHashOf(block)
+        if stateBuffer.buffering then bufferedTip = (hash, journalHeight)
         noteAccumulateCosts(hash, done.accumulateCosts)
         val slot = block.header.slot.toLong
         storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
@@ -1290,7 +1331,7 @@ final class ChainManager(
   def stateAt(headerHash: Hash): Option[StateTrie] =
     // Below the pruning floor the state has been deleted (in part or whole), whether or not the block is kept.
     if pruneOldState && blockHeight(headerHash).exists(_ < pruneFloorHeight) then None
-    else blockRoot(headerHash).map(root => StateTrie.at(trieStore.backend, root))
+    else blockRoot(headerHash).flatMap(stateAtRoot)
 
   /** A read view over the posterior state of stored block `headerHash`. */
   def stateViewAt(headerHash: Hash): Option[TrieBackedJamState] =

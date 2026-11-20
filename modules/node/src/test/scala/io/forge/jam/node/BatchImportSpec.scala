@@ -179,3 +179,121 @@ class BatchImportSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       cleanup(dirA)
       cleanup(dirB)
   }
+
+
+  private def farBehind(n: JamNode, now: Long = 1000L): Unit =
+    n.chain.useWallClock(() => now)
+    n.chain.batchStateDepth = Some(100L)
+
+  private def stateOf(n: JamNode): Seq[(JamBytes, JamBytes)] =
+    n.chain.stateAt(n.chain.best.hash).getOrElse(fail("the best block's state is not held")).getKeyValues(JamBytes.empty, 0)
+
+  test("a batch far behind the head stores the state after its last block only, and the chain goes on from it") {
+    withNodes(2, "batch-one-state") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      val blocks = authorOn(a, 1 to 6)
+      farBehind(b)
+      b.chain.importBatch(blocks).map(_.map(_.slot)) shouldBe (1L to 6L).map(Right(_))
+      b.chain.best shouldBe a.chain.best
+      blocks.foreach(bytes => b.chain.postStateRoot(hashOf(a, bytes)) shouldBe a.chain.postStateRoot(hashOf(a, bytes)))
+      blocks.init.foreach(bytes => b.chain.stateAt(hashOf(a, bytes)) shouldBe None)
+      stateOf(b) shouldBe stateOf(a)
+
+      val more = authorOn(a, 7 to 9)
+      b.chain.importBlock(more(0)).map(_.slot) shouldBe Right(7L)
+      b.chain.importBatch(more.drop(1)).map(_.map(_.slot)) shouldBe Vector(Right(8L), Right(9L))
+      b.chain.stateAt(hashOf(a, more(0))).isDefined shouldBe true // imported alone: its state is kept
+      b.chain.stateAt(hashOf(a, more(1))) shouldBe None
+      stateOf(b) shouldBe stateOf(a)
+    }
+  }
+
+  test("a batch near the head keeps every block's state") {
+    withNodes(2, "batch-near-head") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      val blocks = authorOn(a, 1 to 6)
+      farBehind(b, now = 104L) // blocks 1 to 3 are far behind, 4 to 6 are not
+      b.chain.importBatch(blocks).map(_.map(_.slot)) shouldBe (1L to 6L).map(Right(_))
+      blocks.map(bytes => b.chain.stateAt(hashOf(a, bytes)).isDefined) shouldBe Vector(false, false, true, true, true, true)
+      stateOf(b) shouldBe stateOf(a)
+    }
+  }
+
+  test("an invalid block in a batch far behind the head: the state of the block before it is stored") {
+    withNodes(2, "batch-one-state-invalid") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      val blocks = authorOn(a, 1 to 4)
+      val third = a.chain.decodeBlock(blocks(2)).toOption.get
+      val seal = third.header.seal.toArray
+      seal(0) = (seal(0) ^ 1).toByte
+      val forged = a.chain.encodeBlock(third.copy(header = third.header.copy(seal = JamBytes(seal))))
+      farBehind(b)
+      val results = b.chain.importBatch(Vector(blocks(0), blocks(1), forged, blocks(3)))
+      results.map(_.isRight) shouldBe Vector(true, true, false, false)
+      b.chain.best.hash shouldBe hashOf(a, blocks(1))
+      b.chain.stateAt(hashOf(a, blocks(0))) shouldBe None
+      b.chain.stateAt(hashOf(a, blocks(1))).isDefined shouldBe true
+      b.chain.importBatch(blocks.drop(2)).map(_.map(_.slot)) shouldBe Vector(Right(3L), Right(4L))
+      stateOf(b) shouldBe stateOf(a)
+    }
+  }
+
+  test("a batch far behind the head that fails leaves none of it, and imports on a retry") {
+    withNodes(2, "batch-one-state-failed") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      var saves = 0
+      val (blocks, before) = failThenRetry(
+        a,
+        b,
+        n => {
+          farBehind(n)
+          n.chain.faultAfterStateSave = () => {
+            saves += 1
+            if saves == 3 then throw new InjectedFault
+          }
+        }
+      )
+      b.chain.stateAt(before.hash).isDefined shouldBe true
+      b.chain.importBatch(blocks).map(_.map(_.slot)) shouldBe (3L to 7L).map(Right(_))
+      stateOf(b) shouldBe stateOf(a)
+    }
+  }
+
+  test("after a batch far behind the head and a restart, the best state is whole and the chain goes on") {
+    val s = spec("batch-one-state-restart")
+    val dirA = tempDir("jam-batch-state-a")
+    val dirB = tempDir("jam-batch-state-b")
+    val a = node(s, dirA, 0)
+    var b = node(s, dirB, 1)
+    try
+      val blocks = authorOn(a, 1 to 5)
+      farBehind(b)
+      b.chain.importBatch(blocks).forall(_.isRight) shouldBe true
+      b.shutdown()
+      b = node(s, dirB, 1)
+      b.chain.best shouldBe a.chain.best
+      stateOf(b) shouldBe stateOf(a)
+      blocks.init.foreach(bytes => b.chain.stateAt(hashOf(a, bytes)) shouldBe None)
+      val next = authorOn(a, 6 to 6)
+      b.chain.importBlock(next(0)).map(_.slot) shouldBe Right(6L)
+      stateOf(b) shouldBe stateOf(a)
+    finally
+      a.shutdown()
+      b.shutdown()
+      cleanup(dirA)
+      cleanup(dirB)
+  }
+
+  test("blocks count as far behind the head from the anchor age and an epoch behind the clock, where old state is pruned") {
+    val tiny = ChainConfig.TINY
+    val window = tiny.maxLookupAnchorAge.toLong + tiny.epochLength
+    ChainManager.batchStateDepth(tiny, pruneOldState = true, setting = None) shouldBe Some(window)
+    ChainManager.batchStateDepth(tiny, pruneOldState = false, setting = None) shouldBe None
+    ChainManager.batchStateDepth(tiny, pruneOldState = false, setting = Some("5")) shouldBe None
+    ChainManager.batchStateDepth(tiny, pruneOldState = true, setting = Some(" 1200 ")) shouldBe Some(1200L)
+    ChainManager.batchStateDepth(tiny, pruneOldState = true, setting = Some("off")) shouldBe None
+
+    withNodes(1, "batch-depth-default") { nodes =>
+      nodes.head.chain.batchStateDepth shouldBe Some(window)
+    }
+  }
