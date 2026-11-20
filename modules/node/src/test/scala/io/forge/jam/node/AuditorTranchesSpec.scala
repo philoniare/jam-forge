@@ -8,6 +8,7 @@ import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.primitives.{CoreIndex, Ed25519Signature, Gas, Hash, Timeslot, ValidatorIndex}
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.context.Context
+import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic}
 import io.forge.jam.core.types.work.PackageSpec
 import io.forge.jam.core.types.workpackage.{AvailabilityAssignment, WorkReport}
@@ -65,10 +66,23 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       ticks: AtomicInteger,
       hold: Hold,
       distribution: DistributionService,
-      val step: AtomicLong
+      val step: AtomicLong,
+      val pools: ExtrinsicPools,
+      workReport: WorkReport
   ):
     @volatile var auditor: AuditorService = make()
     val items: Seq[(Int, Hash)] = Seq(0 -> report)
+
+    val guarantee: GuaranteeExtrinsic =
+      GuaranteeExtrinsic(
+        workReport,
+        Timeslot(UInt(7)),
+        List(2, 3).map(v => GuaranteeSignature(ValidatorIndex(v), Ed25519Signature(Array.fill[Byte](64)(v.toByte))))
+      )
+    val guaranteeMessage: Array[Byte] =
+      Array[Byte](7, 0, 0, 0, 2) ++ Array[Byte](2, 0) ++ Array.fill[Byte](64)(2) ++ Array[Byte](3, 0) ++ Array.fill[Byte](64)(3)
+
+    def include(): Unit = pools.recordCredentials(block.header.parent, 9L, List(guarantee))
 
     def restart(): Unit =
       auditor.shutdown()
@@ -125,9 +139,27 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
     def judge(v: Int, valid: Boolean = true): Unit =
       auditor.receiveJudgment(AuditFlood.judgment(v, devKeys(v), report, valid))
 
+    def inlineNegative(v: Int): Array[Byte] =
+      val negative = AuditFlood.judgment(v, devKeys(v), report, valid = false)
+      negative.take(7) ++ guaranteeMessage ++ negative.drop(7)
+
+    def publish(keys: ValidatorKeySet, messages: Array[Byte]*): Unit =
+      val handler: PeerStreamHandler = auditor.judgmentHandler
+      val (toAuditor, _) = Loopback.pair(
+        keys.ed25519Public,
+        new Array[Byte](32),
+        _ => None,
+        kind => Option.when(kind == StreamKind.JudgmentPublication)(handler)
+      )
+      val stream = toAuditor.openStream(StreamKind.JudgmentPublication).get(10, TimeUnit.SECONDS)
+      messages.foreach(stream.send)
+      stream.finish()
+
   private final class Peer:
     val announcements = new ConcurrentLinkedQueue[(Array[Byte], Array[Byte])]()
     val judgments = new ConcurrentLinkedQueue[Array[Byte]]()
+
+    val guarantees = new ConcurrentLinkedQueue[Array[Byte]]()
     val opens = new AtomicInteger()
     def received: (Int, Int) = (announcements.size, judgments.size)
     val handlers: Byte => Option[PeerStreamHandler] = kind =>
@@ -144,7 +176,14 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
         )
       else if kind == StreamKind.JudgmentPublication then
         Some((_: PeerConnection, stream: MessageStream) =>
-          stream.onMessage { m => judgments.add(m); stream.finish() }
+          var first = true
+          stream.onMessage { m =>
+            if first then
+              first = false
+              judgments.add(m)
+              stream.finish()
+            else guarantees.add(m): Unit
+          }
           ()
         )
       else None
@@ -177,7 +216,8 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       vrfSign: (Array[Byte], Array[Byte], Array[Byte]) => Array[Byte],
       audit: Option[WorkReport => Option[Boolean]] = None,
       egressOf: () => ExecutorService = () => Executors.newSingleThreadExecutor(),
-      maxResendsPerTick: Int = AuditorService.MaxResendsPerTick
+      maxResendsPerTick: Int = AuditorService.MaxResendsPerTick,
+      inlineGuarantee: Boolean = false
   )(body: Fixture => Unit): Unit =
     val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
     val spec = ChainSpec(
@@ -240,9 +280,10 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
           threads = threads,
           vrfSign = vrfSign,
           audit = audit,
-          maxResendsPerTick = maxResendsPerTick
+          maxResendsPerTick = maxResendsPerTick,
+          inlineGuarantee = inlineGuarantee
         )
-      val f = Fixture(make, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold, node.distribution, step)
+      val f = Fixture(make, chain, store, block, blockHash, Hashing.blake2b256(report.encode.toArray), now, ticks, hold, node.distribution, step, node.pools, report)
       try body(f)
       finally f.auditor.shutdown()
     finally
@@ -562,6 +603,96 @@ class AuditorTranchesSpec extends AnyFunSuite with Matchers with NodeFixture:
       (0 until 10).foreach(_ => f.settle())
       peer.received shouldBe sent
       after.received shouldBe (0, 0)
+    }
+  }
+
+  private def withOwnNegativeJudgment(included: Boolean = true, inlineForm: Boolean = false)(body: Fixture => Unit): Unit =
+    withAuditorKeys(Seq(devKeys(1)), BandersnatchWrapper.ietfVrfSign, Some(_ => Some(false)), inlineGuarantee = inlineForm) { f =>
+      if included then f.include()
+      f.track()
+      f.settle()
+      eventually("our negative judgment") { f.drain(); f.auditor.judgesOf(f.report)._2 == Set(1) }
+      body(f)
+    }
+
+  test("our negative judgment is followed by the guarantee of the report it judges") {
+    withOwnNegativeJudgment() { f =>
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment and the guarantee")(peer.judgments.size == 1 && peer.guarantees.size == 1)
+      peer.judgments.peek.toSeq shouldBe AuditFlood.judgment(1, devKeys(1), f.report, valid = false).toSeq
+      peer.guarantees.peek.toSeq shouldBe f.guaranteeMessage.toSeq
+    }
+  }
+
+  test("after a restart our negative judgment is still followed by the guarantee") {
+    withOwnNegativeJudgment() { f =>
+      f.restart()
+      f.track()
+      f.settle()
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment and the guarantee after the restart")(peer.judgments.size >= 1 && peer.guarantees.size >= 1)
+      peer.judgments.peek.toSeq shouldBe AuditFlood.judgment(1, devKeys(1), f.report, valid = false).toSeq
+      peer.guarantees.peek.toSeq shouldBe f.guaranteeMessage.toSeq
+    }
+  }
+
+  test("our negative judgment on a report whose guarantee we never saw is sent alone") {
+    withOwnNegativeJudgment(included = false) { f =>
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment")(peer.judgments.size == 1)
+      (0 until 10).foreach(_ => f.settle())
+      peer.guarantees.size shouldBe 0
+    }
+  }
+
+  test("our positive judgment is sent alone, whether or not we know the report's guarantee") {
+    withOwnJudgment() { f =>
+      f.include()
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment")(peer.judgments.size == 1)
+      (0 until 10).foreach(_ => f.settle())
+      peer.guarantees.size shouldBe 0
+    }
+  }
+
+  test("asked for the inline form, our negative judgment is one message with the guarantee inside") {
+    withOwnNegativeJudgment(inlineForm = true) { f =>
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment")(peer.judgments.size == 1)
+      peer.judgments.peek.toSeq shouldBe f.inlineNegative(1).toSeq
+      (0 until 10).foreach(_ => f.settle())
+      peer.guarantees.size shouldBe 0
+    }
+  }
+
+  test("asked for the inline form, our positive judgment is the same message as before") {
+    withAuditorKeys(Seq(devKeys(1)), BandersnatchWrapper.ietfVrfSign, Some(_ => Some(true)), inlineGuarantee = true) { f =>
+      f.include()
+      f.track()
+      f.settle()
+      val peer = f.connect(devKeys(2))
+      eventually("the judgment")(peer.judgments.size == 1)
+      peer.judgments.peek.toSeq shouldBe AuditFlood.judgment(1, devKeys(1), f.report, valid = true).toSeq
+    }
+  }
+
+  test("a peer's negative judgment followed by its guarantee message is taken") {
+    withAuditor { f =>
+      f.track()
+      f.publish(devKeys(3), AuditFlood.judgment(3, devKeys(3), f.report, valid = false), f.guaranteeMessage)
+      eventually("the negative judgment") { f.drain(); f.auditor.judgesOf(f.report) == (Set.empty, Set(3)) }
+    }
+  }
+
+  test("a peer's judgments in the inline form are all taken from one message") {
+    withAuditor { f =>
+      f.track()
+      f.publish(
+        devKeys(3),
+        AuditFlood.judgment(2, devKeys(2), f.report, valid = true) ++ f.inlineNegative(3) ++
+          AuditFlood.judgment(4, devKeys(4), f.report, valid = true)
+      )
+      eventually("the three judgments") { f.drain(); f.auditor.judgesOf(f.report) == (Set(2, 4), Set(3)) }
     }
   }
 

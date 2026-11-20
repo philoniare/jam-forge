@@ -167,17 +167,13 @@ class JsonTraceRunner(
             )
 
         case rejected: (ImportResult.Invalid | ImportResult.Failed) =>
-          val (error, message) = rejected match
-            case ImportResult.Invalid(error, message, _) => (error.toString, message)
-            case ImportResult.Failed(message, _)         => ("import failure", message)
           // If post_state == pre_state, the test expects block rejection (no state change)
-          // In this case, a "failure" with unchanged state is actually correct
-          if traceStep.postState.stateRoot == traceStep.preState.stateRoot then
-            JsonTraceResult.Success(effectiveTraceId, fileName, slot)
-          else
-            if verbose then
-              println(s"  [$fileName] ERROR - import failed: $error - $message")
-            JsonTraceResult.Error(effectiveTraceId, fileName, s"Import failed: $error - $message")
+          val expectsRejection = traceStep.postState.stateRoot == traceStep.preState.stateRoot
+          val judged = JsonTraceRunner.afterRejection(effectiveTraceId, fileName, slot, expectsRejection, rejected)
+          judged match
+            case JsonTraceResult.Error(_, _, why) if verbose => println(s"  [$fileName] ERROR - $why")
+            case _                                           => ()
+          judged
 
     catch
       case e: Exception =>
@@ -246,6 +242,21 @@ class JsonTraceRunner(
  * Companion object with utility methods.
  */
 object JsonTraceRunner:
+
+  private[conformance] def afterRejection(
+      traceId: String,
+      fileName: String,
+      slot: Long,
+      expectsRejection: Boolean,
+      rejected: ImportResult.Invalid | ImportResult.Failed
+  ): JsonTraceResult =
+    rejected match
+      case ImportResult.Failed(message, _) =>
+        JsonTraceResult.Error(traceId, fileName, s"Import failed on our side: $message")
+      case ImportResult.Invalid(_, _, _) if expectsRejection =>
+        JsonTraceResult.Success(traceId, fileName, slot)
+      case ImportResult.Invalid(error, message, _) =>
+        JsonTraceResult.Error(traceId, fileName, s"Import failed: $error - $message")
 
   /**
    * Get all trace directory IDs from the traces base directory.

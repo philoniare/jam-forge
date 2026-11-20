@@ -209,6 +209,44 @@ class TrieSweepSpec extends AnyFunSuite with Matchers:
       cleanup(dir)
   }
 
+  test("a sweep stopped after deleting leaves leaves no journal that names them: the prune that follows keeps every value a kept leaf holds") {
+    val dir = Files.createTempDirectory("jam-sweep-stopped")
+    val backend = open(dir)
+    try
+      val n = 12_000
+      def long(tag: Int, i: Int): JamBytes = JamBytes(Array.fill(80)(tag.toByte) ++ Array[Byte]((i >> 8).toByte, i.toByte))
+      val genesis = save(
+        backend, State(null, 0L, Hash.zero, Map.empty), "genesis", 0L, (0 until 2 * n).map(i => key(i) -> Some(long(7, i / 2)))
+      )
+      val b1 = save(backend, genesis, "b1", 1L, (0 until n).map(i => key(2 * i) -> Some(long(9, i))))
+      backend.schedulePrune(b1.label, 1L)
+      val before = pairs(backend, b1.root)
+      val (nodesBefore, _) = backend.storedCounts
+
+      val sweep = backend.beginSweep()
+      try
+        sweep.run(Seq(b1.root), 1L, _ => false, () => backend.storedCounts._1 < nodesBefore) shouldBe
+          a[RocksDbTrieBackend.SweepOutcome.Stopped]
+      finally sweep.close()
+      backend.storedCounts._1 should be < nodesBefore
+
+      backend.scheduledPrunes.foreach((block, height) => backend.pruneJournal(block, height))
+
+      val (_, liveValues) = reachable(backend, Seq(b1.root))
+      liveValues.count(v => backend.readRawValue(v).isEmpty) shouldBe 0
+      pairs(backend, b1.root) shouldBe before
+
+      val again = backend.beginSweep()
+      try again.run(Seq(b1.root), 1L, _ => false, () => false) shouldBe a[RocksDbTrieBackend.SweepOutcome.Completed]
+      finally again.close()
+      val (liveNodes, _) = reachable(backend, Seq(b1.root))
+      backend.storedCounts shouldBe (liveNodes.size.toLong, liveValues.size.toLong)
+      pairs(backend, b1.root) shouldBe before
+    finally
+      backend.close()
+      cleanup(dir)
+  }
+
   test("a journal kept for a save that records births only (a download) stays empty however many saves it makes") {
     val rng = new Random(19)
     val dir = Files.createTempDirectory("jam-sweep-download")

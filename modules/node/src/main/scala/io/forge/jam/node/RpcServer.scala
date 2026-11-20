@@ -81,7 +81,7 @@ final class RpcServer(
     worker.scheduleWithFixedDelay(refreshTask(refreshAll()), RefreshMillis, RefreshMillis, TimeUnit.MILLISECONDS)
     logger.info(
       s"RPC (JIP-2, WebSocket) on ${bind.getHostString}:$boundPort, " +
-        s"${if unsafeAllowed then "all methods" else "safe methods only"} (--rpc-methods ${methods.toString.toLowerCase})"
+        Option(bind.getAddress).map(RpcMethods.describe(methods, _)).getOrElse("safe methods only")
     )
     if unsafeAllowed && !Option(bind.getAddress).exists(_.isLoopbackAddress) then
       logger.warn(
@@ -226,6 +226,14 @@ enum RpcMethods:
 
 object RpcMethods:
   def parse(value: String): Option[RpcMethods] = values.find(_.toString.equalsIgnoreCase(value))
+
+  def describe(methods: RpcMethods, address: java.net.InetAddress): String =
+    val option = s"--rpc-methods ${methods.toString.toLowerCase}"
+    if allowsUnsafe(methods, address) then s"all methods ($option)"
+    else if methods == Auto then
+      s"safe methods only ($option: ${address.getHostAddress} is not a loopback address; " +
+        "--rpc-methods unsafe serves work-package and preimage submission and segment recovery as well)"
+    else s"safe methods only ($option)"
 
   def allowsUnsafe(methods: RpcMethods, address: java.net.InetAddress): Boolean = methods match
     case Safe   => false

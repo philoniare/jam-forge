@@ -52,22 +52,37 @@ final class InterpretedModule private (
     * module rather than once per invocation. Owned by the backend; null until it first runs the module. */
   @volatile var nativeArtifact: AnyRef = null
 
-  // Fallback cache for block costs charged away from a compiled block's first instruction (rare: entry mid-block).
+  @volatile var nativeBytes: Long = 0L
+
+  @volatile var nativeHeapBytes: Long = 0L
+
   private val blockGasCosts = new java.util.concurrent.ConcurrentHashMap[Integer, java.lang.Long]()
 
-  def blockGasCostAt(chargePc: Int): Long =
-    val cached = blockGasCosts.get(chargePc)
-    if cached != null then cached.longValue
-    else
-      val cost = computeBlockGasCost(chargePc)
-      blockGasCosts.put(chargePc, cost)
-      cost
+  def blockGasCostAt(chargePc: Int): Long = blockGasCostWithin(chargePc, Long.MaxValue)
 
-  private def computeBlockGasCost(chargePc: Int): Long =
-    val start = Program
-      .findStartOfBasicBlock(blob.code, blob.bitmask, chargePc)
-      .getOrElse(chargePc)
-    BlockGasModel.gasCostForBlock(blob.code, blob.bitmask, start)
+  def blockGasCostWithin(chargePc: Int, gas: Long): Long =
+    val mine = blockGasCosts.get(chargePc)
+    if mine != null && mine.longValue >= 0 then return mine.longValue
+    if mine != null && gas <= -mine.longValue - 2 then return BlockGasModel.OverLimit
+    val start = Program.findStartOfBasicBlock(blob.code, blob.bitmask, chargePc).getOrElse(chargePc)
+    val shared = if start == chargePc then mine else blockGasCosts.get(start)
+    if shared != null && shared.longValue >= 0 then
+      blockGasCosts.put(chargePc, shared)
+      return shared.longValue
+    def bound(known: java.lang.Long): Long = if known == null then -1L else -known.longValue - 2
+    val passed = math.max(bound(mine), bound(shared)) // the bound the cost is known to pass, or -1
+    val learnt: Long =
+      if gas <= passed then -passed - 2
+      else
+        val doubled = if passed > Long.MaxValue / 2 then Long.MaxValue else 2 * passed
+        val limit = math.max(math.max(gas, doubled), 0L)
+        val cost = BlockGasModel.gasCostWithin(blob.code, blob.bitmask, start, limit)
+        if cost != BlockGasModel.OverLimit then cost else -limit - 2
+    val keep: java.util.function.BiFunction[java.lang.Long, java.lang.Long, java.lang.Long] =
+      (old, now) => if old >= 0 then old else if now >= 0 then now else java.lang.Long.valueOf(math.min(old, now))
+    blockGasCosts.merge(chargePc, learnt, keep)
+    if start != chargePc then blockGasCosts.merge(start, learnt, keep)
+    if learnt >= 0 then learnt else BlockGasModel.OverLimit
 
   // Racy but benign: each slot only ever goes from 0 (unknown) to the same computed value.
   private val jumpTargetValidity = new Array[Byte](blob.code.length + 1)
@@ -119,15 +134,59 @@ final class InterpretedModule private (
     if pc >= 0 && pc < offsetForPc.length then InterpretedModule.Slots.getAcquire(offsetForPc, pc)
     else InterpretedModule.Absent
 
-  /** Compiles the basic block starting at `pc` and returns the compiled offset of its first instruction, or -1 when
-    * `pc` is past the code. If another thread compiled `pc` first, returns that offset.
-    */
-  private[engine] def compileBlock(pc: Int): Int =
-    if (pc.toLong & 0xffffffffL) > codeLen.toLong then return -1
-    compileLock.synchronized {
-      val existing = targetAt(pc)
-      if existing != InterpretedModule.Absent then return existing & 0x7fffffff
+  private[engine] def compileBlock(pc: Int, gas: Long = Long.MaxValue): Int = compileEntry(pc, pc, gas)
 
+  private[engine] def compileEntry(start: Int, entry: Int, gas: Long): Int =
+    if (start.toLong & 0xffffffffL) > codeLen.toLong then return -1
+    compileLock.synchronized {
+      val existing = targetAt(entry)
+      if existing != InterpretedModule.Absent then existing & 0x7fffffff
+      else
+        val affordable = gas == Long.MaxValue || {
+          val cost = blockGasCostWithin(entry, gas)
+          cost != BlockGasModel.OverLimit && cost <= gas
+        }
+        if !affordable then deferEntry(entry)
+        else if compileWhole(start) < 0 then -1
+        else
+          val packed = targetAt(entry)
+          if packed == InterpretedModule.Absent then -1 else packed & 0x7fffffff
+    }
+
+  private def deferEntry(entry: Int): Int =
+    val published = _compiled
+    var arr = published.instructions
+    val n = published.count
+    if n == arr.length then arr = java.util.Arrays.copyOf(arr, arr.length * 2)
+    arr(n) = CompiledInstruction(
+      Instruction.Panic,
+      ProgramCounter(entry),
+      ProgramCounter(entry),
+      InterpretedModule.DeferredOpcode
+    )
+    _compiled = CompiledCode(arr, n + 1)
+    if entry >= 0 && entry < offsetForPc.length then
+      InterpretedModule.Slots.setRelease(offsetForPc, entry, InterpretedModule.packTarget(n, isJumpTargetValid(entry)))
+    n
+
+  private[engine] def decodeDeferred(entry: Int): Int =
+    compileLock.synchronized {
+      def realOffset(): Int =
+        val packed = targetAt(entry)
+        if packed == InterpretedModule.Absent then -1
+        else
+          val offset = packed & 0x7fffffff
+          if _compiled.instructions(offset).opcodeValue == InterpretedModule.DeferredOpcode then -1 else offset
+      val known = realOffset()
+      if known >= 0 then known
+      else
+        val start = Program.findStartOfBasicBlock(blob.code, blob.bitmask, entry).getOrElse(entry)
+        compileWhole(start)
+        realOffset()
+    }
+
+  private def compileWhole(pc: Int): Int =
+    locally {
       val published = _compiled
       var arr = published.instructions
       var n = published.count
@@ -174,9 +233,10 @@ final class InterpretedModule private (
         origin
     }
 
-  /** Estimate of the heap bytes this module keeps alive: its data sections, code, per-pc tables and the blocks
-    * compiled so far. It grows as more of the program is compiled, so a cache must re-read it. Instance memory (the
-    * declared heap and stack) is not part of the module and is not counted.
+  /** Estimate of the heap bytes this module keeps alive: its data sections, code, per-pc tables, the blocks
+    * compiled so far and the native backend's tables for it. It grows as more of the program is compiled, so a
+    * cache must re-read it. Instance memory (the declared heap and stack) is not part of the module and is not
+    * counted, nor is machine code ([[nativeBytes]]).
     */
   def retainedBytes: Long =
     val data = roData.length.toLong + rwData.length +
@@ -185,7 +245,8 @@ final class InterpretedModule private (
     val program = blob.code.length.toLong + blob.bitmask.length + blob.jumpTable.blob.length
     val tables = offsetForPc.length.toLong * 4 + jumpTargetValidity.length
     val compiledBytes = _compiled.instructions.length.toLong * InterpretedModule.BytesPerCompiledInstruction
-    data + program + tables + compiledBytes + blockGasCosts.size().toLong * InterpretedModule.BytesPerGasCostEntry
+    data + program + tables + compiledBytes + blockGasCosts.size().toLong * InterpretedModule.BytesPerGasCostEntry +
+      nativeHeapBytes
 
   override def equals(other: Any): Boolean = other match
     case that: InterpretedModule =>
@@ -212,6 +273,8 @@ final class CompiledCode(val instructions: Array[CompiledInstruction], val count
 
 object InterpretedModule:
   private[engine] final val Absent = -1
+
+  final val DeferredOpcode = 255
 
   /** Rough heap cost of one compiled-instruction slot: the CompiledInstruction, its decoded Instruction and the array
     * reference.

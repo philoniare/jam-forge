@@ -234,6 +234,7 @@ object Main extends LazyLogging:
       ),
       pruneFinalizedHistory = flags.contains("--prune-history"),
       tamperReports = flags.contains("--fault-tamper-reports"),
+      inlineJudgmentGuarantee = flags.contains("--inline-judgment-guarantee"),
       finalityPeers = opts.get("finality-peers").map(_.toInt),
       telemetry = opts.get("telemetry").map(parseHostPort),
       submitPort = opts.get("submit-port").map(_.toInt),
@@ -241,6 +242,8 @@ object Main extends LazyLogging:
       syncFromSetId = syncFrom.flatMap(_._2)
     )
 
+    try io.forge.jam.vrfs.NativeCpu.check()
+    catch case e: UnsupportedOperationException => fail(e.getMessage)
     val node = new JamNode(spec, config).start()
     running.set(node)
     authorKeys.foreach { k =>
@@ -524,7 +527,7 @@ object Main extends LazyLogging:
 
   private val Flags = Set(
     "--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys",
-    "--fault-tamper-reports", "--help", "--version", "--temp"
+    "--fault-tamper-reports", "--inline-judgment-guarantee", "--help", "--version", "--temp"
   )
 
   /** Flags any command takes: they print and exit before the command runs. */
@@ -678,6 +681,7 @@ object Main extends LazyLogging:
       |                       [--rpc-methods safe|unsafe|auto (default auto: unsafe ones on loopback only)]]
       |         [--metrics-port N [--metrics-listen-ip IP (default 127.0.0.1)]]
       |         [--pvm-backend interpreter|recompiler]
+      |         [--inline-judgment-guarantee]
       |         [--fault-tamper-reports]
       |jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
       |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys

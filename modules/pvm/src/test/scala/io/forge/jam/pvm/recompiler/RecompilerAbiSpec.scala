@@ -233,3 +233,43 @@ class RecompilerAbiSpec extends AnyFlatSpec with Matchers:
 
     pp.opcodes(0) shouldBe Instruction.Panic.opcode.value
   }
+
+  "A prepared program's offset index" should "give the instruction at a byte offset, and nothing inside or outside one" in {
+    val code = Array[Byte](100, 0x21, 100, 0x21, 0)
+    val pp = RecompilerAbi.prepareProgram(code, bitmaskFor(Seq(0, 2, 4), code.length), JumpTable.Empty)
+    pp.byteOffsetToIndex.get(0) shouldBe Some(0)
+    pp.byteOffsetToIndex.get(2) shouldBe Some(1)
+    pp.byteOffsetToIndex.get(4) shouldBe Some(2)
+    pp.byteOffsetToIndex.get(1) shouldBe None
+    pp.byteOffsetToIndex.get(5) shouldBe None
+    pp.byteOffsetToIndex.get(-1) shouldBe None
+    pp.byteOffsetToIndex.getOrElse(3, -7) shouldBe -7
+  }
+
+  it should "weigh four bytes for each byte of code" in {
+    val code = new Array[Byte](1000)
+    val pp = RecompilerAbi.prepareProgram(code, bitmaskFor(0 until 1000, code.length), JumpTable.Empty)
+    pp.byteOffsetToIndex.bytes shouldBe 4000L
+  }
+
+  "RecompilerAbi.markedInstructions" should "count the instruction starts the bitmask marks within the code" in {
+    val code = new Array[Byte](13)
+    val bitmask = Array[Byte](0x15.toByte, 0xf0.toByte)
+    RecompilerAbi.markedInstructions(code, bitmask) shouldBe 4
+    RecompilerAbi.markedInstructions(new Array[Byte](16), Array[Byte](0xff.toByte, 0xff.toByte)) shouldBe 16
+    RecompilerAbi.markedInstructions(Array.emptyByteArray, Array.emptyByteArray) shouldBe 0
+  }
+
+  "RecompilerAbi.prepareWithin" should "prepare a program whose blocks cost no more than the limit, and none that costs more" in {
+    val code = Array.tabulate[Byte](801)(i => if i == 800 then 0 else if i % 2 == 0 then 10 else 1)
+    val bitmask = bitmaskFor(0 to 800, code.length)
+    val whole = RecompilerAbi.prepareProgram(code, bitmask, JumpTable.Empty)
+    val total = (0 to 800).filter(i => i == 0 || i % 2 == 0).map(i => whole.blockGas(i)).sum
+    total should be > 5000L
+
+    val within = RecompilerAbi.prepareWithin(code, bitmask, JumpTable.Empty, total)
+    within.map(_.blockGas.toSeq) shouldBe Some(whole.blockGas.toSeq)
+    within.map(_.opcodes.toSeq) shouldBe Some(whole.opcodes.toSeq)
+    RecompilerAbi.prepareWithin(code, bitmask, JumpTable.Empty, total - 1) shouldBe None
+    RecompilerAbi.prepareWithin(code, bitmask, JumpTable.Empty, 100L) shouldBe None
+  }

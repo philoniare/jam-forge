@@ -1,6 +1,7 @@
 package io.forge.jam.conformance
 
 import io.forge.jam.core.{ChainConfig, JamBytes, Hashing}
+import io.forge.jam.core.codec.CodecDecodingException
 import io.forge.jam.protocol.importing.BlockImporter
 import io.forge.jam.protocol.state.{RawState, StateMerklization}
 
@@ -22,6 +23,7 @@ object ReadResult:
   case object Eof extends ReadResult
   final case class Decoded(msg: ProtocolMessage, size: Int) extends ReadResult
   final case class DecodeFailed(reason: String, size: Int) extends ReadResult
+  final case class InvalidBlock(reason: String, size: Int) extends ReadResult
 
 /** Protocol handler for one fuzzer session (one connection), run on the server thread with blocking reads and
   * writes. The protocol is strictly request/response, so there is nothing to overlap and no reason to leave the
@@ -73,6 +75,10 @@ class ProtocolHandler(
           val reply = StageTimers.time("fuzz/handle")(handleMessage(msg, size))
           StageTimers.time("fuzz/reply")(sendMessage(channel, reply))
 
+        case ReadResult.InvalidBlock(reason, size) =>
+          logger.logInfo(s"ImportBlock: $size-byte frame is not a valid encoding of a block - $reason")
+          sendMessage(channel, ProtocolMessage.ErrorMsg(Error(ImportErrorText.undecodable(reason))))
+
         case ReadResult.DecodeFailed(reason, size) =>
           println(s"[JAM-FORGE WARN] Decode failure on $size-byte frame, terminating session: $reason")
           logger.logWarning(s"Decode failure on $size-byte frame, terminating session: $reason")
@@ -102,6 +108,8 @@ class ProtocolHandler(
           StageTimers.time("fuzz/decode")(ProtocolMessage.decodeMessage(JamBytes.wrap(body.array()), 0, config))
         ReadResult.Decoded(msg, length)
       catch
+        case e: CodecDecodingException if e.nonCanonical && (body.get(0) & 0xff) == ImportBlock.DISCRIMINANT =>
+          ReadResult.InvalidBlock(e.getMessage, length)
         case NonFatal(e) =>
           ReadResult.DecodeFailed(s"${e.getClass.getSimpleName} - ${Option(e.getMessage).getOrElse("unknown")}", length)
 
@@ -198,8 +206,9 @@ class ProtocolHandler(
     logger.logInfo(s"Initialize: stored state with root ${stateRoot.toHex.take(16)}...")
     ProtocolMessage.StateRootMsg(StateRoot(stateRoot))
 
-  /** Handle ImportBlock message. An invalid block gets an Error reply; an exception from the importer is out of
-    * protocol and ends the session.
+  /** Handle ImportBlock message. An invalid block gets an Error reply. A failure on our side (the importer threw,
+    * or reported an internal failure) is not an error the protocol defines: it must not be answered with Error, so
+    * it ends the session.
     */
   private def handleImportBlock(importBlock: ImportBlock): ProtocolMessage =
     val result =

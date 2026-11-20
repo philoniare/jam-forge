@@ -40,6 +40,11 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     Main.Usage should include("JAM_DATA_DIR")
   }
 
+  test("--inline-judgment-guarantee is a flag, and --help names it") {
+    parse("--data", "/d", "--inline-judgment-guarantee").map(_.flags) shouldBe Right(Set("--inline-judgment-guarantee"))
+    Main.Usage should include("[--inline-judgment-guarantee]")
+  }
+
   test("--rpc-methods takes safe, unsafe or auto, and --help names it") {
     for value <- List("safe", "unsafe", "auto") do
       parse("--rpc-port", "9944", "--rpc-methods", value).map(_.options.get("rpc-methods")) shouldBe Right(Some(value))

@@ -188,6 +188,72 @@ class GuarantorAcceptanceSpec extends AnyFunSuite with Matchers with org.scalate
     }
   }
 
+  test("a copy of a package that is still on its way to a guarantee is refused, and the package is guaranteed once") {
+    given net: Devnet = devnet("accept-in-flight")
+    withNodes("jam-accept-in-flight") { (start, dir) =>
+      val author = start(NodeConfig(dir("a"), slotTicking = false))
+      val guarantor = start(NodeConfig(dir("b"), slotTicking = false))
+      author.enableAuthoring(devKeys)
+      guarantor.enableGuaranteeing(devKeys)
+      author.authorSlot(1).isDefined shouldBe true
+      author.authorSlot(2).isDefined shouldBe true
+      guarantor.chain.best.slot shouldBe 0L
+      val service = guarantor.guarantorService.get
+      def inFlight(n: Int): Unit =
+        val deadline = System.currentTimeMillis() + 10000
+        while service.packagesInFlight != n && System.currentTimeMillis() < deadline do Thread.sleep(10)
+        service.packagesInFlight shouldBe n
+
+      val wp = anchoredBeforeHead(author, net, "one at a time")
+      accepted(submitRpc(guarantor, 0, wp))
+      inFlight(1)
+      val copy = submitRpc(guarantor, 0, wp)
+      withClue(copy.noSpaces)(copy.hcursor.downField("error").get[String]("message").toOption.get should include("already on its way"))
+      service.packagesInFlight shouldBe 1
+
+      author.connectPeer(address(guarantor))
+      awaitGuarantee(author)
+      inFlight(0)
+      val later = submitRpc(guarantor, 0, wp)
+      withClue(later.noSpaces)(later.hcursor.downField("error").get[String]("message").toOption.get should include("already guaranteed"))
+    }
+  }
+
+  test("a package that was refused is not held as in flight: the same package can be submitted again") {
+    given net: Devnet = devnet("accept-in-flight-refused")
+    val logger = org.slf4j.LoggerFactory.getLogger(classOf[GuarantorService]).asInstanceOf[ch.qos.logback.classic.Logger]
+    val seen = new ch.qos.logback.core.read.ListAppender[ch.qos.logback.classic.spi.ILoggingEvent]()
+    seen.start()
+    logger.addAppender(seen)
+    try
+      withNodes("jam-accept-in-flight-refused") { (start, dir) =>
+        val author = start(NodeConfig(dir("a"), slotTicking = false))
+        val guarantor = start(NodeConfig(dir("b"), slotTicking = false))
+        author.enableAuthoring(devKeys)
+        guarantor.enableGuaranteeing(devKeys)
+        author.connectPeer(address(guarantor))
+        author.authorSlot(1).isDefined shouldBe true
+        author.authorSlot(2).isDefined shouldBe true
+        awaitSync(author, guarantor)
+        val service = guarantor.guarantorService.get
+
+        val a = guarantor.chain.stateView().beta.history.last
+        val unauthorized = workPackage(guarantor, net, a.headerHash, a.slot, a.stateRoot, a.beefyRoot, "refused")
+          .copy(authCodeHash = Hash(Array.fill[Byte](32)(7)))
+        val name = Hashing.blake2b256(unauthorized.encode.toArray).toHex.take(18)
+        def refusals = seen.list.toArray.toList.map(_.asInstanceOf[ch.qos.logback.classic.spi.ILoggingEvent].getFormattedMessage)
+          .count(m => m.contains(name) && m.contains("refused before refine"))
+        for attempt <- 1 to 2 do
+          accepted(submitRpc(guarantor, 0, unauthorized))
+          val deadline = System.currentTimeMillis() + 20000
+          while (refusals < attempt || service.packagesInFlight != 0) && System.currentTimeMillis() < deadline do Thread.sleep(10)
+          refusals shouldBe attempt
+          service.packagesInFlight shouldBe 0
+        guarantor.pools.guaranteeCount shouldBe 0
+      }
+    finally logger.detachAppender(seen)
+  }
+
   test("a package with imports that its authorizer does not authorize is refused before any import is fetched") {
     given net: Devnet = devnet("accept-unauthorized-imports")
     val logger = org.slf4j.LoggerFactory.getLogger(classOf[GuarantorService]).asInstanceOf[ch.qos.logback.classic.Logger]

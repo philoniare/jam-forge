@@ -179,3 +179,25 @@ class BlockGasModelSpec extends AnyFlatSpec with Matchers:
     gas should be > 0L
     withClue(s"elapsed ${elapsedMs}ms:") { elapsedMs should be < 60_000L }
   }
+
+class BlockGasLimitSpec extends org.scalatest.funsuite.AnyFunSuite:
+  import io.forge.jam.pvm.engine.BlockGasModel
+
+  private def calls(n: Int): (Array[Byte], Array[Byte]) =
+    val code = Array.fill[Byte](n + 1)(10)
+    code(n) = 0
+    (code, Array.fill[Byte]((n + 8) / 8)(0xff.toByte))
+
+  test("pricing a block within a limit gives its cost when that is within the limit, and stops when it is not"):
+    val (code, bitmask) = calls(2_000)
+    val cost = BlockGasModel.gasCostForBlock(code, bitmask, 0)
+    assert(cost > 40_000L)
+    assert(BlockGasModel.gasCostWithin(code, bitmask, 0, Long.MaxValue) == cost)
+    assert(BlockGasModel.gasCostWithin(code, bitmask, 0, cost) == cost)
+    assert(BlockGasModel.gasCostWithin(code, bitmask, 0, cost - 1) == BlockGasModel.OverLimit)
+    assert(BlockGasModel.gasCostWithin(code, bitmask, 0, 100L) == BlockGasModel.OverLimit)
+
+  test("a block of one instruction is priced within any limit of at least its cost"):
+    val (code, bitmask) = calls(0)
+    val cost = BlockGasModel.gasCostForBlock(code, bitmask, 0)
+    assert(BlockGasModel.gasCostWithin(code, bitmask, 0, cost) == cost)

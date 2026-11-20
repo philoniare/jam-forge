@@ -398,6 +398,12 @@ impl Op {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitError {
+    TooLarge { emitted: usize },
+    Assembler,
+}
+
 /// A code-emitting backend for one host ISA. Registers are addressed as byte
 /// offsets into the caller's `[u64; 13]` register file (skeleton ABI).
 pub trait Backend {
@@ -416,7 +422,8 @@ pub trait Backend {
         jump_table_ptr: *const u32,
         entry_offsets_ptr: *const u32,
         code_len: u32,
-    ) -> Option<(Vec<u8>, u32, Vec<u32>)>;
+        max_code_bytes: usize,
+    ) -> Result<(Vec<u8>, u32, Vec<u32>), EmitError>;
 }
 
 /// Decode the FFI instruction array 1:1 into ops (targets are instruction
@@ -599,6 +606,8 @@ const NATIVE_BACKEND: bool = cfg!(all(
     any(target_os = "macos", target_os = "linux")
 ));
 
+pub const MAX_NATIVE_CODE_BYTES: usize = 64 << 20;
+
 /// The emitter for the host this library was built for. Both emitters compile on every host (they only assemble
 /// bytes); the other one is simply never run.
 #[cfg(target_arch = "x86_64")]
@@ -630,41 +639,41 @@ pub unsafe extern "C" fn pvm_compile(
         return std::ptr::null_mut();
     }
     let slice = std::slice::from_raw_parts(instrs, n);
-    let ops = match decode(slice) {
-        Some(x) => x,
-        None => return std::ptr::null_mut(),
-    };
+    let jt: &[u32] = if jump_table.is_null() || jt_n == 0 { &[] } else { std::slice::from_raw_parts(jump_table, jt_n) };
+    match compile_bounded(slice, jt, code_len, MAX_NATIVE_CODE_BYTES) {
+        Some(block) => Box::into_raw(Box::new(block)),
+        None => std::ptr::null_mut(),
+    }
+}
+
+fn compile_bounded(slice: &[RawInstr], jump_table: &[u32], code_len: u32, max_code_bytes: usize) -> Option<CompiledBlock> {
+    let ops = decode(slice)?;
     let pcs: Vec<u32> = slice.iter().map(|i| i.pc).collect();
     let block_gas: Vec<i64> = slice.iter().map(|i| i.block_gas).collect();
-    let jt: Box<[u32]> = if jump_table.is_null() || jt_n == 0 {
-        Box::new([])
-    } else {
-        std::slice::from_raw_parts(jump_table, jt_n).to_vec().into_boxed_slice()
-    };
+    let jt: Box<[u32]> = jump_table.to_vec().into_boxed_slice();
     let jt_ptr = jt.as_ptr();
     let backend = native_backend();
     let (_dry_code, _dry_count, entry_offsets_vec) =
-        match backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, std::ptr::null(), code_len) {
-            Some(x) => x,
-            None => return std::ptr::null_mut(),
-        };
+        backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, std::ptr::null(), code_len, max_code_bytes).ok()?;
     let entry_offsets: Box<[u32]> = entry_offsets_vec.into_boxed_slice();
     let entry_offsets_ptr = entry_offsets.as_ptr();
     let (code, instruction_count, _final_offsets) =
-        match backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, entry_offsets_ptr, code_len) {
-            Some(x) => x,
-            None => return std::ptr::null_mut(),
-        };
-    let mem = match ExecMem::from_code(&code) {
-        Some(m) => m,
-        None => return std::ptr::null_mut(),
-    };
+        backend.emit_program(&ops, &pcs, &block_gas, &jt, jt_ptr, entry_offsets_ptr, code_len, max_code_bytes).ok()?;
+    let mem = ExecMem::from_code(&code)?;
     // Profiling aid: PVM_RECOMPILER_DUMP=<dir> writes each program's machine code to <dir>/<load address>.bin, so
     // sampled addresses (perf) can be matched to disassembly.
     if let Ok(dir) = std::env::var("PVM_RECOMPILER_DUMP") {
         let _ = std::fs::write(format!("{dir}/{:x}.bin", mem.as_ptr() as usize), &code);
     }
-    Box::into_raw(Box::new(CompiledBlock { mem, instruction_count, jump_table: jt, entry_offsets }))
+    Some(CompiledBlock { mem, instruction_count, jump_table: jt, entry_offsets })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pvm_block_bytes(block: *const CompiledBlock) -> u64 {
+    match block.as_ref() {
+        None => 0,
+        Some(b) => (b.mem.len() + 4 * (b.jump_table.len() + b.entry_offsets.len())) as u64,
+    }
 }
 pub type HostFn = extern "C" fn(ctx: *mut std::ffi::c_void, host_call_id: u64, pc: u32) -> i64;
 
@@ -4224,6 +4233,63 @@ mod compile_reject_tests {
             assert_eq!(regs[2], 0);
             assert_eq!(regs[3], 0);
             assert_eq!(regs[5], 1008 + 2009, "reg[5] (pair 4) is entirely after the entry point and must be unaffected");
+        }
+    }
+
+    fn adds_then_panic(n: usize) -> (Vec<RawInstr>, u32) {
+        let mut prog: Vec<RawInstr> = (0..n)
+            .map(|i| RawInstr { opcode: OP_ADD_IMM64, a: 1, b: 1, c: 0, pc: (i * 4) as u32, imm: 1, imm2: 0, block_gas: 0 })
+            .collect();
+        prog.push(RawInstr { opcode: OP_PANIC, a: 0, b: 0, c: 0, pc: (n * 4) as u32, imm: 0, imm2: 0, block_gas: 0 });
+        (with_block_gas(&prog, &[]), ((n + 1) * 4) as u32)
+    }
+
+    #[test]
+    fn a_compiled_block_reports_the_native_memory_it_keeps() {
+        let (prog, code_len) = adds_then_panic(2000);
+        let blk = unsafe { pvm_compile(prog.as_ptr(), prog.len(), std::ptr::null(), 0, code_len) };
+        assert!(!blk.is_null());
+        let bytes = unsafe { pvm_block_bytes(blk) };
+        assert!(bytes > 8 * 1024 + 4 * 2001, "reported {bytes}");
+        assert_eq!(unsafe { pvm_block_bytes(std::ptr::null()) }, 0);
+        unsafe { pvm_free(blk) };
+    }
+
+    #[test]
+    fn a_program_whose_machine_code_would_pass_the_limit_is_not_compiled() {
+        let (prog, code_len) = adds_then_panic(2000);
+        let ops = decode(&prog).expect("decodes");
+        let pcs: Vec<u32> = prog.iter().map(|i| i.pc).collect();
+        let gas: Vec<i64> = prog.iter().map(|i| i.block_gas).collect();
+        let code_bytes = native_backend()
+            .emit_program(&ops, &pcs, &gas, &[], std::ptr::null(), std::ptr::null(), code_len, usize::MAX)
+            .expect("compiles without a limit")
+            .0
+            .len();
+        assert!(code_bytes > 8 * 1024);
+        assert!(compile_bounded(&prog, &[], code_len, code_bytes).is_some(), "code of exactly the limit is kept");
+        assert!(compile_bounded(&prog, &[], code_len, code_bytes - 1).is_none());
+        assert!(compile_bounded(&prog, &[], code_len, 8 * 1024).is_none());
+    }
+
+    #[test]
+    fn emission_stops_within_an_instruction_of_the_limit_even_inside_one_long_block() {
+        let (prog, code_len) = adds_then_panic(50_000);
+        let ops = decode(&prog).expect("decodes");
+        let pcs: Vec<u32> = prog.iter().map(|i| i.pc).collect();
+        let gas: Vec<i64> = prog.iter().map(|i| i.block_gas).collect();
+        let whole = native_backend()
+            .emit_program(&ops, &pcs, &gas, &[], std::ptr::null(), std::ptr::null(), code_len, usize::MAX)
+            .expect("compiles without a limit")
+            .0
+            .len();
+        for limit in [16 * 1024, whole * 3 / 4, whole - 64] {
+            match native_backend().emit_program(&ops, &pcs, &gas, &[], std::ptr::null(), std::ptr::null(), code_len, limit) {
+                Err(EmitError::TooLarge { emitted }) => {
+                    assert!(emitted > limit && emitted <= limit + 1024, "limit {limit}: stopped at {emitted}")
+                }
+                other => panic!("limit {limit}: expected TooLarge, got {:?}", other.map(|x| x.0.len())),
+            }
         }
     }
 

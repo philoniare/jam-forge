@@ -9,7 +9,7 @@ import scala.util.control.NoStackTrace
 /** Thrown by [[ByteReader]] and codecs when input bytes cannot be decoded. Untrusted input fails often, so it
   * skips the stack trace.
   */
-final class CodecDecodingException(message: String, cause: Throwable = null)
+final class CodecDecodingException(message: String, cause: Throwable = null, val nonCanonical: Boolean = false)
     extends IllegalArgumentException(message, cause) with NoStackTrace
 
 /** Growable little-endian byte sink that codecs write into. */
@@ -120,6 +120,8 @@ final class ByteReader(private val buf: Array[Byte], start: Int, private val end
   def isEmpty: Boolean = pos >= end
 
   def fail(message: String): Nothing = throw new CodecDecodingException(message)
+
+  def failNonCanonical(message: String): Nothing = throw new CodecDecodingException(message, nonCanonical = true)
 
   private inline def need(n: Int): Unit =
     if n < 0 || end - pos < n then

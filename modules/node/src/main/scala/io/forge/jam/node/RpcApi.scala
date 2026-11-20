@@ -30,7 +30,8 @@ object RpcError:
   def unsafeRefused(method: String): RpcError =
     RpcError(
       UnsafeMethodCode,
-      "Method not allowed",
+      s"Method not allowed: $method is unsafe and this RPC serves safe methods only; " +
+        "start the node with --rpc-methods unsafe to serve it",
       Json.fromString(s"$method is unsafe and this RPC serves safe methods only (--rpc-methods)")
     )
   val limitExceeded: RpcError =

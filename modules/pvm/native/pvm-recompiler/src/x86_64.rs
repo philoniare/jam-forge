@@ -38,7 +38,7 @@
 //! `mov r64, imm64`, and every jump to a label is rel32.
 use crate::aarch64::analyze_blocks;
 use crate::{
-    AluKind, Backend, CmpCond, InvLogicalKind, MinMaxKind, MulUpperKind, Op, ShiftKind, Width, DJUMP_HALT,
+    AluKind, Backend, CmpCond, EmitError, InvLogicalKind, MinMaxKind, MulUpperKind, Op, ShiftKind, Width, DJUMP_HALT,
     EXIT_FAULT, EXIT_HALT, EXIT_OOG, EXIT_PANIC, HOST_CONTINUE, HOST_OOG, HOST_OOG_NEXT, HOST_PANIC,
 };
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
@@ -163,8 +163,11 @@ impl ColdCode {
         self.thunks[width.trailing_zeros() as usize][store as usize]
     }
 
-    fn emit(&self, a: &mut Asm, m: &RegMap) {
+    fn emit(&self, a: &mut Asm, m: &RegMap, max_code_bytes: usize) -> bool {
         for path in self.paths.borrow().iter() {
+            if a.offset().0 > max_code_bytes {
+                return false;
+            }
             match *path {
                 ColdPath::Access { entry, ok, done, width, tail, fault } => {
                     let scan = a.new_dynamic_label();
@@ -214,6 +217,7 @@ impl ColdCode {
                 ),
             }
         }
+        true
     }
 }
 
@@ -944,7 +948,8 @@ impl Backend for X86_64Backend {
         jump_table_ptr: *const u32,
         entry_offsets_ptr: *const u32,
         code_len: u32,
-    ) -> Option<(Vec<u8>, u32, Vec<u32>)> {
+        max_code_bytes: usize,
+    ) -> Result<(Vec<u8>, u32, Vec<u32>), EmitError> {
         let mut a = Asm::new().expect("dynasm assembler alloc");
 
         if ops.is_empty() {
@@ -956,9 +961,9 @@ impl Backend for X86_64Backend {
                 ; mov eax, DWORD EXIT_PANIC as i32
                 ; ret
             );
-            a.commit().ok()?;
-            let buf = a.finalize().ok()?;
-            return Some((buf.to_vec(), 0, Vec::new()));
+            a.commit().map_err(|_| EmitError::Assembler)?;
+            let buf = a.finalize().map_err(|_| EmitError::Assembler)?;
+            return Ok((buf.to_vec(), 0, Vec::new()));
         }
 
         let blocks = analyze_blocks(ops, jump_table);
@@ -1028,6 +1033,9 @@ impl Backend for X86_64Backend {
             emit_block_gas_charge(&mut a, &cold, block_gas[lo], pcs[lo], oog_label);
 
             for pc in lo..hi {
+                if a.offset().0 > max_code_bytes {
+                    return Err(EmitError::TooLarge { emitted: a.offset().0 });
+                }
                 let this_pc = pcs[pc] as i32;
                 dynasm!(a; .arch x64; =>instr_labels[pc]);
                 // The pc is only read on an exit, so only an instruction that can leave the code records it.
@@ -1509,13 +1517,18 @@ impl Backend for X86_64Backend {
             let lo = blocks.block_lo[b];
             let hi = blocks.block_hi[b];
             for pc in (lo + 1)..hi {
+                if a.offset().0 > max_code_bytes {
+                    return Err(EmitError::TooLarge { emitted: a.offset().0 });
+                }
                 entry_offsets[pc] = a.offset().0 as u32;
                 emit_block_gas_charge(&mut a, &cold, block_gas[pc], pcs[pc], oog_label);
                 dynasm!(a; .arch x64; jmp =>instr_labels[pc]);
             }
         }
 
-        cold.emit(&mut a, &m);
+        if !cold.emit(&mut a, &m, max_code_bytes) {
+            return Err(EmitError::TooLarge { emitted: a.offset().0 });
+        }
 
         // Running off the end of the code is a panic at pc = code length.
         dynasm!(a
@@ -1553,8 +1566,11 @@ impl Backend for X86_64Backend {
             }
         }
 
-        a.commit().ok()?;
-        let buf = a.finalize().ok()?;
-        Some((buf.to_vec(), ops.len() as u32, entry_offsets))
+        a.commit().map_err(|_| EmitError::Assembler)?;
+        let buf = a.finalize().map_err(|_| EmitError::Assembler)?;
+        if buf.len() > max_code_bytes {
+            return Err(EmitError::TooLarge { emitted: buf.len() });
+        }
+        Ok((buf.to_vec(), ops.len() as u32, entry_offsets))
     }
 }

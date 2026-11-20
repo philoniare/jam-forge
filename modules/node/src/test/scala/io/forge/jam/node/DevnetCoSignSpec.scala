@@ -164,6 +164,107 @@ class DevnetCoSignSpec extends AnyFunSuite with Matchers with NodeFixture:
       dirs.foreach(cleanup)
   }
 
+  test("a bundle shared a second time over CE 134 gets the first answer again and is not refined again") {
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val nullAuth = genesis.state.keyvals.map(_.value.toArray).find(_.length == 50).getOrElse(fail("no NULL Authorizer"))
+    val spec = ChainSpec(
+      id = "cosign-replay",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dirs = Seq("jam-cosign-replay-a", "jam-cosign-replay-b", "jam-cosign-replay-c").map(tempDir)
+    val telemetry = new TelemetryCollector
+    var nodes: Seq[JamNode] = Nil
+    try
+      val author = new JamNode(spec, NodeConfig(dataDir = dirs(0), slotTicking = false)).start()
+      nodes = Seq(author)
+      author.enableAuthoring(devKeys)
+      author.authorSlot(1).isDefined shouldBe true
+      author.authorSlot(2).isDefined shouldBe true
+      val core0 = GuarantorService.assignments(author.chain.stateView(), 3L, spec.config)._1.zipWithIndex.collect { case (0, v) => v }
+      core0.size should be >= 2
+      val requester = new JamNode(
+        spec,
+        NodeConfig(dataDir = dirs(1), slotTicking = false, ed25519Seed = Some(devKeys(core0(0)).ed25519Secret))
+      ).start()
+      nodes = nodes :+ requester
+      val coSigner = new JamNode(
+        spec,
+        NodeConfig(
+          dataDir = dirs(2),
+          slotTicking = false,
+          ed25519Seed = Some(devKeys(core0(1)).ed25519Secret),
+          telemetry = Some(telemetry.address)
+        )
+      ).start()
+      nodes = nodes :+ coSigner
+      author.connectPeer(new java.net.InetSocketAddress("127.0.0.1", requester.listenPort))
+      author.connectPeer(new java.net.InetSocketAddress("127.0.0.1", coSigner.listenPort))
+      awaitSync(author, requester)
+      awaitSync(author, coSigner)
+      coSigner.enableGuaranteeing(Seq(devKeys(core0(1))))
+
+      val view = coSigner.chain.stateView()
+      val anchor = view.beta.history(view.beta.history.size - 2)
+      val wp = WorkPackage(
+        authCodeHost = ServiceId(0),
+        authCodeHash = Hashing.blake2b256(nullAuth),
+        context = Context(
+          anchor = anchor.headerHash,
+          anchorSlot = Timeslot(anchor.slot.toInt),
+          stateRoot = anchor.stateRoot,
+          beefyRoot = anchor.beefyRoot,
+          lookupAnchor = anchor.headerHash,
+          lookupAnchorSlot = Timeslot(anchor.slot.toInt),
+          lookupAnchorStateRoot = anchor.stateRoot,
+          prerequisites = List.empty
+        ),
+        authorization = JamBytes.empty,
+        authorizerConfig = JamBytes.empty,
+        items = List(
+          WorkItem(
+            service = ServiceId(0),
+            codeHash = view.accumulation.serviceAccounts.find(_.id == 0).map(_.data.service.codeHash).getOrElse(fail("no service 0")),
+            payload = JamBytes("share me twice".getBytes("UTF-8")),
+            refineGasLimit = Gas(100_000_000L),
+            accumulateGasLimit = Gas(10_000_000L),
+            importSegments = List.empty,
+            extrinsic = List.empty,
+            exportCount = UShort(0)
+          )
+        )
+      )
+      val none = IndexedSeq(IndexedSeq.empty)
+      val bundle = io.forge.jam.protocol.refine.WorkPackageBundle(wp, none, none, IndexedSeq(IndexedSeq.empty)).encode
+      val header = GuarantorService.encodeSharingHeader(0, spec.config.validatorCount, Nil)
+      val conn = requester.connectPeer(new java.net.InetSocketAddress("127.0.0.1", coSigner.listenPort))
+      def share(): Array[Byte] =
+        val answer = new java.util.concurrent.CompletableFuture[Array[Byte]]()
+        val stream = conn.openStream(StreamKind.WorkPackageSharing).get(10, TimeUnit.SECONDS)
+        stream.onMessage(m => answer.complete(m): Unit)
+        stream.onClosed(() => answer.completeExceptionally(new IllegalStateException("closed without an answer")): Unit)
+        stream.send(header)
+        stream.send(bundle)
+        stream.finish()
+        answer.get(60, TimeUnit.SECONDS)
+
+      val first = share()
+      first.length shouldBe 32 + 64
+      val second = share()
+      second.toSeq shouldBe first.toSeq
+      val deadline = System.currentTimeMillis() + 20000
+      while telemetry.all(103)().size < 2 && System.currentTimeMillis() < deadline do Thread.sleep(20)
+      telemetry.all(103)().size shouldBe 2
+      withClue("work reports built (102) by the co-signer: ")(telemetry.all(102)().size shouldBe 1)
+    finally
+      nodes.foreach(_.shutdown())
+      dirs.foreach(cleanup)
+      telemetry.close()
+  }
+
   private def awaitSync(a: JamNode, b: JamNode): Unit =
     val deadline = System.currentTimeMillis() + 30000
     while b.chain.best.hash != a.chain.best.hash && System.currentTimeMillis() < deadline do

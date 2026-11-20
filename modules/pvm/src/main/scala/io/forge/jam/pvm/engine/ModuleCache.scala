@@ -13,9 +13,11 @@ package io.forge.jam.pvm.engine
   * lookups, and least recently used entries are dropped until both bounds hold. The most recently used entry always
   * stays, even when it alone is over `maxBytes`: dropping it would only rebuild it on the next call.
   */
-final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue):
+final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue, maxNativeBytes: Long = Long.MaxValue):
+
   private final class Entry(val code: Array[Byte], val module: InterpretedModule):
     def bytes: Long = code.length.toLong + module.retainedBytes
+    def nativeBytes: Long = module.nativeBytes
 
   // Access-ordered: iteration starts at the least recently used entry. Guarded by its own monitor.
   private val entries = new java.util.LinkedHashMap[K, Entry](16, 0.75f, true)
@@ -27,12 +29,20 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue):
     while it.hasNext do total += it.next().bytes
     total
 
-  /** Drops least recently used entries until both bounds hold. Caller holds the lock. */
+  private def totalNativeBytes(): Long =
+    var total = 0L
+    val it = entries.values().iterator()
+    while it.hasNext do total += it.next().nativeBytes
+    total
+
   private def trim(): Unit =
     var total = totalBytes()
+    var native = totalNativeBytes()
     val it = entries.values().iterator()
-    while entries.size() > 1 && (entries.size() > maxEntries || total > maxBytes) do
-      total -= it.next().bytes
+    while entries.size() > 1 && (entries.size() > maxEntries || total > maxBytes || native > maxNativeBytes) do
+      val dropped = it.next()
+      total -= dropped.bytes
+      native -= dropped.nativeBytes
       it.remove()
 
   private def lookup(key: K, code: Array[Byte]): Option[InterpretedModule] =
@@ -65,6 +75,8 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue):
 
   /** Current estimate of the bytes the cached entries retain. */
   def retainedBytes: Long = entries.synchronized(totalBytes())
+
+  def retainedNativeBytes: Long = entries.synchronized(totalNativeBytes())
 
 object ModuleCache:
   /** A power of two: every this many lookups the entries are weighed again, as running modules grow. */

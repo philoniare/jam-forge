@@ -26,6 +26,8 @@ object ImportErrorText:
           s"actual: ${short(parentStateRoot)})"
       case None => failed(failure.message)
 
+  def undecodable(reason: String): String = s"Local chain error: block does not decode: $reason"
+
   /** The text for an import that failed on our side. */
   def failed(message: String): String = s"Local chain error: block execution failure: $message"
 

@@ -99,6 +99,28 @@ class FuzzServerSpec extends AnyFunSpec with Matchers:
       }
     }
 
+    it("answers Error to a block whose set of prerequisites is out of order, and goes on with the session") {
+      val fuzzy = FuzzClient.TraceDir.find(Paths.get(baseDir, "jamtestvectors", "traces", "fuzzy"))
+      assume(fuzzy.isDefined, "jamtestvectors/traces/fuzzy not found")
+      val guarantee = fuzzy.get.steps.iterator
+        .map(fuzzy.get.readStep(_, config))
+        .flatMap(_.block.extrinsic.guarantees.headOption)
+        .nextOption()
+        .getOrElse(cancel("no guarantee in the fuzzy trace"))
+      val unsorted = List(Hash(Array.fill[Byte](32)(0x7f)), Hash(Array.fill[Byte](32)(0x01)))
+      val report = guarantee.report.copy(context = guarantee.report.context.copy(prerequisites = unsorted))
+      val first = steps.head.block
+      val block = first.copy(extrinsic = first.extrinsic.copy(guarantees = List(guarantee.copy(report = report))))
+      withServer { server =>
+        withClient(server) { client =>
+          handshake(client)
+          initialize(client)
+          client.request(ProtocolMessage.ImportBlockMsg(ImportBlock(block))) shouldBe a[ProtocolMessage.ErrorMsg]
+          importBlock(client, steps.head) shouldBe ProtocolMessage.StateRootMsg(StateRoot(steps.head.postState.stateRoot))
+        }
+      }
+    }
+
     it("ends the session on an unexpected message type or a GetState for an unknown block") {
       withServer { server =>
         withClient(server) { client =>

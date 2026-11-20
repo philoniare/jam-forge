@@ -99,3 +99,26 @@ class ModuleCacheSpec extends AnyFunSuite:
     for _ <- 0 until 600 do cache.getOrCreate(2, Array[Byte](2))(fail("rebuilt"))
     assert(cache.size == 1)
     assert(cache.getOrCreate(2, Array[Byte](2))(fail("rebuilt")).isDefined)
+
+  test("a module's machine code has a budget of its own, and its tables on the heap count as heap"):
+    val plain = moduleOf(1_000)
+    val before = plain.retainedBytes
+    plain.nativeBytes = 5_000_000L
+    assert(plain.retainedBytes == before)
+    plain.nativeHeapBytes = 4_000L
+    assert(plain.retainedBytes == before + 4_000L)
+
+    def compiled(): InterpretedModule =
+      val m = moduleOf(1_000)
+      m.nativeBytes = 5_000_000L
+      m
+    val heapOnly = ModuleCache[Int](100, maxBytes = 8_000_000L)
+    for k <- 1 to 3 do heapOnly.getOrCreate(k, Array[Byte](k.toByte))(Some(compiled()))
+    assert(heapOnly.size == 3)
+    assert(heapOnly.retainedNativeBytes == 15_000_000L)
+    val cache = ModuleCache[Int](100, maxBytes = Long.MaxValue, maxNativeBytes = 12_000_000L)
+    val built = (1 to 3).map(k => k -> cache.getOrCreate(k, Array[Byte](k.toByte))(Some(compiled())).get).toMap
+    assert(cache.size == 2)
+    assert(cache.retainedNativeBytes == 10_000_000L)
+    assert(cache.getOrCreate(2, Array[Byte](2))(fail("2 was evicted")).get eq built(2))
+    assert(cache.getOrCreate(3, Array[Byte](3))(fail("3 was evicted")).get eq built(3))

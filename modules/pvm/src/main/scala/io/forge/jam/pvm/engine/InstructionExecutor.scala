@@ -164,6 +164,7 @@ object InstructionExecutor:
       case 213 => opMulUpperSignedSigned(ci, ctx)
       case 214 => opMulUpperUnsignedUnsigned(ci, ctx)
       case 215 => opMulUpperSignedUnsigned(ci, ctx)
+      case InterpretedModule.DeferredOpcode => ctx.enterDeferred(ci.pc)
       case _ => ctx.panic(ci.pc)
 
   private def opPanic(ci: CompiledInstruction, ctx: InterpreterCore): Int =

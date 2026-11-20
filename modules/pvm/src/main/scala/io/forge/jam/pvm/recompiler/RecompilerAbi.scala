@@ -265,9 +265,34 @@ object RecompilerAbi:
     imm2: Array[Long],
     blockGas: Array[Long],
     jumpTable: Array[Int],
-    byteOffsetToIndex: Map[Int, Int],
+    byteOffsetToIndex: OffsetIndex,
     codeLen: Int
   )
+
+  final class OffsetIndex private[RecompilerAbi] (table: Array[Int]):
+    def get(byteOffset: Int): Option[Int] =
+      if byteOffset >= 0 && byteOffset < table.length && table(byteOffset) >= 0 then Some(table(byteOffset)) else None
+    def getOrElse(byteOffset: Int, default: => Int): Int =
+      if byteOffset >= 0 && byteOffset < table.length && table(byteOffset) >= 0 then table(byteOffset) else default
+
+    def bytes: Long = 4L * table.length
+
+  object OffsetIndex:
+    val Empty: OffsetIndex = new OffsetIndex(Array.emptyIntArray)
+
+  val MaxNativeCodeBytes: Long = 64L << 20
+
+  val MaxNativeInstructions: Int = 300_000
+
+  def markedInstructions(code: Array[Byte], bitmask: Array[Byte]): Int =
+    val bits = math.min(code.length.toLong, bitmask.length.toLong * 8).toInt
+    var count = 0
+    var i = 0
+    while i < bits / 8 do
+      count += Integer.bitCount(bitmask(i) & 0xff)
+      i += 1
+    if bits % 8 != 0 then count += Integer.bitCount(bitmask(bits / 8) & ((1 << (bits % 8)) - 1))
+    count
 
   private inline val InvalidJumpTableSlot = -1
 
@@ -276,18 +301,34 @@ object RecompilerAbi:
    * column form.
    */
   def prepareProgram(code: Array[Byte], bitmask: Array[Byte], jumpTable: io.forge.jam.pvm.program.JumpTable): PreparedProgram =
+    prepareWithin(code, bitmask, jumpTable, Long.MaxValue).get
+
+  val MaxPreparedBlockGas: Long = 4_000_000L
+
+  def prepareWithin(
+      code: Array[Byte],
+      bitmask: Array[Byte],
+      jumpTable: io.forge.jam.pvm.program.JumpTable,
+      maxBlockGas: Long
+  ): Option[PreparedProgram] =
     // Pass 1: decode the whole blob, recording each instruction's byte offset.
     val instrs = scala.collection.mutable.ArrayBuffer.empty[Instruction]
-    val byteOffsets = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val indexAt = new Array[Int](code.length)
+    java.util.Arrays.fill(indexAt, -1)
     var off = 0
     while off < code.length do
       val (instr, skip) = InstructionDecoder.decode(code, bitmask, off)
+      indexAt(off) = instrs.length
       instrs += instr
-      byteOffsets += off
       off += math.max(1, skip)
-    val offsetToIndex: Map[Int, Int] = byteOffsets.zipWithIndex.toMap
+    val offsetToIndex = new OffsetIndex(indexAt)
 
     val n = instrs.length
+    val byteOffsets = new Array[Int](n)
+    var at = 0
+    while at < code.length do
+      if indexAt(at) >= 0 then byteOffsets(indexAt(at)) = at
+      at += 1
     val isLeader = new Array[Boolean](n)
     for i <- 0 until n do
       isLeader(i) = if i == 0 then true else instrs(i - 1).opcode.startsNewBasicBlock
@@ -305,13 +346,18 @@ object RecompilerAbi:
     val imm2Arr = new Array[Long](n)
     val blockGasArr = new Array[Long](n)
     var blockCost = 0L
+    var pricedSoFar = 0L
     var newBlock = true
-    for i <- 0 until n do
+    var bi = 0
+    while bi < n do
       if newBlock then
-        blockCost = BlockGasModel.gasCostForBlock(code, bitmask, byteOffsets(i))
+        blockCost = BlockGasModel.gasCostWithin(code, bitmask, byteOffsets(bi), maxBlockGas - pricedSoFar)
+        if blockCost == BlockGasModel.OverLimit then return None
+        pricedSoFar += blockCost
         newBlock = false
-      blockGasArr(i) = blockCost
-      if instrs(i).opcode.startsNewBasicBlock then newBlock = true
+      blockGasArr(bi) = blockCost
+      if instrs(bi).opcode.startsNewBasicBlock then newBlock = true
+      bi += 1
 
     for i <- 0 until n do
       val mapped = mapInstruction(instrs(i), targetIndex)
@@ -336,7 +382,7 @@ object RecompilerAbi:
         case _ => InvalidJumpTableSlot
     }.toArray
 
-    PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, blockGasArr, jt, offsetToIndex, code.length)
+    Some(PreparedProgram(opcodes, aArr, bArr, cArr, pcArr, immArr, imm2Arr, blockGasArr, jt, offsetToIndex, code.length))
 
   /** Convenience overload taking a `ProgramBlob` directly. */
   def prepareProgram(blob: ProgramBlob): PreparedProgram =

@@ -20,7 +20,7 @@ class RoleStateRestartSpec extends AnyFunSuite with Matchers:
   private def h(tag: String): Hash = Hashing.blake2b256(tag.getBytes("UTF-8"))
   private def sig(b: Int): Array[Byte] = Array.fill(64)(b.toByte)
 
-  private def guarantee(tag: String, core: Int = 0, exports: Int = 0, length: Int = 100, signers: Seq[Int] = Seq(1, 4)) =
+  private def guarantee(tag: String, core: Int = 0, exports: Int = 0, length: Int = 100, signers: Seq[Int] = Seq(1, 4), slot: Int = 0) =
     val report = WorkReport(
       packageSpec = PackageSpec(h(tag), UInt(length), h(s"erasure-$tag"), UShort(0), h(s"exports-$tag"), UShort(exports)),
       context = Context(Hash.zero, Timeslot(UInt(0)), Hash.zero, Hash.zero, Hash.zero, Timeslot(UInt(0)), Hash.zero, List.empty),
@@ -33,7 +33,7 @@ class RoleStateRestartSpec extends AnyFunSuite with Matchers:
     )
     GuaranteeExtrinsic(
       report,
-      Timeslot(UInt(0)),
+      Timeslot(UInt(slot)),
       signers.toList.map(v => GuaranteeSignature(ValidatorIndex(v), Ed25519Signature(sig(v))))
     )
 
@@ -69,6 +69,36 @@ class RoleStateRestartSpec extends AnyFunSuite with Matchers:
     after.judgmentsFor(reportHash(fine)) shouldBe Map(2 -> true)
     evidence(after) shouldBe evidence(before)
     evidence(after).head._4.map(_._2) shouldBe Some(90L)
+  }
+
+  private def guaranteeOf(pools: ExtrinsicPools, g: GuaranteeExtrinsic) =
+    pools.guaranteeOf(reportHash(g)).map((slot, signed) => (slot, signed.map((v, s) => v -> s.toList)))
+
+  test("the guarantee of an included report is known by its own slot and signatures, also after a restart") {
+    val store = new InMemoryRoleStore
+    val before = new ExtrinsicPools(store = store)
+    val bad = guarantee("bad", slot = 88, signers = Seq(1, 4, 5))
+    before.recordCredentials(h("parent"), 90L, List(bad))
+    guaranteeOf(before, bad) shouldBe Some((88L, List(1 -> sig(1).toList, 4 -> sig(4).toList, 5 -> sig(5).toList)))
+    guaranteeOf(before, guarantee("never included")) shouldBe None
+
+    guaranteeOf(new ExtrinsicPools(store = store), bad) shouldBe guaranteeOf(before, bad)
+  }
+
+  test("a guarantee pruned with its credentials is forgotten, also after a restart") {
+    val store = new InMemoryRoleStore
+    val before = new ExtrinsicPools(store = store)
+    val old = guarantee("old", slot = 4)
+    val recent = guarantee("recent", core = 1, slot = 29)
+    before.recordCredentials(h("old-parent"), 5L, List(old))
+    before.recordCredentials(h("parent"), 30L, List(recent))
+    before.pruneDisputes(currentEpoch = 3L, epochLength = 12, judged = Set.empty)
+    guaranteeOf(before, old) shouldBe None
+    guaranteeOf(before, recent).map(_._1) shouldBe Some(29L)
+
+    val after = new ExtrinsicPools(store = store)
+    guaranteeOf(after, old) shouldBe None
+    guaranteeOf(after, recent).map(_._1) shouldBe Some(29L)
   }
 
   test("judgments and credentials dropped before a restart do not come back") {

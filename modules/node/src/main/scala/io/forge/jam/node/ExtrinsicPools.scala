@@ -62,6 +62,8 @@ final class ExtrinsicPools(
   private val credentials =
     new java.util.concurrent.ConcurrentHashMap[Hash, (Hash, Long, List[(Int, Array[Byte])])]()
 
+  private val guaranteeSlots = new java.util.concurrent.ConcurrentHashMap[Hash, java.lang.Long]()
+
   store.scan(ExtrinsicPools.JudgmentPrefix).foreach { (_, bytes) =>
     val (key, value) = ExtrinsicPools.decodeJudgment(bytes)
     judgments.put(key, value)
@@ -69,6 +71,10 @@ final class ExtrinsicPools(
   store.scan(ExtrinsicPools.CredentialPrefix).foreach { (_, bytes) =>
     val (report, value) = ExtrinsicPools.decodeCredentials(bytes)
     credentials.put(report, value)
+  }
+  store.scan(ExtrinsicPools.GuaranteeSlotPrefix).foreach { (_, bytes) =>
+    val (report, slot) = ExtrinsicPools.decodeGuaranteeSlot(bytes)
+    guaranteeSlots.put(report, slot)
   }
 
   private def dropJudgments(drop: ((Hash, Long, Int)) => Boolean): Unit =
@@ -162,13 +168,24 @@ final class ExtrinsicPools(
 
   /** Record the credentials of the guarantees in a block on `parent` at `slot`. */
   def recordCredentials(parent: Hash, slot: Long, guarantees: Iterable[GuaranteeExtrinsic]): Unit =
-    val recorded = guarantees.toList.map { g =>
+    val recorded = guarantees.toList.flatMap { g =>
       val report = reportHashOf(g)
       val value = (parent, slot, g.signatures.map(s => s.validatorIndex.toInt -> s.signature.bytes))
+      val made = g.slot.toLong
       credentials.put(report, value)
-      ExtrinsicPools.credentialKey(report) -> ExtrinsicPools.encodeCredentials(report, value)
+      guaranteeSlots.put(report, made)
+      List(
+        ExtrinsicPools.credentialKey(report) -> ExtrinsicPools.encodeCredentials(report, value),
+        ExtrinsicPools.guaranteeSlotKey(report) -> ExtrinsicPools.encodeGuaranteeSlot(report, made)
+      )
     }
     store.write(recorded)
+
+  def guaranteeOf(report: Hash): Option[(Long, List[(Int, Array[Byte])])] =
+    for
+      made <- Option(guaranteeSlots.get(report))
+      included <- Option(credentials.get(report))
+    yield (made.longValue, included._3)
 
   /** Reports someone judged invalid, with every judgment on them by epoch, and their credentials if known. */
   def disputed: List[ExtrinsicPools.Disputed] =
@@ -195,8 +212,11 @@ final class ExtrinsicPools(
     dropJudgments(k => k._2 < currentEpoch - 1 || judged.contains(k._1))
     val old = credentials.asScala.collect { case (report, c) if c._2 / epochLength < currentEpoch - 1 => report }.toList
     if old.nonEmpty then
-      old.foreach(credentials.remove)
-      store.write(Nil, old.map(ExtrinsicPools.credentialKey))
+      old.foreach { report =>
+        credentials.remove(report)
+        guaranteeSlots.remove(report)
+      }
+      store.write(Nil, old.flatMap(report => List(ExtrinsicPools.credentialKey(report), ExtrinsicPools.guaranteeSlotKey(report))))
 
   /** Tickets for inclusion in a block of `epoch` whose posterior η_2 is
     * `entropy`: ascending ticket-id order,
@@ -357,6 +377,17 @@ object ExtrinsicPools:
     f"$JudgmentPrefix$epoch%016x:${report.toHex}:$validator%04x"
 
   private def credentialKey(report: Hash): String = s"$CredentialPrefix${report.toHex}"
+
+  private val GuaranteeSlotPrefix = "role:guarantee-slot:"
+
+  private def guaranteeSlotKey(report: Hash): String = s"$GuaranteeSlotPrefix${report.toHex}"
+
+  private def encodeGuaranteeSlot(report: Hash, slot: Long): Array[Byte] =
+    java.nio.ByteBuffer.allocate(32 + 8).put(report.bytes.toArray).putLong(slot).array()
+
+  private def decodeGuaranteeSlot(bytes: Array[Byte]): (Hash, Long) =
+    val b = java.nio.ByteBuffer.wrap(bytes)
+    (hash(b), b.getLong)
 
   private def hash(b: java.nio.ByteBuffer): Hash =
     val bytes = new Array[Byte](32)

@@ -10,10 +10,10 @@ object ServiceCode:
   /** Byte budget of the module cache: 256 MiB, or an eighth of the JVM's maximum heap when that is less. */
   private val ModuleCacheBytes: Long = math.min(256L << 20, Runtime.getRuntime.maxMemory() / 8)
 
-  /** Process-wide module cache shared by the accumulate, refine and is-authorized executors, bounded by entry count
-    * and by the bytes the cached modules retain.
+  /** Process-wide module cache shared by the accumulate, refine and is-authorized executors, bounded by entry count,
+    * by the heap bytes the cached modules retain and by the machine code compiled for them.
     */
-  private val modules = ModuleCache[JamBytes](256, ModuleCacheBytes)
+  private val modules = ModuleCache[JamBytes](256, ModuleCacheBytes, NativeCodeBudget.CacheBytes)
 
   /** The compiled module for the code blob `code` (the preimage after its metadata) found under `codeHash`. Built
     * once per process and shared, so a new importer or executor does not recompile it. None when the blob is not a

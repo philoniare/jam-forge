@@ -47,7 +47,8 @@ final class AuditorService(
     audit: Option[WorkReport => Option[Boolean]] = None,
     finalityLagSlots: Long = AuditorService.FinalityLagSlots,
     maxResendsPerTick: Int = AuditorService.MaxResendsPerTick,
-    telemetry: Option[Telemetry] = None
+    telemetry: Option[Telemetry] = None,
+    inlineGuarantee: Boolean = false
 ) extends LazyLogging:
 
   import AuditSelection.*
@@ -277,7 +278,7 @@ final class AuditorService(
           verdicts.putIfAbsent(report, java.lang.Boolean.valueOf(valid))
           if !ownJudgments.contains((report, v)) then
             val (_, message) = signJudgment(report, t.epoch, v, keys, valid)
-            ownJudgments.put((report, v), new AuditorService.Outgoing(StreamKind.JudgmentPublication, List(message)))
+            ownJudgments.put((report, v), judgmentPublication(report, message, valid))
         }
     }
     ownHeads.foreach { (k, head) =>
@@ -820,11 +821,21 @@ final class AuditorService(
   private def publishJudgment(reportHash: Hash, epochIndex: Long, v: Int, keys: ValidatorKeySet, valid: Boolean): Unit =
     val (signature, message) = signJudgment(reportHash, epochIndex, v, keys, valid)
     recordJudgment(reportHash, epochIndex, v, valid, signature, tally = true)
-    val out = new AuditorService.Outgoing(StreamKind.JudgmentPublication, List(message))
+    val out = judgmentPublication(reportHash, message, valid)
     ownJudgments.put((reportHash, v), out)
     broadcast(out)
     if valid then logger.info(s"published positive judgment for ${reportHash.toHex.take(18)} as validator $v")
     else logger.warn(s"published NEGATIVE judgment for ${reportHash.toHex.take(18)} as validator $v")
+
+  private def judgmentPublication(reportHash: Hash, message: Array[Byte], valid: Boolean): AuditorService.Outgoing =
+    val guarantee =
+      if valid then None
+      else
+        val known = pools.guaranteeOf(reportHash).flatMap(JudgmentWire.encodeGuarantee.tupled)
+        if known.isEmpty then logger.warn(s"no guarantee to send with the negative judgment for ${reportHash.toHex.take(18)}")
+        known
+    val inlined = guarantee.filter(_ => inlineGuarantee).flatMap(g => JudgmentWire.encodeInline(message, Some(g)))
+    new AuditorService.Outgoing(StreamKind.JudgmentPublication, inlined.map(List(_)).getOrElse(message :: guarantee.toList))
 
   private def signJudgment(
       reportHash: Hash,
@@ -836,7 +847,7 @@ final class AuditorService(
     val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
     val signature = Ed25519ZebraWrapper.sign(keys.ed25519Secret, context ++ reportHash.bytes)
     val epoch = epochIndex.toInt
-    val msg = new java.io.ByteArrayOutputStream(103)
+    val msg = new java.io.ByteArrayOutputStream(JudgmentWire.JudgmentLength)
     msg.write(epoch & 0xff); msg.write((epoch >> 8) & 0xff)
     msg.write((epoch >> 16) & 0xff); msg.write((epoch >> 24) & 0xff)
     msg.write(v & 0xff); msg.write((v >> 8) & 0xff)
@@ -874,21 +885,32 @@ final class AuditorService(
 
   def judgmentHandler: io.forge.jam.network.PeerStreamHandler =
     (conn: PeerConnection, stream: MessageStream) =>
+      val parts = new JudgmentWire.Stream
       stream.onMessage { msg =>
-        if inbound.submit(conn, msg.length.toLong)(guarded(receiveJudgment(msg, conn))) then stream.finish()
-        else stream.reset()
+        parts.next(msg) match
+          case JudgmentWire.Part.Judgment =>
+            if inbound.submit(conn, msg.length.toLong)(guarded(receiveJudgment(msg, conn))) then stream.finish()
+            else stream.reset()
+          case JudgmentWire.Part.Guarantee => ()
+          case JudgmentWire.Part.Batch =>
+            val taken = JudgmentWire.decodeBatch(msg).toList.flatten.forall { (judgment, _) =>
+              inbound.submit(conn, judgment.length.toLong)(guarded(receiveJudgment(judgment, conn)))
+            }
+            if taken then stream.finish() else stream.reset()
+          case JudgmentWire.Part.Malformed =>
+            logger.warn(s"bad CE145 message of ${msg.length} bytes from ${JamNode.hex(conn.peerKey).take(16)}")
       }
 
-  /** A CE 145 message: the signature is checked first, then the judgment is recorded when a tracked block holds
+  /** A CE 145 judgment: the signature is checked first, then the judgment is recorded when a tracked block holds
     * its report and kept for that block's import otherwise.
     */
   private[node] def receiveJudgment(msg: Array[Byte]): Unit = receiveJudgment(msg, null)
 
   /** As above, counted against the connection `source` it came on (null: not counted per source). */
   private[node] def receiveJudgment(msg: Array[Byte], source: AnyRef): Unit =
-    if msg.length == 4 + 2 + 1 + 32 + 64 then
+    if msg.length == JudgmentWire.JudgmentLength then
       val idx = (msg(4) & 0xff) | ((msg(5) & 0xff) << 8)
-      val valid = msg(6) == 1
+      val valid = JudgmentWire.valid(msg)
       val reportHash = Hash(java.util.Arrays.copyOfRange(msg, 7, 39))
       val signature = java.util.Arrays.copyOfRange(msg, 39, 103)
       val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES

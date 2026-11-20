@@ -64,3 +64,16 @@ class StateStoreSpec extends AnyFlatSpec with Matchers:
     store.awaitPending()
     pending.isDone shouldBe true
   }
+
+  "StateStore" should "keep a parent that blocks are still imported on, however many of them are accepted" in {
+    val store = new StateStore(ChainConfig.TINY)
+    store.setForksEnabled(true) // eight states kept
+    store.initialize(h(0), RawState.empty, List.empty, genesisParent = Some((h(0), Timeslot(0))))
+    store.store(h(1), RawState.empty, parent = Some((h(0), Timeslot(1))))
+    for i <- 1 to 8 do
+      withClue(s"sibling $i: ")(store.get(h(1)) should not be empty)
+      store.store(h(100 + i), RawState.empty, isOriginal = false, parent = Some((h(1), Timeslot(2))))
+    store.get(h(1)) should not be empty // the next block on the same parent
+    store.get(h(108)) should not be empty // and on the newest
+    store.size shouldBe 8
+  }

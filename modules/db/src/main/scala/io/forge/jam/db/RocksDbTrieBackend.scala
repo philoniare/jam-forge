@@ -419,8 +419,8 @@ final class RocksDbTrieBackend private (
       stats.markBytes = marked.bytes
       if stop() then return done(SweepOutcome.Stopped(_))
       afterMark()
-      if !sweepNodes(marked, floorHeight, stop) then return done(SweepOutcome.Stopped(_))
       if !dropJournals(journalWanted, stop) then return done(SweepOutcome.Stopped(_))
+      if !sweepNodes(marked, floorHeight, stop) then return done(SweepOutcome.Stopped(_))
       done(SweepOutcome.Completed(_))
 
     private def mark(roots: Seq[Hash], marked: RocksDbTrieBackend.KeySet, stop: () => Boolean): Unit =

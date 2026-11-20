@@ -24,6 +24,8 @@ public class BandersnatchWrapper {
                 return;
             }
 
+            NativeCpu.check();
+
             String libraryName = "bandersnatch_vrfs_wrapper";
             String osName = System.getProperty("os.name").toLowerCase();
             String libFileName;

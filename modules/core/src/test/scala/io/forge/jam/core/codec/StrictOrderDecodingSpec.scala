@@ -96,3 +96,10 @@ class StrictOrderDecodingSpec extends AnyFlatSpec with Matchers:
     val wire = Codec[WorkReport].encode(report(Nil, List(h(0xbb), h(0xaa))))
     Codec[WorkReport].decodeExact(wire).isLeft shouldBe true
   }
+
+  "A decode failure" should "say the bytes parse but are not the one valid encoding, for keys out of order only" in {
+    val unsorted = Codec[Context].encode(ctx(List(h(0xbb), h(0xaa))))
+    intercept[CodecDecodingException](Codec[Context].decodeUnsafe(unsorted)).nonCanonical shouldBe true
+    val cut = Codec[Context].encode(ctx(List(h(0xaa), h(0xbb)))).dropRight(3)
+    intercept[CodecDecodingException](Codec[Context].decodeUnsafe(cut)).nonCanonical shouldBe false
+  }

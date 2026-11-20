@@ -75,6 +75,7 @@ public final class PvmRecompiler implements AutoCloseable {
     private final MethodHandle execute;
     private final MethodHandle executeFlat;
     private final MethodHandle free;
+    private final MethodHandle blockBytes;
     private final Arena arena;
     private final Linker linker;
     private static final FunctionDescriptor HOST_FN_DESCRIPTOR = FunctionDescriptor.of(
@@ -137,6 +138,9 @@ public final class PvmRecompiler implements AutoCloseable {
         this.free = linker.downcallHandle(
                 lookup.find("pvm_free").orElseThrow(() -> missing("pvm_free")),
                 FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+        this.blockBytes = linker.downcallHandle(
+                lookup.find("pvm_block_bytes").orElseThrow(() -> missing("pvm_block_bytes")),
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
     }
 
     private static IllegalStateException missing(String sym) {
@@ -276,6 +280,17 @@ public final class PvmRecompiler implements AutoCloseable {
 
         public boolean isValid() {
             return handle != null && !handle.equals(MemorySegment.NULL);
+        }
+
+        public long bytes() {
+            if (!isValid()) {
+                return 0L;
+            }
+            try {
+                return (long) blockBytes.invoke(handle);
+            } catch (Throwable t) {
+                throw new RuntimeException("pvm_block_bytes failed", t);
+            }
         }
 
         @Override

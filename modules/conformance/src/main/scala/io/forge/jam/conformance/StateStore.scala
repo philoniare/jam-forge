@@ -13,8 +13,9 @@ import scala.collection.mutable
   * sessions:
   *   - Always retains states referenced by the current ancestry (up to
   *     `maxAncestryLength` entries)
-  *   - Keeps a sliding window of recently stored states for fork support
-  *   - Prunes oldest non-ancestry states when the window is exceeded
+  *   - Keeps a window of the most recently used states for fork support: a state is used when it is stored and
+  *     when it is read, so a parent that blocks are still being imported on is not pushed out by its own children
+  *   - Prunes the least recently used non-ancestry states when the window is exceeded
   *
   * @param config
   *   chain configuration; `maxLookupAnchorAge` (the lookup-anchor window L)
@@ -39,7 +40,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
 
   private var newestParentageSlot: Long = Long.MinValue
 
-  // Insertion-ordered list of stored hashes for LRU-style pruning
+  // Stored hashes, least recently used first (stored or read; see `get`). Never more than a few entries.
   private val insertionOrder: mutable.ArrayBuffer[Hash] =
     mutable.ArrayBuffer.empty
 
@@ -127,7 +128,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
       pruneParentageByAge()
     }
 
-  /** Prune oldest non-ancestry states when storage exceeds the limit. Must be
+  /** Prune the least recently used non-ancestry states when storage exceeds the limit. Must be
     * called within synchronized block.
     */
   private def pruneIfNeeded(): Unit =
@@ -136,7 +137,7 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
     val extraCount = states.size - states.keys.count(ancestryHashes.contains)
 
     if extraCount > maxExtraStates then
-      // Walk insertion order from oldest, removing non-ancestry entries
+      // Walk from the least recently used, removing non-ancestry entries
       var removed = 0
       val toRemoveCount = extraCount - maxExtraStates
       val toRemoveHashes = mutable.ListBuffer[Hash]()
@@ -171,7 +172,8 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
         }.toList
         stale.foreach(parentage.remove)
 
-  /** Retrieve state by header hash.
+  /** Retrieve state by header hash, and count it as used: an import reads its parent's state here, so a parent
+    * with many accepted children stays while they are being imported.
     *
     * @param headerHash
     *   Hash to look up
@@ -179,7 +181,13 @@ class StateStore(config: ChainConfig = ChainConfig.TINY):
     *   Some(state) if found, None otherwise
     */
   def get(headerHash: Hash): Option[RawState] =
-    synchronized(states.get(headerHash)).map(Parallel.await)
+    synchronized {
+      val found = states.get(headerHash)
+      if found.isDefined && insertionOrder.lastOption.forall(_ != headerHash) then
+        insertionOrder -= headerHash
+        insertionOrder += headerHash
+      found
+    }.map(Parallel.await)
 
   /** Waits until the most recently deferred state has been computed. */
   def awaitPending(): Unit =

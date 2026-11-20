@@ -127,12 +127,14 @@ object codecs:
     * Encoding writes the list as given.
     */
   def compactPrefixedStrictlyAscending[A, K](c: Codec[A], key: A => K)(using ord: Ordering[K]): Codec[List[A]] =
-    compactPrefixedList(c).emap(
-      xs =>
-        if xs.lazyZip(xs.drop(1)).forall((a, b) => ord.lt(key(a), key(b))) then Right(xs)
-        else Left("keys are not strictly increasing (unsorted or duplicate)"),
-      identity
-    )
+    val list = compactPrefixedList(c)
+    new Codec[List[A]]:
+      def write(out: ByteWriter, value: List[A]): Unit = list.write(out, value)
+      def read(in: ByteReader): List[A] =
+        val xs = list.read(in)
+        if xs.lazyZip(xs.drop(1)).forall((a, b) => ord.lt(key(a), key(b))) then xs
+        else in.failNonCanonical("keys are not strictly increasing (unsorted or duplicate)")
+      override def sizeHint: Int = list.sizeHint
 
   /** As [[compactPrefixedList]], for sequences read by index. */
   def compactPrefixedVector[A](c: Codec[A]): Codec[IndexedSeq[A]] = new Codec[IndexedSeq[A]]:

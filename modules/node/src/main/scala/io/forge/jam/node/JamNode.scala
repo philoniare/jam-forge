@@ -49,6 +49,7 @@ final case class NodeConfig(
       * real network: the node's guarantors become culprits.
       */
     tamperReports: Boolean = false,
+    inlineJudgmentGuarantee: Boolean = false,
     /** Loopback port of the local submission endpoint ([[SubmitServer]]), from `--submit-port N`. */
     submitPort: Option[Int] = None,
     /** First retry delay for a lost bootnode connection; doubles per failed
@@ -407,7 +408,8 @@ final class JamNode(
       guarantorsFirst = guarantorIndex.first,
       misbehaved = reportFault,
       threads = threads,
-      telemetry = telemetry
+      telemetry = telemetry,
+      inlineGuarantee = nodeConfig.inlineJudgmentGuarantee
     )
     a.onDisregard(h =>
       chain.disregard(h) match

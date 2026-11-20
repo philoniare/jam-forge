@@ -162,6 +162,17 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       "fetchWorkPackageSegments" -> s"$hash,[0]"
     )
 
+  test("the start-up line says which methods are served, and for auto on a public address how to serve the rest") {
+    val loopback = java.net.InetAddress.getByName("127.0.0.1")
+    val any = java.net.InetAddress.getByName("0.0.0.0")
+    RpcMethods.describe(RpcMethods.Auto, loopback) shouldBe "all methods (--rpc-methods auto)"
+    RpcMethods.describe(RpcMethods.Unsafe, any) shouldBe "all methods (--rpc-methods unsafe)"
+    RpcMethods.describe(RpcMethods.Safe, loopback) shouldBe "safe methods only (--rpc-methods safe)"
+    val auto = RpcMethods.describe(RpcMethods.Auto, any)
+    auto should startWith("safe methods only (--rpc-methods auto: 0.0.0.0 is not a loopback address")
+    auto should include("--rpc-methods unsafe")
+  }
+
   test("an RPC serving safe methods only refuses the unsafe ones with a JSON-RPC error and answers the rest") {
     withServerUsing(methods = RpcMethods.Safe) { (_, _, client) =>
       unsafeCalls.zipWithIndex.foreach { case ((method, params), i) =>
@@ -170,7 +181,10 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
         withClue(s"$method: ") {
           answer.hcursor.get[Int]("id") shouldBe Right(i + 1)
           errorCode(answer) shouldBe Some(RpcError.UnsafeMethodCode)
-          answer.hcursor.downField("error").get[String]("message") shouldBe Right("Method not allowed")
+          val message = answer.hcursor.downField("error").get[String]("message").toOption.get
+          message should startWith("Method not allowed")
+          message should include(method)
+          message should include("--rpc-methods unsafe")
         }
       }
       client.send(request(10, "bestBlock"))

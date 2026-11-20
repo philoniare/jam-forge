@@ -38,7 +38,8 @@ object NativeRunner extends StrictLogging:
 
   def logSummary(): Unit =
     logger.info(
-      s"NativeRunner: ${nativeCount} native, ${compileCount} compiled, ${deoptCount} deopt (reasons: ${deoptReasons.mkString(", ")})"
+      s"NativeRunner: ${nativeCount} native, ${compileCount} compiled, ${nativeCode.liveBytes >> 20} MiB of machine code alive, " +
+        s"${deoptCount} deopt (reasons: ${deoptReasons.mkString(", ")})"
     )
 
   def run(
@@ -97,7 +98,7 @@ object NativeRunner extends StrictLogging:
           else if heapSlack.exists(_.heapRegionIndex == -1) then Some("grow-heap-no-heap-region")
           else if heapSlack.exists(ht => ht.maxHeapSize - currentHeapSize(instance) > ht.slackBytes) then
             Some("grow-heap-slack-cap")
-          else if program.block == null then Some("compile-null")
+          else if program.block == null then Some(program.whyNot)
           else None
 
         deoptReason match
@@ -172,9 +173,12 @@ object NativeRunner extends StrictLogging:
   private final class CompiledProgram(
       val scan: UnsupportedOpcodeScan,
       val invalidBlob: Boolean,
-      private val byteOffsetToIndex: Map[Int, Int],
-      val block: PvmRecompiler#Block
+      private val byteOffsetToIndex: RecompilerAbi.OffsetIndex,
+      val block: PvmRecompiler#Block,
+      val whyNot: String = "compile-null"
   ):
+    def waitsForBudget: Boolean = whyNot == OverBudget
+
     def entryIndex(pc: Int): Option[Int] = byteOffsetToIndex.get(pc)
 
     @volatile private var directTemplate: DirectTemplate = null
@@ -359,6 +363,16 @@ object NativeRunner extends StrictLogging:
           }
     }
 
+  private[pvmhost] val nativeCode = NativeCodeBudget(NativeCodeBudget.ProcessBytes)
+
+  private final val OverBudget = "native-code-budget"
+  private final val TooLarge = "too-large"
+  private final val TooCostly = "too-costly-to-price"
+
+  private def settled(artifact: AnyRef): Boolean = artifact match
+    case p: CompiledProgram => !p.waitsForBudget || !nativeCode.hasRoomFor(RecompilerAbi.MaxNativeCodeBytes)
+    case _ => false
+
   private val cleaner = java.lang.ref.Cleaner.create()
   private val compiles = new AtomicLong(0)
 
@@ -367,11 +381,11 @@ object NativeRunner extends StrictLogging:
 
   private def compiledFor(rc: PvmRecompiler, module: InterpretedModule): CompiledProgram =
     module.nativeArtifact match
-      case p: CompiledProgram => p
+      case p: CompiledProgram if settled(p) => p
       case _ =>
         module.synchronized {
           module.nativeArtifact match
-            case p: CompiledProgram => p
+            case p: CompiledProgram if settled(p) => p
             case _ =>
               val p = compileProgram(rc, module)
               module.nativeArtifact = p
@@ -381,21 +395,42 @@ object NativeRunner extends StrictLogging:
   private def compileProgram(rc: PvmRecompiler, module: InterpretedModule): CompiledProgram =
     val blob = module.blob
     val scan = scanUnsupportedOpcodes(blob.code, blob.bitmask)
-    if !module.isBlobStructurallyValid then new CompiledProgram(scan, true, Map.empty, null)
+    val none = RecompilerAbi.OffsetIndex.Empty
+    if !module.isBlobStructurallyValid then new CompiledProgram(scan, true, none, null)
+    else if RecompilerAbi.markedInstructions(blob.code, blob.bitmask) > RecompilerAbi.MaxNativeInstructions then
+      logger.debug("NativeRunner: the program has too many instructions to compile; it will run interpreted")
+      new CompiledProgram(scan, false, none, null, TooLarge)
+    else if !nativeCode.hasRoomFor(RecompilerAbi.MaxNativeCodeBytes) then
+      new CompiledProgram(scan, false, none, null, OverBudget)
     else
-      val prepared = RecompilerAbi.prepareProgram(blob)
-      val blk = rc.compile(
-        prepared.opcodes, prepared.a, prepared.b, prepared.c,
-        prepared.pc, prepared.imm, prepared.imm2, prepared.blockGas, prepared.jumpTable, prepared.codeLen
-      )
-      compiles.incrementAndGet()
-      if !blk.isValid then
-        logger.debug("NativeRunner: pvm_compile rejected the program (null block); it will run interpreted")
-        new CompiledProgram(scan, false, prepared.byteOffsetToIndex, null)
-      else
-        // The action must not reach the module, or the module would never be collected.
-        cleaner.register(module, () => blk.close())
-        new CompiledProgram(scan, false, prepared.byteOffsetToIndex, blk)
+      RecompilerAbi.prepareWithin(blob.code, blob.bitmask, blob.jumpTable, RecompilerAbi.MaxPreparedBlockGas) match
+        case None =>
+          logger.debug("NativeRunner: the program's blocks cost too much to price ahead; it will run interpreted")
+          new CompiledProgram(scan, false, none, null, TooCostly)
+        case Some(prepared) => compilePrepared(rc, module, scan, prepared)
+
+  private def compilePrepared(
+      rc: PvmRecompiler,
+      module: InterpretedModule,
+      scan: UnsupportedOpcodeScan,
+      prepared: RecompilerAbi.PreparedProgram
+  ): CompiledProgram =
+    val none = RecompilerAbi.OffsetIndex.Empty
+    val blk = rc.compile(
+      prepared.opcodes, prepared.a, prepared.b, prepared.c,
+      prepared.pc, prepared.imm, prepared.imm2, prepared.blockGas, prepared.jumpTable, prepared.codeLen
+    )
+    compiles.incrementAndGet()
+    if !blk.isValid then
+      logger.debug("NativeRunner: pvm_compile rejected the program (null block); it will run interpreted")
+      new CompiledProgram(scan, false, none, null)
+    else
+      val codeBytes = blk.bytes()
+      nativeCode.add(codeBytes)
+      module.nativeBytes = codeBytes
+      module.nativeHeapBytes = prepared.byteOffsetToIndex.bytes
+      cleaner.register(module, () => { blk.close(); nativeCode.remove(codeBytes) })
+      new CompiledProgram(scan, false, prepared.byteOffsetToIndex, blk)
 
   /** Each thread keeps one execution context (cells, upcall stub, guest-memory mapping) across its runs. */
   private val contexts = new ThreadLocal[PvmRecompiler#ExecContext]()

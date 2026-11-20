@@ -48,5 +48,5 @@ object ImportBlockStep:
 
           case invalid: ImportResult.Invalid =>
             Left(ImportErrorText(block, parentState.stateRoot, invalid))
-          case ImportResult.Failed(message, _) =>
-            Left(ImportErrorText.failed(message))
+          case ImportResult.Failed(message, cause) =>
+            throw new IllegalStateException(s"block import failed on our side: $message", cause)

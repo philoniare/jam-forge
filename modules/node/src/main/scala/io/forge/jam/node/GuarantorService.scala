@@ -224,6 +224,21 @@ final class GuarantorService(
   /** Submissions waiting for a refine thread. */
   private[node] def queuedSubmissions: Int = admission.queued + coSignAdmission.queued
 
+  private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet[Hash]()
+
+  private[node] def packagesInFlight: Int = inFlight.size
+
+  private def refusedAsCopy(packageHash: Hash): Option[String] =
+    guaranteedLately(packageHash)
+      .map(t => s"package already guaranteed at slot $t")
+      .orElse(Option.when(inFlight.contains(packageHash))("package is already on its way to a guarantee here"))
+
+  private val coSigned = new ByteBoundedCache[Hash, (Long, Array[Byte])](256, Long.MaxValue, _ => 0L)
+
+  private def coSignedLately(request: Hash): Option[Array[Byte]] =
+    val r = chain.config.rotationPeriod
+    coSigned.get(request).filter((t, _) => chain.nextBlockSlot / r <= t / r + 1).map(_._2)
+
   private val guaranteesMadeCount = new java.util.concurrent.atomic.AtomicLong()
 
   def guaranteesMade: Long = guaranteesMadeCount.get
@@ -657,8 +672,8 @@ final class GuarantorService(
       Left(s"submission exceeds $maxSubmissionBytes bytes")
     else
       decodeWorkPackage(packageBytes).left.map(e => s"Codec error: $e").flatMap { wp =>
-        guaranteedLately(RefineFetch.workPackageHash(wp)) match
-          case Some(t) => Left(s"package already guaranteed at slot $t")
+        refusedAsCopy(RefineFetch.workPackageHash(wp)) match
+          case Some(why) => Left(why)
           case None => admitSubmission(coreIndex, wp, packageBytes, extrinsicBlob)
       }
 
@@ -687,7 +702,7 @@ final class GuarantorService(
     if bundleBytes.length > maxSubmissionBytes then Left(s"bundle of ${bundleBytes.length} bytes exceeds $maxSubmissionBytes")
     else
       WorkPackageBundle.decode(bundleBytes).left.map(e => s"Codec error: $e").flatMap { b =>
-        guaranteedLately(RefineFetch.workPackageHash(b.workPackage)).map(t => s"package already guaranteed at slot $t").toLeft(()).flatMap { _ =>
+        refusedAsCopy(RefineFetch.workPackageHash(b.workPackage)).toLeft(()).flatMap { _ =>
         val submission = localSubmission(ce146 = true)
         received(submission, coreIndex, b.workPackage)
         telemetry.foreach(_.extrinsicDataReceived(submission))
@@ -827,7 +842,9 @@ final class GuarantorService(
     def tooOld = chain.slotOf(ctx.anchor).exists(s => history.headOption.exists(s < _.slot))
     known || tooOld
 
-  private def onceAnchored(wp: WorkPackage, bytes: Long, priority: RefinePool.Priority)(k: => Unit): Unit =
+  private def onceAnchored(wp: WorkPackage, bytes: Long, priority: RefinePool.Priority, dropped: () => Unit = () => ())(
+      k: => Unit
+  ): Unit =
     if anchorsSettled(wp) then k
     else
       val name = RefineFetch.workPackageHash(wp).toHex.take(18)
@@ -840,9 +857,11 @@ final class GuarantorService(
         anchorWaiter.schedule((() => poll()): Runnable, GuarantorService.AnchorPollMillis, java.util.concurrent.TimeUnit.MILLISECONDS): Unit
       val admitted = anchorWait.tryExecute(whenAnchored, bytes) {
         try refinePool.submit(priority)(k)
-        catch case _: java.util.concurrent.RejectedExecutionException => () // shutting down
+        catch case _: java.util.concurrent.RejectedExecutionException => dropped() // shutting down
       }
-      if !admitted then logger.warn(s"work package $name refused: too many packages are waiting for their anchor")
+      if !admitted then
+        logger.warn(s"work package $name refused: too many packages are waiting for their anchor")
+        dropped()
 
   /** Run the work-report computation pipeline (Xi) and, on success, custody
     * the bundle/shards and sign+pool+distribute the resulting report. Shared
@@ -862,21 +881,37 @@ final class GuarantorService(
     val bytes = GuarantorService.heldBytes(wp, extrinsicData) +
       importSegments.iterator.flatten.map(_.length.toLong).sum +
       justifications.iterator.flatten.flatten.map(_.length.toLong).sum
-    onceAnchored(wp, bytes, RefinePool.Priority.Submission) {
-      val slot = chain.nextBlockSlot
-      val hash = RefineFetch.workPackageHash(wp)
-      guaranteedLately(hash) match
-        case Some(t) =>
-          logger.warn(s"work package ${hash.toHex.take(18)} refused before refine: already guaranteed at slot $t")
-          telemetry.foreach(_.duplicateWorkPackage(ev, coreIndex, hash))
-        case None =>
-          precheck(wp, coreIndex, slot) match
-            case Left(why) =>
-              logger.warn(s"work package ${hash.toHex.take(18)} refused before refine: $why")
-              failed(ev, why)
-            case Right(anchorState) =>
-              refineAndGuarantee(coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState, authorized, ev)
-    }
+    val hash = RefineFetch.workPackageHash(wp)
+    if !inFlight.add(hash) then
+      logger.warn(s"work package ${hash.toHex.take(18)} refused: a copy is already on its way to a guarantee here")
+      telemetry.foreach(_.duplicateWorkPackage(ev, coreIndex, hash))
+    else
+      val released = new java.util.concurrent.atomic.AtomicBoolean()
+      val release = () => if released.compareAndSet(false, true) then inFlight.remove(hash): Unit
+      try
+        onceAnchored(wp, bytes, RefinePool.Priority.Submission, release) {
+          var handedOn = false
+          try
+            val slot = chain.nextBlockSlot
+            guaranteedLately(hash) match
+              case Some(t) =>
+                logger.warn(s"work package ${hash.toHex.take(18)} refused before refine: already guaranteed at slot $t")
+                telemetry.foreach(_.duplicateWorkPackage(ev, coreIndex, hash))
+              case None =>
+                precheck(wp, coreIndex, slot) match
+                  case Left(why) =>
+                    logger.warn(s"work package ${hash.toHex.take(18)} refused before refine: $why")
+                    failed(ev, why)
+                  case Right(anchorState) =>
+                    handedOn = refineAndGuarantee(
+                      coreIndex, wp, extrinsicData, importSegments, justifications, segmentRootLookup, anchorState, authorized, ev, release
+                    )
+          finally if !handedOn then release()
+        }
+      catch
+        case e: Throwable =>
+          release()
+          throw e
 
   /** GP §guaranteeing: everything that can be judged before refining. The work-package limits and the guarantee
     * extrinsic's refine-independent rules (authorizer in the pool, anchors) against the head, that one of our keys is
@@ -914,8 +949,9 @@ final class GuarantorService(
       segmentRootLookup: Map[Hash, Hash],
       lookup: StateHistoricalLookup,
       authorized: Option[io.forge.jam.protocol.refine.IsAuthorizedResult],
-      ev: Ev
-  ): Unit =
+      ev: Ev,
+      done: () => Unit
+  ): Boolean =
     val computed: Either[Any, ComputedReport] =
       try
         val auth: Either[Any, io.forge.jam.protocol.refine.IsAuthorizedResult] = authorized match
@@ -943,6 +979,7 @@ final class GuarantorService(
       case Left(err) =>
         logger.warn(s"work package refused: $err")
         failed(ev, String.valueOf(err))
+        false
       case Right(computed) =>
         reportBuilt(ev, computed)
         storeShards(computed)
@@ -950,15 +987,19 @@ final class GuarantorService(
           case None =>
             logger.warn(s"work package refused: no key of ours is assigned to core $coreIndex any more after refining")
             failed(ev, s"no key of ours is assigned to core $coreIndex any more after refining")
+            false
           case Some(slot) =>
-            try coSignPool.execute(() =>
+            try
+              coSignPool.execute(() =>
                 try signAndDistribute(computed, slot, ev)
                 catch
                   case e: Exception =>
                     logger.error("guaranteeing failed", e)
                     failed(ev, s"failed here: ${e.getMessage}")
+                finally done()
               )
-            catch case _: java.util.concurrent.RejectedExecutionException => () // shutting down
+              true
+            catch case _: java.util.concurrent.RejectedExecutionException => false // shutting down
 
   private def reportBuilt(ev: Ev, computed: ComputedReport): Unit =
     telemetry.foreach { t =>
@@ -1121,6 +1162,23 @@ final class GuarantorService(
         }
 
   private def respondCoSign(stream: MessageStream, header: Array[Byte], bundleBytes: Array[Byte], shared: Ev): Unit =
+    val request =
+      Hashing.blake2b256(Hashing.blake2b256(header).bytes.toArray ++ Hashing.blake2b256(bundleBytes).bytes.toArray)
+    coSignedLately(request) match
+      case Some(answer) =>
+        logger.debug(s"CE134: the same bundle was co-signed lately; sending that answer again")
+        stream.send(answer)
+        stream.finish()
+        telemetry.foreach(_.workReportSignatureSent(shared))
+      case None => refineAndCoSign(stream, header, bundleBytes, shared, request)
+
+  private def refineAndCoSign(
+      stream: MessageStream,
+      header: Array[Byte],
+      bundleBytes: Array[Byte],
+      shared: Ev,
+      request: Hash
+  ): Unit =
     val decoded = for
       h <- GuarantorService.decodeSharingHeader(header)
       _ <- Either.cond(
@@ -1139,7 +1197,7 @@ final class GuarantorService(
         received(shared, coreIndex, bundle.workPackage)
         telemetry.foreach(_.extrinsicDataReceived(shared))
         onceAnchored(bundle.workPackage, bundleBytes.length.toLong, RefinePool.Priority.CoSign) {
-          try coSign(stream, coreIndex, lookup, bundle, shared)
+          try coSign(stream, coreIndex, lookup, bundle, shared, request)
           catch
             case e: Exception =>
               logger.error("CE134 handling failed", e)
@@ -1152,7 +1210,8 @@ final class GuarantorService(
       coreIndex: Int,
       lookup: Map[Hash, Hash],
       bundle: WorkPackageBundle,
-      shared: Ev
+      shared: Ev,
+      request: Hash
   ): Unit =
     val slot = chain.nextBlockSlot
     val lastOfPrevious = slot / chain.config.rotationPeriod * chain.config.rotationPeriod - 1
@@ -1209,7 +1268,9 @@ final class GuarantorService(
           val (_, keys) = held
             .find((_, k) => ownNetworkKey.exists(java.util.Arrays.equals(_, k.ed25519Public)))
             .getOrElse(held.minBy(_._1))
-          stream.send(reportHash.bytes ++ Ed25519ZebraWrapper.sign(keys.ed25519Secret, message))
+          val answer: Array[Byte] = reportHash.bytes ++ Ed25519ZebraWrapper.sign(keys.ed25519Secret, message)
+          coSigned.put(request, (slot, answer))
+          stream.send(answer)
           stream.finish()
           telemetry.foreach(_.workReportSignatureSent(shared))
           logger.info(s"CE134: co-signed report ${reportHash.toHex.take(18)}")

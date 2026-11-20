@@ -93,6 +93,115 @@ class JamnpWireSpec extends AnyFunSuite with Matchers:
     GuarantorService.decodeSharingHeader(bytes.dropRight(1)).isLeft shouldBe true
   }
 
+  private val polkajamGuarantee: Array[Byte] =
+    ("93169700" + "02" +
+      "0400" + "a56194a05ea8cca86665a40f2932d70e06dfb281d60e61737371df5c81fbaa05" +
+      "d30c6c4bc971c8d590b1ff7cd443d67355d425e81f37736632b3ef6ecd292a06" +
+      "0500" + "70dbfb34f2ae2af53366a6372b5a4bf45f4c53566a7dc138d918559dd0f1baf3" +
+      "83645191303b7bbf443a88b1612dcbf0bd32d871ee3b30ea3bfd4da7072cd606")
+      .grouped(2)
+      .map(Integer.parseInt(_, 16).toByte)
+      .toArray
+
+  test("JAMNP-S: CE 145 guarantee is slot ++ len ++ [validator index ++ signature], as polkajam sends it") {
+    polkajamGuarantee.length shouldBe 137
+    val (slot, signed) = JudgmentWire.decodeGuarantee(polkajamGuarantee).get
+    slot shouldBe 9901715L
+    signed.map(_._1) shouldBe List(4, 5)
+    signed.map(_._2.toSeq) shouldBe List(polkajamGuarantee.slice(7, 71).toSeq, polkajamGuarantee.slice(73, 137).toSeq)
+    JudgmentWire.encodeGuarantee(slot, signed).map(_.toSeq) shouldBe Some(polkajamGuarantee.toSeq)
+  }
+
+  test("JAMNP-S: a CE 145 guarantee carries two or three signatures and nothing else") {
+    val sig = Array.fill[Byte](64)(7)
+    def signers(n: Int) = (0 until n).toList.map(_ -> sig)
+    def wire(count: Int, entries: Int) =
+      Array[Byte](5, 0, 0, 0, count.toByte) ++ (0 until entries).flatMap(i => Array[Byte](i.toByte, 0) ++ sig)
+    JudgmentWire.encodeGuarantee(5L, signers(1)) shouldBe None
+    JudgmentWire.encodeGuarantee(5L, signers(4)) shouldBe None
+    val three = JudgmentWire.encodeGuarantee(5L, signers(3)).get
+    three.toSeq shouldBe wire(3, 3).toSeq
+    JudgmentWire.decodeGuarantee(three).map((slot, signed) => (slot, signed.map(_._1))) shouldBe Some((5L, List(0, 1, 2)))
+    JudgmentWire.decodeGuarantee(three :+ 0.toByte) shouldBe None
+    JudgmentWire.decodeGuarantee(three.dropRight(1)) shouldBe None
+    JudgmentWire.decodeGuarantee(wire(2, 3)) shouldBe None
+    JudgmentWire.decodeGuarantee(wire(1, 1)) shouldBe None
+    JudgmentWire.decodeGuarantee(wire(4, 4)) shouldBe None
+    JudgmentWire.decodeGuarantee(Array.emptyByteArray) shouldBe None
+    JudgmentWire.decodeGuarantee(JudgmentWire.encodeGuarantee(0xfffffff0L, signers(2)).get).map(_._1) shouldBe Some(0xfffffff0L)
+  }
+
+  test("JAMNP-S: on a CE 145 stream a guarantee follows a negative judgment and nothing else") {
+    import JudgmentWire.Part.*
+    def judgment(valid: Boolean) = new Array[Byte](JudgmentWire.JudgmentLength).updated(6, (if valid then 1 else 0).toByte)
+    val guarantee = polkajamGuarantee
+    def parts(messages: Array[Byte]*) =
+      val stream = new JudgmentWire.Stream
+      messages.toList.map(stream.next)
+    parts(judgment(valid = false), guarantee) shouldBe List(Judgment, Guarantee)
+    parts(judgment(valid = false)) shouldBe List(Judgment)
+    parts(judgment(valid = true)) shouldBe List(Judgment)
+    parts(judgment(valid = true), guarantee) shouldBe List(Judgment, Malformed)
+    parts(judgment(valid = false), guarantee, guarantee) shouldBe List(Judgment, Guarantee, Malformed)
+    parts(judgment(valid = false), guarantee.dropRight(1)) shouldBe List(Judgment, Malformed)
+    parts(guarantee) shouldBe List(Malformed)
+    parts(judgment(valid = false), judgment(valid = true), judgment(valid = false), guarantee) shouldBe
+      List(Judgment, Judgment, Judgment, Guarantee)
+  }
+
+  private def judgmentOf(v: Int, valid: Boolean): Array[Byte] =
+    Array[Byte](9, 0, 0, 0, v.toByte, 0, (if valid then 1 else 0).toByte) ++ Array.fill[Byte](32)(0x11) ++ Array.fill[Byte](64)(v.toByte)
+
+  test("JAMNP-S: CE 145 inline form puts the guarantee of a negative judgment after its validity byte") {
+    val negative = judgmentOf(3, valid = false)
+    val positive = judgmentOf(2, valid = true)
+    val inlined = JudgmentWire.encodeInline(negative, Some(polkajamGuarantee)).get
+    inlined.length shouldBe 103 + 137
+    inlined.toSeq shouldBe (negative.take(7) ++ polkajamGuarantee ++ negative.drop(7)).toSeq
+    JudgmentWire.encodeInline(positive, None).map(_.toSeq) shouldBe Some(positive.toSeq)
+    JudgmentWire.encodeInline(positive, Some(polkajamGuarantee)).map(_.toSeq) shouldBe Some(positive.toSeq)
+    JudgmentWire.encodeInline(negative, None) shouldBe None
+    JudgmentWire.encodeInline(negative, Some(polkajamGuarantee.dropRight(1))) shouldBe None
+  }
+
+  test("JAMNP-S: a CE 145 inline message is any number of judgments, each negative one with its guarantee") {
+    val negative = judgmentOf(3, valid = false)
+    val positive = judgmentOf(2, valid = true)
+    val other = judgmentOf(5, valid = true)
+    val inlined = JudgmentWire.encodeInline(negative, Some(polkajamGuarantee)).get
+    def decoded(message: Array[Byte]) =
+      JudgmentWire.decodeBatch(message).map(_.map((judgment, guarantee) => (judgment.toSeq, guarantee.map(_.toSeq))))
+    decoded(positive ++ inlined ++ other) shouldBe Some(
+      List((positive.toSeq, None), (negative.toSeq, Some(polkajamGuarantee.toSeq)), (other.toSeq, None))
+    )
+    decoded(inlined) shouldBe Some(List((negative.toSeq, Some(polkajamGuarantee.toSeq))))
+    decoded(positive) shouldBe Some(List((positive.toSeq, None)))
+    decoded(Array.emptyByteArray) shouldBe None
+    decoded(positive ++ inlined.dropRight(1)) shouldBe None
+    decoded(inlined :+ 0.toByte) shouldBe None
+    decoded(negative) shouldBe None
+    decoded(inlined.updated(7 + 4, 1.toByte)) shouldBe None
+    decoded(positive.updated(6, 2.toByte)) shouldBe None
+  }
+
+  test("JAMNP-S: on a CE 145 stream both forms are told apart") {
+    import JudgmentWire.Part.*
+    val negative = judgmentOf(3, valid = false)
+    val positive = judgmentOf(2, valid = true)
+    val inlined = JudgmentWire.encodeInline(negative, Some(polkajamGuarantee)).get
+    def parts(messages: Array[Byte]*) =
+      val stream = new JudgmentWire.Stream
+      messages.toList.map(stream.next)
+    parts(inlined) shouldBe List(Batch)
+    parts(positive ++ inlined ++ positive) shouldBe List(Batch)
+    parts(positive ++ positive) shouldBe List(Batch)
+    parts(positive) shouldBe List(Judgment)
+    parts(negative, polkajamGuarantee) shouldBe List(Judgment, Guarantee)
+    parts(negative, inlined) shouldBe List(Judgment, Batch)
+    parts(inlined, polkajamGuarantee) shouldBe List(Batch, Malformed)
+    parts(inlined.dropRight(1)) shouldBe List(Malformed)
+  }
+
   test("JAMNP-S: CE 141 assurance is anchor ++ bitfield ++ signature, without a validator index") {
     val a = AssuranceExtrinsic(
       anchor = hash(9),

@@ -291,8 +291,8 @@ abstract class InterpreterCore protected (
                 _compiledOffsetInt = offset
                 throw new RunDeadlinePassed(deadline)
           val static = compiled.blockCost
-          val blockCost = if static >= 0 then static else module.blockGasCostAt(compiled.pc.toInt)
-          if _gas < blockCost then
+          val blockCost = if static >= 0 then static else module.blockGasCostWithin(compiled.pc.toInt, _gas)
+          if blockCost == BlockGasModel.OverLimit || _gas < blockCost then
             outOfGas(compiled.pc)
             _compiledOffsetInt = offset
             return _interrupt
@@ -315,7 +315,7 @@ abstract class InterpreterCore protected (
         if compiled.isTerminator then
           _gasChargedFlag = false
         offset = next
-        if isStepTracing then
+        if isStepTracing && compiled.opcodeValue != InterpretedModule.DeferredOpcode then
           _compiledOffsetInt = offset
           _interrupt = InterruptKind.Step
           return _interrupt
@@ -330,9 +330,8 @@ abstract class InterpreterCore protected (
     else
       val blockStart = findStartOfBasicBlock(pc)
       blockStart.flatMap { start =>
-        compileBlock(start)
-        val p = targetAt(pc.value)
-        if p != TargetAbsent then Some(UInt(p & 0x7fffffff)) else None
+        val offset = module.compileEntry(start.toInt, pc.toInt, payable)
+        if offset >= 0 then Some(UInt(offset)) else None
       }
 
   private def isJumpTargetValid(pc: ProgramCounter): Boolean =
@@ -350,5 +349,11 @@ abstract class InterpreterCore protected (
   // ==========================================================================
 
   private def compileBlock(pc: ProgramCounter): Int =
-    val r = module.compileBlock(pc.toInt)
+    val r = module.compileBlock(pc.toInt, payable)
     if r < 0 then Step.Interrupt else r
+
+  private def payable: Long = if gasMeteringEnabled then _gas else Long.MaxValue
+
+  final def enterDeferred(pc: ProgramCounter): Int =
+    val r = module.decodeDeferred(pc.toInt)
+    if r < 0 then panic(pc) else r

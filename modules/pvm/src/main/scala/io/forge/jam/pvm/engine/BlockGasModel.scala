@@ -292,6 +292,15 @@ object BlockGasModel:
    * Any other `k` is still live, and its slot has not been reused.
    */
   def gasCostForBlock(code: Array[Byte], bitmask: Array[Byte], blockStart: Int): Long =
+    gasCostWithin(code, bitmask, blockStart, Long.MaxValue)
+
+  private val cyclesStepped = new java.util.concurrent.atomic.LongAdder()
+
+  def simulatedCycles: Long = cyclesStepped.sum()
+
+  final val OverLimit = -1L
+
+  def gasCostWithin(code: Array[Byte], bitmask: Array[Byte], blockStart: Int, limit: Long): Long =
     var iota = blockStart
     var iotaDone = false // iota == none
     var cycles = 0L
@@ -369,11 +378,15 @@ object BlockGasModel:
           units = units - en.units
           en.state = StateExecuting
         else if iotaDone && live == 0 then
+          cyclesStepped.add(cycles)
           return math.max(cycles - PipelineLatency, 1L)
         else
           d = MaxDecodePerCycle
           e = MaxStartPerCycle
           cycles += 1
+          if cycles - PipelineLatency > limit then
+            cyclesStepped.add(cycles)
+            return OverLimit
           var j = head
           while j < tail do
             val en = ring(j & RobRingMask)

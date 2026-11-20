@@ -1,6 +1,6 @@
 //! AArch64 single-pass emitter
 use crate::{
-    AluKind, Backend, CmpCond, InvLogicalKind, MinMaxKind, MulUpperKind, Op, ShiftKind, Width,
+    AluKind, Backend, CmpCond, EmitError, InvLogicalKind, MinMaxKind, MulUpperKind, Op, ShiftKind, Width,
     DJUMP_HALT, EXIT_FAULT, EXIT_HALT, EXIT_OOG, EXIT_PANIC, HOST_CONTINUE, HOST_OOG, HOST_OOG_NEXT,
     HOST_PANIC,
 };
@@ -758,7 +758,8 @@ impl Backend for Aarch64Backend {
         jump_table_ptr: *const u32,
         entry_offsets_ptr: *const u32,
         code_len: u32,
-    ) -> Option<(Vec<u8>, u32, Vec<u32>)> {
+        max_code_bytes: usize,
+    ) -> Result<(Vec<u8>, u32, Vec<u32>), EmitError> {
         let mut a = Asm::new().expect("dynasm assembler alloc");
 
         if ops.is_empty() {
@@ -770,9 +771,9 @@ impl Backend for Aarch64Backend {
                 ; movz w0, #EXIT_PANIC as u32
                 ; ret
             );
-            a.commit().ok()?;
-            let buf = a.finalize().ok()?;
-            return Some((buf.to_vec(), 0, Vec::new()));
+            a.commit().map_err(|_| EmitError::Assembler)?;
+            let buf = a.finalize().map_err(|_| EmitError::Assembler)?;
+            return Ok((buf.to_vec(), 0, Vec::new()));
         }
 
         let blocks = analyze_blocks(ops, jump_table);
@@ -834,6 +835,9 @@ impl Backend for Aarch64Backend {
 
             // --- block body --------------------------------------------------
             for pc in lo..hi {
+                if a.offset().0 > max_code_bytes {
+                    return Err(EmitError::TooLarge { emitted: a.offset().0 });
+                }
                 dynasm!(a
                     ; .arch aarch64
                     ; =>instr_labels[pc]
@@ -1602,6 +1606,9 @@ impl Backend for Aarch64Backend {
             let lo = blocks.block_lo[b];
             let hi = blocks.block_hi[b];
             for pc in (lo + 1)..hi {
+                if a.offset().0 > max_code_bytes {
+                    return Err(EmitError::TooLarge { emitted: a.offset().0 });
+                }
                 entry_offsets[pc] = a.offset().0 as u32;
                 emit_block_gas_charge(&mut a, block_gas[pc], pcs[pc], oog_label);
                 dynasm!(a; .arch aarch64; b =>instr_labels[pc]);
@@ -1662,9 +1669,12 @@ impl Backend for Aarch64Backend {
 
         emit_bounds_check_subroutine(&mut a, bounds_check_label);
 
-        a.commit().ok()?;
-        let buf = a.finalize().ok()?;
+        a.commit().map_err(|_| EmitError::Assembler)?;
+        let buf = a.finalize().map_err(|_| EmitError::Assembler)?;
+        if buf.len() > max_code_bytes {
+            return Err(EmitError::TooLarge { emitted: buf.len() });
+        }
         let code = buf.to_vec();
-        Some((code, ops.len() as u32, entry_offsets))
+        Ok((code, ops.len() as u32, entry_offsets))
     }
 }

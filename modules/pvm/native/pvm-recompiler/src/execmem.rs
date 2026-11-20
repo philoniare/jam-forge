@@ -63,6 +63,10 @@ impl ExecMem {
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr as *const u8
     }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
 }
 
 impl Drop for ExecMem {
