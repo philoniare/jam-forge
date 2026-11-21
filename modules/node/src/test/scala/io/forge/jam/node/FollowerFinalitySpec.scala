@@ -194,11 +194,19 @@ class FollowerFinalitySpec extends AnyFunSuite with Matchers with NodeFixture:
     }
   }
 
-  test("a node started without validator keys observes GRANDPA unless the operator asks for announced finality") {
-    Main.grandpaWanted(asked = false, validator = false, unsignedFinality = false) shouldBe true
-    Main.grandpaWanted(asked = false, validator = false, unsignedFinality = true) shouldBe false
-    Main.grandpaWanted(asked = true, validator = false, unsignedFinality = true) shouldBe true
-    Main.grandpaWanted(asked = false, validator = true, unsignedFinality = true) shouldBe true
+  test("with dummy finality, each new best block finalizes its parent and peers are not followed") {
+    val dir = Files.createTempDirectory("jam-dummy-finality")
+    val node = new JamNode(spec(), NodeConfig(dataDir = dir, slotTicking = false, dummyFinality = true)).start()
+    try
+      val author = new BlockAuthor(node.chain, devKeys)
+      for slot <- 1L to 3L do
+        val block = author.tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+        node.chain.importBlock(node.chain.encodeBlock(block)).isRight shouldBe true
+        eventually(s"slot ${slot - 1} to be finalized")(node.chain.finalized.slot == slot - 1)
+      node.chain.finalized.hash shouldBe node.chain.parentHash(node.chain.best.hash).get
+    finally
+      node.shutdown()
+      Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
   }
 
   test("a follower that observes GRANDPA asks for the justification of a block one ahead of its own finality") {

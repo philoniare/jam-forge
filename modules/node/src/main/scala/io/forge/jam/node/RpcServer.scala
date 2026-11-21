@@ -33,7 +33,6 @@ final class RpcServer(
   private val worker = threads.scheduled("jam-rpc")
   private val sessions = new ConcurrentHashMap[Channel, RpcSession]()
   private val origins = allowedOrigins.map(_.toLowerCase)
-  private val unsafeAllowed = Option(bind.getAddress).exists(RpcMethods.allowsUnsafe(methods, _))
   private val clients = new RpcServer.Clients(limits)
 
   private val refusing = new java.util.concurrent.atomic.AtomicInteger()
@@ -83,7 +82,7 @@ final class RpcServer(
       s"RPC (JIP-2, WebSocket) on ${bind.getHostString}:$boundPort, " +
         Option(bind.getAddress).map(RpcMethods.describe(methods, _)).getOrElse("safe methods only")
     )
-    if unsafeAllowed && !Option(bind.getAddress).exists(_.isLoopbackAddress) then
+    if methods == RpcMethods.Unsafe && !Option(bind.getAddress).exists(_.isLoopbackAddress) then
       logger.warn(
         s"the RPC on ${bind.getHostString} serves the unsafe methods (work-package submission, segment recovery) " +
           "to any client that can reach it"
@@ -144,7 +143,7 @@ final class RpcServer(
 
   private final class Connection(ch: Channel, address: java.net.InetAddress)
       extends SimpleChannelInboundHandler[TextWebSocketFrame]:
-    private val session = new RpcSession(send, unsafeAllowed)
+    private val session = new RpcSession(send, RpcMethods.allowsUnsafe(methods, address))
 
     private var queued = 0
     private var queuedBytes = 0L
@@ -231,8 +230,8 @@ object RpcMethods:
     val option = s"--rpc-methods ${methods.toString.toLowerCase}"
     if allowsUnsafe(methods, address) then s"all methods ($option)"
     else if methods == Auto then
-      s"safe methods only ($option: ${address.getHostAddress} is not a loopback address; " +
-        "--rpc-methods unsafe serves work-package and preimage submission and segment recovery as well)"
+      s"all methods to loopback clients, safe methods only to others ($option; " +
+        "--rpc-methods unsafe serves work-package and preimage submission and segment recovery to every client)"
     else s"safe methods only ($option)"
 
   def allowsUnsafe(methods: RpcMethods, address: java.net.InetAddress): Boolean = methods match

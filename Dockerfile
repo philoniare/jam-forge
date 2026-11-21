@@ -81,16 +81,13 @@ RUN groupadd --system --gid 10001 jam \
     && useradd --system --uid 10001 --gid jam --home-dir /data --no-create-home --shell /usr/sbin/nologin jam \
     && mkdir -p /data \
     && chown jam:jam /data
-# Node data (chain, keys, downloaded spec) lives in /data unless --data (or --temp) is given. It is a default the node
-# reads from JAM_DATA_DIR, not an entrypoint --data: the node refuses an option given twice.
-ENV JAM_DATA_DIR=/data
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/data
 VOLUME ["/data"]
 # JAMNP-S (QUIC); publish with -p 40000:40000/udp or run with --network host.
 EXPOSE 40000/udp
 # Numeric, so a runtime that requires a non-root user (Kubernetes runAsNonRoot) can tell it is one.
 USER 10001:10001
-# With the recompiler library named here guest code runs natively; --pvm-backend interpreter turns that off.
-# Metrics (--metrics-port N) listen on loopback unless --metrics-listen-ip 0.0.0.0 is given too.
+# Usage: <image> --chain toaster run [options]
 ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-Djam.pvm.recompiler.lib=/app/lib/libpvm_recompiler.so", "-jar", "/app/jam-node.jar"]
 
 # Stage 3: Runtime image (default target: the conformance fuzz target)

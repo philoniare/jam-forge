@@ -2,8 +2,6 @@ package io.forge.jam.node
 
 import java.net.{InetAddress, InetSocketAddress}
 import java.nio.file.{Files, Path, Paths}
-import java.nio.file.attribute.PosixFilePermissions
-import java.security.SecureRandom
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.JamBytes
@@ -12,97 +10,8 @@ import io.forge.jam.db.RocksDbMemory
 import io.forge.jam.network.NodeIdentity
 import io.forge.jam.pvm.PvmSettings
 
-/** CLI entry point:
-  * {{{
-  * jam-node (--data <data-dir> | --temp) [--spec <chain-spec.json or URL>] [--port N (default 40000)]
-  *          [--listen-ip IP (default 0.0.0.0)] [--external-ip IP]
-  *          [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
-  *          [--peer <64-hex-ed25519>@host:port ...]
-  *          [--author <validator-index> | --validator-seed <path>]
-  *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
-  *          [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
-  *          [--finality-peers N | --announced-finality] [--prune-history]
-  *          [--sync-from <header hash>[:<set id>]]   (join at this block, trusted, instead of replaying from genesis)
-  *          [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]
-  *                        [--rpc-methods safe|unsafe|auto (default auto)]]   (JIP-2 RPC over WebSocket)
-  *          [--metrics-port N [--metrics-listen-ip IP (default 127.0.0.1)]]   (GET /metrics and /health)
-  *          [--pvm-backend interpreter|recompiler]
-  *          [--fault-tamper-reports]   (testing only: guarantee wrong reports, to exercise disputes)
-  * jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
-  *          [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
-  * jam-node gen-keys
-  * jam-node list-keys (--validator-seed <hex or path> | --seed <hex> | --seed-file <path> | --author <index>)
-  * jam-node --version
-  * }}}
-  *
-  * `--version` prints the node's name and version (the build's) and exits. `gen-keys` prints a new random 32-byte
-  * validator seed and the session keys it derives (JIP-5: Ed25519, Bandersnatch, BLS) as JSON: written to a file, the
-  * seed is what `--validator-seed <file>` takes. `list-keys` prints the public keys a seed gives the node, read as the
-  * node reads it: `--validator-seed` (a path, or the hex itself) and `--author` give a validator's keys, `--seed` and
-  * `--seed-file` the network identity's Ed25519 key. Neither command creates a file or starts anything. Both take
-  * `--data`, which they ignore.
-  *
-  * `--listen-ip` is the address the QUIC listener binds to: 0.0.0.0 (the default) and :: take IPv4 and IPv6 peers
-  * where the machine has IPv6; any other address must be one of this machine's. `--external-ip` is the address peers
-  * reach the node at (behind NAT, the public one): reported as its endpoint (telemetry node information, the start-up
-  * log), and a validator whose on-chain metadata names another endpoint is warned. Both take IP addresses, not host
-  * names. Without `--data` the data directory is `JAM_DATA_DIR`'s, when that is set (the node image sets /data).
-  * `--temp` runs on a new temporary data directory, deleted when the node exits; it cannot be given with `--data`,
-  * and `JAM_DATA_DIR` is then not used. `--pvm-backend` chooses how guest code runs: `interpreter`, or `recompiler` (native code, which needs the
-  * recompiler library named by `-Djam.pvm.recompiler.lib`); without it the recompiler is used where it is available.
-  * `--metrics-port N` serves Prometheus metrics at `/metrics` and a JSON health check at `/health` (200 while the node
-  * follows the chain, 503 when it does not) on loopback, or on `--metrics-listen-ip`.
-  *
-  * With `--author i` the node's network identity is dev validator i's Ed25519
-  * key (JIP-5 trivial seed for i), as JAMNP-S expects of validators; peers then
-  * map the connection to validator index i (CE 131 proxying). `--seed` or
-  * `--seed-file` with it is refused: it would give the node another identity.
-  * An unknown option, an option without its value, or an argument that is no
-  * option is refused before anything is opened. `--seed` on the command line is
-  * visible in the process list (a warning says so): `--seed-file` is the way to
-  * keep it out. Native crypto
-  * libraries are looked up under `-Djam.base.dir` (default: the working
-  * directory); a missing one stops the node before it joins the network.
-  * `--rpc-allow-origin <origin>` (repeatable, e.g. `http://localhost:3000`) lets web pages from that origin use the
-  * RPC; a browser's handshake from any other origin is refused, one without an `Origin` (any other client) is not.
-  * `--rpc-methods` says whether the RPC serves its unsafe methods (work-package, bundle and preimage submission, and
-  * segment recovery, which make the node take in work or fetch from the network for the caller): `safe` refuses them
-  * with a JSON-RPC error, `unsafe` serves them, and `auto` (the default) serves them only when `--rpc-listen-ip` is a
-  * loopback address. Each client address may hold a few connections and make a bounded rate of requests; beyond
-  * them it is refused (a 429 handshake, a JSON-RPC error), not cut off.
-  * `--submit-port N` opens the loopback preimage endpoint (`POST /preimage/<service-id>`).
-  * `--seed-file` keeps the network identity across restarts: the seed is read from the file, or generated and
-  * written there (owner-only) when the file does not exist. `--prune-history` deletes finalized blocks once they
-  * are more than a lookup-anchor age behind finality.
-  *
-  * `--validator-seed <path>` runs the node as the validator whose keys derive (JIP-5) from the 32-byte hex seed in
-  * that file, generated there (owner-only) when the file does not exist. Its Ed25519 key is also the network
-  * identity, so it cannot be combined with `--seed` or `--seed-file`. `--print-keys` prints the public keys of
-  * `--author` or `--validator-seed` as JSON and exits without starting the node.
-  *
-  * `--bandersnatch-key` and `--ed25519-key` give the validator's Bandersnatch and Ed25519 keys: 32-byte secret
-  * seeds (JIP-5 `bandersnatch_secret_seed` and `ed25519_secret_seed`), each as hex or as the path of a file holding
-  * the hex (a file keeps it out of the process list). They replace those keys of `--author` or `--validator-seed`;
-  * without either, the keys not given come from `<data-dir>/validator.seed`, generated on first start. The Ed25519
-  * key is also the node's network identity.
-  *
-  * A node with validator keys also votes in GRANDPA, as if `--grandpa` were given.
-  *
-  * `--sync-from <header hash>:<set id>` also names the GRANDPA voter set id in force at the checkpoint, which the
-  * voter then uses. Without it the id is learned from the first commit that proves it.
-  *
-  * `--spec` may be an http(s) URL: the spec is downloaded at every start into `<data-dir>/spec.json`, and the copy
-  * there is used when the download fails. Without `--spec` the node joins the public jamtoaster testnet.
-  */
+/** CLI entry point. */
 object Main extends LazyLogging:
-
-  /** Whether the node runs GRANDPA. A validator votes. A node without validator keys observes: it finalizes what a
-    * justification signed by a supermajority of the voter set proves (CE 130, CE 153) and nothing else. Only an
-    * operator who asks for it gets finality from unsigned UP 0 announcements instead: `--announced-finality` (a
-    * quorum of the current validators' connections) or `--finality-peers N` (any N peers).
-    */
-  private[node] def grandpaWanted(asked: Boolean, validator: Boolean, unsignedFinality: Boolean): Boolean =
-    asked || validator || !unsignedFinality
 
   def main(args: Array[String]): Unit =
     try run(args)
@@ -118,49 +27,69 @@ object Main extends LazyLogging:
     BandersnatchVrf.baseDir.install(BandersnatchVrf.baseDir.fromSystemProperties)
 
   private def run(args: Array[String]): Unit =
-    // Nothing is opened, loaded or started before the command line is known to be whole.
-    val commandLine = parseCommandLine(args.toList).fold(fail, identity)
-    if commandLine.flags.contains("--help") then
-      println(Usage)
-      return
-    if commandLine.flags.contains("--version") then
-      println(VersionText)
-      return
-    // Before any PVM class is loaded: the execution mode is read once, when ExecutionMode is first used.
-    systemProperties(commandLine).foreach((name, value) => System.setProperty(name, value))
+    val cl = parseCommandLine(args.toList).fold(usageError, identity)
+    cl.command match
+      case None if cl.flags.contains("--help") => println(Usage)
+      case None if cl.flags.contains("--version") => println(VersionText)
+      case None if cl.flags.contains("-V") => println(ShortVersionText)
+      case None => usageError(s"a command is required\n\n$Usage")
+      case Some(Help) => println(cl.arguments.headOption.flatMap(CommandUsage.get).getOrElse(Usage))
+      case Some(command) if cl.flags.contains("--help") => println(CommandUsage(command))
+      case Some(GenKeys) => genKeys(cl)
+      case Some(ListKeys) => listKeys(cl)
+      case Some(DumpSpec) => dumpSpec(cl)
+      case Some(_) => runNode(cl)
+
+  private def chainOf(cl: CommandLine): (String, ChainSpec) =
+    val chain = cl.global.getOrElse("chain", if cl.options.contains("dev-validator") then "dev" else Chains.Default)
+    val json = Chains.resolve(chain).fold(fail, identity)
+    (json, ChainSpec.fromJson(json).fold(e => fail(s"Error loading chain spec $chain: $e"), identity))
+
+  private def configDirOf(cl: CommandLine, chainId: String): Path =
+    cl.global.get("config-path").map(Paths.get(_)).getOrElse(defaultBase(config = true)).resolve(chainId)
+
+  private def genKeys(cl: CommandLine): Unit =
+    val (_, spec) = chainOf(cl)
+    val file = Keystore.fileFor(Keystore.dir(configDirOf(cl, spec.id)), cl.arguments.headOption, java.time.LocalDateTime.now())
+    val seed = Keystore.create(file).fold(fail, identity)
+    Keystore.describe(seed).foreach(println)
+
+  private def listKeys(cl: CommandLine): Unit =
+    val (_, spec) = chainOf(cl)
+    val (seeds, errors) = Keystore.load(Keystore.dir(configDirOf(cl, spec.id)), required = true)
+    for seed <- seeds; line <- Keystore.describe(seed) do println(s"${seed.path}: $line")
+    if errors.nonEmpty then
+      errors.foreach(e => System.err.println(e))
+      fail("Error: Failed to load keys")
+
+  private def dumpSpec(cl: CommandLine): Unit =
+    val (json, _) = chainOf(cl)
+    Chains.write(json, Paths.get(cl.arguments.head)).fold(fail, identity)
+
+  private def runNode(cl: CommandLine): Unit =
+    val flags = cl.flags
+    val opts = cl.options
+    systemProperties(cl).foreach((name, value) => System.setProperty(name, value))
     installProcessSettings()
-    commandLine.command match
-      case Some(GenKeys) =>
-        println(genKeys())
-        System.err.println(
-          "keep the seed secret: write it to a file only you can read (chmod 600) and start with --validator-seed <file>"
-        )
-        return
-      case Some(ListKeys) =>
-        println(listKeys(commandLine).fold(fail, identity))
-        return
-      case _ => ()
-    val peerArgs = commandLine.repeated("--peer")
-    val rpcOrigins = commandLine.repeated("--rpc-allow-origin")
-    val flags = commandLine.flags
-    val opts = commandLine.options
-    if opts.get("pvm-backend").contains("recompiler") && !io.forge.jam.pvm.ExecutionMode.nativeAvailable then
+    if opts.get("pvm-backend").contains("compiler") && !io.forge.jam.pvm.ExecutionMode.nativeAvailable then
       fail(
-        "--pvm-backend recompiler: the recompiler library is not available; name it with " +
-          "-Djam.pvm.recompiler.lib=<path to libpvm_recompiler> (it runs on Linux and macOS, x86-64 and AArch64), " +
+        "--pvm-backend compiler: the recompiler library is not available; name it with " +
+          "-Djam.pvm.recompiler.lib=<path to libpvm_recompiler>, " +
           "or use --pvm-backend interpreter"
       )
-    val listenIp = opts.get("listen-ip").map(v => parseIp("--listen-ip", v).fold(fail, identity)).getOrElse(JamNode.AnyAddress)
+    val listenIp = opts.get("listen-ip").map(v => parseIp("--listen-ip", v).fold(fail, identity)).getOrElse(AnyAddress)
     if !listenIp.isAnyLocalAddress && !isOwnAddress(listenIp) then
-      fail(s"--listen-ip ${listenIp.getHostAddress} is not an address of this machine (0.0.0.0 or :: listens on all of them)")
-    val externalIp = opts.get("external-ip").map(v => parseIp("--external-ip", v).fold(fail, identity))
-    // A secret on the command line is in the process list, readable by every user of the machine.
-    if opts.contains("seed") then
-      System.err.println("warning: --seed is visible in the process list to every user of this machine; give --seed-file <path> instead")
+      fail(s"--listen-ip ${listenIp.getHostAddress} is not an address of this machine (:: or 0.0.0.0 listens on all of them)")
 
-    // A temporary data directory is deleted once the node has stopped, by the same hook, so never under it.
+    val (_, loadedSpec) = chainOf(cl)
+    if loadedSpec.genesisValidatorKeys._1.isEmpty then
+      fail(s"chain ${loadedSpec.id} has no validators in its genesis state: it cannot be run (choose another with --chain)")
+    val configDir = configDirOf(cl, loadedSpec.id)
+
     val temporaryData = Option.when(flags.contains("--temp"))(newTempDataDir())
-    val dataDirGiven = temporaryData.orElse(dataDirOf(commandLine, sys.env.get))
+    val dataDir = temporaryData.getOrElse(
+      opts.get("data-path").map(Paths.get(_)).getOrElse(defaultBase(config = false)).resolve(loadedSpec.id)
+    )
     val running = new java.util.concurrent.atomic.AtomicReference[JamNode]()
     Runtime.getRuntime.addShutdownHook(
       new Thread(
@@ -171,72 +100,84 @@ object Main extends LazyLogging:
         "jam-shutdown"
       )
     )
-    temporaryData.foreach(d => logger.info(s"data in the temporary directory $d, deleted on exit (--temp)"))
+    logger.info(s"Chain ID: ${loadedSpec.id}")
+    logger.info(s"Config dir: $configDir")
+    logger.info(s"Data dir: $dataDir${if temporaryData.isDefined then " (--temp: deleted on exit)" else ""}")
 
-    // Derive validator keys first: this loads the native Bandersnatch and
-    // Ed25519 libraries, so a missing library fails here, not after start.
-    // With only some keys given, the others come from a seed kept in the data directory.
-    val givenKeys = List("bandersnatch-key", "ed25519-key").filter(opts.contains)
-    val validatorSeed = opts.get("validator-seed").orElse {
-      if givenKeys.nonEmpty && !opts.contains("author") then
-        if opts.contains("seed") || opts.contains("seed-file") then
-          fail(s"--${givenKeys.head} makes this node a validator, whose network identity is its Ed25519 key: drop --seed/--seed-file")
-        val dir = dataDirGiven.getOrElse(fail(s"--${givenKeys.head} needs --data <dir> (or $DataDirEnv, or --temp) to keep the node's other keys in"))
-        Some(dir.resolve("validator.seed").toString)
-      else None
+    val keysDir = Keystore.dir(configDir)
+    val (stored, unreadable) = Keystore.load(keysDir, required = false)
+    val named = cl.repeated("key-seed-file").map(p => Keystore.read(Paths.get(p)))
+    val loadErrors = unreadable ++ named.collect { case Left(e) => e }
+    if loadErrors.nonEmpty then
+      loadErrors.foreach(e => System.err.println(e))
+      fail("Error: Failed to load keys")
+    val seeds = stored ++ named.collect { case Right(s) => s }
+    seeds.foreach(s => warnIfExposed(s.path))
+
+    val devIndex = opts.get("dev-validator").map(_.toInt)
+    devIndex.foreach { i =>
+      val validators = loadedSpec.genesisValidatorKeys._1.size
+      if i >= validators then fail(s"--dev-validator $i: the chain's genesis state has $validators validators")
     }
-    val authorKeys = opts
-      .get("author")
-      .map(idx => ValidatorKeySet.dev(idx.toInt))
-      .orElse(validatorSeed.map(p => ValidatorKeySet.fromSeed(loadOrCreateSeed(Paths.get(p)))))
+    val peerSeed = opts.get("peer-id").filter(_ => devIndex.isEmpty).map { name =>
+      val key = NodeIdentity.fromAltName(name).get
+      seeds.find(s => java.util.Arrays.equals(s.keys.ed25519Public, key)).getOrElse(fail(s"Error: Don't have secret key for peer ID $name"))
+    }
+    val ownKeys = List("bandersnatch-key", "ed25519-key").filter(opts.contains)
+    val validator = opts.get("mode") match
+      case Some(mode) => mode == "validator"
+      case None       => devIndex.isDefined || peerSeed.isDefined || ownKeys.nonEmpty
+    val baseKeys: Option[ValidatorKeySet] =
+      if !validator then None
+      else
+        devIndex.map(ValidatorKeySet.dev).orElse(peerSeed.map(_.keys)).orElse {
+          seeds match
+            case Nil         => None
+            case List(only)  => Some(only.keys)
+            case several     =>
+              fail(s"${several.size} seeds in $keysDir and --key-seed-file: name the validator's with --peer-id")
+        }
+    if ownKeys.nonEmpty && baseKeys.isEmpty then
+      fail(
+        s"--${ownKeys.head} replaces a key of the validator's seed: give --peer-id or --dev-validator, or keep the seed in " +
+          s"$keysDir (gen-keys)"
+      )
+    val authorKeys = baseKeys
       .map(keys =>
         opts.get("bandersnatch-key").fold(keys)(k => ValidatorKeySet.withBandersnatchSeed(keys, readKey("bandersnatch-key", k)))
       )
       .map(keys => opts.get("ed25519-key").fold(keys)(k => ValidatorKeySet.withEd25519Seed(keys, readKey("ed25519-key", k))))
+    for keys <- authorKeys; seed <- peerSeed if !java.util.Arrays.equals(keys.ed25519Public, seed.keys.ed25519Public) do
+      fail("--ed25519-key gives the validator another network identity than --peer-id names: give one of them")
+    if validator && authorKeys.isEmpty then
+      logger.warn(s"validator mode, but no validator key: no seed in $keysDir and none named; running without duties")
 
-    if flags.contains("--print-keys") then
-      authorKeys match
-        case Some(k) => println(publicKeysJson(k)); return
-        case None    => fail("--print-keys needs --author, --validator-seed, --bandersnatch-key or --ed25519-key")
+    val identitySeed = authorKeys.map(_.ed25519Secret).orElse(peerSeed.map(_.keys.ed25519Secret))
+    val devEndpoint = devIndex.map(i =>
+      loadedSpec.genesisValidatorEndpoints.lift(i).flatten.getOrElse(fail(s"--dev-validator $i: the genesis state names no endpoint for it"))
+    )
+    val externalIp = devEndpoint.map(_.getAddress).orElse(opts.get("external-ip").map(v => parseIp("--external-ip", v).fold(fail, identity)))
+    val listenPort = devEndpoint.map(_.getPort).orElse(opts.get("port").map(_.toInt)).getOrElse(0)
 
-    val specPath = opts.getOrElse("spec", DefaultSpecUrl)
-    val dataDir = dataDirGiven.getOrElse(fail(s"--data <dir> is required (or $DataDirEnv=<dir>, or --temp for a temporary one)"))
-
-    val loadedSpec = ChainSpec.load(localSpec(specPath, dataDir)) match
-      case Right(s)  => s
-      case Left(err) => fail(s"failed to load chain spec: $err")
-
-    val extraBootnodes = peerArgs.map(Bootnode.parse)
-    val spec =
-      if extraBootnodes.isEmpty then loadedSpec
-      else loadedSpec.copy(bootnodes = loadedSpec.bootnodes ++ extraBootnodes)
-
+    val bootnodes = cl.repeated("bootnode").map(Bootnode.parse)
+    val spec = if bootnodes.isEmpty then loadedSpec else loadedSpec.copy(bootnodes = loadedSpec.bootnodes ++ bootnodes)
+    val finality = finalityOf(cl)
     val syncFrom = opts.get("sync-from").map(v => parseSyncFrom(v).fold(fail, identity))
     val config = NodeConfig(
       dataDir = dataDir,
-      listenPort = opts.get("port").map(_.toInt).getOrElse(DefaultPort),
+      listenPort = listenPort,
       listenIp = listenIp,
       externalIp = externalIp,
-      ed25519Seed = opts
-        .get("seed")
-        .map(s => JamBytes.fromHexUnsafe(s.stripPrefix("0x")).toArray)
-        .orElse(opts.get("seed-file").map(p => loadOrCreateSeed(Paths.get(p))))
-        .orElse(authorKeys.map(_.ed25519Secret)),
-      eraStartSeconds = opts
-        .get("era-start")
-        .map(_.toLong)
-        .getOrElse(SlotClock.JamCommonEraSeconds),
+      ed25519Seed = identitySeed,
+      eraStartSeconds = opts.get("era-start").map(_.toLong).getOrElse(SlotClock.JamCommonEraSeconds),
       reusePort = flags.contains("--reuse-port"),
-      grandpa = grandpaWanted(
-        asked = flags.contains("--grandpa"),
-        validator = authorKeys.nonEmpty,
-        unsignedFinality = opts.contains("finality-peers") || flags.contains("--announced-finality")
-      ),
+      grandpa = finality == Finality.Grandpa,
+      dummyFinality = finality == Finality.Dummy,
       pruneFinalizedHistory = flags.contains("--prune-history"),
       tamperReports = flags.contains("--fault-tamper-reports"),
       inlineJudgmentGuarantee = flags.contains("--inline-judgment-guarantee"),
       finalityPeers = opts.get("finality-peers").map(_.toInt),
-      telemetry = opts.get("telemetry").map(parseHostPort),
+      telemetry = opts.get("telemetry").map(parseHostPort(_).fold(fail, a => new InetSocketAddress(a.getHostString, a.getPort))),
       submitPort = opts.get("submit-port").map(_.toInt),
       syncFrom = syncFrom.map(_._1),
       syncFromSetId = syncFrom.flatMap(_._2)
@@ -246,6 +187,7 @@ object Main extends LazyLogging:
     catch case e: UnsupportedOperationException => fail(e.getMessage)
     val node = new JamNode(spec, config).start()
     running.set(node)
+    logger.info(s"This node is ${node.identity.altName}@${externalIp.getOrElse(InetAddress.getLoopbackAddress).getHostAddress}:${node.listenPort}")
     authorKeys.foreach { k =>
       node.enableAuthoring(Seq(k))
       node.enableGuaranteeing(Seq(k))
@@ -254,10 +196,9 @@ object Main extends LazyLogging:
     }
     if config.grandpa then node.enableGrandpa(authorKeys)
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
-    val rpcMethods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
-    opts.get("rpc-port").foreach(p =>
-      node.enableRpc(p.toInt, opts.getOrElse("rpc-listen-ip", "127.0.0.1"), rpcOrigins, rpcMethods)
-    )
+    if flags.contains("--rpc") || (!flags.contains("--no-rpc") && !validator) then
+      val methods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
+      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), opts.getOrElse("rpc-listen-ip", "::"), cl.repeated("rpc-allow-origin"), methods)
     opts.get("metrics-port").foreach { p =>
       val host = opts.get("metrics-listen-ip").map(v => parseIp("--metrics-listen-ip", v).fold(fail, identity).getHostAddress)
       node.enableMetrics(p.toInt, host.getOrElse("127.0.0.1"))
@@ -273,7 +214,29 @@ object Main extends LazyLogging:
 
     Thread.currentThread().join()
 
-  /** `--sync-from <header hash>[:<set id>]`: the checkpoint's header hash and the GRANDPA set id, when given. */
+  enum Finality:
+    case Dummy, Grandpa, Peers
+
+  private[node] def finalityOf(cl: CommandLine): Finality =
+    cl.options.get("finality-mode") match
+      case Some("grandpa") => Finality.Grandpa
+      case Some(_)         => Finality.Dummy
+      case None =>
+        if cl.options.contains("finality-peers") || cl.flags.contains("--announced-finality") then Finality.Peers
+        else Finality.Dummy
+
+  private[node] def defaultBase(
+      config: Boolean,
+      env: String => Option[String] = sys.env.get,
+      home: String = sys.props.getOrElse("user.home", ".")
+  ): Path =
+    val base =
+      if config then env("XDG_CONFIG_HOME").filter(_.nonEmpty).map(Paths.get(_)).getOrElse(Paths.get(home, ".config"))
+      else env("XDG_DATA_HOME").filter(_.nonEmpty).map(Paths.get(_)).getOrElse(Paths.get(home, ".local", "share"))
+    base.resolve(AppDirName)
+
+  private val AppDirName = "jam-forge"
+
   private[node] def parseSyncFrom(value: String): Either[String, (io.forge.jam.core.primitives.Hash, Option[Long])] =
     val (hex, setId) = value.indexOf(':') match
       case -1 => (value, None)
@@ -291,66 +254,8 @@ object Main extends LazyLogging:
               case Some(n) => Right((hash, Some(n)))
               case None => Left(s"--sync-from: the GRANDPA set id after ':' must be a non-negative integer, got '$id'")
 
-  /** A validator's public keys and the JAMNP-S peer name its Ed25519 key gives, as JSON; with the seed they derive
-    * from first, when given.
-    */
-  private def publicKeysJson(k: ValidatorKeySet, seed: Option[Array[Byte]] = None): String =
-    jsonObject(
-      seed.map(s => "seed" -> hex(s)).toList ++ List(
-        "bandersnatch" -> hex(k.bandersnatchPublic),
-        "ed25519" -> hex(k.ed25519Public),
-        "bls" -> hex(k.blsPublic),
-        "peer_id" -> NodeIdentity.altName(k.ed25519Public)
-      )
-    )
-
-  /** The network identity an Ed25519 secret key (`--seed`, `--seed-file`) gives: its public key and peer name. */
-  private def networkKeysJson(secret: Array[Byte]): String =
-    val public = NodeIdentity.fromSeed(secret).publicKeyBytes
-    jsonObject(List("ed25519" -> hex(public), "peer_id" -> NodeIdentity.altName(public)))
-
-  private def hex(b: Array[Byte]): String = "0x" + JamBytes(b).toHex
-
-  private def jsonObject(fields: List[(String, String)]): String =
-    fields.map((name, value) => s"""  "$name": "$value"""").mkString("{\n", ",\n", "\n}")
-
-  /** `gen-keys`: a new random 32-byte validator seed and the session keys it derives (JIP-5), as JSON. */
-  private[node] def genKeys(): String =
-    val seed = new Array[Byte](32)
-    new SecureRandom().nextBytes(seed)
-    publicKeysJson(ValidatorKeySet.fromSeed(seed), Some(seed))
-
-  /** `list-keys`: the public keys the one key source on the command line gives the node, as JSON. Reads only: a
-    * missing seed file is an error, not made.
-    */
-  private[node] def listKeys(cl: CommandLine): Either[String, String] =
-    val o = cl.options
-    o.get("validator-seed").map(v => readSeed("--validator-seed", v, hexAllowed = true).map(s => publicKeysJson(ValidatorKeySet.fromSeed(s))))
-      .orElse(o.get("author").map(i => Right(publicKeysJson(ValidatorKeySet.dev(i.toInt)))))
-      .orElse(o.get("seed").map(v => readSeed("--seed", v, hexAllowed = true).map(networkKeysJson)))
-      .orElse(o.get("seed-file").map(p => readSeed("--seed-file", p, hexAllowed = false).map(networkKeysJson)))
-      .getOrElse(Left(s"$ListKeys needs one of $ListKeysSources"))
-
-  /** A 32-byte seed given as hex (when `hexAllowed`) or as the path of a file holding the hex. */
-  private def readSeed(option: String, hexOrPath: String, hexAllowed: Boolean): Either[String, Array[Byte]] =
-    if hexAllowed && hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then
-      System.err.println(s"warning: $option given as hex is visible in the process list; give the path of a file instead")
-      Right(JamBytes.fromHexUnsafe(hexOrPath.stripPrefix("0x")).toArray)
-    else
-      val path = Paths.get(hexOrPath)
-      if !Files.isRegularFile(path) then Left(s"$option $path: no such file (expected a 32-byte hex seed or the path of one)")
-      else
-        warnIfExposed(path)
-        val text = Files.readString(path).trim.stripPrefix("0x")
-        JamBytes.fromHex(text).toOption.map(_.toArray) match
-          case None => Left(s"$path: not hex (expected a 32-byte hex seed)")
-          case Some(seed) if seed.length != 32 => Left(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
-          case Some(seed) => Right(seed)
-
-  /** A new, empty data directory for `--temp`, readable by its owner only. */
   private[node] def newTempDataDir(): Path = Files.createTempDirectory("jam-node-")
 
-  /** Delete `dir` and everything in it, not following links out of it; nothing when it is gone already. */
   private[node] def deleteTree(dir: Path): Unit =
     if Files.exists(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS) then
       val walk = Files.walk(dir)
@@ -361,20 +266,16 @@ object Main extends LazyLogging:
         }
       finally walk.close()
 
-  /** The node's name and version, as `--version` prints them. */
-  private[node] val VersionText: String =
-    s"${BuildInfo.name} ${BuildInfo.version}${BuildInfo.gitSha.fold("")(sha => s" ($sha)")} " +
-      s"(Gray Paper ${JamNode.GrayPaperVersion})"
+  private[node] val ShortVersionText: String = s"${BuildInfo.name} ${BuildInfo.version}"
 
-  /** The system properties the command line sets, before anything reads them: `--pvm-backend`'s execution mode. */
+  private[node] val VersionText: String =
+    s"$ShortVersionText${BuildInfo.gitSha.fold("")(sha => s" ($sha)")}\nGP ${JamNode.GrayPaperVersion}"
+
   private[node] def systemProperties(cl: CommandLine): Map[String, String] =
     cl.options.get("pvm-backend").map { backend =>
       PvmSettings.ExecutionModeProperty -> (if backend == "interpreter" then "interpreted" else "recompiled")
     }.toMap
 
-  /** An IP address literal: IPv4 dotted decimal, or IPv6 (in brackets or not; an IPv4-mapped one is the IPv4
-    * address). Never a host name, which would need a lookup. A multicast address is refused.
-    */
   private[node] def parseIp(option: String, value: String): Either[String, InetAddress] =
     val dotted = """(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})""".r
     val literal = value.stripPrefix("[").stripSuffix("]")
@@ -386,52 +287,18 @@ object Main extends LazyLogging:
         catch case _: IllegalArgumentException => None
       case _ => None
     parsed match
-      case None => Left(s"$option takes an IPv4 or IPv6 address (such as 0.0.0.0, 192.0.2.1, :: or 2001:db8::1), not '$value'")
+      case None => Left(s"$option takes an IPv4 or IPv6 address (such as ::, 0.0.0.0, 192.0.2.1 or 2001:db8::1), not '$value'")
       case Some(ip) if ip.isMulticastAddress => Left(s"$option: $value is a multicast address")
       case Some(ip) => Right(ip)
 
-  /** Whether `ip` is an address of one of this machine's interfaces. */
   private def isOwnAddress(ip: InetAddress): Boolean =
     ip.isLoopbackAddress || (try java.net.NetworkInterface.getByInetAddress(ip) != null
     catch case _: java.io.IOException => false)
 
-  /** `spec` itself, or for an http(s) URL the file it is downloaded to in `dataDir` (the last good download when
-    * this one fails).
-    */
-  private def localSpec(spec: String, dataDir: Path): Path =
-    if !spec.startsWith("http://") && !spec.startsWith("https://") then Paths.get(spec)
-    else
-      val target = dataDir.resolve("spec.json")
-      try
-        Files.createDirectories(dataDir)
-        val client = java.net.http.HttpClient
-          .newBuilder()
-          .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-          .connectTimeout(java.time.Duration.ofSeconds(20))
-          .build()
-        val request = java.net.http.HttpRequest
-          .newBuilder(java.net.URI.create(spec))
-          .timeout(java.time.Duration.ofSeconds(60))
-          .build()
-        val response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofByteArray())
-        if response.statusCode() != 200 then throw new java.io.IOException(s"HTTP ${response.statusCode()}")
-        val tmp = dataDir.resolve("spec.json.tmp")
-        Files.write(tmp, response.body())
-        Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-        logger.info(s"chain spec downloaded from $spec")
-      catch
-        case e: Exception =>
-          if Files.exists(target) then logger.warn(s"chain spec download from $spec failed ($e); using $target")
-          else fail(s"could not download the chain spec from $spec: $e")
-      target
+  private val AnyAddress: InetAddress = InetAddress.getByAddress(new Array[Byte](16))
 
-  /** Chain spec used when `--spec` is not given: the public jamtoaster testnet. */
-  private val DefaultSpecUrl = "https://jamtoaster.network/chainspec/public.json"
+  private val DefaultRpcPort = 19800
 
-  /** Port the node listens on unless `--port` says otherwise. */
-  private val DefaultPort = 40000
-
-  /** A 32-byte key given as hex, or as the path of a file holding the hex. */
   private def readKey(option: String, hexOrPath: String): Array[Byte] =
     val (hex, from) =
       if hexOrPath.matches("(0x)?[0-9a-fA-F]{64}") then
@@ -446,26 +313,6 @@ object Main extends LazyLogging:
     if key.length != 32 then fail(s"$from: expected a 32-byte hex key, got ${key.length} bytes")
     key
 
-  /** The 32-byte seed in `path` (hex), or a new random one written there, readable by the owner only. */
-  private def loadOrCreateSeed(path: Path): Array[Byte] =
-    if Files.exists(path) then
-      warnIfExposed(path)
-      val seed = JamBytes.fromHexUnsafe(Files.readString(path).trim).toArray
-      if seed.length != 32 then fail(s"$path: expected a 32-byte hex seed, got ${seed.length} bytes")
-      seed
-    else
-      val seed = new Array[Byte](32)
-      new SecureRandom().nextBytes(seed)
-      Option(path.toAbsolutePath.getParent).foreach(Files.createDirectories(_))
-      val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
-      try Files.createFile(path, ownerOnly)
-      catch case _: UnsupportedOperationException => Files.createFile(path)
-      Files.writeString(path, JamBytes(seed).toHex + "\n")
-      seed
-
-  /** Who besides the owner can read the secret in `path`: None when nobody can, or when the file system has no
-    * such permissions to ask about.
-    */
   private[node] def exposedTo(path: Path): Option[String] =
     try
       val perms = Files.getPosixFilePermissions(path)
@@ -474,237 +321,302 @@ object Main extends LazyLogging:
       Option.when(who.nonEmpty)(who.mkString(" and "))
     catch case _: UnsupportedOperationException => None
 
-  /** A key file others can read is as good as published. The node still starts: the operator may have reasons
-    * (a test network's well-known keys), but should not find out from an incident.
-    */
   private def warnIfExposed(path: Path): Unit =
     exposedTo(path).foreach(who =>
       System.err.println(s"warning: $path holds a secret key and is readable by $who; restrict it with: chmod 600 $path")
     )
 
-  private def parseHostPort(s: String): InetSocketAddress =
+  private[node] def parseHostPort(s: String): Either[String, InetSocketAddress] =
     val colon = s.lastIndexOf(':')
-    if colon <= 0 then fail(s"expected host:port, got: $s")
-    new InetSocketAddress(s.substring(0, colon), s.substring(colon + 1).toInt)
+    val port = s.substring(colon + 1).toIntOption.filter(p => p > 0 && p <= 65535)
+    if colon <= 0 || port.isEmpty then Left(s"--telemetry takes <HOST:PORT>, not '$s'")
+    else Right(InetSocketAddress.createUnresolved(s.substring(0, colon).stripPrefix("[").stripSuffix("]"), port.get))
 
-  /** The command line, read whole: options with a value, repeatable options, flags, and the command, if any. */
   private[node] final case class CommandLine(
+      global: Map[String, String],
+      command: Option[String],
       options: Map[String, String],
       repeated: Map[String, List[String]],
       flags: Set[String],
-      command: Option[String] = None
+      arguments: List[String]
   )
 
-  /** The environment variable naming the data directory when the command line gives none (the node image sets it). */
-  private[node] val DataDirEnv = "JAM_DATA_DIR"
-
-  /** The data directory: `--data`, else `JAM_DATA_DIR` when it is set; none with `--temp`, which makes its own. Being a
-    * default, `JAM_DATA_DIR` never makes a `--data` given after it a second one.
-    */
-  private[node] def dataDirOf(cl: CommandLine, env: String => Option[String]): Option[Path] =
-    if cl.flags.contains("--temp") then None
-    else cl.options.get("data").orElse(env(DataDirEnv).filter(_.nonEmpty)).map(Paths.get(_))
-
+  private val Run = "run"
   private val GenKeys = "gen-keys"
   private val ListKeys = "list-keys"
+  private val DumpSpec = "dump-spec"
+  private val Help = "help"
 
-  /** Commands other than running the node. */
-  private val Commands = Set(GenKeys, ListKeys)
-
-  /** The options `list-keys` reads a seed from, one of which it needs. */
-  private val ListKeysOptions = List("validator-seed", "seed", "seed-file", "author")
-  private val ListKeysSources = "--validator-seed, --seed, --seed-file or --author"
-
-  /** Options that take one value, by name without the leading `--`. */
-  private val ValueOptions = Set(
-    "data", "spec", "port", "seed", "seed-file", "era-start", "author", "validator-seed", "bandersnatch-key",
-    "ed25519-key", "telemetry", "submit-port", "finality-peers", "sync-from", "rpc-port", "rpc-listen-ip",
-    "listen-ip", "external-ip", "pvm-backend", "metrics-port", "metrics-listen-ip", "rpc-methods"
+  private final case class Takes(
+      values: Map[String, String],
+      repeated: Map[String, String],
+      flags: Map[String, String],
+      maxArguments: Int
   )
 
-  /** Options that take a value and may be given more than once. */
-  private val RepeatedOptions = Set("--peer", "--rpc-allow-origin")
+  private def longs(names: String*): Map[String, String] = names.map(n => s"--$n" -> n).toMap
+  private val HelpFlags = Map("-h" -> "--help", "--help" -> "--help")
 
-  private val Flags = Set(
-    "--reuse-port", "--grandpa", "--announced-finality", "--beefy", "--prune-history", "--print-keys",
-    "--fault-tamper-reports", "--inline-judgment-guarantee", "--help", "--version", "--temp"
+  private val GlobalTakes = Takes(
+    values = longs("config-path", "chain") + ("-c" -> "config-path"),
+    repeated = Map.empty,
+    flags = HelpFlags ++ Map("-V" -> "-V", "--version" -> "--version"),
+    maxArguments = 0
   )
 
-  /** Flags any command takes: they print and exit before the command runs. */
-  private val InformationFlags = Set("--help", "--version")
-
-  /** Options whose value is a whole number, with its least and greatest value. */
-  private val Numbers: Map[String, (Long, Long)] = Map(
-    "port" -> (0L, 65535L),
-    "rpc-port" -> (0L, 65535L),
-    "submit-port" -> (0L, 65535L),
-    "metrics-port" -> (0L, 65535L),
-    "author" -> (0L, Int.MaxValue.toLong),
-    "finality-peers" -> (1L, Int.MaxValue.toLong),
-    "era-start" -> (0L, Long.MaxValue)
+  private val RunTakes = Takes(
+    values = longs(
+      "data-path", "mode", "peer-id", "external-ip", "listen-ip", "port", "telemetry", "dev-validator",
+      "pvm-backend", "finality-mode", "rpc-listen-ip", "rpc-port",
+      "sync-from", "metrics-port", "metrics-listen-ip", "rpc-methods", "finality-peers", "submit-port", "era-start",
+      "bandersnatch-key", "ed25519-key"
+    ) + ("-d" -> "data-path"),
+    repeated = longs("key-seed-file", "bootnode", "rpc-allow-origin"),
+    flags = HelpFlags ++ Map("-t" -> "--temp") ++ List(
+      "--temp", "--rpc", "--no-rpc",
+      "--prune-history", "--announced-finality", "--beefy", "--reuse-port", "--inline-judgment-guarantee",
+      "--fault-tamper-reports"
+    ).map(f => f -> f),
+    maxArguments = 0
   )
 
-  /** `--pvm-backend` values. */
-  private val PvmBackends = List("interpreter", "recompiler")
+  private val CommandTakes: Map[String, Takes] = Map(
+    Run -> RunTakes,
+    GenKeys -> Takes(Map.empty, Map.empty, HelpFlags, maxArguments = 1),
+    ListKeys -> Takes(Map.empty, Map.empty, HelpFlags, maxArguments = 0),
+    DumpSpec -> Takes(Map.empty, Map.empty, HelpFlags, maxArguments = 1),
+    Help -> Takes(Map.empty, Map.empty, Map.empty, maxArguments = 1)
+  )
 
-  /** Read `args` whole, or say what is wrong with them: an option this node does not know, one without its value,
-    * one given twice, a value that is not what its option takes, an argument that is no option, or options that
-    * cannot be used together.
-    */
   private[node] def parseCommandLine(args: List[String]): Either[String, CommandLine] =
-    def missing(option: String) = s"$option needs a value"
-    @scala.annotation.tailrec
-    def loop(rest: List[String], acc: CommandLine): Either[String, CommandLine] =
-      rest match
-        case Nil => Right(acc)
-        case flag :: more if Flags.contains(flag) => loop(more, acc.copy(flags = acc.flags + flag))
-        case option :: more if RepeatedOptions.contains(option) =>
-          more match
-            case value :: after if !value.startsWith("--") =>
-              loop(after, acc.copy(repeated = acc.repeated.updated(option, acc.repeated(option) :+ value)))
-            case _ => Left(missing(option))
-        case option :: more if option.startsWith("--") && ValueOptions.contains(option.drop(2)) =>
-          val name = option.drop(2)
-          more match
-            case value :: after if !value.startsWith("--") =>
-              if acc.options.contains(name) then Left(s"$option is given twice")
-              else loop(after, acc.copy(options = acc.options.updated(name, value)))
-            case _ => Left(missing(option))
-        case option :: _ if option.startsWith("-") =>
-          Left(s"unknown option: $option (jam-node --help lists the options)")
-        case command :: more if Commands.contains(command) =>
-          acc.command match
-            case Some(first) => Left(s"one command at a time: $first and $command")
-            case None        => loop(more, acc.copy(command = Some(command)))
-        case other :: _ =>
-          Left(s"unexpected argument: $other (every argument is an --option, or one of the commands ${Commands.toList.sorted.mkString(", ")})")
-    loop(args, CommandLine(Map.empty, Map.empty.withDefaultValue(Nil), Set.empty)).flatMap(checked)
+    final case class Read(values: Map[String, String], repeated: Map[String, List[String]], flags: Set[String], arguments: List[String])
+    def read(rest: List[String], takes: Takes, where: String, global: Boolean): Either[String, (Read, List[String])] =
+      @scala.annotation.tailrec
+      def loop(rest: List[String], acc: Read): Either[String, (Read, List[String])] =
+        rest match
+          case Nil => Right((acc, Nil))
+          case token :: more if token.startsWith("-") && token != "-" =>
+            val (spelling, inline) = token.indexOf('=') match
+              case -1 => (token, None)
+              case i  => (token.substring(0, i), Some(token.substring(i + 1)))
+            def value: Either[String, (String, List[String])] = inline match
+              case Some(v) => Right((v, more))
+              case None =>
+                more match
+                  case v :: after if !v.startsWith("--") && !takes.flags.contains(v) => Right((v, after))
+                  case _ => Left(s"a value is required for '$spelling' but none was supplied")
+            if takes.flags.contains(spelling) && inline.isEmpty then loop(more, acc.copy(flags = acc.flags + takes.flags(spelling)))
+            else if takes.values.contains(spelling) then
+              val name = takes.values(spelling)
+              value match
+                case Left(e) => Left(e)
+                case Right(_) if acc.values.contains(name) => Left(s"the argument '--$name' cannot be used multiple times")
+                case Right((v, after)) => loop(after, acc.copy(values = acc.values.updated(name, v)))
+            else if takes.repeated.contains(spelling) then
+              val name = takes.repeated(spelling)
+              value match
+                case Left(e) => Left(e)
+                case Right((v, after)) => loop(after, acc.copy(repeated = acc.repeated.updated(name, acc.repeated(name) :+ v)))
+            else
+              val hint =
+                if global && (RunTakes.values.contains(spelling) || RunTakes.flags.contains(spelling) || RunTakes.repeated.contains(spelling))
+                then s" ('$spelling' is an option of run: give it after the command)"
+                else if !global && GlobalTakes.values.contains(spelling) then s" ('$spelling' comes before the command)"
+                else ""
+              Left(s"unexpected argument '$token' found$hint ($where --help lists the options)")
+          case _ :: _ if global => Right((acc, rest))
+          case argument :: more =>
+            if acc.arguments.size >= takes.maxArguments then Left(s"unexpected argument '$argument' found ($where --help lists the arguments)")
+            else loop(more, acc.copy(arguments = acc.arguments :+ argument))
+      loop(rest, Read(Map.empty, Map.empty.withDefaultValue(Nil), Set.empty, Nil))
 
-  /** Values each option can take, and the combinations that cannot be made consistent. */
+    read(args, GlobalTakes, "jam-node", global = true).flatMap { (globals, rest) =>
+      val noCommand = CommandLine(globals.values, None, Map.empty, Map.empty.withDefaultValue(Nil), globals.flags, Nil)
+      rest match
+        case _ if globals.flags.nonEmpty => Right(noCommand)
+        case Nil                         => Right(noCommand)
+        case command :: more =>
+          CommandTakes.get(command).toRight(s"unrecognized subcommand '$command' (jam-node --help lists the commands)").flatMap { takes =>
+            read(more, takes, s"jam-node $command", global = false).map { (r, _) =>
+              CommandLine(globals.values, Some(command), r.values, r.repeated, r.flags, r.arguments)
+            }
+          }
+    }.flatMap(checked)
+
   private def checked(cl: CommandLine): Either[String, CommandLine] =
     val opts = cl.options
     def has(name: String) = opts.contains(name)
+    def flag(name: String) = cl.flags.contains(name)
+    def oneOf(name: String, values: List[String]): Either[String, Unit] =
+      opts.get(name).filterNot(values.contains).map(v =>
+        s"invalid value '$v' for '--$name'\n  [possible values: ${values.mkString(", ")}]"
+      ).toLeft(())
+    def ip(name: String, check: InetAddress => Option[String] = _ => None): Either[String, Unit] =
+      opts.get(name).fold(Right(())) { value => parseIp(s"--$name", value).flatMap(address => check(address).toLeft(())) }
+    def conflict(a: Boolean, b: Boolean, message: String): Either[String, Unit] = Either.cond(!(a && b), (), message)
     val numbers = Numbers.toList.flatMap { (name, range) =>
       opts.get(name).map { value =>
         value.toLongOption.filter(n => n >= range._1 && n <= range._2).toRight(
-          s"--$name takes a whole number from ${range._1} to ${range._2}, not '$value'"
+          s"invalid value '$value' for '--$name': a whole number from ${range._1} to ${range._2}"
         )
       }
     }
-    /** What the command line gives besides `allowed` options and the information flags. */
-    def besides(allowed: Set[String]): List[String] =
-      (opts.keySet -- allowed).toList.sorted.map("--" + _) ++ (cl.flags -- InformationFlags).toList.sorted ++
-        cl.repeated.keys.toList.sorted
     for
+      _ <- Either.cond(!cl.command.contains(DumpSpec) || cl.flags.contains("--help") || cl.arguments.size == 1, (),
+        "the following required argument was not provided: <SPEC_FILE> (jam-node --chain <CHAIN> dump-spec <SPEC_FILE>)")
+      _ <- cl.command.filter(_ == Help).flatMap(_ => cl.arguments.headOption).filterNot(CommandUsage.contains).map(c =>
+        s"unrecognized subcommand '$c'"
+      ).toLeft(())
       _ <- numbers.collectFirst { case Left(e) => e }.toLeft(())
-      _ <- opts.get("seed").filterNot(_.matches("(0x)?[0-9a-fA-F]{64}")).map(_ =>
-        "--seed takes a 32-byte Ed25519 seed as 64 hex digits (or use --seed-file <path>)"
+      _ <- oneOf("mode", List("ordinary", "validator"))
+      _ <- oneOf("pvm-backend", PvmBackends)
+      _ <- oneOf("finality-mode", List("dummy", "grandpa"))
+      _ <- oneOf("rpc-methods", List("safe", "unsafe", "auto"))
+      _ <- opts.get("peer-id").filter(NodeIdentity.fromAltName(_).isEmpty).map(v =>
+        s"invalid value '$v' for '--peer-id <PEER_ID>': expected 'e' and 52 base-32 digits (as gen-keys and list-keys print it)"
       ).toLeft(())
-      _ <- cl.command match
-        case Some(GenKeys) =>
-          besides(Set("data")).headOption.map(o => s"$GenKeys takes no options but --data: drop $o").toLeft(())
-        case Some(ListKeys) =>
-          val sources = ListKeysOptions.filter(has)
-          for
-            _ <- besides(ListKeysOptions.toSet + "data").headOption
-              .map(o => s"$ListKeys does not take $o (it takes one of $ListKeysSources)")
-              .toLeft(())
-            _ <- Either.cond(sources.nonEmpty, (), s"$ListKeys needs one of $ListKeysSources")
-            _ <- Either.cond(
-              sources.size == 1,
-              (),
-              s"$ListKeys takes one of $ListKeysSources, not ${sources.map("--" + _).mkString(" and ")}"
-            )
-          yield ()
-        case _ => runChecks(cl)
-    yield cl
-
-  /** What running the node takes that the commands do not. */
-  private def runChecks(cl: CommandLine): Either[String, Unit] =
-    val opts = cl.options
-    def has(name: String) = opts.contains(name)
-    def ip(name: String, check: InetAddress => Option[String]): Either[String, Unit] =
-      opts.get(name).fold(Right(())) { value =>
-        parseIp(s"--$name", value).flatMap(address => check(address).toLeft(()))
-      }
-    for
-      _ <- opts.get("pvm-backend").filterNot(PvmBackends.contains).map(v =>
-        s"--pvm-backend takes ${PvmBackends.mkString(" or ")}, not '$v'"
+      _ <- cl.repeated("bootnode").find(b => scala.util.Try(Bootnode.parse(b)).isFailure).map(b =>
+        s"invalid value '$b' for '--bootnode <BOOTNODE>': expected <PEER_ID>@<HOST>:<PORT>"
       ).toLeft(())
-      _ <- Either.cond(
-        !(cl.flags.contains("--temp") && has("data")),
-        (),
-        "--temp and --data are exclusive: --temp runs on a new temporary data directory, deleted on exit"
+      _ <- opts.get("telemetry").map(parseHostPort).collect { case Left(e) => e }.toLeft(())
+      _ <- conflict(flag("--temp"), has("data-path"), "the argument '--temp' cannot be used with '--data-path <DATA_PATH>'")
+      _ <- conflict(flag("--rpc"), flag("--no-rpc"), "the argument '--rpc' cannot be used with '--no-rpc'")
+      _ <- conflict(
+        has("finality-mode"),
+        has("finality-peers") || flag("--announced-finality"),
+        "--finality-mode cannot be used with --finality-peers or --announced-finality, which take finality from peers instead"
       )
-      _ <- ip("listen-ip", _ => None)
+      _ <- conflict(
+        opts.get("mode").contains("ordinary"),
+        has("bandersnatch-key") || has("ed25519-key") || has("dev-validator"),
+        "--mode ordinary runs no validator: drop --dev-validator, --bandersnatch-key and --ed25519-key"
+      )
+      _ <- ip("listen-ip")
+      _ <- ip("rpc-listen-ip")
       _ <- ip(
         "external-ip",
         a => Option.when(a.isAnyLocalAddress)(s"--external-ip is the address peers reach this node at: not ${opts("external-ip")}")
       )
       _ <- Either.cond(!has("metrics-listen-ip") || has("metrics-port"), (), "--metrics-listen-ip needs --metrics-port")
-      _ <- ip("metrics-listen-ip", _ => None)
-      _ <- opts.get("rpc-methods").filter(RpcMethods.parse(_).isEmpty).map(v =>
-        s"--rpc-methods takes safe, unsafe or auto, not '$v'"
-      ).toLeft(())
-      _ <- Either.cond(!(has("seed") && has("seed-file")), (), "--seed and --seed-file both name the network identity: give one")
-      _ <- Either.cond(
-        !(has("author") && has("validator-seed")),
-        (),
-        "--author and --validator-seed are exclusive: give one source of validator keys"
-      )
-      _ <- Either.cond(
-        !(has("validator-seed") && (has("seed") || has("seed-file"))),
-        (),
-        "--validator-seed sets the network identity too: drop --seed/--seed-file"
-      )
-      // A validator's network identity is its Ed25519 key: peers map the connection to its validator index by it.
-      // Dev validator i's keys come from JIP-5's trivial seed for i, which no --seed can stand in for.
-      _ <- Either.cond(
-        !(has("author") && (has("seed") || has("seed-file"))),
-        (),
-        "--author i runs as dev validator i, whose Ed25519 key is the network identity: drop --seed/--seed-file " +
-          "(for keys of your own, use --validator-seed, or --ed25519-key with --bandersnatch-key)"
-      )
-    yield ()
+      _ <- ip("metrics-listen-ip")
+    yield cl
+
+  private val Numbers: Map[String, (Long, Long)] = Map(
+    "port" -> (0L, 65535L),
+    "rpc-port" -> (0L, 65535L),
+    "submit-port" -> (0L, 65535L),
+    "metrics-port" -> (0L, 65535L),
+    "dev-validator" -> (0L, 65535L),
+    "finality-peers" -> (1L, Int.MaxValue.toLong),
+    "era-start" -> (0L, Long.MaxValue)
+  )
+
+  private val PvmBackends = List("interpreter", "compiler")
 
   private[node] val Usage: String =
-    """jam-node (--data <data-dir> | --temp) [--spec <chain-spec.json or URL>] [--port N (default 40000)]
-      |         [--listen-ip IP (default 0.0.0.0)] [--external-ip IP]
-      |         [--seed <64-hex Ed25519 seed> | --seed-file <path>] [--era-start <unix-seconds>]
-      |         [--peer <64-hex-ed25519>@host:port ...]
-      |         [--author <validator-index> | --validator-seed <path>]
-      |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>]
-      |         [--telemetry <host:port>] [--reuse-port] [--grandpa] [--beefy] [--submit-port N]
-      |         [--finality-peers N | --announced-finality] [--prune-history]
-      |         [--sync-from <header hash>[:<set id>]]
-      |         [--rpc-port N [--rpc-listen-ip IP (default 127.0.0.1)] [--rpc-allow-origin <origin> ...]
-      |                       [--rpc-methods safe|unsafe|auto (default auto: unsafe ones on loopback only)]]
-      |         [--metrics-port N [--metrics-listen-ip IP (default 127.0.0.1)]]
-      |         [--pvm-backend interpreter|recompiler]
-      |         [--inline-judgment-guarantee]
-      |         [--fault-tamper-reports]
-      |jam-node --data <data-dir> [--author <index> | --validator-seed <path>]
-      |         [--bandersnatch-key <hex or path>] [--ed25519-key <hex or path>] --print-keys
-      |jam-node gen-keys
-      |jam-node list-keys (--validator-seed <hex or path> | --seed <hex> | --seed-file <path> | --author <index>)
-      |jam-node --version
-      |jam-node --help
+    """JAM-Forge node
       |
-      |  --temp                 run on a new temporary data directory, deleted when the node exits
-      |  --listen-ip IP         address the QUIC listener binds to; 0.0.0.0 and :: take IPv4 and IPv6 peers
-      |  --external-ip IP       address peers reach this node at (the public one behind NAT): reported as its
-      |                         endpoint, and checked against a validator's on-chain metadata
-      |  --pvm-backend B        run guest code on the interpreter, or the recompiler (native code; needs
-      |                         -Djam.pvm.recompiler.lib); default: the recompiler where it is available
-      |  --metrics-port N       Prometheus metrics at GET /metrics, and GET /health: JSON with best and finalized
-      |                         slots, peers and syncing, 200 while the node follows the chain, 503 when not
-      |  gen-keys               print a new random validator seed and its session keys (Ed25519, Bandersnatch,
-      |                         BLS); keep the seed in a file (chmod 600) and run with --validator-seed <file>
-      |  list-keys              print the public keys a seed gives the node: a validator's for --validator-seed
-      |                         and --author, the network identity's for --seed and --seed-file
-      |  --version              print the node's name and version
-      |  JAM_DATA_DIR=<dir>     the data directory when --data is not given (the node image sets /data); not used
-      |                         with --temp""".stripMargin
+      |Usage: jam-node [OPTIONS] <COMMAND>
+      |
+      |Commands:
+      |  dump-spec  Dump the spec of the chain given by the `--chain` option
+      |  gen-keys   Generate a new secret key seed and print the derived session keys
+      |  list-keys  List all session keys we have the secret key for
+      |  run        Run a JAM-Forge node
+      |  help       Print this message or the help of the given subcommand(s)
+      |
+      |Options:
+      |  -c, --config-path <CONFIG_PATH>  Base config path
+      |      --chain <CHAIN>              Chain to run. "polkadot", "toaster", "toaster:<NETWORK>", "dev",
+      |                                   "dev:<BASE_PORT>", or the path of a chain spec file. Default is "polkadot"
+      |                                   ("dev" with `run --dev-validator`). "toaster" fetches the chain spec over
+      |                                   HTTPS; if the network is not given it defaults to "public"
+      |  -h, --help                       Print help
+      |  -V, --version                    Print version""".stripMargin
+
+  private val RunUsage: String =
+    """Run a JAM-Forge node
+      |
+      |Usage: jam-node [-c <CONFIG_PATH>] [--chain <CHAIN>] run [OPTIONS]
+      |
+      |Options:
+      |  -d, --data-path <DATA_PATH>        Base data path; the chain's data is in <DATA_PATH>/<chain id>
+      |  -t, --temp                         Use a temporary data directory, removed on exit. Conflicts with
+      |                                     `--data-path`
+      |      --key-seed-file <FILE>         A secret key seed file (32 bytes), besides <config>/<chain id>/keys/*.seed;
+      |                                     may be given more than once
+      |      --mode <MODE>                  ordinary or validator; validator when --peer-id, --dev-validator or a
+      |                                     validator key is given. Proxy mode is not implemented
+      |      --peer-id <PEER_ID>            Peer ID of this node: the seed whose key it is. Without it an ordinary
+      |                                     node takes a new peer ID each start
+      |      --external-ip <EXTERNAL_IP>    IP address other nodes reach this node at
+      |      --listen-ip <LISTEN_IP>        IP address to listen on [default: ::]
+      |      --port <PORT>                  UDP port to listen on; 0 means any unused port [default: 0]
+      |      --telemetry <HOST:PORT>        Telemetry endpoint (JIP-3)
+      |      --bootnode <BOOTNODE>          A bootnode, <PEER_ID>@<HOST>:<PORT>; may be given more than once
+      |      --dev-validator <VAL_INDEX>    Run as the dev validator with this index: its keys, and its peer ID,
+      |                                     address and port in the genesis state; the default chain becomes dev
+      |      --pvm-backend <PVM_BACKEND>    interpreter, or compiler (the recompiler: native code; needs
+      |                                     -Djam.pvm.recompiler.lib). Default: the compiler where available
+      |      --finality-mode <MODE>         dummy (the best block's parent is finalized without consensus) or
+      |                                     grandpa [default: dummy]
+      |      --rpc                          Enable the RPC server (off by default for a validator)
+      |      --no-rpc                       Disable the RPC server (on by default otherwise)
+      |      --rpc-listen-ip <RPC_LISTEN_IP>  IP address for the RPC server to listen on [default: ::]
+      |      --rpc-port <RPC_PORT>          Port for the RPC server to listen on; 0 means any unused port
+      |                                     [default: 19800]
+      |  -h, --help                         Print help
+      |
+      |Other options:
+      |      --sync-from <HASH>[:<SET_ID>]  Join at this block, trusted, instead of replaying from genesis
+      |      --prune-history                Delete finalized blocks a lookup-anchor age behind finality
+      |      --metrics-port <PORT>          Prometheus metrics at GET /metrics, and GET /health (JSON; 200 while the
+      |                                     node follows the chain, 503 when not)
+      |      --metrics-listen-ip <IP>       Address the metrics listen on [default: 127.0.0.1]
+      |      --rpc-methods <METHODS>        safe, unsafe or auto: whether the RPC serves work-package, bundle and
+      |                                     preimage submission and segment recovery; auto serves them to loopback
+      |                                     clients only [default: auto]
+      |      --rpc-allow-origin <ORIGIN>    A browser origin the RPC accepts (e.g. http://localhost:3000); may be
+      |                                     given more than once
+      |      --finality-peers <N>           Finalize what N peers announce as final (UP 0), instead of --finality-mode
+      |      --announced-finality           Finalize what a quorum of the current validators announce as final
+      |      --bandersnatch-key <KEY>       The validator's Bandersnatch secret seed (JIP-5), as hex or a file holding
+      |                                     it, in place of its seed's
+      |      --ed25519-key <KEY>            The validator's Ed25519 secret seed, likewise; also its peer ID
+      |      --beefy                        Run the BEEFY prototype
+      |      --submit-port <PORT>           Loopback preimage endpoint (POST /preimage/<service-id>)
+      |      --reuse-port                   SO_REUSEPORT on the listening socket
+      |      --era-start <UNIX_SECONDS>     Start of the JAM common era, for devnets whose genesis starts now
+      |      --inline-judgment-guarantee    CE 145 with the guarantee inside the judgment (JAMNP's newer form)
+      |      --fault-tamper-reports         Testing only: guarantee wrong reports, to exercise disputes""".stripMargin
+
+  private val CommandUsage: Map[String, String] = Map(
+    Run -> RunUsage,
+    GenKeys ->
+      """Generate a new secret key seed and print the derived session keys
+        |
+        |Usage: jam-node [-c <CONFIG_PATH>] [--chain <CHAIN>] gen-keys [FILE_NAME]
+        |
+        |Arguments:
+        |  [FILE_NAME]  Secret key seed file name, in <config>/<chain id>/keys unless absolute. If not specified, a
+        |               file name containing the current time will be generated. An existing file is not replaced""".stripMargin,
+    ListKeys ->
+      """List all session keys we have the secret key for (the seeds in <config>/<chain id>/keys)
+        |
+        |Usage: jam-node [-c <CONFIG_PATH>] [--chain <CHAIN>] list-keys""".stripMargin,
+    DumpSpec ->
+      """Dump the spec of the chain given by the `--chain` option
+        |
+        |Usage: jam-node [--chain <CHAIN>] dump-spec <SPEC_FILE>
+        |
+        |Arguments:
+        |  <SPEC_FILE>  Where to write the chain spec file""".stripMargin,
+    Help -> Usage
+  )
+
+  private def usageError(msg: String): Nothing =
+    System.err.println(s"error: $msg")
+    sys.exit(2)
 
   private def fail(msg: String): Nothing =
     System.err.println(msg)

@@ -27,6 +27,7 @@ final case class NodeConfig(
     telemetry: Option[InetSocketAddress] = None,
     /** GRANDPA finality instead of the devnet quorum rule and following peers' finality. */
     grandpa: Boolean = false,
+    dummyFinality: Boolean = false,
     /** How many distinct peers must announce a block as finalized (UP 0 `Final`) before this node finalizes it.
       * None: 2V/3 of the validators, which only a node connected to most of them reaches. A lower number is a
       * decision to trust those peers: their announcement is not a proof, and a finalized block is never reorged
@@ -250,7 +251,7 @@ final class JamNode(
       if author.isDefined then maybeSendTickets(currentSlot)
       // A node started without GRANDPA takes its finality from its peers' UP 0 announcements, which are claims and
       // not proofs. With GRANDPA, voting or only observing, finality moves on a verified justification alone.
-      if !nodeConfig.grandpa then followPeerFinality(),
+      if !nodeConfig.grandpa && !nodeConfig.dummyFinality then followPeerFinality(),
     threads = threads
   )
 
@@ -487,7 +488,7 @@ final class JamNode(
     val fin = chain.finalized.slot
     val entropyFinal = finalityRunning && fin >= epoch * e && fin / e == epoch && chain.best.slot / e == epoch
     val step1Due = peers.appliedSlotOf(epoch).exists(applied => slot >= applied + math.max(e / 60, 1))
-    // A ticket reaching the author at slot index Y − 1 or later misses the lottery (polkajam rejects it).
+    // A ticket reaching the author at slot index Y − 1 or later misses the lottery.
     val inLottery = slot % e < chain.config.ticketCutoff - 1
     val generation = tickets.generation
     if (entropyFinal || step1Due) && inLottery && ticketsSentGeneration != generation && tickets.hasTicketsFor(epoch)
@@ -548,7 +549,7 @@ final class JamNode(
   private def unlessCatchingUp(handler: io.forge.jam.network.PeerStreamHandler): io.forge.jam.network.PeerStreamHandler =
     (conn, stream) => if catchingUp then stream.reset() else handler.onStream(conn, stream)
 
-  private def finalityRunning: Boolean = nodeConfig.grandpa || spec.devnetFinalityDepth > 0
+  private def finalityRunning: Boolean = nodeConfig.grandpa || nodeConfig.dummyFinality || spec.devnetFinalityDepth > 0
 
   /** CE 131 proxy lookup: the open connection whose peer key is the Ed25519
     * key of validator `index` in the next epoch's set (γ_k), whose ring the
@@ -598,7 +599,8 @@ final class JamNode(
     chain.onImported((_, _) => noteRecentValidators())
     chain.onImported((_, _) => importedBlocks.incrementAndGet(): Unit)
 
-    if !nodeConfig.grandpa then
+    if nodeConfig.dummyFinality then chain.onImported((_, _) => chain.finalizeAtDepth(1): Unit)
+    else if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
         chain.onImported((_, _) =>
           chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests(countsForFinality), spec.finalityQuorum)

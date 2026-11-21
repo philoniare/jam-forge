@@ -5,10 +5,6 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** The node image's entrypoint and the arguments given after it are read as one command line, so an option both give
-  * is refused and the node does not start. The testnet deploy of 18 November 2026 failed that way: the entrypoint gave
-  * `--data /data` and the service `--data /data/db`.
-  */
 class NodeImageSpec extends AnyFunSuite with Matchers:
 
   private def read(path: String) = Files.readString(Paths.get(path))
@@ -22,9 +18,10 @@ class NodeImageSpec extends AnyFunSuite with Matchers:
     val line = nodeStage.linesIterator.find(_.startsWith("ENTRYPOINT")).getOrElse(fail("no ENTRYPOINT"))
     "\"([^\"]*)\"".r.findAllMatchIn(line).map(_.group(1)).toList.dropWhile(_ != "/app/jam-node.jar").drop(1)
 
-  /** The image's environment (`ENV NAME=value`). */
   private lazy val imageEnv: Map[String, String] =
-    "(?m)^ENV\\s+(\\w+)=(\\S+)".r.findAllMatchIn(nodeStage).map(m => m.group(1) -> m.group(2)).toMap
+    nodeStage.linesIterator.filter(_.startsWith("ENV ")).flatMap { line =>
+      "(\\w+)=(\\S+)".r.findAllMatchIn(line.drop(4)).map(m => m.group(1) -> m.group(2))
+    }.toMap
 
   /** What jam-node.service gives the image, with JAM_ARGS as setup.sh sets it by default. */
   private lazy val serviceArgs: List[String] =
@@ -38,12 +35,15 @@ class NodeImageSpec extends AnyFunSuite with Matchers:
     Main.parseCommandLine(args).fold(e => fail(s"${args.mkString(" ")}: $e"), identity)
 
   test("the testnet service's arguments after the image's entrypoint are a command line the node takes") {
-    val cl = parsed(entrypointArgs ++ serviceArgs)
-    Main.dataDirOf(cl, imageEnv.get) shouldBe Some(Paths.get("/data/db"))
+    entrypointArgs shouldBe Nil
+    val cl = parsed(serviceArgs)
+    cl.command shouldBe Some("run")
+    cl.global shouldBe Map("config-path" -> "/data", "chain" -> "/data/spec.json")
+    cl.options.get("data-path") shouldBe Some("/data")
   }
 
-  test("the image keeps the node's data in /data when no --data is given, and takes --temp") {
-    Main.dataDirOf(parsed(entrypointArgs ++ List("--bandersnatch-key", "0x" + "11" * 32)), imageEnv.get) shouldBe
-      Some(Paths.get("/data"))
-    Main.dataDirOf(parsed(entrypointArgs :+ "--temp"), imageEnv.get) shouldBe None
+  test("without -c and --data-path the image keeps a chain's data and keys in /data/jam-forge/<chain id>") {
+    Main.defaultBase(config = false, imageEnv.get, "/home/none") shouldBe Paths.get("/data/jam-forge")
+    Main.defaultBase(config = true, imageEnv.get, "/home/none") shouldBe Paths.get("/data/jam-forge")
+    parsed(List("--chain", "toaster", "run", "--temp")).flags shouldBe Set("--temp")
   }

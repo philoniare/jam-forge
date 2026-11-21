@@ -19,6 +19,7 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/jam-testnet_ed25519}"
 SSH_FROM="${SSH_FROM:-$(curl -fsS https://api.ipify.org)/32}"
 SPEC_URL="${SPEC_URL:-https://jamtoaster.network/chainspec/public.json}"
 JAM_ARGS="${JAM_ARGS:---finality-peers 1 --prune-history}"
+TART_DNS="${TART_DNS:-jam-forge-tart}"
 WS="${WS:-jam-testnet-logs}"
 REPO="${REPO:-philoniare/jam-forge}"
 APP="${APP:-jam-forge-testnet-deploy}"
@@ -61,6 +62,17 @@ az network nsg rule create -g "$RG" --nsg-name "$VM-nsg" -n allow-jamnp --priori
 az network nsg rule create -g "$RG" --nsg-name "$VM-nsg" -n allow-ssh --priority 110 \
   --protocol Tcp --destination-port-ranges 22 --source-address-prefixes "$SSH_FROM" \
   --access Allow --direction Inbound -o none
+
+say "firewall: HTTP 80 and HTTPS 443 open for the TART backend"
+az network nsg rule create -g "$RG" --nsg-name "$VM-nsg" -n allow-http --priority 120 \
+  --protocol Tcp --destination-port-ranges 80 --access Allow --direction Inbound -o none
+az network nsg rule create -g "$RG" --nsg-name "$VM-nsg" -n allow-https --priority 130 \
+  --protocol Tcp --destination-port-ranges 443 --access Allow --direction Inbound -o none
+az network public-ip update -g "$RG" -n "$VM-ip" --dns-name "$TART_DNS" -o none
+TART_HOST=$(az network public-ip show -g "$RG" -n "$VM-ip" --query dnsSettings.fqdn -o tsv)
+say "TART at https://$TART_HOST"
+az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts @tart.sh \
+  --parameters "$TART_HOST" --query 'value[0].message' -o tsv
 
 # ---------------------------------------------------------------------------------------------------------------
 # Logs: workspace, node log table, agent, collection rule
@@ -169,6 +181,7 @@ cat <<EOF
 
 Done. VM $VM at $IP (JAMNP-S UDP 40000), ssh -i $SSH_KEY $ADMIN@$IP
 The node starts on the first deploy (push to main, or run the "Deploy testnet node" workflow).
+Telemetry dashboard: open https://tart.jamtoaster.network and set its backend URL to https://$TART_HOST
 Alerts go nowhere until you add a receiver:
   az monitor action-group update -g $RG -n jam-testnet-alerts --add-action email me <your-email>
 EOF

@@ -158,7 +158,7 @@ private[node] final class PeerConnectivity(
     * applies otherwise, and always under GRANDPA, which needs no peer bests.
     */
   private def gridRestrictsAnnouncements: Boolean =
-    nodeConfig.grandpa || !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
+    nodeConfig.grandpa || nodeConfig.dummyFinality || !(spec.devnetFinalityDepth > 0 && spec.finalityQuorum > 1)
 
   /** Whether UP 0 should be open to `peer` (JAMNP-S UP 0). */
   def announcementWanted(peer: Array[Byte]): Boolean =

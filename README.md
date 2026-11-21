@@ -106,30 +106,50 @@ sbt benchmark
 
 ## 🖧 Running a Node
 
-The node image is `ghcr.io/philoniare/jam-forge-node`. To run a validator with an existing Bandersnatch key:
+Usage: `jam-node [-c <config path>] [--chain <chain>] <command>`, with the commands `run`, `gen-keys`, `list-keys`,
+`dump-spec` and `help`. The image is `ghcr.io/philoniare/jam-forge-node`; to follow the public jamtoaster testnet:
 
 ```bash
 docker run -d --name jam-forge --network host -v jam-forge-data:/data \
-  ghcr.io/philoniare/jam-forge-node:testnet --bandersnatch-key 0x<32-byte bandersnatch secret seed>
+  ghcr.io/philoniare/jam-forge-node:testnet --chain toaster run --port 40000
 ```
 
-- `--spec` takes a file or an http(s) URL (default: the public jamtoaster testnet,
-  `https://jamtoaster.network/chainspec/public.json`); a URL is downloaded at each start, and the last copy is used
-  if that fails.
-- `--bandersnatch-key` and `--ed25519-key` are the 32-byte secret seeds (JIP-5 `bandersnatch_secret_seed` and
-  `ed25519_secret_seed`), each as hex or as a file path. A key not given is generated on first start and kept in
-  `/data/validator.seed`. The Ed25519 key is also the node's network identity.
-- Add `--print-keys` to print the public keys and exit. A node with validator keys votes in GRANDPA.
-- QUIC on UDP 40000 (`--port` to change). Leave out `--bandersnatch-key` to only follow the chain.
-- `--listen-ip` binds the listener to one address (default `0.0.0.0`; it and `::` take IPv4 and IPv6 peers);
-  `--external-ip` is the address peers reach the node at behind NAT, reported as its endpoint (a validator whose
-  on-chain metadata names another one is warned).
-- `--metrics-port 9615 --metrics-listen-ip 0.0.0.0` serves Prometheus metrics at `/metrics` and a health check at
-  `/health` (JSON: best and finalized slots, peers, syncing; HTTP 200 while the node follows the chain, 503 when not).
-  Without `--metrics-listen-ip` they listen on loopback only.
-- `gen-keys` prints a new validator seed and its keys; `list-keys --validator-seed <file>` prints the keys a seed
-  gives; `--version` prints the version; `--pvm-backend interpreter|recompiler` chooses how guest code runs; `--temp`
-  runs on a throwaway data directory (not with `--data`, so not with the image's entrypoint).
+To run a validator, keep its seed in the keystore and name it by its peer ID:
+
+```bash
+docker run --rm -v jam-forge-data:/data ghcr.io/philoniare/jam-forge-node:testnet --chain toaster gen-keys validator
+# prints "Peer ID: e…" and "Bandersnatch key: …"
+docker run -d --name jam-forge --network host -v jam-forge-data:/data \
+  ghcr.io/philoniare/jam-forge-node:testnet --chain toaster run --port 40000 --peer-id e… --finality-mode grandpa
+```
+
+- `--chain` is `polkadot` (the default, a placeholder without validators yet), `toaster` or `toaster:<network>`
+  (fetched from `https://jamtoaster.network/chainspec/<network>.json`, `public` by default), `dev` or
+  `dev:<base port>` (the dev chain, validator i at port 40000 + i or base port + i), or a spec file.
+  `dump-spec <file>` writes the spec a `--chain` names.
+- A chain's data lives in `<data path>/<chain id>` (`run -d`, default `~/.local/share/jam-forge`, in the image
+  `/data/jam-forge`) and its keystore in `<config path>/<chain id>/keys` (`-c`, default `~/.config/jam-forge`).
+  Seeds are 32-byte `*.seed` files. `gen-keys [name]` writes a new one (and never replaces an existing file);
+  `list-keys` prints each seed's peer ID and Bandersnatch key; `run --key-seed-file <file>` names more.
+- `run --peer-id` makes the node the validator whose seed has that peer ID (its Ed25519 key is the network
+  identity); `--dev-validator i` runs dev validator i with its address and port from the genesis state; `--mode
+  ordinary` follows the chain with the identity `--peer-id` names. Without `--peer-id` an ordinary node takes a new
+  identity each start. Proxy mode (`--mode proxy`, `--proxy`) is not implemented.
+- Finality: `--finality-mode dummy` (the default: each new best block finalizes its parent, without
+  consensus) or `grandpa`. `--finality-peers N` and `--announced-finality` take finality from peers' announcements
+  instead.
+- The RPC (JIP-2) runs on `[::]:19800` unless the node is a validator (`--rpc` to enable it there) or `--no-rpc` is
+  given; `--rpc-port` and `--rpc-listen-ip` move it. Submission and segment recovery are served to loopback clients
+  only unless `--rpc-methods unsafe` (`safe` refuses them to everyone); `--rpc-allow-origin <origin>` lets a web page
+  use it.
+- `--port` (UDP, default any free port), `--listen-ip` (default `::`), `--external-ip` (the address peers reach the
+  node at behind NAT), `--bootnode <peer id>@<host>:<port>`, `--telemetry <host:port>` (JIP-3), `--pvm-backend
+  interpreter|compiler` (default: the compiler, our recompiler, where available) and `-t`/`--temp` (a throwaway data
+  directory).
+- Also: `--sync-from <header hash>[:<set id>]` joins at a trusted checkpoint; `--prune-history`;
+  `--metrics-port 9615 --metrics-listen-ip 0.0.0.0` serves Prometheus metrics at `/metrics` and a health check at
+  `/health` (loopback only without `--metrics-listen-ip`); `--bandersnatch-key` and `--ed25519-key` (32-byte JIP-5
+  secret seeds, as hex or a file) replace those keys of the validator's seed. `jam-node run --help` lists them all.
 - The image runs as uid/gid 10001, which owns `/data`. A volume an earlier image (which ran as root) wrote must be
   handed over once: `docker run --rm -u 0 -v jam-forge-data:/data --entrypoint chown <image> -R 10001:10001 /data`.
 

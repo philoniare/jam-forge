@@ -20,6 +20,57 @@ set_image() { sed -i "s|^JAM_IMAGE=.*|JAM_IMAGE=$1|" "$ENV_FILE"; }
 
 restarts() { local n; n=$(systemctl show -p NRestarts --value jam-node 2>/dev/null || true); echo "${n:-0}"; }
 
+UNIT=/etc/systemd/system/jam-node.service
+OLD_ARGS='--spec /data/spec.json --data /data/db --port 40000 --seed-file /data/node.seed $JAM_ARGS'
+NEW_ARGS='-c /data --chain /data/spec.json run -d /data --port 40000 $JAM_ARGS'
+DATA=/var/lib/jam
+
+takes_run() { docker run --rm "$1" run --help >/dev/null 2>&1; }
+
+replace_in_unit() { local unit; unit=$(<"$UNIT"); printf '%s\n' "${unit/"$1"/"$2"}" > "$UNIT"; systemctl daemon-reload; }
+
+to_new_command_line() {
+  local image=$1 id peer_id args
+  id=$(jq -r .id "$DATA/spec.json")
+  [[ -e "$DATA/$id" || ! -e "$DATA/db" ]] || mv "$DATA/db" "$DATA/$id"
+  if [[ -s "$DATA/node.seed" && ! -e "$DATA/$id/keys/node.seed" ]]; then
+    mkdir -p "$DATA/$id/keys"
+    python3 -c 'import sys; open(sys.argv[2], "wb").write(bytes.fromhex(open(sys.argv[1]).read().strip().removeprefix("0x")))' \
+      "$DATA/node.seed" "$DATA/$id/keys/node.seed"
+    chmod 600 "$DATA/$id/keys/node.seed"
+  fi
+  mkdir -p "$DATA/$id"
+  chown -R "$(docker image inspect -f '{{.Config.User}}' "$image")" "$DATA/$id"
+  peer_id=$( (docker run --rm -v "$DATA:/data" "$image" -c /data --chain /data/spec.json list-keys || true) |
+    sed -n 's|.*/node.seed: Peer ID: ||p')
+  cp "$ENV_FILE" "$ENV_FILE.before-new-cli"
+  args=$(sed -n 's/^JAM_ARGS=//p' "$ENV_FILE")
+  if [[ " $args " == *" --rpc-port "* ]]; then
+    [[ " $args " == *" --rpc-listen-ip "* ]] || args+=" --rpc-listen-ip 127.0.0.1"
+  else
+    args+=" --no-rpc"
+  fi
+  sed -i "s|^JAM_ARGS=.*|JAM_ARGS=--mode ordinary${peer_id:+ --peer-id $peer_id} $args|" "$ENV_FILE"
+  replace_in_unit "$OLD_ARGS" "$NEW_ARGS"
+}
+
+to_old_command_line() {
+  local id image
+  id=$(jq -r .id "$DATA/spec.json")
+  [[ -e "$DATA/db" || ! -e "$DATA/$id" ]] || mv "$DATA/$id" "$DATA/db"
+  image=$(sed -n 's/^JAM_IMAGE=//p' "$ENV_FILE")
+  [[ -f "$ENV_FILE.before-new-cli" ]] && cp "$ENV_FILE.before-new-cli" "$ENV_FILE" && set_image "$image"
+  replace_in_unit "$NEW_ARGS" "$OLD_ARGS"
+}
+
+command_line_for() {
+  if takes_run "$1"; then
+    if grep -qF -- "$OLD_ARGS" "$UNIT"; then to_new_command_line "$1"; fi
+  elif grep -qF -- "$NEW_ARGS" "$UNIT"; then
+    to_old_command_line
+  fi
+}
+
 # Healthy: the node imports blocks after the restart (finality is watched by the alerts, since a node far behind
 # finalizes only once it has caught up). A node that exits is started again by Restart=always, so the unit is never
 # "failed": one automatic restart since ours fails the check at once.
@@ -40,6 +91,7 @@ restart_on() {
   user=$(docker image inspect -f '{{.Config.User}}' "$1" 2>/dev/null || true)
   systemctl enable -q jam-node
   systemctl stop jam-node
+  command_line_for "$1"
   [[ -z "$user" ]] || chown -R "$user" /var/lib/jam /var/log/jam-node
   since=$(date -u +%Y-%m-%dT%H:%M:%S)
   systemctl start jam-node

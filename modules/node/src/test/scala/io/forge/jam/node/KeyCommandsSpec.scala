@@ -1,68 +1,69 @@
 package io.forge.jam.node
 
-import java.nio.file.Files
+import java.nio.file.{Files, Paths}
+import java.time.LocalDateTime
 
-import io.circe.parser.parse as parseJson
 import io.forge.jam.core.JamBytes
-import io.forge.jam.network.NodeIdentity
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 class KeyCommandsSpec extends AnyFunSuite with Matchers with NodeFixture:
 
-  private def json(text: String): Map[String, String] =
-    parseJson(text).fold(e => fail(s"not JSON: $e\n$text"), identity).asObject
-      .getOrElse(fail(s"not a JSON object: $text"))
-      .toMap
-      .map((k, v) => k -> v.asString.getOrElse(fail(s"$k is not a string: $v")))
-
-  private def hex(bytes: Array[Byte]) = "0x" + JamBytes(bytes).toHex
-
-  private def commandLine(args: String*) = Main.parseCommandLine(args.toList).fold(e => fail(e), identity)
-
-  private def keysOf(keys: ValidatorKeySet): Map[String, String] = Map(
-    "bandersnatch" -> hex(keys.bandersnatchPublic),
-    "ed25519" -> hex(keys.ed25519Public),
-    "bls" -> hex(keys.blsPublic),
-    "peer_id" -> NodeIdentity.altName(keys.ed25519Public)
+  private val knownSeed = JamBytes.fromHexUnsafe("a1af1d61c53e246a917830a94f46ddc55a753a633175baad212fb38a56d1931f").toArray
+  private val knownKeys = List(
+    "Peer ID: escwcf65sw3wjyfdjy6xsngu6bg5qzdnincbu4ddzbdwara66tmib",
+    "Bandersnatch key: 97b6ce46667a97b3a414f4fbbb8be5174002e757188f30ca109e20a81676df94"
   )
 
-  test("gen-keys prints a new random seed and the session keys it derives (JIP-5)") {
-    val first = json(Main.genKeys())
-    val second = json(Main.genKeys())
-    first("seed") should not be second("seed")
-    for printed <- List(first, second) do
-      val seed = JamBytes.fromHexUnsafe(printed("seed").stripPrefix("0x")).toArray
-      seed.length shouldBe 32
-      printed - "seed" shouldBe keysOf(ValidatorKeySet.fromSeed(seed))
+  test("a known seed gives its known keys") {
+    val dir = tempDir("jam-keystore")
+    try
+      val file = dir.resolve("2026-11-21-10-18-47.seed")
+      Files.write(file, knownSeed)
+      val seed = Keystore.read(file).fold(e => fail(e), identity)
+      Keystore.describe(seed) shouldBe knownKeys
+    finally cleanup(dir)
   }
 
-  test("list-keys prints the keys each seed option gives the node, and creates no file") {
-    val dir = tempDir("jam-list-keys")
+  test("gen-keys writes a new raw seed, owner-only, in the keystore, and never replaces one") {
+    val keys = tempDir("jam-keystore").resolve("dev/keys")
     try
-      val seed = Array.tabulate[Byte](32)(i => (i * 7 + 1).toByte)
-      val seedFile = dir.resolve("validator.seed")
-      Files.writeString(seedFile, JamBytes(seed).toHex + "\n")
-      val validator = keysOf(ValidatorKeySet.fromSeed(seed))
-      def listed(args: String*) = Main.listKeys(commandLine(("list-keys" +: args)*)).fold(e => fail(e), json)
+      val now = LocalDateTime.of(2026, 11, 21, 10, 18, 47)
+      Keystore.fileFor(keys, None, now) shouldBe keys.resolve("2026-11-21-10-18-47.seed")
+      Keystore.fileFor(keys, Some("mykey"), now) shouldBe keys.resolve("mykey.seed")
+      Keystore.fileFor(keys, Some("other.seed"), now) shouldBe keys.resolve("other.seed")
+      Keystore.fileFor(keys, Some("/abs/v.seed"), now) shouldBe Paths.get("/abs/v.seed")
 
-      listed("--validator-seed", seedFile.toString) shouldBe validator
-      listed("--validator-seed", JamBytes(seed).toHex) shouldBe validator
-      listed("--author", "2") shouldBe keysOf(ValidatorKeySet.dev(2))
-      val identity = NodeIdentity.fromSeed(seed).publicKeyBytes
-      val network = Map("ed25519" -> hex(identity), "peer_id" -> NodeIdentity.altName(identity))
-      listed("--seed", JamBytes(seed).toHex) shouldBe network
-      listed("--seed-file", seedFile.toString) shouldBe network
+      val first = Keystore.create(keys.resolve("mykey.seed")).fold(e => fail(e), identity)
+      Files.readAllBytes(first.path).toSeq shouldBe first.secret.toSeq
+      first.secret.length shouldBe 32
+      Main.exposedTo(first.path) shouldBe None
+      Keystore.create(keys.resolve("mykey.seed")).left.toOption.get should include("not replacing a secret key")
+      Files.readAllBytes(first.path).toSeq shouldBe first.secret.toSeq
+      val second = Keystore.create(keys.resolve("other.seed")).fold(e => fail(e), identity)
+      second.secret.toSeq should not be first.secret.toSeq
+    finally cleanup(keys.getParent.getParent)
+  }
 
-      val missing = dir.resolve("none.seed")
-      Main.listKeys(commandLine("list-keys", "--validator-seed", missing.toString)).left.toOption.get should include(
-        "no such file"
-      )
-      Files.exists(missing) shouldBe false
-      Files.writeString(dir.resolve("short.seed"), "abcd")
-      Main.listKeys(commandLine("list-keys", "--seed-file", dir.resolve("short.seed").toString)).left.toOption.get should
-        include("32-byte")
-    finally cleanup(dir)
+  test("list-keys reads the *.seed files by name, and names a file that is not a seed") {
+    val keys = tempDir("jam-keystore")
+    try
+      Files.write(keys.resolve("b.seed"), knownSeed)
+      Files.write(keys.resolve("a.seed"), Array.fill[Byte](32)(7))
+      Files.writeString(keys.resolve("notes.txt"), "not a seed")
+      val (good, bad) = Keystore.load(keys, required = true)
+      good.map(_.path.getFileName.toString) shouldBe List("a.seed", "b.seed")
+      bad shouldBe Nil
+      Keystore.describe(good(1)) shouldBe knownKeys
+
+      Files.writeString(keys.resolve("hex.seed"), JamBytes(knownSeed).toHex.stripPrefix("0x") + "\n")
+      val (_, errors) = Keystore.load(keys, required = true)
+      errors shouldBe List(s"${keys.resolve("hex.seed")}: Seed file is the wrong size: expected 32 bytes, read 65 bytes")
+
+      Keystore.load(keys.resolve("none"), required = true)._2 shouldBe List(s"${keys.resolve("none")}: No such file or directory")
+      Keystore.load(keys.resolve("none"), required = false) shouldBe (Nil, Nil)
+      Keystore.read(keys.resolve("missing.seed")).left.toOption.get should include("No such file or directory")
+    finally cleanup(keys)
   }
 
   test("a temporary data directory is made new, and deleted with everything in it") {
@@ -74,7 +75,6 @@ class KeyCommandsSpec extends AnyFunSuite with Matchers with NodeFixture:
       Files.list(dir).count() shouldBe 0L
       Files.createDirectories(dir.resolve("state/sub"))
       Files.writeString(dir.resolve("state/sub/file"), "x")
-      Files.writeString(dir.resolve("spec.json"), "{}")
       Main.deleteTree(dir)
       Files.exists(dir) shouldBe false
       Main.deleteTree(dir) // gone already: nothing to do

@@ -164,12 +164,12 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
 
   test("the start-up line says which methods are served, and for auto on a public address how to serve the rest") {
     val loopback = java.net.InetAddress.getByName("127.0.0.1")
-    val any = java.net.InetAddress.getByName("0.0.0.0")
+    val any = java.net.InetAddress.getByName("::")
     RpcMethods.describe(RpcMethods.Auto, loopback) shouldBe "all methods (--rpc-methods auto)"
     RpcMethods.describe(RpcMethods.Unsafe, any) shouldBe "all methods (--rpc-methods unsafe)"
     RpcMethods.describe(RpcMethods.Safe, loopback) shouldBe "safe methods only (--rpc-methods safe)"
     val auto = RpcMethods.describe(RpcMethods.Auto, any)
-    auto should startWith("safe methods only (--rpc-methods auto: 0.0.0.0 is not a loopback address")
+    auto should startWith("all methods to loopback clients, safe methods only to others (--rpc-methods auto")
     auto should include("--rpc-methods unsafe")
   }
 
@@ -192,7 +192,7 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
-  test("auto, the default, serves the unsafe methods on a loopback address only; unsafe serves them anywhere") {
+  test("auto, the default, serves the unsafe methods to loopback clients only; unsafe serves them to every client") {
     withServerUsing() { (_, _, client) =>
       unsafeCalls.zipWithIndex.foreach { case ((method, params), i) =>
         client.send(request(i + 1, method, params))
