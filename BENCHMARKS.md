@@ -14,6 +14,7 @@ verification and erasure coding. Each suite is a plain `main` under `src/test/..
 | Block import, before/after | `ImportBench` (replay with root check; heap soak) | `sbt benchImport` (see below) |
 | Block import against state size | `ServiceScaleBench` (a trace replayed on a state with N extra service accounts) | `sbt "protocol/Test/runMain io.forge.jam.protocol.benchmark.ServiceScaleBench --services=0,10000,100000"` |
 | Node heap soak | `NodeSoak` (two nodes over loopback JAMNP) | `sbt soakNodes` (see below) |
+| Trie, large batches | `TrieBatchBench` (in-memory backend: populate 1M keys, insert 1M more as one batch and in 10k batches; `--keys=N`, `--reps=R`) | `sbt "core/Test/runMain io.forge.jam.core.benchmark.TrieBatchBench"` |
 | Hashing | `Blake2bBench` | `sbt "core/Test/runMain io.forge.jam.core.benchmark.Blake2bBench"` |
 | PVM heap growth (`grow_heap`) | `GrowHeapBench` | `sbt benchGrowHeap` |
 
@@ -81,6 +82,31 @@ PVM Heap Growth:
 | fuzzy-ramp: 20 grows of 1-3 pages, then doubling to ~128 MiB (30 calls) | 64.2 / 65.7 ms | 16.0 / 15.6 ms |
 | small-steps: 4,096 grows of 2 pages (32 MiB) | 27,556 / 27,452 ms | 2.4 / 2.7 ms |
 | small-on-large: one 32 MiB grow, then 200 grows of 2 pages | 1,772 / 1,748 ms | 1.9 / 2.0 ms |
+
+Large trie batches (`TrieBatchBench`, 1M keys, in-memory backend), 2026-11-22, cloud VM (4 vCPU Xeon @ 2.10 GHz),
+JDK 24, ParallelGC 10 GB, median of 3 passes. "Before" rebuilds a batch on one thread; "after" rebuilds the subtrees
+at depth 5 in parallel (batches of 4,096 keys or more). Same final root. PolkaJam is `polkajam benchmark`
+(nightly-2026-11-22) on the same VM, one run, which reports one insert figure.
+
+| Workload | Before | After | PolkaJam |
+|---|---|---|---|
+| Populate 1M keys | 3,744 ms | 2,183 ms | 1,242 ms |
+| Insert 1M more, one batch | 6,535 ms | 3,220 ms | 1,738 ms |
+| Insert 1M more, 10k batches | 16,795 ms | 9,075 ms | |
+
+Seal and entropy-source verification in block import, same VM and day: fuzz-perf mean ms per block with each
+verification split over the native library's threads ("split", as before) and done on the thread that started it
+("on caller", as now), two alternating runs each. Run-to-run noise on this VM is about 10%.
+
+| Trace | Split | On caller |
+|---|---|---|
+| fallback | 1.43, 1.52 | 1.41, 1.26 |
+| safrole | 5.26, 4.91 | 5.41, 4.71 |
+| storage | 2.32, 2.39 | 1.93, 2.12 |
+| storage_light | 1.97, 2.13 | 1.84, 1.79 |
+
+With nothing else running the split verification is the quicker one (`SignatureVerifyBench ietf`: 403 against 674 us
+for one, 654 against 758 us for a pair started together), which is why only block import verifies on the caller.
 
 ## The published measurement (fuzz-perf)
 

@@ -47,7 +47,8 @@ object HeaderChecks:
                   blockAuthorKey.bytes,
                   vrfInput,
                   encodedHeader,
-                  block.header.seal.toArray
+                  block.header.seal.toArray,
+                  onCaller = true
                 )
                 if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature)) else None
               }
@@ -64,7 +65,8 @@ object HeaderChecks:
                 blockAuthorKey.bytes,
                 vrfInput,
                 encodedHeader,
-                block.header.seal.toArray
+                block.header.seal.toArray,
+                onCaller = true
               )
               vrfResult match
                 case None => Some(PipelineError.HeaderErr(HeaderErrorCode.BadSealSignature))
@@ -103,7 +105,8 @@ object HeaderChecks:
               blockAuthorKey.bytes,
               SigningContext.entropyInputData(sealVrfOutput),
               Array.empty[Byte],
-              block.header.entropySource.toArray
+              block.header.entropySource.toArray,
+              onCaller = true
             )
             if vrfResult.isEmpty then Some(PipelineError.HeaderErr(HeaderErrorCode.BadEntropySignature)) else None
       }

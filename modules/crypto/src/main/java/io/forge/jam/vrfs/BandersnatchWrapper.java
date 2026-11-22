@@ -191,6 +191,17 @@ public class BandersnatchWrapper {
     );
 
     /**
+     * The same verification done wholly on the calling thread, where {@link #ietfVrfVerify} hands two thirds of it
+     * to the library's own threads. For a caller that runs beside other busy threads, as block import does.
+     */
+    public static native byte[] ietfVrfVerifyOnCaller(
+        byte[] publicBytes,
+        byte[] vrfInput,
+        byte[] auxData,
+        byte[] signature
+    );
+
+    /**
      * Get VRF output directly from secret key and input.
      */
     public static native byte[] getVrfOutput(byte[] secretBytes, byte[] vrfInput);

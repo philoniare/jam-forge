@@ -279,17 +279,24 @@ object BandersnatchVrf:
    * @param vrfInput The VRF input data (signing context + entropy + optional attempt)
    * @param auxData Auxiliary data bound to the signature (e.g., encoded header)
    * @param signature The 96-byte IETF VRF signature (seal)
+   * @param onCaller Verify wholly on the calling thread. By default the native library spreads one verification
+   *                 over three threads, which is quickest for a caller with idle cores; a caller that already runs
+   *                 beside other busy threads (block import verifies the seal and the entropy source at once, during
+   *                 the state transition) passes true, so the verifications do not wait for each other's threads.
    * @return Some(vrfOutput) if verification succeeds, None otherwise
    */
   def ietfVrfVerify(
     publicKey: Array[Byte],
     vrfInput: Array[Byte],
     auxData: Array[Byte],
-    signature: Array[Byte]
+    signature: Array[Byte],
+    onCaller: Boolean = false
   ): Option[Array[Byte]] =
     JniBandersnatchWrapper.ensureLibraryLoaded() // throws for a local failure: see the object's comment
     try
-      val result = JniBandersnatchWrapper.ietfVrfVerify(publicKey, vrfInput, auxData, signature)
+      val result =
+        if onCaller then JniBandersnatchWrapper.ietfVrfVerifyOnCaller(publicKey, vrfInput, auxData, signature)
+        else JniBandersnatchWrapper.ietfVrfVerify(publicKey, vrfInput, auxData, signature)
       if result == null || result.length != 32 then
         None
       else

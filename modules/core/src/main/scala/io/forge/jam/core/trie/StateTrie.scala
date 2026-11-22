@@ -27,6 +27,8 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private val pendingNodes = new NodeTable
   private val pendingValues = new ValueTable
+  private var children: Array[StateTrie] | Null = null
+  private var preDone: java.util.HashMap[Integer, Hash] | Null = null
 
   def rootHash: Hash = currentRoot
 
@@ -58,7 +60,52 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     if updates.nonEmpty then
       val batch = StateTrie.sortedBatch(updates)
       if backend.readsInBulk && batch.length >= StateTrie.PrefetchFrom then prefetch(batch)
+      if splits(batch.length) && currentRoot != Hash.zero then
+        val tasks = new mutable.ArrayBuffer[(Hash, Int, Int)]
+        def prepass(hash: Hash, depth: Int, lo: Int, hi: Int): Unit =
+          if lo < hi && hash != Hash.zero then
+            if depth == StateTrie.ParDepth then tasks += ((hash, lo, hi))
+            else
+              val node = getNode(hash).get
+              if node.nodeType == TrieNodeType.Branch then
+                val mid = StateTrie.firstWithBit(batch, lo, hi, depth)
+                prepass(Hash.wrapUnchecked(node.left.toArrayUnsafe), depth + 1, lo, mid)
+                prepass(Hash.wrapUnchecked(node.right.toArrayUnsafe), depth + 1, mid, hi)
+        prepass(currentRoot, 0, 0, batch.length)
+        // None when the trie is shallower than ParDepth along the batch: the rebuild below may then split instead.
+        if tasks.nonEmpty then
+          runSubtrees(tasks.length, i => tasks(i)._2)((child, i) =>
+            child.updateSubtree(tasks(i)._1, StateTrie.ParDepth, batch, tasks(i)._2, tasks(i)._3)
+          )
       currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
+      preDone = null
+
+  /**
+   * Whether an update of `size` keys is rebuilt as parallel subtrees. Only on the in-memory backend, whose reads are
+   * safe from several threads while nothing writes and whose save takes pending tables as they are; only for a batch
+   * large enough to repay starting the tasks; and only as the first update since a save, so that every pending node
+   * a subtree could meet is in the backend or its own table.
+   */
+  private def splits(size: Int): Boolean =
+    size >= StateTrie.ParFrom && children == null && pendingNodes.size == 0 &&
+      backend.isInstanceOf[InMemoryTrieBackend]
+
+  /** Runs `n` subtree jobs in parallel, each on a new child trie, and records each result under `key(i)`. */
+  private def runSubtrees(n: Int, key: Int => Int)(job: (StateTrie, Int) => Hash): Unit =
+    val kids = Array.fill(n)(new StateTrie(backend, Hash.zero))
+    val hashes = new Array[Hash](n)
+    java.util.stream.IntStream.range(0, n).parallel().forEach(i => hashes(i) = job(kids(i), i))
+    val done = new java.util.HashMap[Integer, Hash]
+    var i = 0
+    while i < n do
+      done.put(key(i), hashes(i))
+      i += 1
+    children = kids
+    preDone = done
+
+  private def preDoneAt(depth: Int, lo: Int): Hash | Null =
+    val d = preDone
+    if d != null && depth == StateTrie.ParDepth then d.get(lo) else null
 
   private def prefetch(batch: Array[StateTrie.Update]): Unit =
     var hashes = Array(currentRoot)
@@ -90,7 +137,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
   /** Writes the queued nodes and values with all ref deltas in one backend batch. */
   def save(): Unit =
     backend match
-      case mem: InMemoryTrieBackend => mem.absorb(pendingNodes, pendingValues)
+      case mem: InMemoryTrieBackend =>
+        val kids = children
+        if kids != null then kids.foreach(k => mem.absorb(k.pendingNodes, k.pendingValues))
+        children = null
+        mem.absorb(pendingNodes, pendingValues)
       case _ =>
         val ops = new Array[BackendOp](2 * (pendingNodes.size + pendingValues.size))
         var n = 0
@@ -124,7 +175,9 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   /** Rewrites the subtree at `hash` (at `depth`) with `batch(lo until hi)`, whose keys all lead to it. */
   private def updateSubtree(hash: Hash, depth: Int, batch: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
+    val pre = preDoneAt(depth, lo)
     if lo == hi then hash
+    else if pre != null then pre
     else
       getNode(hash) match
         case None =>
@@ -182,10 +235,29 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       if i < hi && batch(i).value.isDefined then items += batch(i)
       i += 1
     val arr = items.toArray
-    buildItems(depth, arr, 0, arr.length)
+    if depth == 0 && splits(arr.length) then
+      val tasks = new mutable.ArrayBuffer[(Int, Int)]
+      def prepass(d: Int, from: Int, to: Int): Unit =
+        if to - from >= 2 then
+          if d == StateTrie.ParDepth then tasks += ((from, to))
+          else
+            val mid = StateTrie.firstWithBit(arr, from, to, d)
+            prepass(d + 1, from, mid)
+            prepass(d + 1, mid, to)
+      prepass(0, 0, arr.length)
+      if tasks.nonEmpty then
+        runSubtrees(tasks.length, i => tasks(i)._1)((child, i) =>
+          child.buildItems(StateTrie.ParDepth, arr, tasks(i)._1, tasks(i)._2)
+        )
+      val root = buildItems(depth, arr, 0, arr.length)
+      preDone = null
+      root
+    else buildItems(depth, arr, 0, arr.length)
 
   private def buildItems(depth: Int, items: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
+    val pre = if hi - lo >= 2 then preDoneAt(depth, lo) else null
     if lo == hi then Hash.zero
+    else if pre != null then pre
     else if hi - lo == 1 then
       val item = items(lo)
       if item.existing != null then item.existing
@@ -272,15 +344,26 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private def pendingOrStoredValue(h: Hash): JamBytes =
     val slot = pendingValues.find(h.toArrayUnsafe)
-    val v = if slot >= 0 then pendingValues.value(slot) else null
+    var v = if slot >= 0 then pendingValues.value(slot) else null
+    val kids = children
+    if v == null && kids != null then
+      var k = 0
+      while v == null && k < kids.length do
+        val ks = kids(k).pendingValues.find(h.toArrayUnsafe)
+        if ks >= 0 then v = kids(k).pendingValues.value(ks)
+        k += 1
     if v != null then JamBytes.wrap(v)
     else backend.readRawValue(h).getOrElse(throw new MissingTrieNodeException(h, "value"))
 
-  /** Nodes queued for the next [[save]]; for tests. */
-  private[trie] def pendingNodeCount: Int = pendingNodes.payloadCount
+  /** Nodes queued for the next [[save]], here and in the subtrees' tables; for tests. */
+  private[trie] def pendingNodeCount: Int =
+    val kids = children
+    pendingNodes.payloadCount + (if kids == null then 0 else kids.iterator.map(_.pendingNodes.payloadCount).sum)
 
-  /** Raw values queued for the next [[save]]; for tests. */
-  private[trie] def pendingValueCount: Int = pendingValues.payloadCount
+  /** Raw values queued for the next [[save]]; for tests. A value queued by two subtrees counts twice. */
+  private[trie] def pendingValueCount: Int =
+    val kids = children
+    pendingValues.payloadCount + (if kids == null then 0 else kids.iterator.map(_.pendingValues.payloadCount).sum)
 
   def getKeyValues(prefix: JamBytes, bitsCount: Int): List[(JamBytes, JamBytes)] =
     require(bitsCount >= 0 && bitsCount <= 248, "bitsCount must be in [0, 248]")
@@ -426,7 +509,14 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     if hash == Hash.zero then None
     else
       val slot = pendingNodes.find(hash.toArrayUnsafe)
-      val pending = if slot >= 0 then pendingNodes.node(slot, hash) else null
+      var pending = if slot >= 0 then pendingNodes.node(slot, hash) else null
+      val kids = children
+      if pending == null && kids != null then
+        var k = 0
+        while pending == null && k < kids.length do
+          val ks = kids(k).pendingNodes.find(hash.toArrayUnsafe)
+          if ks >= 0 then pending = kids(k).pendingNodes.node(ks, hash)
+          k += 1
       if pending != null then Some(pending)
       else
         val stored = backend.readNode(hash)
@@ -454,6 +544,12 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
 object StateTrie:
   private val PrefetchFrom = 16
+
+  /** Batches of at least this many keys are rebuilt as parallel subtrees (in-memory backend only). */
+  private[trie] val ParFrom = 4096
+
+  /** The depth the subtrees hang at: up to 32 of them, enough to keep every core busy when their sizes differ. */
+  private val ParDepth = 5
 
 
   /** One key of a batch: an update (`existing` null; `value` None deletes) or a kept leaf being rebuilt around. */

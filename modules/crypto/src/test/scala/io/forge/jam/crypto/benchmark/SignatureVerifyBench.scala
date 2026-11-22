@@ -72,6 +72,24 @@ object SignatureVerifyBench:
     for _ <- 1 to 3 do { sign(); verify() }
     result("bandersnatch_ietf_sign", median(Seq.fill(Runs)(timeMs(sign())._2)) * 1000 / n, "us/sig")
     result("bandersnatch_ietf_verify", median(Seq.fill(Runs)(timeMs(verify())._2)) * 1000 / n, "us/sig")
+    def verifyOnCaller(): Unit = cases.zip(sigs).foreach { case ((pk, in, aux, _), sig) =>
+      if BandersnatchVrf.ietfVrfVerify(pk, in, aux, sig, onCaller = true).isEmpty then
+        throw new IllegalStateException("bad seal")
+    }
+    for _ <- 1 to 3 do verifyOnCaller()
+    result("bandersnatch_ietf_verify_on_caller", median(Seq.fill(Runs)(timeMs(verifyOnCaller())._2)) * 1000 / n, "us/sig")
+    // As block import starts them: a seal and an entropy-source verification together on the shared pool, timed
+    // until both are done, with nothing else running. us per pair.
+    def pairs(onCaller: Boolean): Unit = cases.zip(sigs).grouped(2).foreach { g =>
+      val started = g.map { case ((pk, in, aux, _), sig) =>
+        io.forge.jam.core.Parallel.async(BandersnatchVrf.ietfVrfVerify(pk, in, aux, sig, onCaller).isDefined)
+      }
+      if !started.map(io.forge.jam.core.Parallel.await).forall(identity) then throw new IllegalStateException("bad seal")
+    }
+    for onCaller <- List(false, true) do
+      for _ <- 1 to 3 do pairs(onCaller)
+      val name = if onCaller then "bandersnatch_ietf_verify_pair_on_caller" else "bandersnatch_ietf_verify_pair"
+      result(name, median(Seq.fill(Runs)(timeMs(pairs(onCaller))._2)) * 1000 / (n / 2), "us/pair")
 
   /** `tickets` proofs from distinct ring members, as a block's ticket extrinsic carries (K = 3 tiny, 16 full). */
   private def ring(rng: Random, ringSize: Int, tickets: Int, label: String): Unit =

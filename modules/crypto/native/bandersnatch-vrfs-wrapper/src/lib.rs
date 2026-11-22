@@ -865,7 +865,13 @@ fn input_point(data: &[u8]) -> Option<BanderInput> {
 /// and `-c*O` to another, and this thread hashes to the input point `I` and computes `s*I`, the longest part, so
 /// that it is not the one waiting for a thread to wake. The caller waits for under half the work of a
 /// verification in place of all of it.
-fn ietf_verify_signature(public: &BanderPublic, input_data: &[u8], aux: &[u8], sig: &[u8]) -> Option<BanderOutput> {
+fn ietf_verify_signature(
+    public: &BanderPublic,
+    input_data: &[u8],
+    aux: &[u8],
+    sig: &[u8],
+    on_caller: bool,
+) -> Option<BanderOutput> {
     if sig.len() < 96 {
         return None;
     }
@@ -875,7 +881,7 @@ fn ietf_verify_signature(public: &BanderPublic, input_data: &[u8], aux: &[u8], s
     let minus_c = -c;
 
     let public_point = public.0;
-    let u_result = on_pool(move || {
+    let u_job = move || {
         double_scalar_mul(
             generator_multiples(),
             GENERATOR_WINDOW,
@@ -884,20 +890,28 @@ fn ietf_verify_signature(public: &BanderPublic, input_data: &[u8], aux: &[u8], s
             POINT_WINDOW,
             &minus_c,
         )
-    });
+    };
     let output_bytes: [u8; 32] = sig[..32].try_into().ok()?;
-    let output_result = on_pool(move || {
+    let output_job = move || {
         let output = decode_output(&output_bytes)?;
         let minus_c_output = scalar_mul(&odd_multiples(&output.0, POINT_WINDOW), POINT_WINDOW, &minus_c);
         Some((output, minus_c_output))
-    });
+    };
 
-    let input = input_point(input_data);
-    let s_input = input.as_ref().map(|i| scalar_mul(&odd_multiples(&i.0, POINT_WINDOW), POINT_WINDOW, &s));
-
-    // Both results are received whatever the outcome, so no job is left writing to a dropped channel.
-    let u = u_result.recv().ok();
-    let output = output_result.recv().ok().flatten();
+    let (input, s_input, u, output) = if on_caller {
+        let input = input_point(input_data);
+        let s_input = input.as_ref().map(|i| scalar_mul(&odd_multiples(&i.0, POINT_WINDOW), POINT_WINDOW, &s));
+        (input, s_input, Some(u_job()), output_job())
+    } else {
+        let u_result = on_pool(u_job);
+        let output_result = on_pool(output_job);
+        let input = input_point(input_data);
+        let s_input = input.as_ref().map(|i| scalar_mul(&odd_multiples(&i.0, POINT_WINDOW), POINT_WINDOW, &s));
+        // Both results are received whatever the outcome, so no job is left writing to a dropped channel.
+        let u = u_result.recv().ok();
+        let output = output_result.recv().ok().flatten();
+        (input, s_input, u, output)
+    };
     let (input, s_input, u, (output, minus_c_output)) = (input?, s_input?, u?, output?);
 
     let v = s_input + minus_c_output;
@@ -1045,12 +1059,36 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
 /// IETF VRF verify - verifies signature and returns 32-byte output hash
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     public_bytes: JByteArray,
     vrf_input: JByteArray,
     aux_data: JByteArray,
     signature: JByteArray,
+) -> jbyteArray {
+    ietf_vrf_verify_entry(env, public_bytes, vrf_input, aux_data, signature, false)
+}
+
+/// The same verification done wholly on the calling thread: see [`ietf_verify_signature`].
+#[no_mangle]
+pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerifyOnCaller(
+    env: JNIEnv,
+    _class: JClass,
+    public_bytes: JByteArray,
+    vrf_input: JByteArray,
+    aux_data: JByteArray,
+    signature: JByteArray,
+) -> jbyteArray {
+    ietf_vrf_verify_entry(env, public_bytes, vrf_input, aux_data, signature, true)
+}
+
+fn ietf_vrf_verify_entry(
+    mut env: JNIEnv,
+    public_bytes: JByteArray,
+    vrf_input: JByteArray,
+    aux_data: JByteArray,
+    signature: JByteArray,
+    on_caller: bool,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
@@ -1086,7 +1124,7 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfVerify(
         None => return return_error_local(&mut env, "Failed to deserialize public key"),
     };
 
-    let output = match ietf_verify_signature(&public, &vrf_input_data, &aux, &sig_data) {
+    let output = match ietf_verify_signature(&public, &vrf_input_data, &aux, &sig_data, on_caller) {
         Some(output) => output,
         None => return return_error_local(&mut env, "IETF VRF verification failed"),
     };
@@ -1390,8 +1428,10 @@ mod tests {
                 for public in [secret.public(), other.public()] {
                     for (d, ad) in [(&data, &aux), (&other_data, &aux), (&data, &other_data)] {
                         let expected = sequential_verify(&public, d, ad, sig);
-                        let got = ietf_verify_signature(&public, d, ad, sig);
+                        let got = ietf_verify_signature(&public, d, ad, sig, false);
                         assert_eq!(got, expected, "signature {}", hex::encode(sig));
+                        let on_caller = ietf_verify_signature(&public, d, ad, sig, true);
+                        assert_eq!(on_caller, expected, "on caller, signature {}", hex::encode(sig));
                         if expected.is_some() { accepted += 1 } else { rejected += 1 }
                     }
                 }
@@ -1422,9 +1462,11 @@ mod tests {
                 scope.spawn(move || {
                     for round in 0..200 {
                         let (public, data, sig, output) = &cases[(t + round) % cases.len()];
-                        assert_eq!(ietf_verify_signature(public, data, b"x", sig), Some(*output));
+                        // Half the threads verify on themselves, as block import does, beside the pooled ones.
+                        let on_caller = t % 2 == 0;
+                        assert_eq!(ietf_verify_signature(public, data, b"x", sig, on_caller), Some(*output));
                         let (wrong_key, ..) = &cases[(t + round + 1) % cases.len()];
-                        assert_eq!(ietf_verify_signature(wrong_key, data, b"x", sig), None);
+                        assert_eq!(ietf_verify_signature(wrong_key, data, b"x", sig, on_caller), None);
                     }
                 });
             }
