@@ -898,11 +898,23 @@ fn ietf_verify_signature(
         Some((output, minus_c_output))
     };
 
-    let (input, s_input, u, output) = if on_caller {
-        let input = input_point(input_data);
-        let s_input = input.as_ref().map(|i| scalar_mul(&odd_multiples(&i.0, POINT_WINDOW), POINT_WINDOW, &s));
-        (input, s_input, Some(u_job()), output_job())
-    } else {
+    if on_caller {
+        let input = input_point(input_data)?;
+        let output = decode_output(&output_bytes)?;
+        let u = u_job();
+        let v = double_scalar_mul(
+            &odd_multiples(&input.0, POINT_WINDOW),
+            POINT_WINDOW,
+            &s,
+            &odd_multiples(&output.0, POINT_WINDOW),
+            POINT_WINDOW,
+            &minus_c,
+        );
+        let (u, v) = (u.into_affine(), v.into_affine());
+        let expected = BandersnatchSha512Ell2::challenge(&[&public.0, &input.0, &output.0, &u, &v], aux);
+        return (expected == c).then_some(output);
+    }
+    let (input, s_input, u, output) = {
         let u_result = on_pool(u_job);
         let output_result = on_pool(output_job);
         let input = input_point(input_data);
@@ -1440,6 +1452,37 @@ mod tests {
         // Per signer: the good signature and the one with trailing bytes, under its own key, input and data.
         assert_eq!(accepted, 24 * 2);
         assert!(rejected > 24 * 1000);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_ietf_verify() {
+        use ark_ec_vrfs::ietf::Prover as _;
+        let cases: Vec<_> = (0..64u8)
+            .map(|i| {
+                let secret = BanderSecret::from_seed(&[i; 32]);
+                let data = vec![i; 40];
+                let input = vrf_input_point(&data);
+                let output = secret.output(input);
+                let mut sig = Vec::new();
+                IetfVrfSignature { output, proof: secret.prove(input, output, b"x") }.serialize_compressed(&mut sig).unwrap();
+                (secret.public(), data, sig)
+            })
+            .collect();
+        for on_caller in [true, false, true, false] {
+            for (public, data, sig) in &cases {
+                assert!(ietf_verify_signature(public, data, b"x", sig, on_caller).is_some());
+            }
+            let rounds = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                for (public, data, sig) in &cases {
+                    assert!(ietf_verify_signature(public, data, b"x", sig, on_caller).is_some());
+                }
+            }
+            let each = start.elapsed().as_secs_f64() * 1e6 / (rounds * cases.len()) as f64;
+            println!("RESULT ietf_verify on_caller={on_caller} {each:.1} us (inputs cached)");
+        }
     }
 
     #[test]

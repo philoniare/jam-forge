@@ -139,9 +139,10 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     backend match
       case mem: InMemoryTrieBackend =>
         val kids = children
-        if kids != null then kids.foreach(k => mem.absorb(k.pendingNodes, k.pendingValues))
-        children = null
-        mem.absorb(pendingNodes, pendingValues)
+        if kids == null then mem.absorb(pendingNodes, pendingValues)
+        else
+          mem.absorbAll(kids.map(_.pendingNodes) :+ pendingNodes, kids.map(_.pendingValues) :+ pendingValues)
+          children = null
       case _ =>
         val ops = new Array[BackendOp](2 * (pendingNodes.size + pendingValues.size))
         var n = 0

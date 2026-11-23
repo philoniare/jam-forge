@@ -73,6 +73,24 @@ object BlockPipeline:
     case Right(value) => value
     case Left(error)  => break(Left(wrap(error)))
 
+  private final class EarlyHeaderChecks(
+      val seal: Either[PipelineError, Unit],
+      val entropy: Either[PipelineError, Unit],
+      val checks: PendingChecks
+  )
+
+  private def earlyHeaderChecks(run: Run): Option[EarlyHeaderChecks] =
+    val slot = run.block.header.slot.toLong
+    val epochLength = run.config.epochLength.toLong
+    if slot <= run.priorSlot || slot / epochLength != run.priorSlot / epochLength then None
+    else
+      try
+        val checks = new PendingChecks
+        val seal = HeaderChecks.blockSeal(run.block, run.header, run.view, checks)
+        val entropy = if seal.isRight then HeaderChecks.entropyVrf(run.block, run.view, checks) else seal
+        Some(new EarlyHeaderChecks(seal, entropy, checks))
+      catch case NonFatal(_) => None
+
   private def safroleEpoch(run: Run)(using Stop): SafroleOutputData =
     valueOf(SafroleTransition.epochStfView(run.safroleInput, run.view))(PipelineError.SafroleErr(_))
 
@@ -146,6 +164,8 @@ object BlockPipeline:
     val view = run.view
     val slot = block.header.slot.toLong
 
+    val early = time("x/earlyHeaderChecks")(earlyHeaderChecks(run))
+
     // Step 0: Validate extrinsic hash
     if !extrinsicHashChecked then time("extrinsic-hash")(HeaderChecks.extrinsicHash(block, run.config)).orStop
     view.postOffenders = run.posteriorOffenders
@@ -156,8 +176,14 @@ object BlockPipeline:
     // Step 2: Block seal validation (uses post-Safrole state)
     time("x/validateEpochMark")(HeaderChecks.epochMark(block, safrole)).orStop
     time("x/validateTicketsMark")(HeaderChecks.ticketsMark(block, safrole)).orStop
-    time("seal")(HeaderChecks.blockSeal(block, run.header, view, run.checks)).orStop
-    time("entropy-vrf")(HeaderChecks.entropyVrf(block, view, run.checks)).orStop
+    early match
+      case Some(started) =>
+        started.seal.orStop
+        started.entropy.orStop
+        run.checks.adopt(started.checks)
+      case None =>
+        time("seal")(HeaderChecks.blockSeal(block, run.header, view, run.checks)).orStop
+        time("entropy-vrf")(HeaderChecks.entropyVrf(block, view, run.checks)).orStop
 
     time("tickets") {
       valueOf(

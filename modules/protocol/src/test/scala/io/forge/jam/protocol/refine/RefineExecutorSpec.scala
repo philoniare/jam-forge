@@ -117,6 +117,18 @@ class RefineExecutorSpec extends AnyFunSuite with Matchers:
     result.result shouldBe ExecutionResult.BadCode
   }
 
+  test("panic, not BAD, when the code preimage is there but is not metadata and a program") {
+    val wp = workPackageFor(42L, Array[Byte](1))
+    val pastEnd = Array[Byte](0x7f) ++ new Array[Byte](20)
+    val noCode = Array[Byte](2, 9, 9)
+    val notAProgram = Array[Byte](0) ++ Array.fill[Byte](40)(0x5a)
+    for preimage <- List(pastEnd, noCode, notAProgram) do
+      val result = run(wp, new SingleServiceLookup(42L, Some(preimage)))
+      result.result shouldBe ExecutionResult.Panic
+      result.gasUsed shouldBe 0L
+      result.exports shouldBe Nil
+  }
+
   test("BIG when the code preimage exceeds Cmaxservicecodesize") {
     val wp = workPackageFor(42L, Array[Byte](1))
     val big = new Array[Byte](4_000_001)

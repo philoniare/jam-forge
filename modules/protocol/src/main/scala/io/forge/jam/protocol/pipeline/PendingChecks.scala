@@ -34,6 +34,9 @@ final class PendingChecks:
   def add(check: CompletableFuture[Option[PipelineError]]): Unit =
     checks += check
 
+  def adopt(other: PendingChecks): Unit =
+    checks ++= other.checks
+
   /** Waits for the checks in start order and returns the first failure. */
   def firstFailure(): Option[PipelineError] =
     checks.iterator.map(Parallel.await).collectFirst { case Some(err) => err }

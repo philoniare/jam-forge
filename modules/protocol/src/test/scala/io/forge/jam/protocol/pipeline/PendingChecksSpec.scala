@@ -168,6 +168,27 @@ class PendingChecksSpec extends AnyFunSuite with Matchers:
     failsWith(resealed(fixture.block.header.copy(offendersMark = List(offender))), PipelineError.InvalidOffendersMark)
   }
 
+  test("an error of a step before the seal wins over a bad seal, though the seal check starts first") {
+    val h = fixture.block.header
+    val wrongBody = h.copy(extrinsicHash = Hash(Array.fill[Byte](32)(9)))
+    failsWith(fixture.block.copy(header = wrongBody), PipelineError.HeaderErr(HeaderErrorCode.InvalidExtrinsicHash))
+    val stale = h.copy(slot = io.forge.jam.core.primitives.Timeslot(0))
+    failsWith(fixture.block.copy(header = stale), PipelineError.SafroleErr(SafroleErrorCode.BadSlot))
+  }
+
+  test("a block that opens a new epoch has its seal checked after the epoch step, as before") {
+    given Decoder[Genesis] = Genesis.decoder
+    val importer = new BlockImporter(config)
+    importer.store.bootstrap(fixture.genesis.keyvals.map(kv => (kv.key, kv.value)))
+    val validators = DevKeyStore.getAllTinyValidators()
+    val block = new BlockGenerator(config, validators, importer.store)
+      .generateBlock(fixture.genesis.stateRoot, slot = config.epochLength.toLong)
+    importResult(block) match
+      case ImportResult.Invalid(_, message, _) => fail(s"the epoch's first block was refused: $message")
+      case _                                   => ()
+    failsWith(block.copy(header = block.header.copy(seal = corrupt(block.header.seal))), badSeal)
+  }
+
   test("GP: an offenders mark holding the new offenders' keys is accepted (§10.3)") {
     val key = io.forge.jam.core.primitives.Ed25519PublicKey(Array.fill[Byte](32)(7))
     val block = fixture.block.copy(header = fixture.block.header.copy(offendersMark = List(offender)))

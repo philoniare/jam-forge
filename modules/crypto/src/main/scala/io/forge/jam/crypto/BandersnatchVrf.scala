@@ -180,23 +180,8 @@ object BandersnatchVrf:
     attempt: UByte,
     ringSize: Int
   ): Option[VerificationResult] =
-    ensureInitialized(ringSize) // throws for a local failure: see the object's comment
-    try
-      val result = JniBandersnatchWrapper.verifierRingVrfVerify(
-        entropy.bytes.toArray,
-        attempt.toByte,
-        signature.toArray,
-        ringCommitment.toArray,
-        ringSize
-      )
-
-      if result == null || result.length != 32 then
-        None
-      else
-        // The result is the 32-byte ticket ID
-        Some(VerificationResult(JamBytes(result), attempt))
-    catch
-      case _: RuntimeException => None
+    verifyRingProofRaw(entropy.bytes.toArray, attempt.toInt, signature.toArray, ringCommitment.toArray, ringSize)
+      .map(id => VerificationResult(JamBytes(id), attempt))
 
   /**
    * Verify the ring VRF proofs of several tickets together, which costs one pairing check for all of them where
@@ -218,19 +203,35 @@ object BandersnatchVrf:
         val length = tickets.head._1.length
         if tickets.exists(_._1.length != length) then None
         else
-          val signatures = new Array[Byte](length * tickets.size)
-          tickets.iterator.zipWithIndex.foreach { case ((signature, _), i) =>
-            System.arraycopy(signature.toArray, 0, signatures, i * length, length)
-          }
-          val result = JniBandersnatchWrapper.verifierRingVrfVerifyBatch(
-            entropy.bytes.toArray,
-            tickets.iterator.map(_._2.toByte).toArray,
-            signatures,
-            ringCommitment.toArray,
-            ringSize
+          val entropyBytes = entropy.bytes.toArray
+          val commitment = ringCommitment.toArray
+          val keys = tickets.map((signature, attempt) =>
+            VerifiedRingProofs.key(ringSize, commitment, entropyBytes, attempt.toByte, signature.toArray)
           )
-          if result == null || result.length != 32 * tickets.size then None
-          else Some(result.grouped(32).map(JamBytes(_)).toSeq)
+          val known = keys.map(VerifiedRingProofs.get)
+          val fresh = tickets.indices.filter(known(_) == null)
+          if fresh.isEmpty then Some(known.map(id => JamBytes(id.nn)))
+          else
+            val signatures = new Array[Byte](length * fresh.size)
+            fresh.iterator.zipWithIndex.foreach { (t, i) =>
+              System.arraycopy(tickets(t)._1.toArray, 0, signatures, i * length, length)
+            }
+            val result = JniBandersnatchWrapper.verifierRingVrfVerifyBatch(
+              entropyBytes,
+              fresh.iterator.map(tickets(_)._2.toByte).toArray,
+              signatures,
+              commitment,
+              ringSize
+            )
+            if result == null || result.length != 32 * fresh.size then None
+            else
+              val ids = known.toArray
+              fresh.iterator.zipWithIndex.foreach { (t, i) =>
+                val id = java.util.Arrays.copyOfRange(result, i * 32, i * 32 + 32)
+                VerifiedRingProofs.put(keys(t), id)
+                ids(t) = id
+              }
+              Some(ids.toSeq.map(id => JamBytes(id.nn)))
       catch
         case _: RuntimeException => None
 
@@ -246,21 +247,51 @@ object BandersnatchVrf:
     ringSize: Int
   ): Option[Array[Byte]] =
     ensureInitialized(ringSize) // throws for a local failure: see the object's comment
-    try
-      val result = JniBandersnatchWrapper.verifierRingVrfVerify(
-        entropy,
-        attempt.toByte,
-        signature,
-        commitment,
-        ringSize
-      )
+    val key = VerifiedRingProofs.key(ringSize, commitment, entropy, attempt.toByte, signature)
+    val known = VerifiedRingProofs.get(key)
+    if known != null then Some(known.clone())
+    else
+      try
+        val result = JniBandersnatchWrapper.verifierRingVrfVerify(
+          entropy,
+          attempt.toByte,
+          signature,
+          commitment,
+          ringSize
+        )
 
-      if result == null || result.length != 32 then
-        None
-      else
-        Some(result)
-    catch
-      case _: RuntimeException => None
+        if result == null || result.length != 32 then
+          None
+        else
+          VerifiedRingProofs.put(key, result.clone())
+          Some(result)
+      catch
+        case _: RuntimeException => None
+
+  private[crypto] object VerifiedRingProofs:
+    val MaxEntries = 8192
+
+    private val ids = new java.util.LinkedHashMap[io.forge.jam.core.primitives.Hash, Array[Byte]](256, 0.75f, true):
+      override def removeEldestEntry(
+          eldest: java.util.Map.Entry[io.forge.jam.core.primitives.Hash, Array[Byte]]
+      ): Boolean = this.size() > MaxEntries
+
+    def key(ringSize: Int, commitment: Array[Byte], entropy: Array[Byte], attempt: Byte, signature: Array[Byte])
+        : io.forge.jam.core.primitives.Hash =
+      val in = new Array[Byte](4 + 1 + 4 + 4 + commitment.length + entropy.length + signature.length)
+      val b = java.nio.ByteBuffer.wrap(in)
+      b.putInt(ringSize).put(attempt).putInt(commitment.length).putInt(entropy.length)
+      b.put(commitment).put(entropy).put(signature)
+      io.forge.jam.core.Hashing.blake2b256(in)
+
+    def get(key: io.forge.jam.core.primitives.Hash): Array[Byte] | Null = ids.synchronized(ids.get(key))
+
+    def put(key: io.forge.jam.core.primitives.Hash, id: Array[Byte]): Unit =
+      ids.synchronized(ids.put(key, id)): Unit
+
+    def size: Int = ids.synchronized(ids.size())
+
+    def clear(): Unit = ids.synchronized(ids.clear())
 
   /**
    * Check if the native library is loaded and operational.

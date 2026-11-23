@@ -101,7 +101,7 @@ class RefineExecutor(val config: ChainConfig):
     val code = ServiceCode.extractCodeBlob(preimage) match
       case Some(bytes) if bytes.nonEmpty => bytes
       case _ =>
-        return RefineResult(ExecutionResult.BadCode, Nil, 0L)
+        return RefineResult(ExecutionResult.Panic, Nil, 0L)
 
     // a = encode(c, i, s, var(payload), blake(p))
     val payload = workItem.payload.toArray

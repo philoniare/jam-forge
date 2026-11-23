@@ -198,7 +198,7 @@ object Main extends LazyLogging:
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
     if flags.contains("--rpc") || (!flags.contains("--no-rpc") && !validator) then
       val methods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
-      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), opts.getOrElse("rpc-listen-ip", "::"), cl.repeated("rpc-allow-origin"), methods)
+      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), opts.getOrElse("rpc-listen-ip", AnyAddress.getHostAddress), cl.repeated("rpc-allow-origin"), methods)
     opts.get("metrics-port").foreach { p =>
       val host = opts.get("metrics-listen-ip").map(v => parseIp("--metrics-listen-ip", v).fold(fail, identity).getHostAddress)
       node.enableMetrics(p.toInt, host.getOrElse("127.0.0.1"))
@@ -295,7 +295,16 @@ object Main extends LazyLogging:
     ip.isLoopbackAddress || (try java.net.NetworkInterface.getByInetAddress(ip) != null
     catch case _: java.io.IOException => false)
 
-  private val AnyAddress: InetAddress = InetAddress.getByAddress(new Array[Byte](16))
+  private[node] def ipv6Available: Boolean =
+    try
+      java.nio.channels.DatagramChannel.open(java.net.StandardProtocolFamily.INET6).close()
+      true
+    catch case _: UnsupportedOperationException | _: java.io.IOException => false
+
+  private[node] def anyAddress(ipv6: Boolean): InetAddress =
+    InetAddress.getByAddress(new Array[Byte](if ipv6 then 16 else 4))
+
+  private lazy val AnyAddress: InetAddress = anyAddress(ipv6Available)
 
   private val DefaultRpcPort = 19800
 
@@ -550,7 +559,8 @@ object Main extends LazyLogging:
       |      --peer-id <PEER_ID>            Peer ID of this node: the seed whose key it is. Without it an ordinary
       |                                     node takes a new peer ID each start
       |      --external-ip <EXTERNAL_IP>    IP address other nodes reach this node at
-      |      --listen-ip <LISTEN_IP>        IP address to listen on [default: ::]
+      |      --listen-ip <LISTEN_IP>        IP address to listen on [default: ::, or 0.0.0.0 on a
+      |                                     host without IPv6]
       |      --port <PORT>                  UDP port to listen on; 0 means any unused port [default: 0]
       |      --telemetry <HOST:PORT>        Telemetry endpoint (JIP-3)
       |      --bootnode <BOOTNODE>          A bootnode, <PEER_ID>@<HOST>:<PORT>; may be given more than once
@@ -562,7 +572,8 @@ object Main extends LazyLogging:
       |                                     grandpa [default: dummy]
       |      --rpc                          Enable the RPC server (off by default for a validator)
       |      --no-rpc                       Disable the RPC server (on by default otherwise)
-      |      --rpc-listen-ip <RPC_LISTEN_IP>  IP address for the RPC server to listen on [default: ::]
+      |      --rpc-listen-ip <RPC_LISTEN_IP>  IP address for the RPC server to listen on [default: as
+      |                                     --listen-ip]
       |      --rpc-port <RPC_PORT>          Port for the RPC server to listen on; 0 means any unused port
       |                                     [default: 19800]
       |  -h, --help                         Print help

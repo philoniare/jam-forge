@@ -32,6 +32,21 @@ private[trie] object HashTables:
         j += 1
       size += 1
 
+    def addWords(k0: Long, k1: Long, k2: Long, k3: Long): Unit =
+      if (size + 1) * 4 > words.length then words = java.util.Arrays.copyOf(words, words.length * 2)
+      val b = size * 4
+      words(b) = k0
+      words(b + 1) = k1
+      words(b + 2) = k2
+      words(b + 3) = k3
+      size += 1
+
+    def addAll(other: HashList): Unit =
+      if (size + other.size) * 4 > words.length then
+        words = java.util.Arrays.copyOf(words, math.max(words.length * 2, (size + other.size) * 4))
+      System.arraycopy(other.words, 0, words, size * 4, other.size * 4)
+      size += other.size
+
     def copyTo(i: Int, out: Array[Byte]): Unit =
       var j = 0
       while j < 4 do
@@ -51,6 +66,8 @@ private[trie] object HashTables:
   /** Initial slots: small, since a StateTrie makes two tables per block and most blocks touch few nodes. */
   val SmallCapacity: Int = 1 << 5
   val LargeCapacity: Int = 1 << 10
+
+  inline val Unresolved = Int.MinValue
 
   /**
    * Linear-probing table of 32-byte keys with a count and an optional payload per slot. Deletion shifts later entries
@@ -135,6 +152,43 @@ private[trie] object HashTables:
       s(b + Meta) = 1L
       count += 1
       i
+
+    final def findOrInsertBefore(k0: Long, k1: Long, k2: Long, k3: Long, end: Int): Int =
+      val p = probe
+      val s = slots
+      val w = probeWord(k0)
+      var i = home(k0)
+      while i < end do
+        val pw = p(i)
+        if pw == 0L then
+          p(i) = w
+          val b = i * stride
+          s(b) = k0
+          s(b + 1) = k1
+          s(b + 2) = k2
+          s(b + 3) = k3
+          s(b + Ref) = 0L
+          s(b + Meta) = 1L
+          return -(i + 1)
+        if pw == w then
+          val b = i * stride
+          if s(b) == k0 && s(b + 1) == k1 && s(b + 2) == k2 && s(b + 3) == k3 then return i
+        i += 1
+      Unresolved
+
+    final def addCounts(inserted: Int, payloads: Int): Unit =
+      count += inserted
+      payloadCount += payloads
+
+    final def regionStart(region: Int, regions: Int): Int = region * (capacity / regions)
+
+    final def regionOf(k0: Long, regionBits: Int): Int = (k0 >>> (64 - regionBits)).toInt
+
+    protected final def setMetaUncounted(slot: Int, m: Long): Boolean =
+      val b = slot * stride + Meta
+      val added = m >= 2 && slots(b) < 2
+      slots(b) = m
+      added
 
     /** Whether `slot` is in use; for iterating slots `0 until slotCount`. */
     final def occupied(slot: Int): Boolean = probe(slot) != 0L
@@ -252,6 +306,11 @@ private[trie] object HashTables:
       setMeta(slot, from.meta(fromSlot))
       System.arraycopy(from.slots, from.base(fromSlot) + Head, slots, base(slot) + Head, 8)
 
+    def setNodeFromUncounted(slot: Int, from: NodeTable, fromSlot: Int): Boolean =
+      val added = setMetaUncounted(slot, from.meta(fromSlot))
+      System.arraycopy(from.slots, from.base(fromSlot) + Head, slots, base(slot) + Head, 8)
+      added
+
     /** Drops the payload, keeping the key and count. */
     def clearNode(slot: Int): Unit =
       val b = slot * stride + Meta
@@ -318,5 +377,10 @@ private[trie] object HashTables:
     def setValue(slot: Int, v: Array[Byte]): Unit =
       setMeta(slot, 2L)
       vals(slot) = v
+
+    def setValueUncounted(slot: Int, v: Array[Byte]): Boolean =
+      val added = setMetaUncounted(slot, 2L)
+      vals(slot) = v
+      added
 
     def value(slot: Int): Array[Byte] | Null = vals(slot)

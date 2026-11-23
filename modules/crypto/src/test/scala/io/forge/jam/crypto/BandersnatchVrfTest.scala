@@ -27,6 +27,10 @@ class BandersnatchVrfTest extends AnyFunSuite with Matchers:
   private val expectedGammaZ: String =
     "af39b7de5fcfb9fb8a46b1645310529ce7d08af7301d9758249da4724ec698eb127f489b58e49ae9ab85027509116962a135fc4d97b66fbbed1d3df88cd7bf5cc6e5d7391d261a4b552246648defcb64ad440d61d69ec61b5473506a48d58e1992e630ae2b14e758ab0960e372172203f4c9a41777dadd529971d7ab9d23ab29fe0e9c85ec450505dde7f5ac038274cf"
 
+  private val validTicketSignatureHex: String =
+    "e5055ade89aba8daa558078c28b6f86468772f63bebe920d88ce3e189405c09660e430f3ea78a6d70aa849570e35de25a35414c1bf5df87f0ebcf495a9481ef289bfe8b2135788aa9687549f8a4a1d492323e817eb7ddd396d9d4d1f95da6b807822b436856a8a5c06f65f0aecb4a077944d0b5b308293c403a28a91c8d4474fe99615eebe49cd57973e101a5bc3982144d236031327aa95f58d16d92364df062a89bb767c63aef3cd2938e7af15cf9e3e60b19afd0d3d78c43ed0af8e9fd0108407aef70f2bba8bf2bd9316eb6c1cc923e133e00096f6ebbb58b124491d7093f271db465926809975343eaa02d30c108d6db123d2815dbfa6cbe74866ed9855eecbbab8e2011f84f71a2e360caeac3bcd64c4b46b11ca167e238cf5f0ccfe7f93ff1cab74815f48db1759417f39f81d8887490789027344561d32285bf92ca503bca1dcf8b013d5938e865ea933221f98910d47cc02f4a9a826c16b5893a6c792c4aee4b20c2df607796db538b5c6538623b88151a00aad17689fa94ee32123f1ec933cb4fdbc00e5452ba7f151b86359c8fed9878216e1fdac29c26a5a700c2994d49afce3daec4839a2ec63f1c36b47bef47014f9433005103d9d1bd5541d409ec0cfbeaf2dd92627a1fb702e9a0b509403f965c3be6a31aeb8ad97cbc725e359d8b8960a3a512af9af95c2712f26a5d4483b69001c956abfdc781148d73db38ee8ce579f5030bb28d98fa84e4c942327b6e58ee6ce1f0f1e71b4e4b7263b347140d7979bd4d1cda8532dc8ba12dbc31f7b154f0bda72fc486adba2737e6621633f98350f73040c9abf9530a09989476e6243cdcf397ac05a0ccb71eb6265af7258d8dc1ac2f66210686e7deeca4099bb7b2240d2dae18bcd739cf9fdcb0536745cdf6b30c3c29312511b8f71a035c2114ea47439261d30a556b66b84d1a4ba2cc64bdf2b19f862a363b9d91ee022ab7ffa61dedd23efb3c4effdbe955638956d6ee3998cf874449763818d23fbdb7297d47f82db65db6ebac8a6d06c0dbeb3163095c13fd27af4e31416c5561c7adc552bf02ad47d1c99757bc66c302eb2a851c706b097869faed86517a22fae96"
+  private val validTicketEntropy = Hash(hexToBytes("0xbb30a42c1e62f0afda5f0a4e8a562f7a13a24cea00ee81917b86b89e801314aa"))
+
   private val testKeys: List[BandersnatchPublicKey] = List(
     "0xaa2b95f7572875b0d0f186552ae745ba8222fc0b5bd456554bfe51c68938f8bc",
     "0xf16e5352840afb47e206b5c89f560f2611835855cf2e6ebad1acc9520a72591d",
@@ -112,8 +116,7 @@ class BandersnatchVrfTest extends AnyFunSuite with Matchers:
     val gammaZ = JamBytes(hexToBytes("0x" + gammaZHex))
 
     // Valid signature from test vector (first ticket in publish-tickets-no-mark-1.json extrinsic)
-    val signatureHex =
-      "e5055ade89aba8daa558078c28b6f86468772f63bebe920d88ce3e189405c09660e430f3ea78a6d70aa849570e35de25a35414c1bf5df87f0ebcf495a9481ef289bfe8b2135788aa9687549f8a4a1d492323e817eb7ddd396d9d4d1f95da6b807822b436856a8a5c06f65f0aecb4a077944d0b5b308293c403a28a91c8d4474fe99615eebe49cd57973e101a5bc3982144d236031327aa95f58d16d92364df062a89bb767c63aef3cd2938e7af15cf9e3e60b19afd0d3d78c43ed0af8e9fd0108407aef70f2bba8bf2bd9316eb6c1cc923e133e00096f6ebbb58b124491d7093f271db465926809975343eaa02d30c108d6db123d2815dbfa6cbe74866ed9855eecbbab8e2011f84f71a2e360caeac3bcd64c4b46b11ca167e238cf5f0ccfe7f93ff1cab74815f48db1759417f39f81d8887490789027344561d32285bf92ca503bca1dcf8b013d5938e865ea933221f98910d47cc02f4a9a826c16b5893a6c792c4aee4b20c2df607796db538b5c6538623b88151a00aad17689fa94ee32123f1ec933cb4fdbc00e5452ba7f151b86359c8fed9878216e1fdac29c26a5a700c2994d49afce3daec4839a2ec63f1c36b47bef47014f9433005103d9d1bd5541d409ec0cfbeaf2dd92627a1fb702e9a0b509403f965c3be6a31aeb8ad97cbc725e359d8b8960a3a512af9af95c2712f26a5d4483b69001c956abfdc781148d73db38ee8ce579f5030bb28d98fa84e4c942327b6e58ee6ce1f0f1e71b4e4b7263b347140d7979bd4d1cda8532dc8ba12dbc31f7b154f0bda72fc486adba2737e6621633f98350f73040c9abf9530a09989476e6243cdcf397ac05a0ccb71eb6265af7258d8dc1ac2f66210686e7deeca4099bb7b2240d2dae18bcd739cf9fdcb0536745cdf6b30c3c29312511b8f71a035c2114ea47439261d30a556b66b84d1a4ba2cc64bdf2b19f862a363b9d91ee022ab7ffa61dedd23efb3c4effdbe955638956d6ee3998cf874449763818d23fbdb7297d47f82db65db6ebac8a6d06c0dbeb3163095c13fd27af4e31416c5561c7adc552bf02ad47d1c99757bc66c302eb2a851c706b097869faed86517a22fae96"
+    val signatureHex = validTicketSignatureHex
     val signature = JamBytes(hexToBytes("0x" + signatureHex))
 
     val attempt = UByte(0)
@@ -124,6 +127,49 @@ class BandersnatchVrfTest extends AnyFunSuite with Matchers:
     result.isDefined shouldBe true
     result.get.attempt shouldBe attempt
     result.get.ticketId.length shouldBe 32
+  }
+
+  test("a ring proof that verified is answered from memory, and only for the very same inputs") {
+    assume(BandersnatchVrf.isAvailable, "Native library not available - skipping JNI tests")
+    val gammaZ = JamBytes(hexToBytes("0x" + expectedGammaZ))
+    val signature = JamBytes(hexToBytes("0x" + validTicketSignatureHex))
+    BandersnatchVrf.VerifiedRingProofs.clear()
+
+    val first = BandersnatchVrf.verifyRingProof(signature, gammaZ, validTicketEntropy, UByte(0), 6)
+    first.isDefined shouldBe true
+    BandersnatchVrf.VerifiedRingProofs.size shouldBe 1
+    val again = BandersnatchVrf.verifyRingProof(signature, gammaZ, validTicketEntropy, UByte(0), 6)
+    again.map(_.ticketId) shouldBe first.map(_.ticketId)
+    BandersnatchVrf.verifyRingProofRaw(validTicketEntropy.bytes.toArray, 0, signature.toArray, gammaZ.toArray, 6)
+      .map(JamBytes(_)) shouldBe first.map(_.ticketId)
+    BandersnatchVrf.verifyRingProofs(Seq((signature, UByte(0)), (signature, UByte(0))), gammaZ, validTicketEntropy, 6) shouldBe
+      Some(Seq(first.get.ticketId, first.get.ticketId))
+    BandersnatchVrf.VerifiedRingProofs.size shouldBe 1
+
+    BandersnatchVrf.verifyRingProof(signature, gammaZ, validTicketEntropy, UByte(1), 6) shouldBe None
+    val otherEntropy = Hash(Array.fill[Byte](32)(3))
+    BandersnatchVrf.verifyRingProof(signature, gammaZ, otherEntropy, UByte(0), 6) shouldBe None
+    val otherRing = gammaZ.toArray
+    otherRing(0) = (otherRing(0) ^ 1).toByte
+    BandersnatchVrf.verifyRingProof(signature, JamBytes(otherRing), validTicketEntropy, UByte(0), 6) shouldBe None
+    val tampered = signature.toArray
+    tampered(200) = (tampered(200) ^ 1).toByte
+    BandersnatchVrf.verifyRingProof(JamBytes(tampered), gammaZ, validTicketEntropy, UByte(0), 6) shouldBe None
+    BandersnatchVrf.verifyRingProofs(
+      Seq((signature, UByte(0)), (JamBytes(tampered), UByte(0))), gammaZ, validTicketEntropy, 6
+    ) shouldBe None
+    BandersnatchVrf.VerifiedRingProofs.size shouldBe 1
+  }
+
+  test("a batch of ring proofs not seen before verifies and is remembered") {
+    assume(BandersnatchVrf.isAvailable, "Native library not available - skipping JNI tests")
+    val gammaZ = JamBytes(hexToBytes("0x" + expectedGammaZ))
+    val signature = JamBytes(hexToBytes("0x" + validTicketSignatureHex))
+    BandersnatchVrf.VerifiedRingProofs.clear()
+    val ids = BandersnatchVrf.verifyRingProofs(Seq((signature, UByte(0))), gammaZ, validTicketEntropy, 6)
+    ids.map(_.size) shouldBe Some(1)
+    BandersnatchVrf.VerifiedRingProofs.size shouldBe 1
+    BandersnatchVrf.verifyRingProof(signature, gammaZ, validTicketEntropy, UByte(0), 6).map(_.ticketId) shouldBe ids.map(_.head)
   }
 
   test("Verify ring proof with invalid signature should fail") {

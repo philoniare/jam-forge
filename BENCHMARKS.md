@@ -94,6 +94,15 @@ at depth 5 in parallel (batches of 4,096 keys or more). Same final root. PolkaJa
 | Insert 1M more, one batch | 6,535 ms | 3,220 ms | 1,738 ms |
 | Insert 1M more, 10k batches | 16,795 ms | 9,075 ms | |
 
+The save made parallel as well (the subtrees' pending tables go into the store by ranges of its slots, one task
+a range), same VM and bench, 2026-11-22, median of 3 passes, two runs:
+
+| Workload | Parallel subtrees only | Parallel save too | PolkaJam |
+|---|---|---|---|
+| Populate 1M keys | 2,004 ms | 1,353 / 1,153 ms | 1,242 ms |
+| Insert 1M more, one batch | 2,952 ms | 2,154 / 2,016 ms | 1,738 ms |
+| Insert 1M more, 10k batches | 8,358 ms | 5,485 / 4,941 ms | |
+
 Seal and entropy-source verification in block import, same VM and day: fuzz-perf mean ms per block with each
 verification split over the native library's threads ("split", as before) and done on the thread that started it
 ("on caller", as now), two alternating runs each. Run-to-run noise on this VM is about 10%.
@@ -107,6 +116,37 @@ verification split over the native library's threads ("split", as before) and do
 
 With nothing else running the split verification is the quicker one (`SignatureVerifyBench ietf`: 403 against 674 us
 for one, 654 against 758 us for a pair started together), which is why only block import verifies on the caller.
+
+Header checks started early, same VM, 2026-11-22: the seal and entropy-source checks of a block in its parent's
+epoch start before the extrinsic hash and the epoch step instead of after them, and a verification on the caller
+shares its doublings between `s*I` and `-c*O` (native timing: 446 to 356 us with the input point cached). fuzz-perf,
+mean of three alternating runs before and after the change, ms per block:
+
+| Trace | mean before / after | p50 before / after | p99 before / after |
+|---|---|---|---|
+| fallback | 1.21 / 0.97 | 1.07 / 0.89 | 2.98 / 2.25 |
+| safrole | 4.31 / 4.42 | 5.69 / 5.38 | 10.65 / 13.95 |
+| storage | 2.19 / 1.83 | 1.77 / 1.66 | 7.56 / 4.47 |
+| storage_light | 1.67 / 1.61 | 1.42 / 1.34 | 6.25 / 5.99 |
+
+Single runs differ by 10 to 20% here (one run of storage before the change had a 13.9 ms p99), so read safrole and
+storage_light as unchanged. `benchImport --stages --reps=30` on fallback, in process: 0.98 to 0.80 ms mean, 0.81 to
+0.64 ms p50.
+
+Ring proofs verified once (`BandersnatchVrf.VerifiedRingProofs`), 2026-11-23, same VM: a node met each ticket's
+proof when the ticket arrived, twice while authoring a block with it and again importing that block, at about 6 ms
+a proof. A mixed devnet under jamboree (four PolkaJam nightly-2026-11-22 validators, two of ours, tiny spec), how
+long after its slot began each of our blocks was authored:
+
+| Our blocks | Before (9 min run) | After (6 min run) |
+|---|---|---|
+| Without tickets | median 7 ms (5 to 22, n=9) | median 7 ms (5 to 56, n=5) |
+| With tickets | median 54 ms (23 to 137, n=16) | 24 to 92 ms in the first 2.5 min (n=4), then 7 to 9 ms (n=3) |
+
+PolkaJam's own blocks in the same runs: 2 to 19 ms. Small samples from two runs of different length, so the sizes
+are rough; the late blocks of the first minutes are a cold JVM and tickets not yet seen. `benchImport` replays a
+trace many times in one process, so on a trace with tickets (safrole) it now measures remembered proofs after the
+first pass; fuzz-perf, a fresh process importing each block once, is not affected.
 
 ## The published measurement (fuzz-perf)
 
