@@ -198,7 +198,7 @@ object Main extends LazyLogging:
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
     if flags.contains("--rpc") || (!flags.contains("--no-rpc") && !validator) then
       val methods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
-      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), opts.getOrElse("rpc-listen-ip", AnyAddress.getHostAddress), cl.repeated("rpc-allow-origin"), methods)
+      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), rpcListenHost(opts, listenIp), cl.repeated("rpc-allow-origin"), methods)
     opts.get("metrics-port").foreach { p =>
       val host = opts.get("metrics-listen-ip").map(v => parseIp("--metrics-listen-ip", v).fold(fail, identity).getHostAddress)
       node.enableMetrics(p.toInt, host.getOrElse("127.0.0.1"))
@@ -305,6 +305,9 @@ object Main extends LazyLogging:
     InetAddress.getByAddress(new Array[Byte](if ipv6 then 16 else 4))
 
   private lazy val AnyAddress: InetAddress = anyAddress(ipv6Available)
+
+  private[node] def rpcListenHost(options: Map[String, String], listenIp: InetAddress): String =
+    options.getOrElse("rpc-listen-ip", listenIp.getHostAddress)
 
   private val DefaultRpcPort = 19800
 

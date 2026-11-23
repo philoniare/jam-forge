@@ -27,8 +27,10 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   private val pendingNodes = new NodeTable
   private val pendingValues = new ValueTable
+
   private var children: Array[StateTrie] | Null = null
-  private var preDone: java.util.HashMap[Integer, Hash] | Null = null
+  private var doneByBatchIndex: java.util.HashMap[Integer, Hash] | Null = null
+  private var doneByItemIndex: java.util.HashMap[Integer, Hash] | Null = null
 
   def rootHash: Hash = currentRoot
 
@@ -74,11 +76,11 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
         prepass(currentRoot, 0, 0, batch.length)
         // None when the trie is shallower than ParDepth along the batch: the rebuild below may then split instead.
         if tasks.nonEmpty then
-          runSubtrees(tasks.length, i => tasks(i)._2)((child, i) =>
+          doneByBatchIndex = runSubtrees(tasks.length, i => tasks(i)._2)((child, i) =>
             child.updateSubtree(tasks(i)._1, StateTrie.ParDepth, batch, tasks(i)._2, tasks(i)._3)
           )
-      currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
-      preDone = null
+      try currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
+      finally doneByBatchIndex = null
 
   /**
    * Whether an update of `size` keys is rebuilt as parallel subtrees. Only on the in-memory backend, whose reads are
@@ -90,8 +92,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
     size >= StateTrie.ParFrom && children == null && pendingNodes.size == 0 &&
       backend.isInstanceOf[InMemoryTrieBackend]
 
-  /** Runs `n` subtree jobs in parallel, each on a new child trie, and records each result under `key(i)`. */
-  private def runSubtrees(n: Int, key: Int => Int)(job: (StateTrie, Int) => Hash): Unit =
+  private def runSubtrees(n: Int, key: Int => Int)(job: (StateTrie, Int) => Hash): java.util.HashMap[Integer, Hash] =
     val kids = Array.fill(n)(new StateTrie(backend, Hash.zero))
     val hashes = new Array[Hash](n)
     java.util.stream.IntStream.range(0, n).parallel().forEach(i => hashes(i) = job(kids(i), i))
@@ -101,10 +102,14 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
       done.put(key(i), hashes(i))
       i += 1
     children = kids
-    preDone = done
+    done
 
-  private def preDoneAt(depth: Int, lo: Int): Hash | Null =
-    val d = preDone
+  private def doneAtBatchIndex(depth: Int, lo: Int): Hash | Null =
+    val d = doneByBatchIndex
+    if d != null && depth == StateTrie.ParDepth then d.get(lo) else null
+
+  private def doneAtItemIndex(depth: Int, lo: Int): Hash | Null =
+    val d = doneByItemIndex
     if d != null && depth == StateTrie.ParDepth then d.get(lo) else null
 
   private def prefetch(batch: Array[StateTrie.Update]): Unit =
@@ -176,7 +181,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
 
   /** Rewrites the subtree at `hash` (at `depth`) with `batch(lo until hi)`, whose keys all lead to it. */
   private def updateSubtree(hash: Hash, depth: Int, batch: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
-    val pre = preDoneAt(depth, lo)
+    val pre = doneAtBatchIndex(depth, lo)
     if lo == hi then hash
     else if pre != null then pre
     else
@@ -247,16 +252,15 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
             prepass(d + 1, mid, to)
       prepass(0, 0, arr.length)
       if tasks.nonEmpty then
-        runSubtrees(tasks.length, i => tasks(i)._1)((child, i) =>
+        doneByItemIndex = runSubtrees(tasks.length, i => tasks(i)._1)((child, i) =>
           child.buildItems(StateTrie.ParDepth, arr, tasks(i)._1, tasks(i)._2)
         )
-      val root = buildItems(depth, arr, 0, arr.length)
-      preDone = null
-      root
+      try buildItems(depth, arr, 0, arr.length)
+      finally doneByItemIndex = null
     else buildItems(depth, arr, 0, arr.length)
 
   private def buildItems(depth: Int, items: Array[StateTrie.Update], lo: Int, hi: Int): Hash =
-    val pre = if hi - lo >= 2 then preDoneAt(depth, lo) else null
+    val pre = if hi - lo >= 2 then doneAtItemIndex(depth, lo) else null
     if lo == hi then Hash.zero
     else if pre != null then pre
     else if hi - lo == 1 then

@@ -45,8 +45,7 @@ class LoopbackSpec extends AnyFunSuite with Matchers:
     stream.finish()
     seen.all shouldBe List("cba", "again", "FIN")
     served.asScala.toList shouldBe List("1")
-    a.openStreamCount shouldBe 0
-    b.openStreamCount shouldBe 0
+    eventually(a.openStreamCount == 0 && b.openStreamCount == 0) shouldBe true
   }
 
   test("a stream that sees the peer's FIN before finishing its own side stops counting once it finishes") {

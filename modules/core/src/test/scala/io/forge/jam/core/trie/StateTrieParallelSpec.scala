@@ -105,3 +105,81 @@ class StateTrieParallelSpec extends AnyFlatSpec with Matchers:
     pair.round(Seq(Vector((key(rng), Some(JamBytes(rng.nextBytes(40)))))), "one key")
     pair.round(Seq(Vector.fill(9_000)((key(rng), Some(JamBytes(rng.nextBytes(40)))))), "onto one key")
   }
+
+  private def keyUnder(rng: Random, first: Int): JamBytes =
+    val a = rng.nextBytes(31)
+    a(0) = first.toByte
+    JamBytes.wrap(a)
+
+  private def entry(rng: Random, first: Int): (JamBytes, Option[JamBytes]) =
+    (keyUnder(rng, first), Some(JamBytes(rng.nextBytes(40))))
+
+  it should "build new keys under an empty slot above the split depth" in {
+    val rng = new Random(11)
+    val pair = new Pair
+    pair.round(Seq(Vector(entry(rng, 0x00), entry(rng, 0x04))), "seed 00, 04")
+    pair.round(
+      Seq(entry(rng, 0x02) +: Vector.fill(StateTrie.ParFrom - 1)(entry(rng, 0x80))),
+      "one key under 02, the rest under 80"
+    )
+    pair.round(
+      Seq(Vector.fill(StateTrie.ParFrom - 2)(entry(rng, 0x02)) ++ Vector.fill(2)(entry(rng, 0x40))),
+      "most keys under 02, two under 40"
+    )
+  }
+
+  it should "build new keys under an empty slot at the split depth" in {
+    val rng = new Random(12)
+    val pair = new Pair
+    pair.round(Seq(Vector(0x00, 0x04, 0x10, 0x14).map(entry(rng, _))), "seed 00, 04, 10, 14")
+    pair.round(
+      Seq(entry(rng, 0x02) +: Vector.fill(StateTrie.ParFrom - 1)(entry(rng, 0x08 + rng.nextInt(8)))),
+      "one key under 02, the rest under 08 to 0f"
+    )
+  }
+
+  it should "build new keys beside a leaf above the split depth" in {
+    val rng = new Random(13)
+    val pair = new Pair
+    pair.round(Seq(Vector(0x00, 0x04, 0x98).map(entry(rng, _))), "seed 00, 04, 98")
+    pair.round(
+      Seq(entry(rng, 0x02) +: Vector.fill(StateTrie.ParFrom - 1)(entry(rng, 0x90))),
+      "one key under 02, the rest under 90"
+    )
+  }
+
+  it should "give a state-shaped trie, where a new service writes many items in one block, the same trie" in {
+    val rng = new Random(14)
+    val pair = new Pair
+    val components = (1 to 16).toVector.map(i => JamBytes.wrap(Array.tabulate[Byte](31)(j => if j == 0 then i.toByte else 0)))
+    val accounts = Vector.fill(3)(keyUnder(rng, 0xff))
+    def value(): Option[JamBytes] = Some(JamBytes(rng.nextBytes(40 + rng.nextInt(200))))
+    pair.round(
+      Seq((components ++ accounts).map((_, value())) ++ Vector.fill(300)(entry(rng, 0x00))),
+      "genesis"
+    )
+    pair.round(
+      Seq(
+        Vector(3, 6, 11, 13).map(i => (components(i - 1), value())) ++
+          Vector((accounts.head, value())) ++
+          Vector.fill(StateTrie.ParFrom + 100)(entry(rng, 0x80))
+      ),
+      "a block with a new service's items"
+    )
+  }
+
+  it should "leave sparse-topped tries the trie a piecewise update leaves" in {
+    for seed <- 21 to 40 do
+      val rng = new Random(seed)
+      val pair = new Pair
+      def firsts(n: Int): Vector[Int] = Vector.fill(n)(rng.nextInt(256))
+      val seeded = firsts(1 + rng.nextInt(6))
+      pair.round(Seq(Vector.fill(2 + rng.nextInt(40))(entry(rng, seeded(rng.nextInt(seeded.size))))), s"seed $seed seeded")
+      for round <- 1 to 3 do
+        val crowded = firsts(1 + rng.nextInt(3))
+        val batch =
+          Vector.fill(StateTrie.ParFrom + rng.nextInt(500))(entry(rng, crowded(rng.nextInt(crowded.size)))) ++
+            Vector.fill(rng.nextInt(6))(entry(rng, rng.nextInt(256))) ++
+            rng.shuffle(pair.model.keys.toVector.sortBy(_.toHex)).take(rng.nextInt(20)).map(k => (k, None))
+        pair.round(Seq(rng.shuffle(batch)), s"seed $seed round $round")
+  }

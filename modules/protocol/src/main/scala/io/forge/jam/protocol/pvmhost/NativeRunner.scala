@@ -83,6 +83,10 @@ object NativeRunner extends StrictLogging:
         logger.debug("NativeRunner: deopt to interpreter — recompiler dylib not available (jam.pvm.recompiler.lib unset or file missing)")
         recordDeopt("no-dylib")
         None
+      case Some(_) if currentHeapSize(instance) > MaxDescribedHeapBytes =>
+        logger.debug("NativeRunner: deopt to interpreter — the instance's heap is too large to describe")
+        recordDeopt("heap-too-large")
+        None
       case Some(rc) =>
         val program = StageTimers.time("native/program")(compiledFor(rc, instance.module))
         val unsupported = program.scan
@@ -122,7 +126,7 @@ object NativeRunner extends StrictLogging:
                     val regions = described.regions.map(r => new PvmRecompiler.Region(r.base, r.len, r.base, r.writable))
                     val backing = described.backing
 
-                    val (out, finalRegionLens, grownHeapBytes) = StageTimers.time("native/execute")(
+                    val (out, finalRegionLens, heapWrittenBack) = StageTimers.time("native/execute")(
                       executeInContext(
                         rc, instance, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex,
                         hostCalls, describedWithHeap
@@ -145,12 +149,8 @@ object NativeRunner extends StrictLogging:
                     // are never mutated by a correct program, and BasicMemory.setMemorySlice
                     // rejects writes to read-only ranges outright.
                     StageTimers.time("native/writeback")(described.regions.zip(finalRegionLens).zipWithIndex.foreach { case ((region, finalLen), idx) =>
-                      if region.writable then
-                        val slice =
-                          if describedWithHeap.exists(_.heapRegionIndex == idx) && grownHeapBytes.isDefined then
-                            grownHeapBytes.get
-                          else
-                            backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + finalLen.toInt)
+                      if region.writable && !(heapWrittenBack && describedWithHeap.exists(_.heapRegionIndex == idx)) then
+                        val slice = backing.slice(region.bufOffset.toInt, region.bufOffset.toInt + finalLen.toInt)
                         instance.basicMemory.setMemorySlice(UInt(region.base.toInt), slice)
                     })
 
@@ -454,7 +454,7 @@ object NativeRunner extends StrictLogging:
       entryIndex: Int,
       hostCalls: Option[(HostCallDispatcher, Option[() => Unit])],
       heapTracking: Option[RecompilerMemory.DescribedWithHeap]
-  ): (PvmRecompiler.ExecResult, Array[Long], Option[Array[Byte]]) =
+  ): (PvmRecompiler.ExecResult, Array[Long], Boolean) =
     var wrapperRef: NativeInstanceWrapper = null
     val handler: PvmRecompiler.HostCallHandler = hostCalls match
       case None => null
@@ -490,22 +490,42 @@ object NativeRunner extends StrictLogging:
           Integer.toUnsignedLong(live.regionsSegment().get(java.lang.foreign.ValueLayout.JAVA_INT, i * 16L + 4))
         else regions(i).len
       }
-      val grownHeapBytes: Option[Array[Byte]] = heapTracking.flatMap { ht =>
+      val heapWrittenBack = heapTracking.exists { ht =>
         val idx = ht.heapRegionIndex
         val finalLen = finalLens(idx)
         val snapshotLen = regions(idx).len
         if finalLen > snapshotLen then
-          val nativeOff = regions(idx).bufOffset
-          val out = new Array[Byte](finalLen.toInt)
-          java.lang.foreign.MemorySegment.copy(
-            live.backingSegment(), java.lang.foreign.ValueLayout.JAVA_BYTE, nativeOff,
-            out, 0, finalLen.toInt
+          StageTimers.time("native/writeback")(
+            writeGrownHeapBack(instance, live.backingSegment(), regions(idx).bufOffset, regions(idx).base, snapshotLen, finalLen)
           )
-          Some(out)
-        else None
+          true
+        else false
       }
-      (result, finalLens, grownHeapBytes)
+      (result, finalLens, heapWrittenBack)
     finally StageTimers.time("native/close")(live.close())
+
+  private val HeapCopyPieceBytes = 1 << 20
+  private val ZeroPiece = new Array[Byte](HeapCopyPieceBytes)
+
+  private def writeGrownHeapBack(
+      instance: InterpretedInstance,
+      backing: java.lang.foreign.MemorySegment,
+      offset: Long,
+      base: Long,
+      snapshot: Long,
+      length: Long
+  ): Unit =
+    val piece = new Array[Byte](math.min(length, HeapCopyPieceBytes.toLong).toInt)
+    var at = 0L
+    while at < length do
+      val n = math.min(piece.length.toLong, length - at).toInt
+      java.lang.foreign.MemorySegment.copy(backing, java.lang.foreign.ValueLayout.JAVA_BYTE, offset + at, piece, 0, n)
+      if at < snapshot || java.util.Arrays.mismatch(piece, 0, n, ZeroPiece, 0, n) >= 0 then
+        val data = if n == piece.length then piece else java.util.Arrays.copyOf(piece, n)
+        instance.basicMemory.setMemorySlice(UInt((base + at).toInt), data)
+      at += n
+
+  private val MaxDescribedHeapBytes = 1L << 30
 
   private def currentHeapSize(instance: InterpretedInstance): Long =
     instance.basicMemory.heapSize.signed.toLong & 0xFFFFFFFFL

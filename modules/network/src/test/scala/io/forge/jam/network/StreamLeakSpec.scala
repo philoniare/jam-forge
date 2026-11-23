@@ -1,8 +1,11 @@
 package io.forge.jam.network
 
 import java.net.InetSocketAddress
-import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{CountDownLatch, LinkedBlockingQueue, Semaphore, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 
+import io.netty.channel.{ChannelFuture, ChannelFutureListener, ChannelHandlerContext, ChannelInboundHandlerAdapter}
+import io.netty.incubator.codec.quic.{QuicStreamChannel, QuicStreamType}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -12,7 +15,10 @@ import org.scalatest.matchers.should.Matchers
   */
 class StreamLeakSpec extends AnyFunSuite with Matchers:
 
-  private val config = JamnpConfig(genesisHashPrefix = "deadbeef")
+  private val ReleaseSeconds = 60
+
+  private val config =
+    JamnpConfig(genesisHashPrefix = "deadbeef", maxIdleTimeoutMillis = 4 * ReleaseSeconds * 1000L)
 
   /** More than the 256 concurrent streams a connection allows: a leak of one stream per round exhausts them. */
   private val Rounds = 300
@@ -29,6 +35,73 @@ class StreamLeakSpec extends AnyFunSuite with Matchers:
     val deadline = System.currentTimeMillis() + seconds * 1000L
     while !cond && System.currentTimeMillis() < deadline do Thread.sleep(20)
     if !cond then fail(s"timed out waiting for: $what")
+
+  private def await(what: String, detail: => String)(done: Long => Boolean): Unit =
+    if !done(ReleaseSeconds.toLong) then fail(s"timed out after $ReleaseSeconds s waiting for: $what ($detail)")
+
+  private def stillConnected(conns: JamnpConnection*): Unit =
+    withClue("connection closed: ")(conns.foreach(_.isOpen shouldBe true))
+
+  private def releasedOnPeerStreams(conn: JamnpConnection): Semaphore =
+    val released = new Semaphore(0)
+    val counter = new ChannelInboundHandlerAdapter:
+      override def channelRead(ctx: ChannelHandlerContext, msg: Object): Unit =
+        msg match
+          case ch: QuicStreamChannel =>
+            ch.closeFuture()
+              .addListener(new ChannelFutureListener {
+                override def operationComplete(f: ChannelFuture): Unit = released.release()
+              })
+            ()
+          case _ => ()
+        ctx.fireChannelRead(msg)
+    conn.quic
+      .eventLoop()
+      .submit(new Runnable { def run(): Unit = { conn.quic.pipeline().addFirst(counter); () } })
+      .get(10, TimeUnit.SECONDS)
+    released
+
+  private def openWithCredit(conn: JamnpConnection, kind: Byte): JamnpStream =
+    eventually("stream credit from the peer", ReleaseSeconds)(
+      conn.quic.peerAllowedStreams(QuicStreamType.BIDIRECTIONAL) > 0
+    )
+    conn.openStream(kind).get(10, TimeUnit.SECONDS)
+
+  private final class Relay(server: InetSocketAddress) extends AutoCloseable:
+    private val front = new java.net.DatagramSocket(new InetSocketAddress("127.0.0.1", 0))
+    private val back = new java.net.DatagramSocket(new InetSocketAddress("127.0.0.1", 0))
+    @volatile private var client: java.net.SocketAddress = null
+
+    val dropFromClient = new AtomicInteger()
+
+    def address: InetSocketAddress = new InetSocketAddress("127.0.0.1", front.getLocalPort)
+
+    private def pump(from: java.net.DatagramSocket)(forward: java.net.DatagramPacket => Unit): Unit =
+      val t = new Thread(() =>
+        val packet = new java.net.DatagramPacket(new Array[Byte](65535), 65535)
+        try
+          while true do
+            packet.setLength(65535)
+            from.receive(packet)
+            forward(packet)
+        catch case _: java.io.IOException => () // closed
+      )
+      t.setDaemon(true)
+      t.start()
+
+    pump(front) { p =>
+      client = p.getSocketAddress
+      if dropFromClient.getAndUpdate(n => math.max(0, n - 1)) == 0 then
+        back.send(new java.net.DatagramPacket(p.getData, p.getLength, server))
+    }
+    pump(back) { p =>
+      val to = client
+      if to != null then front.send(new java.net.DatagramPacket(p.getData, p.getLength, to))
+    }
+
+    def close(): Unit =
+      front.close()
+      back.close()
 
   /** A CE 128-style echo request on `conn`; the response text. */
   private def echo(conn: JamnpConnection, text: String): String =
@@ -154,7 +227,7 @@ class StreamLeakSpec extends AnyFunSuite with Matchers:
         // Two batches, each under the limit, together over it.
         for _ <- 1 to 2 do
           for i <- 1 to Batch do
-            val stream = conn.openStream(StreamKind.BundleRequest).get(10, TimeUnit.SECONDS)
+            val stream = openWithCredit(conn, StreamKind.BundleRequest)
             stream.onClosed(() => closed.offer(true))
             // Half send a request and go quiet; half never send a message.
             if i % 2 == 0 then stream.send("request".getBytes("UTF-8"))
@@ -179,12 +252,96 @@ class StreamLeakSpec extends AnyFunSuite with Matchers:
         .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
         .get(10, TimeUnit.SECONDS)
       val serverSide = accepted.poll(10, TimeUnit.SECONDS)
+      serverSide should not be null
+      val released = releasedOnPeerStreams(serverSide)
+      def counts = s"open streams: client ${conn.openStreamCount}, server ${serverSide.openStreamCount}"
       for _ <- 1 to 2 do
+        val reset = new CountDownLatch(Batch)
         for _ <- 1 to Batch do
-          val stream = conn.openStream(StreamKind.BundleRequest).get(10, TimeUnit.SECONDS)
+          val stream = openWithCredit(conn, StreamKind.BundleRequest)
+          stream.onClosed(() => reset.countDown())
           stream.send("request".getBytes("UTF-8"))
-        eventually("client streams to be reset")(conn.openStreamCount == 0)
-        eventually("server streams to see the reset")(serverSide.openStreamCount == 0)
+        await("client streams to be reset", counts)(reset.await(_, TimeUnit.SECONDS))
+        await("server streams to see the reset", counts)(released.tryAcquire(Batch, _, TimeUnit.SECONDS))
+        stillConnected(conn, serverSide)
+        eventually("client streams to close")(conn.openStreamCount == 0)
+        eventually("server streams to close")(serverSide.openStreamCount == 0)
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+  }
+
+  test("a CE stream its opener resets before the acceptor has read it is released at once") {
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config.copy(streamIdleTimeoutMillis = 300))
+    val accepted = new LinkedBlockingQueue[JamnpConnection]()
+    val handled = new AtomicInteger()
+    serverNode.onConnectionChange((c, up) => if up then accepted.offer(c))
+    serverNode.registerHandler(
+      StreamKind.BundleRequest,
+      (_: JamnpConnection, stream: JamnpStream) =>
+        handled.incrementAndGet()
+        stream.onMessage(_ => ())
+        ()
+    )
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = clientNode
+        .connect(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
+        .get(10, TimeUnit.SECONDS)
+      val serverSide = accepted.poll(10, TimeUnit.SECONDS)
+      serverSide should not be null
+      val released = releasedOnPeerStreams(serverSide)
+      def counts = s"open streams: client ${conn.openStreamCount}, server ${serverSide.openStreamCount}"
+      val reset = new CountDownLatch(Batch)
+      serverSide.quic.eventLoop().execute(() => { reset.await(30, TimeUnit.SECONDS); () })
+      val request = new Array[Byte](1024)
+      for _ <- 1 to Batch do
+        val stream = conn.openStream(StreamKind.BundleRequest).get(10, TimeUnit.SECONDS)
+        stream.onClosed(() => reset.countDown())
+        stream.send(request)
+      await("client streams to be reset", counts)(reset.await(_, TimeUnit.SECONDS))
+      await("server streams to see the reset", counts)(released.tryAcquire(Batch, _, TimeUnit.SECONDS))
+      stillConnected(conn, serverSide)
+      withClue("streams that reached the acceptor's handler: ") { handled.get() should be < Batch }
+      eventually("client streams to close")(conn.openStreamCount == 0)
+      eventually("server streams to close")(serverSide.openStreamCount == 0)
+    finally
+      clientNode.shutdown()
+      serverNode.shutdown()
+  }
+
+  test("an opener's reset reaches the acceptor even when later datagrams overtake it") {
+    val serverNode = new JamnpNode(NodeIdentity.generate(), config)
+    val clientNode = new JamnpNode(NodeIdentity.generate(), config)
+    val accepted = new LinkedBlockingQueue[JamnpConnection]()
+    val requests = new LinkedBlockingQueue[Array[Byte]]()
+    serverNode.onConnectionChange((c, up) => if up then accepted.offer(c))
+    serverNode.registerHandler(
+      StreamKind.BundleRequest,
+      (_: JamnpConnection, stream: JamnpStream) =>
+        stream.onMessage(requests.offer(_))
+        ()
+    )
+    try
+      serverNode.start(new InetSocketAddress("127.0.0.1", 0))
+      val relay = new Relay(new InetSocketAddress("127.0.0.1", serverNode.boundPort))
+      try
+        val conn = clientNode.connect(relay.address).get(10, TimeUnit.SECONDS)
+        val serverSide = accepted.poll(10, TimeUnit.SECONDS)
+        serverSide should not be null
+        val released = releasedOnPeerStreams(serverSide)
+        def counts = s"open streams: client ${conn.openStreamCount}, server ${serverSide.openStreamCount}"
+        val stream = conn.openStream(StreamKind.BundleRequest).get(10, TimeUnit.SECONDS)
+        stream.send("request".getBytes("UTF-8"))
+        requests.poll(10, TimeUnit.SECONDS) should not be null
+        Thread.sleep(300)
+        relay.dropFromClient.set(1)
+        stream.reset()
+        await("server stream to see the reset", counts)(released.tryAcquire(1, _, TimeUnit.SECONDS))
+        stillConnected(conn, serverSide)
+        relay.dropFromClient.get() shouldBe 0
+      finally relay.close()
     finally
       clientNode.shutdown()
       serverNode.shutdown()

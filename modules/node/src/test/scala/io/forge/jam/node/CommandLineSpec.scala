@@ -105,6 +105,15 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     finality("--announced-finality") shouldBe Main.Finality.Peers
   }
 
+  test("the RPC listens where the node does, unless --rpc-listen-ip names another address") {
+    val any = java.net.InetAddress.getByName("0.0.0.0")
+    val one = java.net.InetAddress.getByName("10.0.0.5")
+    Main.rpcListenHost(Map.empty, any) shouldBe "0.0.0.0"
+    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5"), one) shouldBe "10.0.0.5"
+    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5", "rpc-listen-ip" -> "127.0.0.1"), one) shouldBe "127.0.0.1"
+    Main.rpcListenHost(Map("rpc-listen-ip" -> "::"), one) shouldBe "::"
+  }
+
   test("--listen-ip, --rpc-listen-ip and --external-ip take an IPv4 or IPv6 address, never a host name") {
     def ip(option: String, value: String) = Main.parseIp(option, value).fold(e => fail(e), identity)
     parse("run", "--listen-ip", "0.0.0.0").isRight shouldBe true

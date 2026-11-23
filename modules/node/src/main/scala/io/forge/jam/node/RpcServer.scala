@@ -206,9 +206,10 @@ final class RpcServer(
                   if !session.subscriptions.isEmpty then refreshOne(session)
               )
           catch
-            case e: Exception =>
+            case e: Throwable =>
               done()
-              logger.warn(s"RPC request failed: ${e.getMessage}")
+              logger.warn(s"RPC request failed: $e")
+              if !e.isInstanceOf[Exception] && !e.isInstanceOf[StackOverflowError] then throw e
         }
       catch
         case _: RejectedExecutionException => // shutting down

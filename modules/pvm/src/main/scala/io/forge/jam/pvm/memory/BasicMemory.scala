@@ -61,6 +61,54 @@ final class BasicMemory private (
 
   // Slot boundaries: regions are laid out in this order, so three unsigned compares pick the slot.
   private val rwStartU: Long = rwStart.toLong & 0xffffffffL
+  private val rwRegionSizeU: Long = rwRegionSize.toLong & 0xffffffffL
+  private val heapBaseU: Long = heapBaseInt.toLong & 0xffffffffL
+
+  private inline def rwEndU: Long = math.max(rwStartU + rwRegionSizeU, heapBaseU + _heapSize.toLong)
+
+  private var sparseFromU: Long = Long.MaxValue
+  private var chunks: Array[Array[Byte]] = null
+  private var firstChunk: Long = 0L
+  private var chunkCount: Int = 0
+
+  private def chunkAt(a: Long): Array[Byte] =
+    val table = chunks
+    if table == null then null
+    else
+      val k = (a >>> BasicMemory.ChunkShift) - firstChunk
+      if k < 0 || k >= table.length then null else table(k.toInt)
+
+  private def chunkForWrite(a: Long): Array[Byte] =
+    val table = chunks
+    if table == null then null
+    else
+      val k = (a >>> BasicMemory.ChunkShift) - firstChunk
+      if k < 0 || k >= table.length then null
+      else
+        var c = table(k.toInt)
+        if c == null then
+          if reservation != null then reservation.grow(BasicMemory.ChunkBytes.toLong)
+          c = new Array[Byte](BasicMemory.ChunkBytes)
+          table(k.toInt) = c
+          chunkCount += 1
+        c
+
+  private def cacheBuffer(): Unit =
+    cachedRegionId = 2
+    cachedRegionStart = rwStart
+    cachedRegionEnd = math.min(math.min(rwEndU, rwStartU + rwData.length), Int.MaxValue.toLong).toInt
+    cachedRegionArray = rwData
+    cachedRegionOffset = 0
+
+  private def cacheChunk(a: Long, c: Array[Byte]): Unit =
+    val chunkStart = (a >>> BasicMemory.ChunkShift) << BasicMemory.ChunkShift
+    val start = math.max(chunkStart, sparseFromU)
+    val end = math.min(chunkStart + BasicMemory.ChunkBytes, rwEndU)
+    cachedRegionId = 2
+    cachedRegionStart = start.toInt
+    cachedRegionEnd = if end == 0x80000000L then Int.MaxValue else end.toInt
+    cachedRegionArray = c
+    cachedRegionOffset = (start - chunkStart).toInt
   private val stackLowU: Long = stackLow.toLong & 0xffffffffL
   private val auxStartU: Long = auxStart.toLong & 0xffffffffL
 
@@ -503,6 +551,8 @@ final class BasicMemory private (
 
   def setReservation(r: InstanceMemoryBudget.Reservation): Unit = reservation = r
 
+  private[pvm] def heapBackingBytes: Long = rwData.length.toLong + chunkCount.toLong * BasicMemory.ChunkBytes
+
   private def zeroDirty(upTo: Int): Unit =
     if upTo > dirtyFrom && dirtyTo > dirtyFrom then
       val end = math.min(upTo, dirtyTo)
@@ -536,15 +586,24 @@ final class BasicMemory private (
     // the large buffer a finished invocation released, if there is one, else grows the buffer by at least half, so a
     // run of grow_heap calls copies linearly, not quadratically. Bytes past the heap end are zero and stay
     // unreachable: every access is bounded by the page map and heapEnd, never by the buffer length.
-    val requiredBufferSize = newHeapSize.signed
-    zeroDirty(requiredBufferSize)
+    val required = newHeapSize.toLong
+    if sparseFromU != Long.MaxValue || required > BasicMemory.DenseHeapLimit then
+      zeroDirty(math.min(required, rwData.length.toLong).toInt)
+      if sparseFromU == Long.MaxValue then
+        sparseFromU = rwStartU + rwData.length
+        firstChunk = sparseFromU >>> BasicMemory.ChunkShift
+      val needed = math.max(0L, ((rwEndU - 1) >>> BasicMemory.ChunkShift) - firstChunk + 1).toInt
+      if chunks == null then chunks = new Array[Array[Byte]](needed)
+      else if needed > chunks.length then chunks = java.util.Arrays.copyOf(chunks, needed)
+    val requiredBufferSize = if sparseFromU != Long.MaxValue then 0 else required.toInt
+    if sparseFromU == Long.MaxValue then zeroDirty(requiredBufferSize)
     if requiredBufferSize > rwData.length then
       val pooled = BasicMemory.takeSpare(requiredBufferSize)
       val oldLength = rwData.length
       val newLength =
         if pooled != null then pooled.buffer.length
         else
-          val cap = math.min(memoryMap.maxHeapSize.toLong, BasicMemory.MaxBufferSize.toLong)
+          val cap = math.min(memoryMap.maxHeapSize.toLong, BasicMemory.DenseHeapLimit)
           val grown = math.min(oldLength.toLong * 3 / 2, cap).toInt
           math.max(requiredBufferSize, grown)
       // Both buffers are live during the copy; this may wait for other runs to finish.
@@ -584,8 +643,7 @@ final class BasicMemory private (
   private def findRegionBulk(addr: Int, length: Int): Int =
     val endAddr = addr + length - 1
 
-    // Fast path: check cached region first
-    if cachedRegionId != 0 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
+    if cachedRegionId != 0 && (addr ^ endAddr) >= 0 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
       val offset = addr - cachedRegionStart + cachedRegionOffset
       if offset >= 0 && offset + length <= cachedRegionArray.length then
         _bulkArr = cachedRegionArray
@@ -602,8 +660,7 @@ final class BasicMemory private (
   private def findWritableRegionBulk(addr: Int, length: Int): Int =
     val endAddr = addr + length - 1
 
-    // Fast path: check cached region first (excluding RO region)
-    if cachedRegionId > 1 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
+    if cachedRegionId > 1 && (addr ^ endAddr) >= 0 && addr >= cachedRegionStart && endAddr < cachedRegionEnd then
       val offset = addr - cachedRegionStart + cachedRegionOffset
       if offset >= 0 && offset + length <= cachedRegionArray.length then
         _bulkArr = cachedRegionArray
@@ -616,9 +673,11 @@ final class BasicMemory private (
    * Finds a region containing the address range and caches it.
    */
   private def findAndCacheRegion(addr: Int, endAddr: Int): Int =
+    val oneSide = (addr ^ endAddr) >= 0
+
     // Check RO data region
     val roEnd = roStart + roData.length
-    if addr >= roStart && endAddr < roEnd then
+    if oneSide && addr >= roStart && endAddr < roEnd then
       val offset = addr - roStart
       cachedRegionId = 1
       cachedRegionStart = roStart
@@ -631,24 +690,26 @@ final class BasicMemory private (
       // Within RO region but may extend past actual data - can't use bulk
       return -1
 
-    // Check RW data + heap region
-    val heapEndAddr = heapBaseInt + _heapSize.signed
-    val rwEnd = math.max(rwStart + rwRegionSize, heapEndAddr)
-    if addr >= rwStart && endAddr < rwEnd then
-      val offset = addr - rwStart
-      if offset >= 0 && offset + (endAddr - addr + 1) <= rwData.length then
-        cachedRegionId = 2
-        cachedRegionStart = rwStart
-        cachedRegionEnd = rwEnd
-        cachedRegionArray = rwData
-        cachedRegionOffset = 0
+    val a = addr.toLong & 0xffffffffL
+    val length = endAddr - addr + 1
+    val last = a + length - 1
+    if a >= rwStartU && last < rwEndU then
+      val offset = a - rwStartU
+      if offset + length <= rwData.length then
+        cacheBuffer()
         _bulkArr = rwData
-      return offset
+        return offset.toInt
+      else if a >= sparseFromU && (a >>> BasicMemory.ChunkShift) == (last >>> BasicMemory.ChunkShift) then
+        val c = chunkAt(a)
+        if c == null then return -1
+        cacheChunk(a, c)
+        _bulkArr = c
+        return (a & BasicMemory.ChunkMask).toInt
       else
-        return -1 // Beyond buffer
+        return -1 // Beyond the buffer, or across chunks: byte by byte
 
     // Check stack region
-    if addr >= stackLow && endAddr < stackHigh then
+    if oneSide && addr >= stackLow && endAddr < stackHigh then
       val offset = addr - stackLow
       if offset >= 0 && offset + (endAddr - addr + 1) <= stack.length then
         cachedRegionId = 3
@@ -663,7 +724,7 @@ final class BasicMemory private (
 
     // Check aux data region
     val auxEnd = auxStart + aux.length
-    if addr >= auxStart && endAddr < auxEnd then
+    if oneSide && addr >= auxStart && endAddr < auxEnd then
       val offset = addr - auxStart
       cachedRegionId = 4
       cachedRegionStart = auxStart
@@ -679,24 +740,28 @@ final class BasicMemory private (
    * Finds a writable region containing the address range.
    */
   private def findAndCacheWritableRegion(addr: Int, endAddr: Int): Int =
-    // Check RW data + heap region
-    val heapEndAddr = heapBaseInt + _heapSize.signed
-    val rwEnd = math.max(rwStart + rwRegionSize, heapEndAddr)
-    if addr >= rwStart && endAddr < rwEnd then
-      val offset = addr - rwStart
-      if offset >= 0 && offset + (endAddr - addr + 1) <= rwData.length then
-        cachedRegionId = 2
-        cachedRegionStart = rwStart
-        cachedRegionEnd = rwEnd
-        cachedRegionArray = rwData
-        cachedRegionOffset = 0
+    val a = addr.toLong & 0xffffffffL
+    val length = endAddr - addr + 1
+    val last = a + length - 1
+    if a >= rwStartU && last < rwEndU then
+      val offset = a - rwStartU
+      if offset + length <= rwData.length then
+        cacheBuffer()
         _bulkArr = rwData
-      return offset
+        return offset.toInt
+      else if a >= sparseFromU && (a >>> BasicMemory.ChunkShift) == (last >>> BasicMemory.ChunkShift) then
+        val c = chunkForWrite(a)
+        if c == null then return -1
+        cacheChunk(a, c)
+        _bulkArr = c
+        return (a & BasicMemory.ChunkMask).toInt
       else
-        return -1
+        return -1 // Beyond the buffer, or across chunks: byte by byte
+
+    val oneSide = (addr ^ endAddr) >= 0
 
     // Check stack region
-    if addr >= stackLow && endAddr < stackHigh then
+    if oneSide && addr >= stackLow && endAddr < stackHigh then
       val offset = addr - stackLow
       if offset >= 0 && offset + (endAddr - addr + 1) <= stack.length then
         cachedRegionId = 3
@@ -710,7 +775,7 @@ final class BasicMemory private (
         return -1
 
     // Check aux data region (GP stack portion only)
-    if addr >= gpStackLowInt && endAddr < gpStackBaseInt then
+    if oneSide && addr >= gpStackLowInt && endAddr < gpStackBaseInt then
       val offset = addr - auxStart
       if offset >= 0 && offset + (endAddr - addr + 1) <= aux.length then
         cachedRegionId = 4
@@ -756,18 +821,17 @@ final class BasicMemory private (
     else if addr >= roStart && addr < (roStart + roRegionSize) then
       return Some(0.toByte)
 
-    // Check RW data + heap region
-    val heapEndAddr = heapBaseInt + _heapSize.signed
-    val effectiveEnd = math.max(rwStart + rwRegionSize, heapEndAddr)
-    if addr >= rwStart && addr < effectiveEnd then
-      val offset = addr - rwStart
-      if offset >= 0 && offset < rwData.length then
-        cachedRegionId = 2
-        cachedRegionStart = rwStart
-        cachedRegionEnd = effectiveEnd
-        cachedRegionArray = rwData
-        cachedRegionOffset = 0
-        return Some(rwData(offset))
+    val a = addr.toLong & 0xffffffffL
+    if a >= rwStartU && a < rwEndU then
+      val offset = a - rwStartU
+      if offset < rwData.length then
+        cacheBuffer()
+        return Some(rwData(offset.toInt))
+      else if a >= sparseFromU then
+        val c = chunkAt(a)
+        if c == null then return Some(0.toByte)
+        cacheChunk(a, c)
+        return Some(c((a & BasicMemory.ChunkMask).toInt))
       else
         return Some(0.toByte)
 
@@ -840,18 +904,18 @@ final class BasicMemory private (
     if addr >= roStart && addr < roEnd then
       return false
 
-    // Check RW data + heap region
-    val heapEndAddr = heapBaseInt + _heapSize.signed
-    val effectiveEnd = math.max(rwStart + rwRegionSize, heapEndAddr)
-    if addr >= rwStart && addr < effectiveEnd then
-      val offset = addr - rwStart
-      if offset >= 0 && offset < rwData.length then
-        cachedRegionId = 2
-        cachedRegionStart = rwStart
-        cachedRegionEnd = effectiveEnd
-        cachedRegionArray = rwData
-        cachedRegionOffset = 0
-        rwData(offset) = value
+    val a = addr.toLong & 0xffffffffL
+    if a >= rwStartU && a < rwEndU then
+      val offset = a - rwStartU
+      if offset < rwData.length then
+        cacheBuffer()
+        rwData(offset.toInt) = value
+        return true
+      else if a >= sparseFromU then
+        val c = chunkForWrite(a)
+        if c == null then return false
+        cacheChunk(a, c)
+        c((a & BasicMemory.ChunkMask).toInt) = value
         return true
       else
         return false
@@ -922,6 +986,9 @@ final class BasicMemory private (
     val written = math.max(math.max(rwRegionSize.toLong, _heapSize.toLong), dirtyTo.toLong)
     val dirtyEnd = math.min(buf.length.toLong, written).toInt
     rwData = Array.emptyByteArray
+    sparseFromU = Long.MaxValue
+    chunks = null
+    chunkCount = 0
     dirtyFrom = 0
     dirtyTo = 0
     cachedRegionId = 0
@@ -951,8 +1018,11 @@ object BasicMemory:
 
   private final val WindowSlots = 4
 
-  /** Largest heap buffer sbrk over-allocates to; a larger heap still gets exactly the size it needs. */
-  private inline val MaxBufferSize = Int.MaxValue - 8
+  private final val DenseHeapLimit: Long = 256L << 20
+
+  private final val ChunkShift = 16
+  private final val ChunkBytes = 1 << ChunkShift
+  private final val ChunkMask: Long = ChunkBytes - 1L
 
   /** A released heap buffer; bytes at `dirtyEnd` and beyond are zero. */
   private final class Spare(val buffer: Array[Byte], val dirtyEnd: Int)

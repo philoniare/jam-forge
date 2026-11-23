@@ -21,14 +21,14 @@ ThisBuild / coverageHighlighting := true
 ThisBuild / coverageExcludedPackages := ".*benchmark.*"
 
 val spire = "org.typelevel" %% "spire" % "0.18.0"
-val bouncyCastleVersion = "1.77"
+val bouncyCastleVersion = "1.87"
 val bcprov = "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion
 val bcpkix = "org.bouncycastle" % "bcpkix-jdk18on" % bouncyCastleVersion
-val circeVersion = "0.14.6"
+val circeVersion = "0.14.17"
 val circeCore = "io.circe" %% "circe-core" % circeVersion
 val circeParser = "io.circe" %% "circe-parser" % circeVersion
 val scalaLogging = "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
-val logback = "ch.qos.logback" % "logback-classic" % "1.4.11"
+val logback = "ch.qos.logback" % "logback-classic" % "1.5.38"
 val scalatest = "org.scalatest" %% "scalatest" % "3.2.17" % Test
 val scalacheck = Seq(
   "org.scalacheck" %% "scalacheck" % "1.17.0" % Test,
@@ -107,6 +107,11 @@ lazy val buildPvmRecompilerLib = taskKey[Unit]("Build native PVM recompiler libr
 lazy val benchmark = taskKey[Unit]("Run benchmark tests")
 lazy val stressTest = taskKey[Unit]("Run long-running stress test (100K blocks)")
 val nettyQuicVersion = "0.0.75.Final"
+val nettyVersion = "4.1.141.Final"
+ThisBuild / dependencyOverrides ++= Seq(
+  "netty-buffer", "netty-codec", "netty-common", "netty-handler", "netty-resolver", "netty-transport",
+  "netty-transport-native-unix-common"
+).map("io.netty" % _ % nettyVersion)
 val quicNativeClassifier = {
   val arch = System.getProperty("os.arch").toLowerCase
   val archName =
@@ -311,7 +316,7 @@ lazy val node = (project in file("modules/node"))
       spire,
       circeCore,
       circeParser,
-      "io.netty" % "netty-codec-http" % "4.1.131.Final",
+      "io.netty" % "netty-codec-http" % nettyVersion,
       scalaLogging,
       logback,
       scalatest

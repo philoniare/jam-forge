@@ -1007,6 +1007,38 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_publicFromSecr
     })
 }
 
+const IETF_NONCE_DOMAIN: &[u8] = b"jam-forge/ietf-vrf-nonce/v1";
+
+fn ietf_nonce(secret: &BanderScalar, input: &BanderInput, aux: &[u8]) -> BanderScalar {
+    use ark_ec_vrfs::{codec, utils};
+    let secret_hash = utils::hash::<<BandersnatchSha512Ell2 as Suite>::Hasher>(&codec::scalar_encode::<
+        BandersnatchSha512Ell2,
+    >(secret));
+    let point = codec::point_encode::<BandersnatchSha512Ell2>(&input.0);
+    let mut data = Vec::with_capacity(32 + point.len() + IETF_NONCE_DOMAIN.len() + aux.len());
+    data.extend_from_slice(&secret_hash[32..]);
+    data.extend_from_slice(&point);
+    data.extend_from_slice(IETF_NONCE_DOMAIN);
+    data.extend_from_slice(aux);
+    let hash = utils::hash::<<BandersnatchSha512Ell2 as Suite>::Hasher>(&data);
+    codec::scalar_decode::<BandersnatchSha512Ell2>(&hash)
+}
+
+fn ietf_prove(
+    secret: &BanderScalar,
+    public: &BanderPublic,
+    input: BanderInput,
+    output: BanderOutput,
+    aux: &[u8],
+) -> IetfProof {
+    let k = ietf_nonce(secret, &input, aux);
+    let k_b = (BandersnatchSha512Ell2::generator() * k).into_affine();
+    let k_h = (input.0 * k).into_affine();
+    let c = BandersnatchSha512Ell2::challenge(&[&public.0, &input.0, &output.0, &k_b, &k_h], aux);
+    let s = k + c * secret;
+    IetfProof { c, s }
+}
+
 /// IETF VRF sign - creates a 96-byte signature
 #[no_mangle]
 pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
@@ -1017,8 +1049,6 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
     aux_data: JByteArray,
 ) -> jbyteArray {
     jni_guard!(env, std::ptr::null_mut(), {
-    use ark_ec_vrfs::ietf::Prover as _;
-
     let return_error_local = |env: &mut JNIEnv, error_msg: &str| -> jbyteArray {
         let _ = env.throw_new("java/lang/RuntimeException", error_msg);
         std::ptr::null_mut()
@@ -1039,14 +1069,15 @@ pub extern "system" fn Java_io_forge_jam_vrfs_BandersnatchWrapper_ietfVrfSign(
         Err(_) => return return_error_local(&mut env, "Failed to convert aux data"),
     };
 
-    let secret = match BanderSecret::deserialize_compressed(&secret_data[..]) {
+    let scalar = match BanderScalar::deserialize_compressed(&secret_data[..]) {
         Ok(s) => s,
         Err(_) => return return_error_local(&mut env, "Failed to deserialize secret key"),
     };
+    let secret = BanderSecret::from_scalar(scalar);
 
     let input = vrf_input_point(&vrf_input_data);
     let output = secret.output(input);
-    let proof = secret.prove(input, output, &aux);
+    let proof = ietf_prove(&scalar, &secret.public(), input, output, &aux);
 
     // IETF signature structure: output (32 bytes) + proof (64 bytes) = 96 bytes
     #[derive(CanonicalSerialize)]
@@ -1389,6 +1420,66 @@ mod tests {
         let input = vrf_input_point(input_data);
         public.verify(input, decoded.output, aux, &decoded.proof).ok()?;
         Some(decoded.output)
+    }
+
+    fn scalar_of(secret: &BanderSecret) -> BanderScalar {
+        let mut bytes = Vec::new();
+        secret.serialize_compressed(&mut bytes).unwrap();
+        BanderScalar::deserialize_compressed(&bytes[..]).unwrap()
+    }
+
+    #[test]
+    fn ietf_prove_makes_proofs_that_ark_vrf_and_the_fast_verifier_accept() {
+        use ark_ec_vrfs::ietf::Verifier as _;
+        for i in 0..16u8 {
+            let secret = BanderSecret::from_seed(&[i; 32]);
+            let public = secret.public();
+            let data = [b"jam_fallback_seal".as_slice(), &[i; 32]].concat();
+            let aux = vec![i; i as usize * 7];
+            let input = vrf_input_point(&data);
+            let output = secret.output(input);
+            let proof = ietf_prove(&scalar_of(&secret), &public, input, output, &aux);
+            assert!(public.verify(input, output, &aux, &proof).is_ok(), "case {i}");
+            assert!(public.verify(input, output, b"other data", &proof).is_err(), "case {i}");
+
+            let mut sig = Vec::new();
+            IetfVrfSignature { output, proof }.serialize_compressed(&mut sig).unwrap();
+            for on_caller in [false, true] {
+                assert_eq!(ietf_verify_signature(&public, &data, &aux, &sig, on_caller), Some(output), "case {i}");
+                assert_eq!(ietf_verify_signature(&public, &data, b"other data", &sig, on_caller), None, "case {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn ietf_prove_has_a_nonce_of_its_own_for_each_additional_data() {
+        use ark_ec_vrfs::ietf::Prover as _;
+        for i in 0..8u8 {
+            let secret = BanderSecret::from_seed(&[i; 32]);
+            let scalar = scalar_of(&secret);
+            let public = secret.public();
+            let input = vrf_input_point(&[b"jam_fallback_seal".as_slice(), &[i; 32]].concat());
+            let output = secret.output(input);
+            let commitment =
+                |p: &IetfProof| (BandersnatchSha512Ell2::generator() * p.s - public.0 * p.c).into_affine();
+
+            let headers: [&[u8]; 5] = [b"", b"header of one block", b"header of another", &[0u8; 300], &[0u8; 301]];
+            let ours: Vec<BanderAffine> =
+                headers.iter().map(|aux| commitment(&ietf_prove(&scalar, &public, input, output, aux))).collect();
+            for a in 0..ours.len() {
+                for b in a + 1..ours.len() {
+                    assert_ne!(ours[a], ours[b], "case {i}: additional data {a} and {b} share a nonce");
+                }
+            }
+            assert_eq!(commitment(&ietf_prove(&scalar, &public, input, output, headers[1])), ours[1]);
+            let library = commitment(&secret.prove(input, output, b""));
+            assert_eq!(
+                library,
+                commitment(&secret.prove(input, output, b"anything")),
+                "ark-vrf's nonce now depends on the additional data: ietf_prove may no longer be needed"
+            );
+            assert!(ours.iter().all(|c| *c != library), "case {i}: a nonce shared with ark-vrf's provers");
+        }
     }
 
     #[test]

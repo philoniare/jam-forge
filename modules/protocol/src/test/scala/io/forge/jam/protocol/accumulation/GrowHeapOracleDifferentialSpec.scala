@@ -281,6 +281,92 @@ class GrowHeapOracleDifferentialSpec extends AnyFlatSpec with Matchers:
       info(s"grow_heap oracle differential (chained growth): $n programs matched the interpreter")
   }
 
+
+  private val LargeHeapGas = 200_000_000L
+
+  private val LoadRegisters = Seq(6, 8, 9, 10, 11, 12)
+
+  private def compareLarge(target: Long, stores: Seq[(Long, Int, Long)], clue: String): Unit =
+    require(stores.size <= LoadRegisters.size, "one register per load")
+    val body = stores.zipWithIndex.flatMap { case ((address, width, value), i) =>
+      val skew = (i * 3) - 8
+      Seq(
+        LoadImm64(5, address - skew),
+        LoadImm64(4, value),
+        StoreInd(4, 5, skew, width),
+        LoadInd(LoadRegisters(i), 5, skew, width, signed = false)
+      )
+    }
+    val prog = Seq(LoadImm64(7, target), GrowHeap) ++ body :+ Trap
+    val (code, bitmask) = encodeProgram(prog)
+    val interpInst = buildInstance(RW_DATA_LEN, code, bitmask)
+    val nativeInst = buildInstance(RW_DATA_LEN, code, bitmask)
+    val interp = runInterpreter(interpInst, Array.fill(13)(0L), LargeHeapGas)
+    val native = runNative(nativeInst, Array.fill(13)(0L), LargeHeapGas)
+    withClue(s"$clue\n interp(exit=${interp.exit} gas=${interp.gas} pc=${interp.pc} regs=${interp.regs.toSeq})\n" +
+      s"native(exit=${native.exit} gas=${native.gas} pc=${native.pc} regs=${native.regs.toSeq})\n") {
+      native.exit shouldBe interp.exit
+      native.gas shouldBe interp.gas
+      native.pc shouldBe interp.pc
+      native.regs.toSeq shouldBe interp.regs.toSeq
+      native.heapSize shouldBe interp.heapSize
+      interp.exit shouldBe PvmRecompiler.EXIT_PANIC // the trap that ends the program
+      interp.regs(7) shouldBe target
+      (interp.heapSize.toLong & 0xFFFFFFFFL) shouldBe target * PAGE - initialHeapBase
+      stores.zipWithIndex.foreach { case ((address, width, value), i) =>
+        val mask = if width == 8 then -1L else (1L << (width * 8)) - 1
+        withClue(f"the load after store $i at 0x$address%x: ")(interp.regs(LoadRegisters(i)) shouldBe (value & mask))
+      }
+      stores.foreach { (address, _, _) =>
+        withClue(f"memory at 0x$address%x after the run: ") {
+          nativeInst.basicMemory.loadU64(spire.math.UInt(address.toInt)) shouldBe
+            interpInst.basicMemory.loadU64(spire.math.UInt(address.toInt))
+        }
+      }
+    }
+
+  private lazy val initialHeapBase: Long =
+    val (code, bitmask) = encodeProgram(Seq(Trap))
+    buildInstance(RW_DATA_LEN, code, bitmask).module.memoryMap.heapBase.toLong
+
+  it should "match the interpreter when the heap grows past 2^31 and is used on both sides of it" in {
+    if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
+    else
+      val twoGiB = 0x80000000L
+      for target <- Seq(twoGiB / PAGE + 0x20, 0xC0000L, initialB) do
+        val end = target * PAGE
+        compareLarge(
+          target,
+          Seq(
+            (initialH * PAGE, 8, 0x1122334455667788L), // the first new byte
+            (twoGiB - 4, 8, 0x0102030405060708L), // across 2^31
+            (twoGiB, 4, 0xa1b2c3d4L),
+            (twoGiB + 0xfffe, 2, 0xbeefL),
+            (end - 8, 8, -2L), // the last eight bytes
+            (0x40000000L, 1, 0x7fL)
+          ),
+          s"target page 0x${target.toHexString} of bound 0x${initialB.toHexString}"
+        )
+      info("grow_heap oracle differential (heap past 2^31): 3 heap sizes matched the interpreter")
+  }
+
+  it should "match the interpreter across random stores into a heap of gigabytes" in {
+    if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
+    else
+      val rng = new Random(0x19110006L)
+      val n = 8
+      for i <- 1 to n do
+        val target = 0x80001L + rng.nextInt((initialB - 0x80001L).toInt + 1)
+        val start = initialH * PAGE
+        val span = target * PAGE - start
+        val picked = Seq.fill(6)(start + (rng.nextLong() & Long.MaxValue) % (span - 8)).sorted
+        val stores = picked.zipWithIndex.collect {
+          case (a, k) if k == 0 || a - picked(k - 1) >= 8 => (a, 1 << rng.nextInt(4), rng.nextLong())
+        }
+        compareLarge(target, stores, s"program $i: target page 0x${target.toHexString}, stores at ${stores.map(s => f"0x${s._1}%x").mkString(", ")}")
+      info(s"grow_heap oracle differential (random stores, heap past 2^31): $n programs matched the interpreter")
+  }
+
   it should "match the interpreter when grow_heap cannot afford its own cost" in {
     if !canRunNative then cancel("recompiler unavailable on this host (AArch64 dylib required); skipping")
     else

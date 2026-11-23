@@ -140,6 +140,47 @@ class RpcApiSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("an id is a string, a number or null: anything else is an invalid request, answered with a null id") {
+    withNodes(1, "rpc-id") { nodes =>
+      author(nodes, 1 to 1)
+      val api = nodes.head.rpcApi
+      val session = new Client(api).session
+      def answer(id: String) =
+        api.handle(s"""{"jsonrpc":"2.0","id":$id,"method":"bestBlock","params":[]}""", session).get.hcursor
+      for id <- Seq("7", "-1.5", "\"abc\"", "null") do
+        withClue(s"id $id: ") {
+          answer(id).downField("error").focus shouldBe None
+          answer(id).downField("id").focus shouldBe io.circe.parser.parse(id).toOption
+        }
+      for id <- Seq("[1]", "{\"a\":1}", "true", "[" * 500 + "]" * 500) do
+        withClue(s"id ${id.take(20)}: ") {
+          answer(id).downField("error").get[Int]("code") shouldBe Right(-32600)
+          answer(id).downField("id").focus shouldBe Some(Json.Null)
+          RpcApi.refusal(s"""{"jsonrpc":"2.0","id":$id,"method":"bestBlock"}""", RpcError.limitExceeded)
+            .flatMap(_.hcursor.downField("error").get[Int]("code").toOption) shouldBe Some(-32600)
+        }
+      val deep = "[" * 100_000 + "]" * 100_000
+      answer(deep).downField("error").get[Int]("code") shouldBe Right(-32700)
+      api.handle(s"""{"jsonrpc":"2.0","id":1,"method":"bestBlock","params":[$deep]}""", session)
+        .get.hcursor.downField("error").get[Int]("code") shouldBe Right(-32700)
+    }
+  }
+
+  test("a request is counted out whatever sending its response does") {
+    withNodes(1, "rpc-done") { nodes =>
+      author(nodes, 1 to 1)
+      val api = nodes.head.rpcApi
+      val session = new Client(api).session
+      for failure <- Seq[Throwable](new IllegalStateException("closed"), new StackOverflowError) do
+        var done = 0
+        val thrown = intercept[Throwable] {
+          api.handle("""{"jsonrpc":"2.0","id":1,"method":"bestBlock","params":[]}""", session, _ => throw failure, () => done += 1)
+        }
+        thrown shouldBe failure
+        done shouldBe 1
+    }
+  }
+
   test("a block subscription is told the head at once and each new head after, until it is cancelled") {
     withApi(blocks = 1) { (node, api, rpc) =>
       val best = rpc.result("subscribeBestBlock")

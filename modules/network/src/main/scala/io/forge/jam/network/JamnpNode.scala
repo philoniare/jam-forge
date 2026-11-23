@@ -863,8 +863,29 @@ object JamnpNode:
     * channel never does, and the peer never gets the stream credit back.
     */
   private[network] def resetStream(ch: QuicStreamChannel): Unit =
-    ch.shutdown(JamnpStream.ResetErrorCode).addListener(io.netty.channel.ChannelFutureListener.CLOSE)
+    ch.shutdown(JamnpStream.ResetErrorCode)
+      .addListener(new io.netty.channel.ChannelFutureListener {
+        override def operationComplete(f: io.netty.channel.ChannelFuture): Unit =
+          if f.isSuccess then markFinSent(ch)
+          ch.close()
+          ()
+      })
     ()
+
+  private val FinSentField: java.lang.reflect.Field =
+    try
+      val f = Class.forName("io.netty.incubator.codec.quic.QuicheQuicStreamChannel").getDeclaredField("finSent")
+      if f.getType != classOf[Boolean] then null
+      else
+        f.setAccessible(true)
+        f
+    catch case _: (ReflectiveOperationException | RuntimeException) => null
+
+  private def markFinSent(ch: QuicStreamChannel): Unit =
+    val field = FinSentField
+    if field != null && field.getDeclaringClass.isInstance(ch) then
+      try field.setBoolean(ch, true)
+      catch case _: (ReflectiveOperationException | RuntimeException) => ()
 
   private val IdleHandlerName = "jamnp-idle"
 
@@ -1014,6 +1035,10 @@ object JamnpNode:
       // No kind byte within the idle limit.
       if isIdle(evt) then resetStream(ctx.channel().asInstanceOf[QuicStreamChannel])
       ctx.fireUserEventTriggered(evt)
+
+    override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable): Unit =
+      rejected = true
+      resetStream(ctx.channel().asInstanceOf[QuicStreamChannel])
 
     override def decode(
         ctx: ChannelHandlerContext,

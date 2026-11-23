@@ -133,6 +133,26 @@ class RpcServerSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("requests with an id or parameters nested thousands deep are refused, counted out, and the connection stays") {
+    withServer { (_, server, client) =>
+      def nested(depth: Int) = "[" * depth + "1" + "]" * depth
+      for (id, code) <- Seq(("[1]", -32600), (nested(500), -32600), (nested(5_000), -32700), (nested(200_000), -32700)) do
+        client.send(s"""{"jsonrpc":"2.0","id":$id,"method":"bestBlock","params":[]}""")
+        val refused = client.next()
+        withClue(s"id nested ${id.count(_ == '[')} deep: ") {
+          errorCode(refused) shouldBe Some(code)
+          refused.hcursor.downField("id").focus shouldBe Some(Json.Null)
+        }
+      client.send(s"""{"jsonrpc":"2.0","id":5,"method":"bestBlock","params":[${nested(200_000)}]}""")
+      errorCode(client.next()) shouldBe Some(-32700)
+      eventually("every request to be counted out")(server.queuedBytesTotal == 0L)
+      client.send(request(6, "bestBlock"))
+      val best = client.next()
+      best.hcursor.get[Int]("id") shouldBe Right(6)
+      best.hcursor.downField("result").get[Long]("slot") shouldBe Right(1L)
+    }
+  }
+
   test("a handshake with an Origin not allowed is refused with 403; an allowed one, or none, is accepted") {
     withServerAllowing(List("http://good.example")) { (_, server, client) =>
       client.send("""{"jsonrpc":"2.0","id":1,"method":"bestBlock","params":[]}""")

@@ -84,13 +84,15 @@ final class RpcApi(
 
   def handle(text: String, session: RpcSession, respond: Json => Unit, done: () => Unit = () => ()): Unit =
     def finish(response: Option[Json]): Unit =
-      response.foreach(respond)
-      done()
+      try response.foreach(respond)
+      finally done()
     parse(text) match
       case Left(_) => finish(Some(failure(Json.Null, RpcError.parseError)))
       case Right(json) =>
         json.asObject match
           case None => finish(Some(failure(Json.Null, RpcError.invalidRequest)))
+          case Some(request) if !RpcApi.validId(request) =>
+            finish(Some(failure(Json.Null, RpcError.invalidRequest)))
           case Some(request) =>
             val id = request("id")
             val parsed = for
@@ -496,8 +498,12 @@ object RpcApi:
 
   val Unsafe: Set[String] = Slow + "submitPreimage"
 
+  private[node] def validId(request: io.circe.JsonObject): Boolean =
+    request("id").forall(id => id.isString || id.isNumber || id.isNull)
+
   def refusal(text: String, error: RpcError): Option[Json] =
     parse(text).toOption.flatMap(_.asObject) match
+      case Some(request) if !validId(request) => Some(failure(Json.Null, RpcError.invalidRequest))
       case Some(request) => request("id").map(failure(_, error))
       case None          => Some(failure(Json.Null, error))
 
