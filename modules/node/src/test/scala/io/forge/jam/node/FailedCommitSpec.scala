@@ -115,15 +115,15 @@ class FailedCommitSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       author(Seq(x, y, b), 1 to 2)
       val shared = x.chain.blocksAscending(x.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get, 10)
         .map(hashOf(x, _))
-      val x3 = authorOn(x, 3)
-      b.chain.importBlock(x3).isRight shouldBe true
-      val y4 = authorOn(y, 4)
+      val x4 = authorOn(x, 4)
+      b.chain.importBlock(x4).isRight shouldBe true
+      val y3 = authorOn(y, 3)
       val y5 = authorOn(y, 5)
-      val y6 = authorOn(y, 6)
+      val y8 = authorOn(y, 8)
 
-      b.chain.importBlock(y4).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      b.chain.importBlock(y3).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       val before = b.chain.best
-      before.hash shouldBe hashOf(x, x3)
+      before.hash shouldBe hashOf(x, x4)
       var saves = 0
       b.chain.faultAfterStateSave = () =>
         saves += 1
@@ -133,18 +133,18 @@ class FailedCommitSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       b.chain.faultAfterStateSave = () => ()
 
       b.chain.best shouldBe before
-      b.chain.leaves.map(_.hash).toSet shouldBe Set(hashOf(x, x3), hashOf(y, y4))
-      b.chain.postStateRoot(hashOf(y, y4)) shouldBe None
+      b.chain.leaves.map(_.hash).toSet shouldBe Set(hashOf(x, x4), hashOf(y, y3))
+      b.chain.postStateRoot(hashOf(y, y3)) shouldBe None
       b.chain.postStateRoot(hashOf(y, y5)) shouldBe None
-      sameStates(x, b, shared :+ hashOf(x, x3))
+      sameStates(x, b, shared :+ hashOf(x, x4))
 
       val x7 = authorOn(x, 7)
       b.chain.importBlock(x7) shouldBe Right(x.chain.best)
-      sameStates(x, b, shared ++ Seq(hashOf(x, x3), hashOf(x, x7)))
+      sameStates(x, b, shared ++ Seq(hashOf(x, x4), hashOf(x, x7)))
       b.chain.importBlock(y5).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
-      b.chain.importBlock(y6) shouldBe Right(y.chain.best)
+      b.chain.importBlock(y8) shouldBe Right(y.chain.best)
       b.chain.best shouldBe y.chain.best
-      sameStates(y, b, shared ++ Seq(y4, y5, y6).map(hashOf(y, _)))
-      b.chain.leaves.map(_.hash).toSet shouldBe Set(hashOf(y, y6), hashOf(x, x7))
+      sameStates(y, b, shared ++ Seq(y3, y5, y8).map(hashOf(y, _)))
+      b.chain.leaves.map(_.hash).toSet shouldBe Set(hashOf(y, y8), hashOf(x, x7))
     }
   }

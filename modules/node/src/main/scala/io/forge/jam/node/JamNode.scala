@@ -860,10 +860,12 @@ final class JamNode(
     memo._2.contains(JamBytes(conn.peerKey))
 
   /** Whose unsigned word counts towards finality on a node without GRANDPA: the current validators, by connection
-    * key, or any peer when the operator named a number of peers to trust (`--finality-peers`).
+    * key, and, when the operator named a number of peers to trust (`--finality-peers`), the peers this node was told
+    * to keep a connection to as well: the chain spec's bootnodes and its own `--bootnode`s. A peer that merely
+    * connected is never counted, or any host that can reach the port could decide what this node finalizes.
     */
   private def countsForFinality(conn: PeerConnection): Boolean =
-    nodeConfig.finalityPeers.isDefined || isCurrentValidator(conn)
+    isCurrentValidator(conn) || (nodeConfig.finalityPeers.isDefined && peers.isConfigured(conn.peerKey))
 
   private def followPeerFinality(): Unit = sync.followPeerFinality(peerFinalityQuorum, countsForFinality)
 

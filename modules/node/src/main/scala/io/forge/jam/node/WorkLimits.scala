@@ -20,19 +20,24 @@ import com.typesafe.scalalogging.LazyLogging
   * The executors behind the node's services also run the service's own timers and import callbacks, which must not be
   * lost, so their queues stay as they are and only the peer-driven submissions go through a gate: at most `maxQueued`
   * of them, holding at most `maxBytes` of message data, wait at any time, and at most `maxPerSource` of them from
-  * one source (a peer's connection), so one peer cannot fill the queue and crowd the others out. A submission over
-  * a limit is refused (drop-newest) and the caller decides how to tell the peer, usually by resetting the stream.
-  * One submission is always admitted when none is waiting, whatever its size.
+  * one source (a peer's connection), so one peer cannot fill the queue and crowd the others out. Connections and
+  * identities cost a peer nothing, so sources are also counted by group (the address they come from), with at
+  * most `maxPerGroup` waiting from one group. A submission over a limit is refused (drop-newest) and the caller
+  * decides how to tell the peer, usually by resetting the stream. One submission is always admitted when none is
+  * waiting, whatever its size.
   */
-final class WorkGate(name: String, maxQueued: Int, maxBytes: Long = Long.MaxValue, perSource: Int = 0)
+final class WorkGate(name: String, maxQueued: Int, maxBytes: Long = Long.MaxValue, perSource: Int = 0, perGroup: Int = 0)
     extends LazyLogging:
   private val waiting = new AtomicInteger()
   private val waitingBytes = new AtomicLong()
   private val refused = new AtomicLong()
   private val bySource = new java.util.concurrent.ConcurrentHashMap[AnyRef, Integer]()
+  private val byGroup = new java.util.concurrent.ConcurrentHashMap[AnyRef, Integer]()
 
   /** A quarter of the queue for any one source unless given. */
   val maxPerSource: Int = if perSource > 0 then perSource else math.max(1, maxQueued / 4)
+
+  val maxPerGroup: Int = if perGroup > 0 then perGroup else math.max(maxPerSource, maxQueued / 4)
 
   /** Tasks admitted and not yet started. */
   def queued: Int = waiting.get()
@@ -40,37 +45,42 @@ final class WorkGate(name: String, maxQueued: Int, maxBytes: Long = Long.MaxValu
   def dropped: Long = refused.get()
 
   /** Run `task` on `exec` unless a limit is reached; false when it was refused (or `exec` is shut down). `bytes` is
-    * the size of the message data the task keeps alive while it waits, `source` whom it is from (null: not counted
-    * per source).
+    * the size of the message data the task keeps alive while it waits, `source` whom it is from and `group` where
+    * that source is (null: not counted per source, per group).
     */
-  def tryExecute(exec: Executor, bytes: Long = 0L, source: AnyRef = null)(task: => Unit): Boolean =
-    submit(exec, bytes, source)(task) == WorkGate.Admission.Admitted
+  def tryExecute(exec: Executor, bytes: Long = 0L, source: AnyRef = null, group: AnyRef = null)(task: => Unit): Boolean =
+    submit(exec, bytes, source, group)(task) == WorkGate.Admission.Admitted
 
-  def submit(exec: Executor, bytes: Long = 0L, source: AnyRef = null)(task: => Unit): WorkGate.Admission =
+  def submit(exec: Executor, bytes: Long = 0L, source: AnyRef = null, group: AnyRef = null)(
+      task: => Unit
+  ): WorkGate.Admission =
     val n = waiting.incrementAndGet()
     val b = waitingBytes.addAndGet(bytes)
     val fromSource = if source == null then 0 else bySource.merge(source, 1, (a, c) => a + c).intValue
+    val fromGroup = if group == null then 0 else byGroup.merge(group, 1, (a, c) => a + c).intValue
     val full = n > 1 && (n > maxQueued || b > maxBytes)
-    if fromSource > maxPerSource || full then
-      leave(bytes, source)
+    val overShare = fromSource > maxPerSource || fromGroup > maxPerGroup
+    if overShare || full then
+      leave(bytes, source, group)
       refuse()
-      if fromSource > maxPerSource then WorkGate.Admission.SourceFull else WorkGate.Admission.Full
+      if overShare then WorkGate.Admission.SourceFull else WorkGate.Admission.Full
     else
       try
         exec.execute { () =>
-          leave(bytes, source)
+          leave(bytes, source, group)
           task
         }
         WorkGate.Admission.Admitted
       catch
         case _: RejectedExecutionException =>
-          leave(bytes, source)
+          leave(bytes, source, group)
           WorkGate.Admission.Stopped
 
-  private def leave(bytes: Long, source: AnyRef): Unit =
+  private def leave(bytes: Long, source: AnyRef, group: AnyRef): Unit =
     waiting.decrementAndGet()
     waitingBytes.addAndGet(-bytes)
     if source != null then bySource.computeIfPresent(source, (_, c) => if c <= 1 then null else c - 1)
+    if group != null then byGroup.computeIfPresent(group, (_, c) => if c <= 1 then null else c - 1)
     ()
 
   private def refuse(): Unit =

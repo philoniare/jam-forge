@@ -20,6 +20,36 @@ class OneShotSendSpec extends AnyFunSuite with Matchers:
       val t = new Thread(r, name); t.setDaemon(true); t
     }
 
+  test("a one-shot stream is told that nothing the peer answers is wanted, before anything is sent on it") {
+    val egress = singleThread("jam-egress")
+    try
+      val calls = new ConcurrentLinkedQueue[String]()
+      val stream = new MessageStream:
+        def kind: Byte = 1
+        def onMessage(f: Array[Byte] => Unit): MessageStream = this
+        override def ignoreInbound(): Unit = calls.add("ignoreInbound"): Unit
+        def onClosed(f: () => Unit): MessageStream = this
+        def send(message: Array[Byte]): Unit = calls.add(s"send ${message.length}"): Unit
+        def finish(): Unit = calls.add("finish"): Unit
+        def close(): Unit = ()
+        def reset(): Unit = calls.add("reset"): Unit
+        def isOpen: Boolean = true
+        def id: Long = 0L
+        def pendingOutboundBytes: Long = 0L
+      val settled = new CompletableFuture[Boolean]()
+      OneShotSend.submit(
+        egress,
+        null,
+        () => CompletableFuture.completedFuture[MessageStream](stream),
+        List(Array[Byte](1, 2), Array[Byte](3)),
+        _ => (),
+        settled = ok => settled.complete(ok): Unit
+      )
+      settled.get(10, TimeUnit.SECONDS) shouldBe true
+      calls.toArray.toList shouldBe List("ignoreInbound", "send 2", "send 1", "finish")
+    finally egress.shutdownNow()
+  }
+
   test("a peer that grants no stream does not hold up the sends behind it") {
     val egress = singleThread("jam-egress")
     try

@@ -9,7 +9,7 @@
 
     <logger name="io.netty" level="INFO" />
 
-    <root level="${LOG_LEVEL:-DEBUG}">
+    <root level="${LOG_LEVEL:-INFO}">
         <appender-ref ref="CONSOLE" />
     </root>
 </configuration>

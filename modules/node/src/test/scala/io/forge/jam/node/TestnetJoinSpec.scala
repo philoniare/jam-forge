@@ -87,10 +87,10 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
       eventually("the cautious node to catch up")(cautious.chain.best.hash == ahead.chain.best.hash)
       cautious.chain.best.slot shouldBe 70L
 
-      // Told to trust one peer: it also adopts that peer's finalized block.
+      // Told to trust one peer, with that peer as its bootnode: it also adopts that peer's finalized block.
       val trusting = new JamNode(spec, NodeConfig(dataDir = dirs(2), slotTicking = false, finalityPeers = Some(1))).start()
       nodes = trusting :: nodes
-      trusting.connectPeer(address)
+      trusting.addPeer(address)
       eventually("the trusting node to catch up")(trusting.chain.best.hash == ahead.chain.best.hash)
       eventually("the trusting node to follow the peer's finality")(trusting.chain.finalized.hash == ahead.chain.finalized.hash)
       trusting.chain.finalized.slot shouldBe 65L
@@ -108,7 +108,8 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
       voter.chain.finalized.slot shouldBe 0L
 
       // A node whose best head is on a fork the peer never saw: nothing can be served "after" that head, so it asks
-      // from its finalized block and is led along the peer's chain.
+      // from its finalized block and is led along the peer's chain. It leaves its fork when the peer's chain has
+      // the head with the later slot.
       val forked = new JamNode(spec, NodeConfig(dataDir = dirs(4), slotTicking = false)).start()
       nodes = forked :: nodes
       forked.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
@@ -118,6 +119,9 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
       forked.authorSlot(72).isDefined shouldBe true
       ahead.chain.hasBlock(forked.chain.best.hash) shouldBe false
       forked.connectPeer(address)
+      eventually("the forked node to hold the peer's chain beside its own")(forked.chain.hasBlock(ahead.chain.best.hash))
+      forked.chain.best.slot shouldBe 72L
+      ahead.authorSlot(73).isDefined shouldBe true
       eventually("the forked node to leave its fork for the peer's chain")(forked.chain.best.hash == ahead.chain.best.hash)
     finally
       nodes.foreach(_.shutdown())

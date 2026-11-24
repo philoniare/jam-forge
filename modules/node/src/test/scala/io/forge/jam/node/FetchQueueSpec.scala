@@ -32,6 +32,38 @@ class FetchQueueSpec extends AnyFunSuite with Matchers:
     q.next() shouldBe Some(a2)
   }
 
+  test("strangers do not hold every fetch: one is kept for known peers, whose fetches also go out first") {
+    val known = new Peer("validator")
+    val q = new FetchQueue[Peer](
+      maxInFlight = 4, maxPerPeer = 8, maxPending = 64, maxAlternates = 3, isOpen = _.open,
+      preferred = _ eq known, keptForPreferred = 1
+    )
+    val strangers = (1 to 6).map(i => new Peer(s"stranger-$i"))
+    val theirs = strangers.zipWithIndex.map((p, i) => request(p, block(i)))
+    theirs.foreach(q.offer(_) shouldBe Nil)
+    q.next() shouldBe Some(theirs(0))
+    q.next() shouldBe Some(theirs(1))
+    q.next() shouldBe Some(theirs(2))
+    q.next() shouldBe None
+    q.size shouldBe 3
+    val ours = request(known, block(50))
+    q.offer(ours) shouldBe Nil
+    q.next() shouldBe Some(ours)
+    q.next() shouldBe None
+    q.finished(theirs(0), have = true)
+    q.next() shouldBe Some(theirs(3))
+    q.finished(ours, have = true)
+    q.next() shouldBe None
+    val moreKnown = (1 to 4).map(i => new Peer(s"known-$i"))
+    val all = new FetchQueue[Peer](
+      maxInFlight = 4, maxPerPeer = 8, maxPending = 64, maxAlternates = 3, isOpen = _.open,
+      preferred = moreKnown.contains, keptForPreferred = 1
+    )
+    val known4 = moreKnown.zipWithIndex.map((p, i) => request(p, block(60 + i)))
+    known4.foreach(all.offer(_) shouldBe Nil)
+    known4.foreach(r => all.next() shouldBe Some(r))
+  }
+
   test("no more fetches are out at once than the limit") {
     val q = queue(maxInFlight = 2)
     val requests = (1 to 3).map(n => request(new Peer(s"p$n"), block(n)))

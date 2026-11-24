@@ -116,11 +116,35 @@ class FollowerFinalitySpec extends AnyFunSuite with Matchers with NodeFixture:
     }
   }
 
-  test("with --finality-peers the operator's chosen number of peers is trusted, validators or not") {
+  private def bootnode(chainSpec: ChainSpec, node: JamNode, finalized: SyncCodec.HashSlot): JamnpNode =
+    val identity = NodeIdentity.generate()
+    val peer = new JamnpNode(identity, JamnpConfig(genesisHashPrefix = chainSpec.alpnPrefix))
+    peer.registerPeerHandler(
+      StreamKind.BlockAnnouncement,
+      (_, stream) =>
+        stream.onMessage(_ => ())
+        stream.send(SyncCodec.encodeHandshake(finalized, Nil))
+    )
+    peer.start(new InetSocketAddress("127.0.0.1", 0))
+    node.addPeer(new InetSocketAddress("127.0.0.1", peer.boundPort), Some(identity.publicKeyBytes))
+    peer
+
+  test("with --finality-peers the operator's chosen number of bootnodes is trusted, validators or not") {
     withFollower(dir => NodeConfig(dataDir = dir, slotTicking = false, finalityPeers = Some(1))) { (node, chainSpec, target) =>
-      val bootnode = announcer(NodeIdentity.generate(), chainSpec, node, target)
+      val trusted = bootnode(chainSpec, node, target)
       try eventually("finality to follow the trusted peer")(node.chain.finalized.hash == target.hash)
-      finally bootnode.shutdown()
+      finally trusted.shutdown()
+    }
+  }
+
+  test("with --finality-peers a peer that merely connected is not counted, however many do") {
+    withFollower(dir => NodeConfig(dataDir = dir, slotTicking = false, finalityPeers = Some(1))) { (node, chainSpec, target) =>
+      val strangers = (1 to 3).map(_ => announcer(NodeIdentity.generate(), chainSpec, node, target))
+      try
+        eventually("the announcements to arrive")(node.sync.peerFinalized.size == 3)
+        Thread.sleep(1500) // three upkeep passes
+        node.chain.finalized.slot shouldBe 0L
+      finally strangers.foreach(_.shutdown())
     }
   }
 

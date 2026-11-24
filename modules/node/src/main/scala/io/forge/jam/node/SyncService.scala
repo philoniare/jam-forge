@@ -259,7 +259,7 @@ final class SyncService(
   /** Keep to the chain `needed` peers announce as finalized, fetching the agreed block when we lack it. */
   def followPeerFinality(needed: Int, counts: PeerConnection => Boolean = _ => true): Unit =
     val finals = peerFinalized.filter((conn, _) => counts(conn))
-    chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed) match
+    chain.followPeerFinality(finals.map((_, f) => (f.hash, f.slot)), needed, fetching.contains) match
       case Left(missing) =>
         if fetching.add(missing) then
           finals.find(_._2.hash == missing).foreach((conn, _) => requestAndImport(conn, missing, onDone = () => fetching.remove(missing)))
@@ -486,7 +486,8 @@ final class SyncService(
           asked = true
           decodeBlockRequest(msg) match
             case Left(err) =>
-              logger.warn(s"CE128: $err")
+              logger.debug(s"CE128 from ${JamNode.hex(conn.peerKey).take(16)}: $err")
+              misbehaved(conn, Offence.Malformed)
               refuse(s"malformed request: $err")
             case Right((from, ascending, maxBlocks)) =>
               telemetry.foreach(_.blockRequestReceived(receiving, from, ascending, maxBlocks))
@@ -554,6 +555,33 @@ final class SyncService(
     dropped.foreach(_.onDone())
     if dropped.forall(_ ne request) then schedulePump()
 
+  private val refusedBlocks = new java.util.concurrent.atomic.AtomicLong
+  private val genesisMismatchSaid = new java.util.concurrent.atomic.AtomicBoolean
+
+  private[node] def refusedBlockCount: Long = refusedBlocks.get()
+
+  private def reportRefused(conn: PeerConnection, blockBytes: Array[Byte], invalid: ChainError.InvalidBlock): Unit =
+    val header = chain.decodeBlock(blockBytes).toOption.map(_.header)
+    val from = JamNode.hex(conn.peerKey).take(16)
+    val onGenesis = header.exists(h => chain.genesisHash.contains(h.parent))
+    if invalid.error == io.forge.jam.protocol.importing.ImportError.InvalidStateRoot && onGenesis then
+      if genesisMismatchSaid.compareAndSet(false, true) then
+        val theirs = header.map(_.parentStateRoot.toHex.take(16)).getOrElse("?")
+        val ours = chain.genesisHash.flatMap(chain.postStateRoot).map(_.toHex.take(16)).getOrElse("?")
+        logger.warn(
+          s"peer $from is on another genesis state: its block at slot ${header.map(_.slot.toLong).getOrElse(0L)} " +
+            s"builds on the genesis block with state root $theirs, ours is $ours. The genesis header is the same, " +
+            "so the chain specs differ in their state (for a dev chain, another build's bootstrap service). The two " +
+            "nodes cannot follow one chain: start both from one spec (e.g. the peer's, dumped with dump-spec)"
+        )
+    else
+      val n = refusedBlocks.incrementAndGet()
+      if (n & (n - 1)) == 0 then
+        logger.warn(
+          s"block at slot ${header.map(_.slot.toLong).getOrElse(0L)} from $from refused: ${invalid.message} " +
+            s"($n refused since start)"
+        )
+
   /** Fetches waiting to be sent, and those out with a peer or being imported. */
   private val fetches = new FetchQueue[PeerConnection](
     maxInFlight = SyncService.MaxConcurrentFetches,
@@ -562,7 +590,9 @@ final class SyncService(
     maxAlternates = SyncService.MaxAlternatePeers,
     isOpen = _.isOpen,
     samePeer = (a, b) => (a eq b) || java.util.Arrays.equals(a.peerKey, b.peerKey),
-    order = requests => scores.leastFaultedFirst(requests)(_.peer.peerKey)
+    order = requests => scores.leastFaultedFirst(requests)(_.peer.peerKey),
+    preferred = conn => scores.isExempt(conn.peerKey),
+    keptForPreferred = SyncService.FetchesKeptForKnownPeers
   )
   private val pumpScheduled = new java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -759,6 +789,9 @@ final class SyncService(
               case _: ChainError.InvalidBlock | ChainError.PreviouslyInvalid | ChainError.BodyMismatch =>
                 misbehaved(conn, Offence.InvalidBlock)
               case _ => ()
+            err match
+              case invalid: ChainError.InvalidBlock => reportRefused(conn, blockBytes, invalid)
+              case _                                => ()
             if err.isInstanceOf[ChainError.StoredOnSideBranch] then stored += 1
             logger.debug(s"sync import skipped: $err")
       }
@@ -799,7 +832,8 @@ final class SyncService(
           asked = true
           decodeStateRequest(msg) match
             case Left(err) =>
-              logger.warn(s"CE129 request decode failed: $err")
+              logger.debug(s"CE129 from ${JamNode.hex(conn.peerKey).take(16)}: request decode failed: $err")
+              misbehaved(conn, Offence.Malformed)
               stream.reset()
             case Right((headerHash, start, end, maxSize)) =>
               val taken = serving.submit(conn, msg.length.toLong) {
@@ -855,6 +889,8 @@ object SyncService:
   val MaxAnswersAhead: Int = 2
 
   val MaxConcurrentFetches: Int = 4
+
+  val FetchesKeptForKnownPeers: Int = 1
 
   /** Other peers remembered as fallbacks for a block already being fetched. */
   val MaxAlternatePeers: Int = 3

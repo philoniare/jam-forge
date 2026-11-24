@@ -197,12 +197,12 @@ Create a standalone JAR with all dependencies:
 # Build fat JAR
 sbt "conformance/assembly"
 
-# Output: modules/conformance/target/scala-3.3.7/jam-conformance.jar
+# Output: modules/conformance/target/scala-3.3.8/jam-conformance.jar
 
 # Run the server (listens on /tmp/jam_target.sock; the native libraries come from the sbt build)
 java --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow \
   -Djava.library.path=modules/crypto/native/build/linux \
-  -jar modules/conformance/target/scala-3.3.7/jam-conformance.jar
+  -jar modules/conformance/target/scala-3.3.8/jam-conformance.jar
 ```
 
 ### Docker Build

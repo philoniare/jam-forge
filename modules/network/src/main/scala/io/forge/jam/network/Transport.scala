@@ -13,6 +13,8 @@ trait MessageStream:
   /** Register the message receiver; messages received before this call are delivered first, in order. */
   def onMessage(f: Array[Byte] => Unit): MessageStream
 
+  def ignoreInbound(): Unit = ()
+
   /** Register a listener for the peer's FIN or reset; one that already happened fires it at once. */
   def onClosed(f: () => Unit): MessageStream
   def send(message: Array[Byte]): Unit

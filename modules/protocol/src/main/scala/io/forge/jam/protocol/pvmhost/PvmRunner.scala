@@ -95,7 +95,9 @@ object PvmRunner:
       regs(1) = SP_INIT
       regs(7) = INPUT_ADDR
       regs(8) = inputData.length.toLong
-      NativeRunner.runDirect(module, inputData, regs, gasLimit, entryPc, hostCalls, preDispatch, reservation) match
+      NativeRunner.runDirect(
+        module, inputData, regs, gasLimit, entryPc, hostCalls, preDispatch, reservation, deadlineMillis
+      ) match
         case Some(result) =>
           val exit = result.outcome match
             case NativeRunner.RunOutcome.Halt => PvmExit.Halt
@@ -139,7 +141,7 @@ object PvmRunner:
     var exit = PvmExit.Halt
     var continueExecution = true
 
-    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode, hostCalls, preDispatch)
+    val nativeOutcome = NativeRunner.run(instance, entryPc, executionMode, hostCalls, preDispatch, deadlineMillis)
     nativeOutcome match
       case Some(outcome) =>
         exit = outcome match

@@ -819,6 +819,10 @@ fn with_block_gas(instrs: &[RawInstr], jt: &[u32]) -> Vec<RawInstr> {
 mod tests {
     use super::*;
 
+    mod flat;
+
+    mod resume;
+
     fn run(instrs: &[RawInstr], regs: &mut [u64; 13], gas: &mut i64) -> (u32, ExecOut) {
         run_full(instrs, regs, gas, &[], &mut [], &[], 0)
     }

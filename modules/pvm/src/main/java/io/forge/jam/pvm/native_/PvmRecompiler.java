@@ -907,13 +907,24 @@ public final class PvmRecompiler implements AutoCloseable {
                 throw new IllegalStateException("LiveExecution.run() already called");
             }
             ran = true;
+            return enter(entryIndex);
+        }
+
+        public ExecResult resume(int index) {
+            if (!ran || closed) {
+                throw new IllegalStateException("LiveExecution.resume() needs an execution that has run and is open");
+            }
+            return enter(index);
+        }
+
+        private ExecResult enter(int index) {
             try {
                 int exit = context != null
                         ? (int) executeFlat.invoke(block.handle, regSeg, gasSeg, regionsSeg,
-                                nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg,
+                                nRegions, backingSeg, pageShift, index, outSeg, hostFnSeg, hostCtxSeg,
                                 context.permsSeg)
                         : (int) execute.invoke(block.handle, regSeg, gasSeg, regionsSeg,
-                                nRegions, backingSeg, pageShift, entryIndex, outSeg, hostFnSeg, hostCtxSeg);
+                                nRegions, backingSeg, pageShift, index, outSeg, hostFnSeg, hostCtxSeg);
                 if (upcallStub != null) {
                     upcallStub.rethrowIfPending();
                 }

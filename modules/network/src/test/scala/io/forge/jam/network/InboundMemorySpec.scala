@@ -7,8 +7,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** What a peer can make this node keep in memory before any handler has agreed to take it is bounded: a message on
-  * a stream the peer opened may be no larger than its kind ever needs, and the frames still being received count
-  * against a budget per connection and one for the whole node.
+  * a stream the peer opened may be no larger than its kind ever needs, and the frames still being received count,
+  * for the bytes of them that have arrived, against a budget per connection and one for the whole node.
   */
 class InboundMemorySpec extends AnyFunSuite with Matchers:
 
@@ -47,6 +47,8 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
       buf.writeBytes(new Array[Byte](sent))
       stream.channel.writeAndFlush(buf).sync()
 
+    def almostAll(length: Int): Unit = startFrame(length, length - Unsent)
+
     def finishFrame(remaining: Int): Unit =
       val buf = stream.channel.alloc().buffer(remaining)
       buf.writeBytes(new Array[Byte](remaining))
@@ -57,6 +59,10 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
 
   private def open(conn: JamnpConnection, kind: Byte): Opened =
     new Opened(conn.openStream(kind).get(10, TimeUnit.SECONDS))
+
+  private val Unsent = 10
+
+  private def heldFor(length: Int): Long = 4L + length - Unsent
 
   test("a message on a peer-opened stream may be no larger than its kind needs") {
     val server = new Server()
@@ -85,28 +91,52 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
     try
       val conn = server.connect(client)
       val first = open(conn, StreamKind.WorkPackageSubmission)
-      first.startFrame(600 * KiB)
-      eventually("the first frame to be counted")(server.node.heldInboundBytes == 600L * KiB)
+      first.almostAll(600 * KiB)
+      eventually("the first frame to be counted")(server.node.heldInboundBytes == heldFor(600 * KiB))
 
       val second = open(conn, StreamKind.WorkPackageSubmission)
-      second.startFrame(600 * KiB)
+      second.almostAll(600 * KiB)
       second.wasReset shouldBe true
       first.stillOpen shouldBe true
-      server.node.heldInboundBytes shouldBe 600L * KiB
+      eventually("the refused frame's bytes to be given back")(server.node.heldInboundBytes == heldFor(600 * KiB))
 
       // Once the frame is complete it is the handler's, and the budget is free again.
-      first.finishFrame(600 * KiB - 10)
+      first.finishFrame(Unsent)
       server.received.poll(10, TimeUnit.SECONDS) shouldBe (StreamKind.WorkPackageSubmission, 600 * KiB)
       eventually("the finished frame's bytes to be given back")(server.node.heldInboundBytes == 0L)
 
       // A stream that ends with its frame unfinished gives its bytes back too.
       val third = open(conn, StreamKind.WorkPackageSubmission)
-      third.startFrame(600 * KiB)
-      eventually("the third frame to be counted")(server.node.heldInboundBytes == 600L * KiB)
+      third.almostAll(600 * KiB)
+      eventually("the third frame to be counted")(server.node.heldInboundBytes == heldFor(600 * KiB))
       third.stream.reset()
       eventually("the abandoned frame's bytes to be given back")(server.node.heldInboundBytes == 0L)
     finally
       client.shutdown()
+      server.node.shutdown()
+  }
+
+  test("the length a frame announces holds nothing: frames begun and left count for the bytes that were sent") {
+    val server = new Server(InboundLimits(maxConnectionBytes = 1024L * KiB, maxBytes = 1536L * KiB))
+    val idle = new JamnpNode(NodeIdentity.generate(), config())
+    val busy = new JamnpNode(NodeIdentity.generate(), config())
+    try
+      val idleConn = server.connect(idle)
+      val begun = (1 to 40).map { _ =>
+        val stream = open(idleConn, StreamKind.WorkPackageSubmission)
+        stream.startFrame(24 * 1024 * KiB)
+        stream
+      }
+      eventually("the frames begun to be counted")(server.node.heldInboundBytes == 40L * 14)
+      begun.foreach(_.stillOpen shouldBe true)
+
+      val whole = open(server.connect(busy), StreamKind.WorkPackageSubmission)
+      whole.stream.send(new Array[Byte](900 * KiB))
+      server.received.poll(10, TimeUnit.SECONDS) shouldBe (StreamKind.WorkPackageSubmission, 900 * KiB)
+      eventually("only the frames begun to stay counted")(server.node.heldInboundBytes == 40L * 14)
+    finally
+      idle.shutdown()
+      busy.shutdown()
       server.node.shutdown()
   }
 
@@ -116,10 +146,10 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
     val clientB = new JamnpNode(NodeIdentity.generate(), config())
     try
       val a = open(server.connect(clientA), StreamKind.WorkPackageSubmission)
-      a.startFrame(900 * KiB)
-      eventually("the first connection's frame to be counted")(server.node.heldInboundBytes == 900L * KiB)
+      a.almostAll(900 * KiB)
+      eventually("the first connection's frame to be counted")(server.node.heldInboundBytes == heldFor(900 * KiB))
       val b = open(server.connect(clientB), StreamKind.WorkPackageSubmission)
-      b.startFrame(900 * KiB)
+      b.almostAll(900 * KiB)
       b.wasReset shouldBe true
       a.stillOpen shouldBe true
     finally
@@ -166,6 +196,48 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
       server.node.shutdown()
   }
 
+  test("a stream opened only to send keeps nothing of what the peer answers on it") {
+    val answering = new JamnpNode(NodeIdentity.generate(), config())
+    val answered = new LinkedBlockingQueue[JamnpStream]()
+    answering.registerHandler(
+      StreamKind.AssuranceDistribution,
+      (_: JamnpConnection, stream: JamnpStream) =>
+        stream.onMessage { _ =>
+          stream.send(new Array[Byte](200 * KiB))
+          answered.offer(stream)
+          ()
+        }
+    )
+    val sender = new JamnpNode(NodeIdentity.generate(), config())
+    try
+      answering.start(new InetSocketAddress("127.0.0.1", 0))
+      val conn = sender.connect(new InetSocketAddress("127.0.0.1", answering.boundPort)).get(10, TimeUnit.SECONDS)
+      def answerWritten(): Unit =
+        val stream = answered.poll(10, TimeUnit.SECONDS)
+        eventually("the answer to be written")(stream.pendingOutboundBytes == 0L)
+
+      val unread = conn.openStream(StreamKind.AssuranceDistribution).get(10, TimeUnit.SECONDS)
+      unread.send(Array[Byte](1))
+      answerWritten()
+      eventually("the answer to wait for a receiver")(unread.pendingInboundBytes == 200L * KiB)
+
+      val before = conn.openStream(StreamKind.AssuranceDistribution).get(10, TimeUnit.SECONDS)
+      before.ignoreInbound()
+      before.send(Array[Byte](1))
+      before.finish()
+      answerWritten()
+      unread.ignoreInbound()
+      unread.pendingInboundBytes shouldBe 0L
+      Thread.sleep(500)
+      before.pendingInboundBytes shouldBe 0L
+      val late = new LinkedBlockingQueue[Array[Byte]]()
+      before.onMessage(m => { late.offer(m); () })
+      late.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    finally
+      sender.shutdown()
+      answering.shutdown()
+  }
+
   test("bytes a handler holds for a connection share its budget with the frames still arriving") {
     val server = new Server(InboundLimits(maxConnectionBytes = 1024L * KiB))
     val client = new JamnpNode(NodeIdentity.generate(), config())
@@ -179,14 +251,14 @@ class InboundMemorySpec extends AnyFunSuite with Matchers:
       serverSide.heldInboundBytes shouldBe 700L * KiB
 
       val arriving = open(conn, StreamKind.WorkPackageSubmission)
-      arriving.startFrame(600 * KiB)
+      arriving.almostAll(600 * KiB)
       arriving.wasReset shouldBe true
 
       serverSide.releaseInbound(700L * KiB)
-      server.node.heldInboundBytes shouldBe 0L
+      eventually("everything to be given back")(server.node.heldInboundBytes == 0L)
       val later = open(conn, StreamKind.WorkPackageSubmission)
-      later.startFrame(600 * KiB)
-      eventually("a frame to be taken once the handler let go")(server.node.heldInboundBytes == 600L * KiB)
+      later.almostAll(600 * KiB)
+      eventually("a frame to be taken once the handler let go")(server.node.heldInboundBytes == heldFor(600 * KiB))
     finally
       client.shutdown()
       server.node.shutdown()

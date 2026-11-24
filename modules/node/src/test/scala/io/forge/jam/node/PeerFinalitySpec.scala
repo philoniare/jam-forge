@@ -64,21 +64,54 @@ class PeerFinalitySpec extends AnyFunSuite with Matchers with NodeFixture:
       withNode(s) { b =>
         val block1 = author(a, 1)
         b.chain.importBlock(block1).isRight shouldBe true
-        // A's best chain: 1, 2, 3, 4. B's: 1, 5 (lighter, so A keeps it on a side branch).
-        (2L to 4L).foreach(author(a, _))
-        val b5 = author(b, 5)
-        a.chain.importBlock(b5).isLeft shouldBe true
+        (3L to 5L).foreach(author(a, _))
+        val b2 = author(b, 2)
+        a.chain.importBlock(b2).isLeft shouldBe true
         val target = b.chain.best
 
         // Fewer peers than needed: nothing changes.
         a.chain.followPeerFinality(List.fill(3)((target.hash, target.slot)), needed = 4) shouldBe Right(None)
-        a.chain.best.slot shouldBe 4L
+        a.chain.best.slot shouldBe 5L
 
         a.chain.followPeerFinality(List.fill(4)((target.hash, target.slot)), needed = 4).isRight shouldBe true
         a.chain.best.hash shouldBe target.hash
         a.chain.finalized.hash shouldBe target.hash
 
       }
+    }
+  }
+
+  test("a block we hold is taken at its own slot: an ancestor of the finalized block never moves finality back") {
+    val s = spec("peer-finality-claimed-slot")
+    withNode(s) { a =>
+      val hashes = (1L to 6L).map { slot => author(a, slot); a.chain.best.hash }
+      a.chain.followPeerFinality(List((hashes(3), 4L)), needed = 1).isRight shouldBe true
+      a.chain.finalized.hash shouldBe hashes(3)
+
+      for (hash, claimed) <- Seq((hashes(0), 0xffffffffL), (hashes(2), 5L), (hashes(3), 99L)) do
+        a.chain.followPeerFinality(List((hash, claimed)), needed = 1) shouldBe Right(None)
+        a.chain.finalized.hash shouldBe hashes(3)
+
+      a.chain.followPeerFinality(List((hashes(4), 0xffffffffL), (hashes(5), 1L)), needed = 1).isRight shouldBe true
+      a.chain.finalized.hash shouldBe hashes(5)
+    }
+  }
+
+  test("a block we do not hold does not stand in the way of one we hold, and is asked for only when none is agreed") {
+    val s = spec("peer-finality-unknown")
+    withNode(s) { a =>
+      val hashes = (1L to 3L).map { slot => author(a, slot); a.chain.best.hash }
+      val unknown = io.forge.jam.core.primitives.Hash(Array.fill[Byte](32)(0x5a))
+      val other = io.forge.jam.core.primitives.Hash(Array.fill[Byte](32)(0x6b))
+
+      a.chain.followPeerFinality(List((unknown, 0xffffffffL), (hashes(1), 2L)), needed = 1).isRight shouldBe true
+      a.chain.finalized.hash shouldBe hashes(1)
+
+      a.chain.followPeerFinality(List((unknown, 9L)), needed = 1) shouldBe Left(unknown)
+      a.chain.followPeerFinality(List((unknown, 9L)), needed = 1, beingFetched = _ == unknown) shouldBe Right(None)
+      a.chain.followPeerFinality(List((unknown, 9L), (other, 9L)), needed = 1, beingFetched = _ == unknown) shouldBe Left(other)
+      a.chain.followPeerFinality(List((unknown, 9L), (other, 9L), (other, 9L)), needed = 2) shouldBe Left(other)
+      a.chain.finalized.hash shouldBe hashes(1)
     }
   }
 

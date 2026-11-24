@@ -11,7 +11,9 @@ private[node] final class FetchQueue[P <: AnyRef](
     maxAlternates: Int,
     isOpen: P => Boolean,
     samePeer: (P, P) => Boolean = (a: P, b: P) => a eq b,
-    order: List[FetchQueue.Request[P]] => List[FetchQueue.Request[P]] = (rs: List[FetchQueue.Request[P]]) => rs
+    order: List[FetchQueue.Request[P]] => List[FetchQueue.Request[P]] = (rs: List[FetchQueue.Request[P]]) => rs,
+    preferred: P => Boolean = (_: P) => false,
+    keptForPreferred: Int = 0
 ):
   import FetchQueue.Request
 
@@ -75,7 +77,12 @@ private[node] final class FetchQueue[P <: AnyRef](
     if inFlight.size >= maxInFlight then None
     else
       val free = pending.asScala.iterator.filter(p => !inFlight.stream().anyMatch(f => samePeer(f.peer, p.peer))).toList
-      order(free).headOption.map { found =>
+      val ordered = order(free)
+      val othersOut = inFlight.asScala.count(f => !preferred(f.peer))
+      val next =
+        ordered.find(r => preferred(r.peer))
+          .orElse(if othersOut < maxInFlight - keptForPreferred then ordered.headOption else None)
+      next.map { found =>
         pending.removeFirstOccurrence(found)
         inFlight.add(found)
         found

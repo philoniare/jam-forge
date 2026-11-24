@@ -25,6 +25,8 @@ FROM sbtscala/scala-sbt:eclipse-temurin-24.0.1_9_1.12.11_3.3.7 AS scala-builder
 
 WORKDIR /build
 
+ENV JAM_NATIVE_PREBUILT=1
+
 RUN mkdir -p /build/modules/crypto/native/build/linux
 COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libbandersnatch_vrfs_wrapper.so /build/modules/crypto/native/build/linux/
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /build/modules/crypto/native/build/linux/
@@ -43,7 +45,6 @@ COPY modules/pvm ./modules/pvm
 COPY modules/protocol ./modules/protocol
 COPY modules/conformance ./modules/conformance
 
-# After the sources, so it is newer than them and sbt does not try to rebuild it (this stage has no cargo).
 COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so modules/pvm/native/build/linux/
 
 ARG GIT_SHA=unknown
@@ -71,7 +72,7 @@ COPY --from=rust-builder /build/bandersnatch-vrfs-wrapper/target/release/libband
 COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_zebra_wrapper.so /app/lib/
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /app/lib/
 COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /app/lib/
-COPY --from=node-builder /build/modules/node/target/scala-3.3.7/jam-node.jar /app/
+COPY --from=node-builder /build/modules/node/target/scala-3*/jam-node.jar /app/
 
 ENV LD_LIBRARY_PATH=/app/lib
 # The node runs as an unprivileged user, uid and gid 10001, which owns /data. A host directory mounted there must be
@@ -104,7 +105,7 @@ COPY --from=rust-builder /build/ed25519-zebra-wrapper/target/release/libed25519_
 COPY --from=rust-builder /build/erasure-coding-wrapper/target/release/liberasure_coding_wrapper.so /app/lib/
 COPY --from=rust-builder /build/pvm-recompiler/target/release/libpvm_recompiler.so /app/lib/
 
-COPY --from=scala-builder /build/modules/conformance/target/scala-3.3.7/jam-conformance.jar /app/
+COPY --from=scala-builder /build/modules/conformance/target/scala-3*/jam-conformance.jar /app/
 COPY --from=scala-builder /build/modules/conformance/src/main/resources/logback-prod.xml /app/logback.xml
 COPY jamtestvectors/traces/preimages/*.bin /app/warmup-traces/preimages/
 COPY jamtestvectors/traces/preimages_light/*.bin /app/warmup-traces/preimages_light/

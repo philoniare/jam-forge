@@ -11,7 +11,7 @@ enum ChainError:
   case Disregarded
   case BodyMismatch
   case UnknownParent(parent: Hash)
-  case StoredOnSideBranch(weight: Long, height: Long, bestWeight: Long, bestHeight: Long)
+  case StoredOnSideBranch(weight: Long, slot: Long, bestWeight: Long, bestSlot: Long)
   /** The block was checked and is invalid. */
   case InvalidBlock(error: ImportError, detail: String)
   /** The import failed on our side: not a verdict on the block, which may import on a later try. */
@@ -51,8 +51,8 @@ enum ChainError:
     case Disregarded          => "block was disregarded"
     case BodyMismatch         => "block body does not match its header"
     case UnknownParent(p)     => s"unknown parent ${p.toHex.take(18)}"
-    case StoredOnSideBranch(w, h, bw, bh) =>
-      s"stored on side branch (weight $w height $h vs best $bw/$bh)"
+    case StoredOnSideBranch(w, s, bw, bs) =>
+      s"stored on side branch (weight $w slot $s vs best $bw/$bs)"
     case InvalidBlock(error, detail) => s"$error: $detail"
     case ImportFailed(detail)        => s"import failed: $detail"
     case UnknownBlock         => "unknown block"

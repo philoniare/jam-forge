@@ -250,7 +250,9 @@ final class TicketService(
         if decoded.isLeft then misbehaved(connection, Offence.Malformed)
         val sender = senderKey(connection)
         val admitted = inbound.submit(connection, msg.length.toLong) {
-          if receive(msg, asProxy, peerLabel(connection), sender) then stream.finish() else stream.reset()
+          val taken =
+            receive(msg, asProxy, peerLabel(connection), sender, () => misbehaved(connection, Offence.BadProof))
+          if taken then stream.finish() else stream.reset()
         }
         if !admitted then stream.reset()
       }
@@ -259,7 +261,8 @@ final class TicketService(
       msg: Array[Byte],
       asProxy: Boolean,
       from: String,
-      sender: Option[Ed25519PublicKey] = None
+      sender: Option[Ed25519PublicKey] = None,
+      badProof: () => Unit = () => ()
   ): Boolean =
     try
       TicketCodec.decode(msg) match
@@ -269,7 +272,7 @@ final class TicketService(
         case Right((epoch, env)) =>
           val view = chain.stateView()
           val currentEpoch = view.timeslot / chain.config.epochLength
-          if epoch == currentEpoch then accept(view, epoch, env, asProxy, from)
+          if epoch == currentEpoch then accept(view, epoch, env, asProxy, from, sender, badProof)
           else if epoch == currentEpoch + 1 then
             defer(view, epoch, env, asProxy, from, sender)
           else
@@ -459,16 +462,31 @@ final class TicketService(
       epoch: Long,
       env: TicketEnvelope,
       asProxy: Boolean,
-      from: String
+      from: String,
+      sender: Option[Ed25519PublicKey],
+      badProof: () => Unit
   ): Boolean =
-    val entropy = TicketService.contestEntropy(view)
-    verifyTickets(Seq(env), view.gamma.z, entropy, chain.config.ringSize).headOption.flatten match
-      case None =>
-        logger.warn(
-          s"CE131/132 ticket from $from for epoch $epoch failed ring verification against η_2 ${entropy.toHex.take(18)}; dropped"
-        )
-        false
-      case Some(id) => admit(view, epoch, id, env, asProxy, from)
+    val next = view.validators.nextEpoch
+    def refuse(why: String): Boolean =
+      logger.debug(s"ticket from $from for epoch $epoch not checked: $why")
+      false
+    if sender.exists(k => !next.exists(_.ed25519 == k) && !view.validators.current.exists(_.ed25519 == k)) then
+      refuse("the sender is not a validator of the current or the next set")
+    else if env.attempt.toInt >= SafroleTransition.maxTicketEntries(next.size, chain.config) then
+      refuse(s"entry index ${env.attempt.toInt} out of range")
+    else if env.signature.length != RingVrfSignatureSize then refuse("proof length")
+    else if view.timeslot % chain.config.epochLength >= chain.config.ticketCutoff then
+      refuse("the lottery of this epoch is over")
+    else
+      val entropy = TicketService.contestEntropy(view)
+      verifyTickets(Seq(env), view.gamma.z, entropy, chain.config.ringSize).headOption.flatten match
+        case None =>
+          logger.warn(
+            s"CE131/132 ticket from $from for epoch $epoch failed ring verification against η_2 ${entropy.toHex.take(18)}; dropped"
+          )
+          badProof()
+          false
+        case Some(id) => admit(view, epoch, id, env, asProxy, from)
 
   private def admit(
       view: io.forge.jam.protocol.state.TrieBackedJamState,

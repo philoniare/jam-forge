@@ -66,7 +66,13 @@ final class GrandpaService(
     def broadcastCommit(round: Long, setId: Long, c: Commit): Unit =
       toVoters(StreamKind.GrandpaCommit, encodeCommitMessage(round, setId, c))
     def broadcastState(round: Long, setId: Long, finalizedSlot: Long): Unit =
+      lastStateBroadcast = clock()
       toVoters(StreamKind.GrandpaState, encodeState(round, setId, finalizedSlot))
+
+  @volatile private var lastStateBroadcast = 0L
+  private val stateSends = new java.util.concurrent.atomic.AtomicLong
+
+  private[node] def stateMessagesSent: Long = stateSends.get
 
   @volatile private var voter: GrandpaVoter = null
 
@@ -80,6 +86,7 @@ final class GrandpaService(
   private def toVoters(kind: Byte, payload: Array[Byte]): Unit =
     val peers = voterPeers
     if kind == StreamKind.GrandpaVote then peers.foreach(c => votesSentTo.add(c.peerPublicKey))
+    else if kind == StreamKind.GrandpaState then stateSends.addAndGet(peers.size)
     peers.foreach(c => send(c, kind, payload))
 
   private def send(c: PeerConnection, kind: Byte, payload: Array[Byte]): Unit =
@@ -101,6 +108,8 @@ final class GrandpaService(
   private def resendVotes(): Unit =
     if silent then return
     val now = clock()
+    if keys.isDefined && now - lastStateBroadcast >= GrandpaService.StateEveryGossips * gossipMillis then
+      outbound.broadcastState(voter.round, voter.voterSet.setId, chain.finalized.slot)
     val round = (voter.voterSet.setId, voter.round)
     if round != votesRound then
       votesRound = round
@@ -565,6 +574,8 @@ final class GrandpaService(
 object GrandpaService:
 
   val ForwardPeersPerStall: Int = 4
+
+  val StateEveryGossips: Long = 5L
 
   /** Commits kept while their target block is fetched. Each one carries a supermajority of valid precommits of the
     * current set (checked before it is kept) for a block above our finalized one, so honest voters produce at most

@@ -130,7 +130,10 @@ class TicketDistributionSpec extends AnyFunSuite with Matchers with NodeFixture:
     var nodeA: JamNode = null
     var nodeB: JamNode = null
     try
-      nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false)).start()
+      nodeA = new JamNode(
+        spec,
+        NodeConfig(dataDir = dirA, slotTicking = false, ed25519Seed = Some(devKeys(0).ed25519Secret))
+      ).start()
       nodeB = new JamNode(spec, NodeConfig(dataDir = dirB, slotTicking = false)).start()
       nodeA.enableAuthoring(devKeys)
 

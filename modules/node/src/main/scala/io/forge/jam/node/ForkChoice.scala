@@ -19,8 +19,8 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
 
   def weightOf(h: Hash): Long = meta.weight(h)
 
-  def heavier(weight: Long, height: Long, bestWeight: Long, bestHeight: Long): Boolean =
-    weight > bestWeight || (weight == bestWeight && height > bestHeight)
+  def preferred(weight: Long, slot: Long, bestWeight: Long, bestSlot: Long): Boolean =
+    weight > bestWeight || (weight == bestWeight && slot > bestSlot)
 
   /** A block whose seal was not checked may claim anything in its header, so it is credited with nothing of its
     * own: no ticket-sealed weight, no winning-tickets marker of its own and no slot author. It still passes on what

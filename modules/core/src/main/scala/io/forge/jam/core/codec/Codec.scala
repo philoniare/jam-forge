@@ -261,7 +261,7 @@ trait Codec[A]:
     def write(out: ByteWriter, value: B): Unit = self.write(out, g(value))
     def read(in: ByteReader): B = f(self.read(in)) match
       case Right(b)  => b
-      case Left(err) => in.fail(err)
+      case Left(err) => in.failNonCanonical(err)
     override def sizeHint: Int = self.sizeHint
 
   /** Fails decoding unless the reader is exhausted afterwards. */

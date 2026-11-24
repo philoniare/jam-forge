@@ -2,7 +2,7 @@
 
 > A Scala 3 implementation of the JAM (Join-Accumulate Machine) protocol - a potential successor to the Polkadot Relay chain
 
-[![Scala Version](https://img.shields.io/badge/scala-3.3.7-red.svg)](https://www.scala-lang.org/)
+[![Scala Version](https://img.shields.io/badge/scala-3.3.8-red.svg)](https://www.scala-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Run Tests](https://github.com/philoniare/jam-forge/actions/workflows/run-tests.yml/badge.svg)](https://github.com/philoniare/jam-forge/actions/workflows/run-tests.yml)
 [![codecov](https://codecov.io/gh/philoniare/jam-forge/branch/main/graph/badge.svg)](https://codecov.io/gh/philoniare/jam-forge)
@@ -126,20 +126,25 @@ docker run -d --name jam-forge --network host -v jam-forge-data:/data \
 - `--chain` is `polkadot` (the default, a placeholder without validators yet), `toaster` or `toaster:<network>`
   (fetched from `https://jamtoaster.network/chainspec/<network>.json`, `public` by default), `dev` or
   `dev:<base port>` (the dev chain, validator i at port 40000 + i or base port + i), or a spec file.
-  `dump-spec <file>` writes the spec a `--chain` names.
+  `dump-spec <file>` writes the spec a `--chain` names. The built-in dev chain is PolkaJam v0.8.0's; other PolkaJam
+  builds (the nightlies) have another genesis state, so with one of them take the chain from it: `polkajam --chain
+  dev dump-spec spec.json`, then `--chain spec.json` (`scripts/mixed-devnet.sh` does this and starts a network of
+  both clients, see [TESTING.md](TESTING.md#mixed-network-with-polkajam)).
 - A chain's data lives in `<data path>/<chain id>` (`run -d`, default `~/.local/share/jam-forge`, in the image
   `/data/jam-forge`) and its keystore in `<config path>/<chain id>/keys` (`-c`, default `~/.config/jam-forge`).
   Seeds are 32-byte `*.seed` files. `gen-keys [name]` writes a new one (and never replaces an existing file);
   `list-keys` prints each seed's peer ID and Bandersnatch key; `run --key-seed-file <file>` names more.
 - `run --peer-id` makes the node the validator whose seed has that peer ID (its Ed25519 key is the network
-  identity); `--dev-validator i` runs dev validator i with its address and port from the genesis state; `--mode
+  identity); `--dev-validator i` runs dev validator i with its address and port from the genesis state (the dev
+  keys are public; on a chain whose validator i has another key the node says so and runs, as polkajam does); `--mode
   ordinary` follows the chain with the identity `--peer-id` names. Without `--peer-id` an ordinary node takes a new
   identity each start. Proxy mode (`--mode proxy`, `--proxy`) is not implemented.
 - Finality: `--finality-mode dummy` (the default: each new best block finalizes its parent, without
   consensus) or `grandpa`. `--finality-peers N` and `--announced-finality` take finality from peers' announcements
   instead.
-- The RPC (JIP-2) runs on `[::]:19800` unless the node is a validator (`--rpc` to enable it there) or `--no-rpc` is
-  given; `--rpc-port` and `--rpc-listen-ip` move it. Submission and segment recovery are served to loopback clients
+- The RPC (JIP-2) runs on `[::]:19800`, every address, as polkajam's does, unless the node is a validator (`--rpc`
+  to enable it there) or `--no-rpc` is given; `--rpc-port` and `--rpc-listen-ip` move it (`--rpc-listen-ip
+  127.0.0.1` keeps it to this machine). Submission and segment recovery are served to loopback clients
   only unless `--rpc-methods unsafe` (`safe` refuses them to everyone); `--rpc-allow-origin <origin>` lets a web page
   use it.
 - `--port` (UDP, default any free port), `--listen-ip` (default `::`), `--external-ip` (the address peers reach the
@@ -173,7 +178,7 @@ JAM-Forge uses [scoverage](https://github.com/scoverage/sbt-scoverage) for code 
 sbt clean coverage test coverageAggregate
 
 # View HTML report
-open target/scala-3.3.7/scoverage-report/index.html
+open target/scala-3.3.8/scoverage-report/index.html
 ```
 
 **Coverage targets**: 70% statement coverage | Excludes: benchmark code

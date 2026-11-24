@@ -85,8 +85,9 @@ final class PreimageService(
           try
             PreimageCodec.decodeAnnouncement(msg) match
               case Left(err) =>
-                logger.warn(err)
+                logger.debug(s"CE142 from ${JamNode.hex(connection.peerKey).take(16)}: $err")
                 telemetry.foreach(_.preimageAnnouncementFailed(connection.peerKey, remote = true, err))
+                misbehaved(connection, Offence.Malformed)
               case Right((serviceId, hash, length)) =>
                 telemetry.foreach(_.preimageAnnounced(connection.peerKey, remote = true, serviceId, hash, length))
                 announcedMeta.put(hash, (serviceId, length))

@@ -898,7 +898,9 @@ final class AuditorService(
             }
             if taken then stream.finish() else stream.reset()
           case JudgmentWire.Part.Malformed =>
-            logger.warn(s"bad CE145 message of ${msg.length} bytes from ${JamNode.hex(conn.peerKey).take(16)}")
+            logger.debug(s"bad CE145 message of ${msg.length} bytes from ${JamNode.hex(conn.peerKey).take(16)}")
+            misbehaved(conn.peerKey, Offence.Malformed)
+            stream.reset()
       }
 
   /** A CE 145 judgment: the signature is checked first, then the judgment is recorded when a tracked block holds

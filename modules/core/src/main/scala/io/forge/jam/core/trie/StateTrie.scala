@@ -60,6 +60,7 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
    */
   def update(updates: Seq[(JamBytes, Option[JamBytes])]): Unit =
     if updates.nonEmpty then
+      if children != null then foldChildren()
       val batch = StateTrie.sortedBatch(updates)
       if backend.readsInBulk && batch.length >= StateTrie.PrefetchFrom then prefetch(batch)
       if splits(batch.length) && currentRoot != Hash.zero then
@@ -81,6 +82,42 @@ final class StateTrie private (backend: StateTrieBackend, initialRoot: Hash):
           )
       try currentRoot = updateSubtree(currentRoot, 0, batch, 0, batch.length)
       finally doneByBatchIndex = null
+
+  private def foldChildren(): Unit =
+    val kids = children.nn
+    children = null
+    var k = 0
+    while k < kids.length do
+      val nodes = kids(k).pendingNodes
+      pendingNodes.reserve(nodes.size)
+      var s = 0
+      while s < nodes.slotCount do
+        if nodes.occupied(s) then
+          val slot =
+            pendingNodes.findOrInsertWords(nodes.keyWord(s, 0), nodes.keyWord(s, 1), nodes.keyWord(s, 2), nodes.keyWord(s, 3))
+          val had = pendingNodes.ref(slot)
+          val d = had + nodes.ref(s)
+          if d == 0 then pendingNodes.remove(slot)
+          else
+            pendingNodes.setRef(slot, d)
+            val takes = had == 0 ||
+              (if d > 0 then !pendingNodes.hasPayload(slot) && nodes.hasPayload(s)
+               else pendingNodes.hasPayload(slot) && !nodes.hasPayload(s))
+            if takes then pendingNodes.setNodeFrom(slot, nodes, s)
+        s += 1
+      val values = kids(k).pendingValues
+      pendingValues.reserve(values.size)
+      s = 0
+      while s < values.slotCount do
+        if values.occupied(s) then
+          val slot =
+            pendingValues.findOrInsertWords(values.keyWord(s, 0), values.keyWord(s, 1), values.keyWord(s, 2), values.keyWord(s, 3))
+          if pendingValues.addRef(slot, values.ref(s)) == 0 then pendingValues.remove(slot)
+          else
+            val v = values.value(s)
+            if v != null then pendingValues.setValue(slot, v)
+        s += 1
+      k += 1
 
   /**
    * Whether an update of `size` keys is rebuilt as parallel subtrees. Only on the in-memory backend, whose reads are

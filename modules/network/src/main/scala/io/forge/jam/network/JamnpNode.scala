@@ -63,9 +63,11 @@ final case class JamnpConfig(
       */
     builderSlots: Int = 20,
     /** Inbound connections one address may hold, builders and other peers together: one host cannot take the
-      * slots of many. Validators (see [[JamnpNode.setPriorityPeers]]) are not counted or limited.
+      * slots of many. An IPv6 address counts with the rest of its /64 ([[JamnpNode.addressGroup]]). Validators (see
+      * [[JamnpNode.setPriorityPeers]]) are not counted by address; they are limited by key, below.
       */
     maxInboundPerAddress: Int = 32,
+    maxInboundPerValidator: Int = 2,
     /** A CE stream with no bytes read or written for this long is reset, so a
       * silent peer cannot hold stream credit forever. UP streams are exempt
       * (they stay open and may be quiet). 0 disables the timeout.
@@ -247,9 +249,19 @@ final class JamnpStream private[network] (
   private var receiver: Array[Byte] => Unit = null
   // Messages that arrive before a receiver is registered (the peer can reply
   // as soon as `openStream` returns), or while `onMessage` replays them.
-  // Capped, since send-only streams never register a receiver.
+  // Capped, since a stream may never register a receiver; one known to be
+  // send-only keeps none at all (`ignoreInbound`).
   private val pending = new java.util.ArrayDeque[Array[Byte]]()
   private var pendingBytes = 0L
+  private var unwanted = false
+
+  override def ignoreInbound(): Unit = synchronized {
+    unwanted = true
+    pending.clear()
+    pendingBytes = 0L
+  }
+
+  private[network] def pendingInboundBytes: Long = synchronized(pendingBytes)
   private var draining = false
   private var closed = false
   private var closeDelivered = false
@@ -299,7 +311,8 @@ final class JamnpStream private[network] (
 
   private[network] def dispatch(message: Array[Byte]): Unit =
     val f = synchronized {
-      if receiver == null || draining then
+      if unwanted then null
+      else if receiver == null || draining then
         if draining || pendingBytes + message.length <= JamnpStream.MaxPendingBytes then
           pending.add(message)
           pendingBytes += message.length
@@ -592,7 +605,8 @@ final class JamnpNode(
 
   /** Inbound admission.
     *   - A validator is admitted while any slot is free, and when the slots open to ordinary peers are all taken
-    *     an ordinary peer is closed to make room for it.
+    *     an ordinary peer is closed to make room for it. Its key holds at most `maxInboundPerValidator` connections:
+    *     one over that replaces its own oldest.
     *   - A builder may use one of the `builderSlots`, and at most `maxInboundPerAddress` builders and other peers
     *     together from one address.
     *   - Any other peer may use all but the `builderSlots` reserved for builders, and at most
@@ -604,10 +618,17 @@ final class JamnpNode(
     def isPriority(c: JamnpConnection) = priorityPeer(c.peerPublicKey.bytes.toArray)
     val ordinaryLimit = config.maxInboundConnections - config.builderSlots
     val nonBuilders = inbound.filterNot(isBuilder)
-    def sameAddress = addressOf(conn).fold(0)(a => inbound.count(c => !isPriority(c) && addressOf(c).contains(a)))
+    def groupOf(c: JamnpConnection) = addressOf(c).map(JamnpNode.addressGroup)
+    def sameAddress = groupOf(conn).fold(0)(g => inbound.count(c => !isPriority(c) && groupOf(c).contains(g)))
+    def ownOldestFirst =
+      inbound.filter(c => java.util.Arrays.equals(c.peerKey, conn.peerKey)).sortBy(_.openedAtMillis)
     if isBuilder(conn) then
       inbound.size < config.maxInboundConnections && inbound.count(isBuilder) < config.builderSlots &&
         sameAddress < config.maxInboundPerAddress
+    else if isPriority(conn) && ownOldestFirst.size >= config.maxInboundPerValidator then
+      val own = ownOldestFirst
+      own.take(own.size - config.maxInboundPerValidator + 1).foreach(_.close())
+      true
     else if isPriority(conn) then
       if nonBuilders.size < ordinaryLimit then true
       else
@@ -802,6 +823,10 @@ final class JamnpNode(
     group.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync()
 
 object JamnpNode:
+
+  def addressGroup(address: java.net.InetAddress): Seq[Byte] = address match
+    case v6: java.net.Inet6Address => v6.getAddress.take(8).toSeq
+    case other                     => other.getAddress.toSeq
   private[network] val Ed25519KeyType = "Ed25519"
   private[network] val DefaultMaxFrame = 32 * 1024 * 1024
   private val InitialMaxData = 64L * 1024 * 1024
@@ -978,14 +1003,16 @@ object JamnpNode:
           return
         if in.readableBytes() < len then
           in.resetReaderIndex()
-          if counted == 0L && len > 0 then
+          val arrived = in.readableBytes().toLong
+          if arrived > counted then
             val flow = inboundFlow(ch.parent())
             if flow != null then
-              if flow.hold(len.toLong) then counted = len.toLong
+              if flow.hold(arrived - counted) then counted = arrived
               else
                 ch.attr(RefusedHereKey).set(java.lang.Boolean.TRUE)
                 refused = true
                 in.skipBytes(in.readableBytes())
+                uncount(ctx)
                 resetStream(ch)
           return
         val content = new Array[Byte](len)

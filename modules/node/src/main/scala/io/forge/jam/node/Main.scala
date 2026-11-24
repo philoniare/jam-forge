@@ -113,11 +113,18 @@ object Main extends LazyLogging:
       fail("Error: Failed to load keys")
     val seeds = stored ++ named.collect { case Right(s) => s }
     seeds.foreach(s => warnIfExposed(s.path))
+    seeds.filter(s => isTrivialSeed(s.secret)).foreach(s =>
+      System.err.println(
+        s"warning: ${s.path} holds a dev validator's seed (four bytes, repeated), which anyone can write down: " +
+          "whatever its keys sign, anyone else can sign too"
+      )
+    )
 
     val devIndex = opts.get("dev-validator").map(_.toInt)
     devIndex.foreach { i =>
-      val validators = loadedSpec.genesisValidatorKeys._1.size
-      if i >= validators then fail(s"--dev-validator $i: the chain's genesis state has $validators validators")
+      val genesisKeys = loadedSpec.genesisValidatorKeys._1
+      devValidatorRefusal(i, genesisKeys).foreach(fail)
+      devValidatorWarning(i, genesisKeys).foreach(w => System.err.println(s"warning: $w"))
     }
     val peerSeed = opts.get("peer-id").filter(_ => devIndex.isEmpty).map { name =>
       val key = NodeIdentity.fromAltName(name).get
@@ -198,7 +205,7 @@ object Main extends LazyLogging:
     if flags.contains("--beefy") then node.enableBeefy(authorKeys)
     if flags.contains("--rpc") || (!flags.contains("--no-rpc") && !validator) then
       val methods = opts.get("rpc-methods").flatMap(RpcMethods.parse).getOrElse(RpcMethods.Auto)
-      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), rpcListenHost(opts, listenIp), cl.repeated("rpc-allow-origin"), methods)
+      node.enableRpc(opts.get("rpc-port").map(_.toInt).getOrElse(DefaultRpcPort), rpcListenHost(opts), cl.repeated("rpc-allow-origin"), methods)
     opts.get("metrics-port").foreach { p =>
       val host = opts.get("metrics-listen-ip").map(v => parseIp("--metrics-listen-ip", v).fold(fail, identity).getHostAddress)
       node.enableMetrics(p.toInt, host.getOrElse("127.0.0.1"))
@@ -306,8 +313,8 @@ object Main extends LazyLogging:
 
   private lazy val AnyAddress: InetAddress = anyAddress(ipv6Available)
 
-  private[node] def rpcListenHost(options: Map[String, String], listenIp: InetAddress): String =
-    options.getOrElse("rpc-listen-ip", listenIp.getHostAddress)
+  private[node] def rpcListenHost(options: Map[String, String], any: InetAddress = AnyAddress): String =
+    options.getOrElse("rpc-listen-ip", any.getHostAddress)
 
   private val DefaultRpcPort = 19800
 
@@ -324,6 +331,22 @@ object Main extends LazyLogging:
     val key = JamBytes.fromHex(hex).fold(e => fail(s"$from: not hex: $e"), _.toArray)
     if key.length != 32 then fail(s"$from: expected a 32-byte hex key, got ${key.length} bytes")
     key
+
+  private[node] def isTrivialSeed(seed: Array[Byte]): Boolean =
+    seed.length == 32 && seed.indices.forall(i => seed(i) == seed(i % 4))
+
+  private[node] def devValidatorRefusal(index: Int, genesisKeys: IndexedSeq[Array[Byte]]): Option[String] =
+    Option.when(index >= genesisKeys.size)(
+      s"--dev-validator $index: the chain's genesis state has ${genesisKeys.size} validators"
+    )
+
+  private[node] def devValidatorWarning(index: Int, genesisKeys: IndexedSeq[Array[Byte]]): Option[String] =
+    Option.when(
+      index < genesisKeys.size && !java.util.Arrays.equals(genesisKeys(index), ValidatorKeySet.dev(index).ed25519Public)
+    )(
+      s"--dev-validator $index: validator $index of this chain does not have dev validator $index's key. The dev " +
+        "keys are public and are not this chain's; for a validator of it, use its own key (gen-keys, then --peer-id)"
+    )
 
   private[node] def exposedTo(path: Path): Option[String] =
     try
@@ -568,15 +591,16 @@ object Main extends LazyLogging:
       |      --telemetry <HOST:PORT>        Telemetry endpoint (JIP-3)
       |      --bootnode <BOOTNODE>          A bootnode, <PEER_ID>@<HOST>:<PORT>; may be given more than once
       |      --dev-validator <VAL_INDEX>    Run as the dev validator with this index: its keys, and its peer ID,
-      |                                     address and port in the genesis state; the default chain becomes dev
+      |                                     address and port in the genesis state; the default chain becomes dev.
+      |                                     On a custom chain spec these keys may not be correct
       |      --pvm-backend <PVM_BACKEND>    interpreter, or compiler (the recompiler: native code; needs
       |                                     -Djam.pvm.recompiler.lib). Default: the compiler where available
       |      --finality-mode <MODE>         dummy (the best block's parent is finalized without consensus) or
       |                                     grandpa [default: dummy]
       |      --rpc                          Enable the RPC server (off by default for a validator)
       |      --no-rpc                       Disable the RPC server (on by default otherwise)
-      |      --rpc-listen-ip <RPC_LISTEN_IP>  IP address for the RPC server to listen on [default: as
-      |                                     --listen-ip]
+      |      --rpc-listen-ip <RPC_LISTEN_IP>  IP address for the RPC server to listen on [default: ::, or
+      |                                     0.0.0.0 on a host without IPv6]
       |      --rpc-port <RPC_PORT>          Port for the RPC server to listen on; 0 means any unused port
       |                                     [default: 19800]
       |  -h, --help                         Print help
@@ -592,7 +616,8 @@ object Main extends LazyLogging:
       |                                     clients only [default: auto]
       |      --rpc-allow-origin <ORIGIN>    A browser origin the RPC accepts (e.g. http://localhost:3000); may be
       |                                     given more than once
-      |      --finality-peers <N>           Finalize what N peers announce as final (UP 0), instead of --finality-mode
+      |      --finality-peers <N>           Finalize what N peers announce as final (UP 0), instead of --finality-mode;
+      |                                     the peers counted are the bootnodes and the current validators
       |      --announced-finality           Finalize what a quorum of the current validators announce as final
       |      --bandersnatch-key <KEY>       The validator's Bandersnatch secret seed (JIP-5), as hex or a file holding
       |                                     it, in place of its seed's
@@ -604,7 +629,7 @@ object Main extends LazyLogging:
       |      --inline-judgment-guarantee    CE 145 with the guarantee inside the judgment (JAMNP's newer form)
       |      --fault-tamper-reports         Testing only: guarantee wrong reports, to exercise disputes""".stripMargin
 
-  private val CommandUsage: Map[String, String] = Map(
+  private[node] val CommandUsage: Map[String, String] = Map(
     Run -> RunUsage,
     GenKeys ->
       """Generate a new secret key seed and print the derived session keys

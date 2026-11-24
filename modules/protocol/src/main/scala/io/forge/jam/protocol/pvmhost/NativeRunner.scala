@@ -1,7 +1,7 @@
 package io.forge.jam.protocol.pvmhost
 
 import io.forge.jam.pvm.{ExecutionMode, Instruction, PvmSettings}
-import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule}
+import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule, RunDeadlinePassed}
 import io.forge.jam.pvm.memory.InstanceMemoryBudget
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.InstructionDecoder
@@ -56,11 +56,53 @@ object NativeRunner extends StrictLogging:
       entryPc: Int,
       mode: ExecutionMode,
       dispatcher: HostCallDispatcher,
-      preDispatch: Option[() => Unit]
+      preDispatch: Option[() => Unit],
+      deadlineMillis: Option[Long] = None
   ): Option[RunOutcome] =
     mode match
       case ExecutionMode.Interpreted => None
-      case ExecutionMode.Recompiled => runRecompiled(instance, entryPc, hostCalls = Some((dispatcher, preDispatch)))
+      case ExecutionMode.Recompiled =>
+        runRecompiled(instance, entryPc, hostCalls = Some((dispatcher, preDispatch)), deadlineMillis)
+
+  @volatile private[pvmhost] var deadlineSliceGas: Long = 1L << 24
+
+  private val slicesResumed = new LongAdder
+  private[pvmhost] def resumedSlices: Long = slicesResumed.sum()
+
+  private final class GasSlices(live: PvmRecompiler#LiveExecution, deadlineMillis: Long, indexOfPc: Int => Option[Int]):
+    private val cell = live.gasSegment()
+    private var held = 0L
+    private var slice = math.max(1L, deadlineSliceGas)
+
+    private def gas: Long = cell.get(java.lang.foreign.ValueLayout.JAVA_LONG, 0)
+    private def setGas(v: Long): Unit = cell.set(java.lang.foreign.ValueLayout.JAVA_LONG, 0, v)
+
+    def cut(): Unit =
+      val all = gas
+      if all > slice then
+        setGas(slice)
+        held = all - slice
+
+    def restore(): Unit =
+      if held != 0L then
+        setGas(gas + held)
+        held = 0L
+
+    def run(): PvmRecompiler.ExecResult =
+      cut()
+      var out = live.run()
+      while out.exit == PvmRecompiler.EXIT_OOG && held > 0L do
+        if System.currentTimeMillis() > deadlineMillis then throw new RunDeadlinePassed(deadlineMillis)
+        if gas == slice && slice <= (Long.MaxValue >> 1) then slice <<= 1
+        restore()
+        cut()
+        val index = indexOfPc(out.pc.toInt).getOrElse(
+          throw new IllegalStateException(s"NativeRunner: out of gas at pc=${out.pc}, which is no instruction")
+        )
+        slicesResumed.increment()
+        out = live.resume(index)
+      restore()
+      new PvmRecompiler.ExecResult(out.exit, gas, out.pc, out.faultPage)
 
   private lazy val recompiler: Option[PvmRecompiler] =
     PvmSettings.current.recompilerLib
@@ -76,7 +118,8 @@ object NativeRunner extends StrictLogging:
   private def runRecompiled(
       instance: InterpretedInstance,
       entryPc: Int,
-      hostCalls: Option[(HostCallDispatcher, Option[() => Unit])]
+      hostCalls: Option[(HostCallDispatcher, Option[() => Unit])],
+      deadlineMillis: Option[Long] = None
   ): Option[RunOutcome] =
     recompiler match
       case None =>
@@ -129,7 +172,7 @@ object NativeRunner extends StrictLogging:
                     val (out, finalRegionLens, heapWrittenBack) = StageTimers.time("native/execute")(
                       executeInContext(
                         rc, instance, blk, regs, instance.gas, regions, backing, described.pageShift, entryIndex,
-                        hostCalls, describedWithHeap
+                        hostCalls, describedWithHeap, deadlineMillis, program.entryIndex
                       )
                     )
 
@@ -296,7 +339,8 @@ object NativeRunner extends StrictLogging:
       entryPc: Int,
       dispatcher: HostCallDispatcher,
       preDispatch: Option[() => Unit],
-      reservation: InstanceMemoryBudget.Reservation = null
+      reservation: InstanceMemoryBudget.Reservation = null,
+      deadlineMillis: Option[Long] = None
   ): Option[DirectResult] =
     recompiler.flatMap { rc =>
       val program = compiledFor(rc, module)
@@ -316,7 +360,9 @@ object NativeRunner extends StrictLogging:
                   template.contents :+ args
                 )
             var wrapper: NativeInstanceWrapper = null
+            var slices: GasSlices = null
             val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, _: Int) =>
+              if slices != null then slices.restore()
               val gasCost = dispatcher.getGasCost(hostCallId.toInt, wrapper)
               val newGas = wrapper.gas - gasCost
               wrapper.setGas(newGas)
@@ -328,7 +374,9 @@ object NativeRunner extends StrictLogging:
                     StageTimers.time(s"pvm/host-$hostCallId")(dispatcher.dispatch(hostCallId.toInt, wrapper))
                   else dispatcher.dispatch(hostCallId.toInt, wrapper)
                   if wrapper.isForcedOutOfGas then PvmRecompiler.HOST_OOG_NEXT
-                  else PvmRecompiler.HOST_CONTINUE
+                  else
+                    if slices != null then slices.cut()
+                    PvmRecompiler.HOST_CONTINUE
                 catch
                   case _: HostCallPanic => PvmRecompiler.HOST_PANIC
             val live = StageTimers.time("native/setup") {
@@ -340,7 +388,8 @@ object NativeRunner extends StrictLogging:
             }
             try
               wrapper = new NativeInstanceWrapper(live, template.heap.map(new DirectHeapGrowth(_, reservation)))
-              val out = StageTimers.time("native/run")(live.run())
+              slices = deadlineMillis.map(new GasSlices(live, _, program.entryIndex)).orNull
+              val out = StageTimers.time("native/run")(if slices != null then slices.run() else live.run())
               val outcome = out.exit match
                 case PvmRecompiler.EXIT_HALT => RunOutcome.Halt
                 case PvmRecompiler.EXIT_PANIC => RunOutcome.Panic
@@ -453,13 +502,17 @@ object NativeRunner extends StrictLogging:
       pageShift: Int,
       entryIndex: Int,
       hostCalls: Option[(HostCallDispatcher, Option[() => Unit])],
-      heapTracking: Option[RecompilerMemory.DescribedWithHeap]
+      heapTracking: Option[RecompilerMemory.DescribedWithHeap],
+      deadlineMillis: Option[Long],
+      indexOfPc: Int => Option[Int]
   ): (PvmRecompiler.ExecResult, Array[Long], Boolean) =
     var wrapperRef: NativeInstanceWrapper = null
+    var slices: GasSlices = null
     val handler: PvmRecompiler.HostCallHandler = hostCalls match
       case None => null
       case Some((dispatcher, preDispatch)) =>
         (hostCallId: Long, _: Int) =>
+          if slices != null then slices.restore()
           val wrapper = wrapperRef
           val gasCost = dispatcher.getGasCost(hostCallId.toInt, wrapper)
           val newGas = wrapper.gas - gasCost
@@ -470,7 +523,9 @@ object NativeRunner extends StrictLogging:
               preDispatch.foreach(_.apply())
               dispatcher.dispatch(hostCallId.toInt, wrapper)
               if wrapper.isForcedOutOfGas then PvmRecompiler.HOST_OOG_NEXT
-              else PvmRecompiler.HOST_CONTINUE
+              else
+                if slices != null then slices.cut()
+                PvmRecompiler.HOST_CONTINUE
             catch
               case _: HostCallPanic => PvmRecompiler.HOST_PANIC
 
@@ -482,7 +537,8 @@ object NativeRunner extends StrictLogging:
     }
     wrapperRef = new NativeInstanceWrapper(live, heapTracking.map(new InstanceHeapGrowth(instance, _)))
     try
-      val result = StageTimers.time("native/run")(live.run())
+      slices = deadlineMillis.map(new GasSlices(live, _, indexOfPc)).orNull
+      val result = StageTimers.time("native/run")(if slices != null then slices.run() else live.run())
       // Final region lengths, read from the LIVE region-table segment (which a
       // grow_heap host call may have mutated) BEFORE close() releases it.
       val finalLens = Array.tabulate(regions.length) { i =>

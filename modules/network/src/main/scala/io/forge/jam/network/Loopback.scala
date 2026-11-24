@@ -104,6 +104,12 @@ object Loopback:
     def pendingOutboundBytes: Long = 0L
     def isOpen: Boolean = !dead
 
+    @volatile private var unwanted = false
+
+    override def ignoreInbound(): Unit =
+      unwanted = true
+      inbox.clear()
+
     def onMessage(f: Array[Byte] => Unit): Stream =
       synchronized { receiver = f }
       drain()
@@ -118,7 +124,7 @@ object Loopback:
       if !dead && !finished then
         val target = peer
         deliver.execute { () =>
-          if !target.dead then
+          if !target.dead && !target.unwanted then
             target.inbox.add(message)
             target.drain()
         }

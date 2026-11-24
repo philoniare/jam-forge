@@ -21,7 +21,61 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
 
   private val devKeys = (0 until 6).map(ValidatorKeySet.dev)
 
-  test("a longer side branch triggers a validated reorg") {
+  test("at equal ticket weight the head with the later slot is taken, though its chain is shorter") {
+    val genesis = loadGenesis().getOrElse(
+      cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
+    )
+    val spec = ChainSpec(
+      id = "fork-slots",
+      config = ChainConfig.TINY,
+      genesisHeaderBytes = Some(genesis.header.encode.toArray),
+      explicitGenesisHash = None,
+      genesisState = genesis.state.keyvals,
+      bootnodes = Nil
+    )
+    val dirs = List("a", "b", "c").map(n => tempDir(s"jam-fork-slots-$n"))
+    val nodes = dirs.map(d => new JamNode(spec, NodeConfig(dataDir = d, slotTicking = false)))
+    try
+      nodes.foreach(_.chain.initializeOrRestore(spec))
+      val List(long, late, mid) = nodes.map(_.chain)
+      def author(chain: ChainManager, slot: Long): Array[Byte] =
+        val block = new BlockAuthor(chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+        val bytes = chain.encodeBlock(block)
+        chain.importBlock(bytes).isRight shouldBe true
+        bytes
+      val onA = List(1L, 2L, 3L).map(author(long, _))
+      val five = author(late, 5L)
+      val four = author(mid, 4L)
+      long.best.slot shouldBe 3L
+      long.heightOf(long.best.hash) shouldBe Some(3L)
+
+      long.importBlock(five).isRight shouldBe true
+      long.best.hash shouldBe late.best.hash
+      long.best.slot shouldBe 5L
+      long.heightOf(long.best.hash) shouldBe Some(1L)
+      long.best.stateRoot shouldBe late.best.stateRoot
+
+      long.importBlock(four) match
+        case Left(ChainError.StoredOnSideBranch(_, slot, _, bestSlot)) =>
+          slot shouldBe 4L
+          bestSlot shouldBe 5L
+        case other => fail(s"expected the slot-4 block to be stored on a side branch, got $other")
+      long.best.slot shouldBe 5L
+
+      onA.foreach(bytes => late.importBlock(bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch])
+      late.best.slot shouldBe 5L
+      val six = author(mid, 6L) // on that chain: genesis, 4, 6
+      late.importBlock(four).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      late.importBlock(six).isRight shouldBe true
+      late.best.hash shouldBe mid.best.hash
+      long.importBlock(six).isRight shouldBe true
+      long.best.hash shouldBe mid.best.hash
+    finally
+      nodes.foreach(_.shutdownStorageOnly())
+      dirs.foreach(cleanup)
+  }
+
+  test("a side branch is adopted once its head has the later slot, by a validated reorg") {
     val genesis = loadGenesis().getOrElse(
       cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available")
     )
@@ -59,15 +113,14 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
       nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
 
-      // A's own block 2 (with tickets → different from B's).
-      nodeA.authorSlot(2).isDefined shouldBe true
+      nodeA.authorSlot(3).isDefined shouldBe true
       val headA2 = nodeA.chain.best
       // Block 1 is no longer a leaf.
       nodeA.chain.leaves.map(_.hash) shouldBe List(headA2.hash)
 
-      // B's competing chain: 3' and 4' (no block at slot 2, so the branches
+      // B's competing chain: 2' and 4' (no block at slot 3, so the branches
       // do not equivocate).
-      val block2b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
+      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
       val block2bBytes = nodeB.chain.encodeBlock(block2b)
       nodeB.chain.importBlock(block2bBytes).isRight shouldBe true
       val block3b = bareAuthorB.tryAuthor(4).getOrElse(fail("author 4'"))
@@ -76,18 +129,18 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
 
       nodeB.chain.best.hash should not be headA2.hash
 
-      // Sanity: 3' imports linearly on a fresh node C (isolates replay bugs
+      // Sanity: 2' imports linearly on a fresh node C (isolates replay bugs
       // from block validity).
       val dirC = tempDir("jam-fork-c")
       val nodeC = new JamNode(spec, NodeConfig(dataDir = dirC, slotTicking = false))
       nodeC.chain.initializeOrRestore(spec)
       nodeC.chain.importBlock(block1Bytes).isRight shouldBe true
       val cRes = nodeC.chain.importBlock(block2bBytes)
-      withClue(s"fresh-node import of 3': $cRes") { cRes.isRight shouldBe true }
+      withClue(s"fresh-node import of 2': $cRes") { cRes.isRight shouldBe true }
       nodeC.shutdownStorageOnly()
       cleanup(dirC)
 
-      // Feed B's branch to A: 3' parks on a side branch (equal height)...
+      // Feed B's branch to A: 2' parks on a side branch (its slot is earlier than A's head's)...
       val sideResult = nodeA.chain.importBlock(block2bBytes)
       sideResult.isLeft shouldBe true
       sideResult.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
@@ -98,7 +151,7 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       leavesAfterFork.head.hash shouldBe headA2.hash
       leavesAfterFork.map(_.hash).toSet shouldBe Set(headA2.hash, block2bHash)
 
-      // ...and 4' makes the branch longer → reorg onto B's chain.
+      // ...and 4' gives the branch the later slot → reorg onto B's chain.
       val left = scala.collection.mutable.ListBuffer.empty[(List[Hash], List[Hash])]
       nodeA.chain.onAbandoned((abandoned, adopted) =>
         left += ((abandoned.map(nodeA.chain.headerHashOf), adopted.map(nodeA.chain.headerHashOf)))
@@ -107,12 +160,12 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       withClue(s"reorg result: $reorged") {
         reorged.isRight shouldBe true
       }
-      // A's block 2 was left behind for 3' and 4', whose extrinsics the pools must not take back.
+      // A's block was left behind for 2' and 4', whose extrinsics the pools must not take back.
       left.toList shouldBe List((List(headA2.hash), List(block2bHash, nodeB.chain.best.hash)))
       nodeA.chain.best.hash shouldBe nodeB.chain.best.hash
       nodeA.chain.best.stateRoot shouldBe nodeB.chain.best.stateRoot
       nodeA.chain.best.slot shouldBe 4L
-      // After the reorg the new best leads the leaves; 3' has a child and is no leaf; A's 2 still is.
+      // After the reorg the new best leads the leaves; 2' has a child and is no leaf; A's block still is.
       val leavesAfterReorg = nodeA.chain.leaves
       leavesAfterReorg.head.hash shouldBe nodeB.chain.headerHashOf(block3b)
       leavesAfterReorg.map(_.hash).toSet shouldBe Set(nodeB.chain.headerHashOf(block3b), headA2.hash)
@@ -175,19 +228,19 @@ class ForkChoiceSpec extends AnyFunSuite with Matchers with NodeFixture:
       nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
       val headA1 = nodeA.chain.best
 
-      // A: 2 then 3 on its own chain; B: 4' on block 1, parked on A as a side branch.
+      // A: slots 3 then 4 on its own chain; B: slot 2 on block 1, parked on A as a side branch.
       val authorA = new BlockAuthor(nodeA.chain, devKeys)
-      val a2 = authorA.tryAuthor(2).getOrElse(fail("author 2"))
+      val a2 = authorA.tryAuthor(3).getOrElse(fail("author 3"))
       nodeA.chain.importBlock(nodeA.chain.encodeBlock(a2)).isRight shouldBe true
       val headA2 = nodeA.chain.best
-      val a3 = authorA.tryAuthor(3).getOrElse(fail("author 3"))
+      val a3 = authorA.tryAuthor(4).getOrElse(fail("author 4"))
       nodeA.chain.importBlock(nodeA.chain.encodeBlock(a3)).isRight shouldBe true
-      val b4 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(4).getOrElse(fail("author 4'"))
+      val b4 = new BlockAuthor(nodeB.chain, devKeys).tryAuthor(2).getOrElse(fail("author 2'"))
       val b4Bytes = nodeB.chain.encodeBlock(b4)
       nodeB.chain.importBlock(b4Bytes).isRight shouldBe true
-      nodeA.chain.importBlock(b4Bytes).isLeft shouldBe true // shorter: stays a side branch
+      nodeA.chain.importBlock(b4Bytes).isLeft shouldBe true // an earlier slot than A's head: stays a side branch
 
-      // Disregarding block 2 drops 2 and 3 and adopts 4'.
+      // Disregarding A's first block drops both of A's and adopts 2'.
       nodeA.chain.disregard(headA2.hash) match
         case Right(head) => head.hash shouldBe nodeB.chain.best.hash
         case Left(err)   => fail(err.message)

@@ -144,6 +144,7 @@ object OneShotSend:
                   failed(String.valueOf(err.getMessage))
                   false
                 else
+                  stream.ignoreInbound()
                   messages.foreach(stream.send)
                   stream.finish()
                   true

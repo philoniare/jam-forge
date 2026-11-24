@@ -49,14 +49,10 @@ class LeavesSpec extends AnyFunSuite with Matchers with NodeFixture:
       nodeA.chain.importBlock(block1Bytes).isRight shouldBe true
       nodeB.chain.importBlock(block1Bytes).isRight shouldBe true
 
-      // A's own block 2 (with tickets, so it differs from B's bare 2').
-      nodeA.authorSlot(2).isDefined shouldBe true
+      nodeA.authorSlot(3).isDefined shouldBe true
       val headA2 = nodeA.chain.best
 
-      // B's competing block 3' on block 1 parks on a side branch: a dead tip that will never be adoptable again
-      // once A's chain is finalized past it. (Not at slot 2: two blocks at one slot are an equivocation, and the
-      // best chain would leave A's own block 2.)
-      val block2b = bareAuthorB.tryAuthor(3).getOrElse(fail("author 3'"))
+      val block2b = bareAuthorB.tryAuthor(2).getOrElse(fail("author 2'"))
       val block2bBytes = nodeB.chain.encodeBlock(block2b)
       val block2bHash = nodeB.chain.headerHashOf(block2b)
       nodeA.chain.importBlock(block2bBytes).isLeft shouldBe true
@@ -66,7 +62,7 @@ class LeavesSpec extends AnyFunSuite with Matchers with NodeFixture:
       val bestBefore = nodeA.chain.best
       leavesBefore.map(_._1) shouldBe Set(headA2.hash, block2bHash)
       leavesBefore should contain((headA2.hash, headA2.slot, headA2.stateRoot))
-      leavesBefore should contain((block2bHash, 3L, Hash.zero))
+      leavesBefore should contain((block2bHash, 2L, Hash.zero))
 
       nodeA.shutdownStorageOnly()
       nodeA = new JamNode(spec, NodeConfig(dataDir = dirA, slotTicking = false))

@@ -232,6 +232,32 @@ class PeerFaultReportingSpec extends AnyFunSuite with Matchers with LoopbackFixt
     }
   }
 
+  test("a block request, a state request, a preimage announcement and a judgment that cannot be read are each charged") {
+    withNodes(2, "peer-faults-requests") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      val auditor = b.enableAuditing(Seq(devKeys(1)))
+      val serves: Byte => Option[PeerStreamHandler] = {
+        case StreamKind.BlockRequest         => Some(b.sync.blockRequestHandler)
+        case StreamKind.StateRequest         => Some(b.sync.stateRequestHandler)
+        case StreamKind.PreimageAnnouncement => Some(b.preimages.announceHandler)
+        case StreamKind.JudgmentPublication  => Some(auditor.judgmentHandler)
+        case _                               => None
+      }
+      val (aToB, bToA) = Loopback.pair(a.identity.publicKeyBytes, b.identity.publicKeyBytes, _ => None, serves)
+      val peer = bToA.peerKey
+      val unreadable = Seq(
+        "block request" -> (StreamKind.BlockRequest, new Array[Byte](36)),
+        "state request" -> (StreamKind.StateRequest, new Array[Byte](97)),
+        "preimage announcement" -> (StreamKind.PreimageAnnouncement, new Array[Byte](3)),
+        "judgment" -> (StreamKind.JudgmentPublication, new Array[Byte](5))
+      )
+      for (what, (kind, message)) <- unreadable do
+        val before = b.scores.points(peer)
+        aToB.openStream(kind).get().send(message)
+        eventually(s"the unreadable $what to be charged")(b.scores.points(peer) >= before + 19)
+    }
+  }
+
   private val genesisFinal = SyncCodec.HashSlot(io.forge.jam.core.primitives.Hash.zero, 0)
 
   private def announce(conn: Loopback.Connection, headers: Seq[Array[Byte]]): Unit =

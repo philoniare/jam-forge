@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "3.3.7"
+ThisBuild / scalaVersion := "3.3.8"
 ThisBuild / organization := "io.forge.jam"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
@@ -56,10 +56,36 @@ val commonScalacOptions = Seq(
 
 val commonScalacOptionsHK = commonScalacOptions :+ "-language:higherKinds"
 
+val strictTests = sys.props.get("jam.test.strict").exists(_.toBoolean)
+
+val allowedCancels = Map(
+  "io.forge.jam.conformance.FuzzReportTraceSpec" -> 1,
+  "io.forge.jam.node.NodeOperationsSpec" -> 1
+)
+
 def commonSettings = Seq(
   publish / skip := true,
   // Main sources must compile without warnings; test sources may still warn.
-  Compile / compile / scalacOptions += "-Werror"
+  Compile / compile / scalacOptions += "-Werror",
+  Test / envVars ++= (if (sys.env.contains("LOG_LEVEL")) Map.empty[String, String] else Map("LOG_LEVEL" -> "DEBUG")),
+  Test / executeTests := {
+    val out = (Test / executeTests).value
+    val log = streams.value.log
+    val unexpected =
+      if (!strictTests) Seq.empty
+      else
+        out.events.toSeq.collect {
+          case (suite, r) if r.canceledCount > allowedCancels.getOrElse(suite, 0) => (suite, r.canceledCount)
+        }.sortBy(_._1)
+    if (unexpected.isEmpty) out
+    else {
+      unexpected.foreach { case (suite, n) =>
+        log.error(s"[jam.test.strict] $suite canceled $n test(s); allowed: ${allowedCancels.getOrElse(suite, 0)}")
+      }
+      log.error("[jam.test.strict] a canceled test did not run: fetch what it needs, or allow it in build.sbt")
+      Tests.Output(TestResult.Failed, out.events, out.summaries)
+    }
+  }
 )
 
 def fatJarSettings = Seq(

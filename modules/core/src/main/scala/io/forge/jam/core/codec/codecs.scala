@@ -24,7 +24,7 @@ object codecs:
       r.u8() match
         case 0 => false
         case 1 => true
-        case b => r.fail(s"invalid boolean byte $b (expected 0 or 1)"),
+        case b => r.failNonCanonical(s"invalid boolean byte $b (expected 0 or 1)"),
     1
   )
 

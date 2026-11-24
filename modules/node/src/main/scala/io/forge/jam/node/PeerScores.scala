@@ -75,6 +75,8 @@ final class PeerScores(
     Option(entries.get(JamBytes(key))).fold(0.0)(decayed(_, clock()))
   }
 
+  def isExempt(key: Array[Byte]): Boolean = exempt(key)
+
   def leastFaultedFirst[P](peers: List[P])(key: P => Array[Byte]): List[P] =
     if synchronized(entries.isEmpty) then peers // the usual case: nobody has been charged
     else

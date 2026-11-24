@@ -44,16 +44,16 @@ jobs:
                     restore-keys: |
                         ${{ runner.os }}-sbt-
 
-            -   name: Build project
-                run: sbt compile
+            -   name: Set up Rust
+                uses: dtolnay/rust-toolchain@stable
 
             -   name: Run tests with coverage
-                run: sbt clean coverage test coverageAggregate
+                run: sbt -Djam.test.strict=true -Djam.fuzz.requireCorpus=true clean coverage test coverageAggregate
 
             -   name: Upload coverage to Codecov
                 uses: codecov/codecov-action@v7
                 with:
-                    files: ./target/scala-3.3.7/scoverage-report/scoverage.xml
+                    files: ./target/scala-3.3.8/scoverage-report/scoverage.xml
                     flags: unittests
                     name: codecov-jam
                     fail_ci_if_error: false
@@ -96,7 +96,7 @@ jobs:
 
             -   name: Run recompiler unit tests (execute emitted code natively)
                 working-directory: modules/pvm/native/pvm-recompiler
-                run: cargo test --release
+                run: cargo test --release --locked
 
             -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
                 run: sbt "pvm/test"
@@ -141,7 +141,7 @@ jobs:
 
             -   name: Run recompiler unit tests (execute emitted code natively)
                 working-directory: modules/pvm/native/pvm-recompiler
-                run: cargo test --release
+                run: cargo test --release --locked
 
             -   name: Run pvm module tests (includes VectorConformanceSpec hard gate)
                 run: sbt "pvm/test"
@@ -185,10 +185,10 @@ jobs:
 
             -   name: Report corpus availability
                 run: |
-                    if [ -d jam-conformance/fuzz-reports/0.7.2/traces ]; then
-                        echo "Conformance corpus present: $(ls jam-conformance/fuzz-reports/0.7.2/traces | wc -l) trace dirs"
+                    if [ -d jam-conformance/fuzz-reports/0.8.0/traces ]; then
+                        echo "Conformance corpus present: $(ls jam-conformance/fuzz-reports/0.8.0/traces | wc -l) trace dirs"
                     else
-                        echo "WARNING: conformance corpus NOT fetched (jam-conformance submodule uses an SSH URL; configure a deploy key to enable the full corpus run)."
+                        echo "Conformance corpus NOT fetched: jam-conformance/fuzz-reports/0.8.0/traces is missing; the run below fails."
                     fi
 
             -   name: Run full conformance corpus (no coverage)

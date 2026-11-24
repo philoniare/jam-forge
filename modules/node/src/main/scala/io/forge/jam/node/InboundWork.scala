@@ -15,7 +15,7 @@ final class InboundWork private (exec: ExecutorService, gate: WorkGate):
     if exec == null then
       task
       true
-    else gate.tryExecute(exec, bytes, conn)(task)
+    else gate.tryExecute(exec, bytes, conn, InboundWork.groupOf(conn))(task)
 
   /** Messages waiting for a thread. */
   def queued: Int = if gate == null then 0 else gate.queued
@@ -27,6 +27,14 @@ final class InboundWork private (exec: ExecutorService, gate: WorkGate):
       ()
 
 object InboundWork:
+
+  private[node] def groupOf(conn: PeerConnection): AnyRef =
+    if conn == null then null
+    else
+      conn.remoteAddress match
+        case Some(a: java.net.InetSocketAddress) if a.getAddress != null && !a.getAddress.isLoopbackAddress =>
+          io.forge.jam.network.JamnpNode.addressGroup(a.getAddress)
+        case _ => null
 
   val Threads: Int = 4
   val MaxQueuedMessages: Int = 4096

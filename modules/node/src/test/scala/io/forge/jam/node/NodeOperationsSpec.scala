@@ -114,6 +114,11 @@ class NodeOperationsSpec extends AnyFunSuite with Matchers with NodeFixture:
       sample(text, "jam_sync_blocks_total") shouldBe Some("0")
       sample(text, "jam_sync_answers_total") shouldBe Some("0")
       eventually("b to import the announced block")(b.chain.best.slot == 1L)
+      eventually("b's sync counters to move") {
+        val now = b.metrics.prometheusText
+        sample(now, "jam_sync_blocks_total").contains("1") &&
+        sample(now, "jam_sync_import_seconds_total").map(_.toDouble).exists(_ > 0.0)
+      }
       val synced = b.metrics.prometheusText
       sample(synced, "jam_sync_blocks_total") shouldBe Some("1")
       sample(synced, "jam_sync_answers_total") shouldBe Some("1")

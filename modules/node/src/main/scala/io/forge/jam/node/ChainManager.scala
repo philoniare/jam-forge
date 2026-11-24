@@ -57,7 +57,8 @@ object ChainManager:
   *
   * Forks: blocks with a known non-best parent are stored unexecuted on a
   * side branch, after the header checks that need no execution (see
-  * "Side-branch admission"); when a branch becomes strictly heavier than the best chain
+  * "Side-branch admission"); when a branch is preferred to the best chain (more
+  * ticket-sealed blocks, or as many and a head at a later slot: [[ForkChoice.preferred]])
   * and contains no equivocation, it is adopted by rewinding to the common
   * ancestor and replaying.
   */
@@ -448,31 +449,35 @@ final class ChainManager(
     * that runs no GRANDPA voter (GP 0.8.0 §grandpa) on the chain the voters finalized, even below our own devnet
     * finality, which is only a local guess. Returns the block to fetch when the agreed block is not stored yet.
     */
-  def followPeerFinality(peerFinals: Iterable[(Hash, Long)], needed: Int): Either[Hash, Option[ChainHead]] =
+  def followPeerFinality(
+      peerFinals: Iterable[(Hash, Long)],
+      needed: Int,
+      beingFetched: Hash => Boolean = _ => false
+  ): Either[Hash, Option[ChainHead]] =
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
     val result = commit {
-      val finals = peerFinals.toList
+      val finals = peerFinals.iterator.map(_._1).toList
       val current = finalized
       def supports(f: Hash, x: Hash, xHeight: Long): Boolean = f == x || ancestorAtHeight(f, xHeight).contains(x)
-      val agreed = finals
-        .filter(_._2 > current.slot)
-        .distinctBy(_._1)
-        .sortBy(-_._2)
-        .find { case (x, _) =>
-          blockHeight(x) match
-            case Some(h) => finals.count(f => supports(f._1, x, h)) >= needed
-            case None    => finals.count(_._1 == x) >= needed
-        }
+      val (held, missing) = finals.distinct.partition(x => blockHeight(x).isDefined && blockStore.hasBlock(x))
+      val agreed = held
+        .flatMap(x => for h <- blockHeight(x); slot <- slotOf(x) if slot > current.slot yield (x, h, slot))
+        .sortBy((_, h, slot) => (-slot, -h))
+        .find((x, h, _) => finals.count(supports(_, x, h)) >= needed)
       agreed match
-        case None => Right(None)
-        case Some((x, _)) if !blockStore.hasBlock(x) || blockHeight(x).isEmpty => Left(x)
-        case Some((x, _)) =>
+        case Some((x, _, _)) =>
           val r = adoptAndFinalize(x, events, belowCurrent = true)
           r.left.foreach {
             case _: ChainError.BelowPruneFloor => () // reorgTo warned once already
             case e                             => logger.warn(s"cannot follow peer finality of ${x.toHex.take(18)}: $e")
           }
           Right(r.toOption)
+        case None =>
+          missing
+            .filter(x => !beingFetched(x) && finals.count(_ == x) >= needed)
+            .sortBy(x => -finals.count(_ == x))
+            .headOption
+            .toLeft(None)
     }
     publishImported(events)
     result
@@ -499,7 +504,7 @@ final class ChainManager(
           if onBest then Right(bestHead)
           else
             val tips = (x :: leafMap.keySet.asScala.toList).filter(l => ancestorAtHeight(l, xHeight).contains(x))
-            val tip = tips.maxBy(l => (weightOf(l), blockHeight(l).getOrElse(0L)))
+            val tip = tips.maxBy(l => (weightOf(l), slotOf(l).getOrElse(0L)))
             if blockRoot(tip).isDefined then Right(bestHead)
             else
               logger.warn(s"adopting ${tip.toHex.take(18)}, which contains finalized ${x.toHex.take(18)}")
@@ -507,6 +512,8 @@ final class ChainManager(
         adopted.flatMap(_ =>
           if blockRoot(x).isDefined then finalize(x, belowCurrent) else Left(ChainError.NotValidated)
         )
+
+  def genesisHash: Option[Hash] = blockStore.getHead(BlockStore.GenesisHead)
 
   /** Parent of a stored block. */
   def parentHash(h: Hash): Option[Hash] = parentOf(h)
@@ -531,19 +538,38 @@ final class ChainManager(
 
   val headerCodec = io.forge.jam.core.types.header.Header.headerCodec(config.epochLength)
 
-  /** Ancestor of stored block `hash` (inclusive) at `height`, following
-    * parent links from the stored headers; None when the walk leaves the
-    * store or `hash` is below `height`.
+  /** Ancestor of stored block `hash` (inclusive) at `height`; None when `hash` is below `height` or its ancestry
+    * leaves the store.
+    *
+    * Parent links are followed one header at a time, but only down to the finalized block. The finalized chain is
+    * indexed by height at every finalization (`HistoryPruner.indexFinalized`), so from a block on it the answer is
+    * one lookup however far down it lies. That matters to whoever can name the two ends: a peer asking for blocks
+    * from an early one (CE 128) made the node walk the whole chain for each block it returned. Where the index has
+    * no entry (a chain that has not finalized since it was opened, heights below a checkpoint) or the block is on
+    * a branch that finality passed by, the links are followed as before.
     */
   def ancestorAtHeight(hash: Hash, height: Long): Option[Hash] =
     blockHeight(hash).filter(_ >= height).flatMap { start =>
-      var cursor: Option[Hash] = Some(hash)
-      var h = start
-      while h > height && cursor.isDefined do
-        cursor = cursor.flatMap(parentOf)
-        h -= 1
-      cursor
+      val fin = finalized.hash
+      val finHeight = blockHeight(fin).getOrElse(-1L)
+      val top = math.max(height, math.min(start, finHeight))
+      followParents(hash, start, top).flatMap { atTop =>
+        if top == height then Some(atTop)
+        else
+          val onFinalizedChain = if top == finHeight then atTop == fin else meta.isFinalizedAt(top, atTop)
+          (if onFinalizedChain then meta.finalizedAt(height) else None).orElse(followParents(atTop, top, height))
+      }
     }
+
+  private def followParents(from: Hash, at: Long, to: Long): Option[Hash] =
+    var cursor: Option[Hash] = Some(from)
+    var h = at
+    while h > to && cursor.isDefined do
+      cursor = cursor.flatMap(parentOf)
+      h -= 1
+    cursor
+
+  private[node] def parentLookups: Long = headers.parentLookups
 
   private def parentOf(h: Hash): Option[Hash] = headers.parentOf(h)
 
@@ -1003,8 +1029,8 @@ final class ChainManager(
     Option(accumulateCosts.remove(hash))
 
   /** Import a block: extends the best head directly, or is stored as a side
-    * branch and adopted via reorg when its branch becomes strictly heavier
-    * (ticket-sealed count, then height) and holds no equivocation. A side-branch
+    * branch and adopted via reorg when its branch is preferred to the best chain
+    * (ticket-sealed count, then the slot of the head) and holds no equivocation. A side-branch
     * block is stored only after the checks described above; `source` is the peer
     * it came from, for the per-peer cap on blocks whose seal cannot be checked.
     */
@@ -1106,7 +1132,13 @@ final class ChainManager(
               val stored = blockHeight(hash).isDefined && blockStore.hasBlock(hash)
               val admitted =
                 if stored then Right(unverified.contains(hash)) else admitSideBlock(block, blockBytes.length, source)
-              admitted.flatMap { unverifiable =>
+              if admitted.left.exists(_.isInstanceOf[ChainError.UnverifiedLimit]) && tooLongToHold(parent, parentHeight) then
+                logger.info(
+                  s"adopting the branch at ${parent.toHex.take(18)} (height $parentHeight): it has more blocks than " +
+                    "the best chain, and more whose seal cannot be checked than are kept unexecuted"
+                )
+                reorgTo(parent, events).flatMap(_ => importOnBest(block, blockBytes, events, bodyChecked = true))
+              else admitted.flatMap { unverifiable =>
                 storeBlock(hash, parent, headerCodec.encode(block.header), blockBytes)
                 if unverifiable then unverified.track(hash, block.header.slot.toLong, parent, blockBytes.length, source)
                 val height = parentHeight + 1
@@ -1117,17 +1149,23 @@ final class ChainManager(
                 if blockStore.children(hash).isEmpty then
                   leafMap.put(hash, ChainHead(hash, block.header.slot.toLong, Hash.zero))
                 else leafMap.remove(hash)
-                val bestHeight = blockHeight(bestHead.hash).getOrElse(0L)
+                val (slot, bestSlot) = (block.header.slot.toLong, bestHead.slot)
                 val (weight, bestWeight) = (weightOf(hash), weightOf(bestHead.hash))
-                val heavier = forkChoice.heavier(weight, height, bestWeight, bestHeight)
-                if heavier && !forkChoice.branchEquivocates(hash) && !forkChoice.branchInvalid(hash) then
+                val preferred = forkChoice.preferred(weight, slot, bestWeight, bestSlot)
+                if preferred && !forkChoice.branchEquivocates(hash) && !forkChoice.branchInvalid(hash) then
                   reorgTo(hash, events)
                 else
-                  Left(ChainError.StoredOnSideBranch(weight, height, bestWeight, bestHeight))
+                  Left(ChainError.StoredOnSideBranch(weight, slot, bestWeight, bestSlot))
               }
             case _ =>
               Left(ChainError.UnknownParent(parent))
       }
+
+  private def tooLongToHold(parent: Hash, parentHeight: Long): Boolean =
+    val (weight, bestWeight) = (weightOf(parent), weightOf(bestHead.hash))
+    unverified.contains(parent) &&
+      (weight > bestWeight || (weight == bestWeight && parentHeight > blockHeight(bestHead.hash).getOrElse(0L))) &&
+      !forkChoice.branchEquivocates(parent) && !forkChoice.branchInvalid(parent)
 
   private[node] def bodyMatchesHeader(block: Block): Boolean = HeaderChecks.extrinsicHash(block, config).isRight
 
@@ -1356,17 +1394,17 @@ final class ChainManager(
     publishImported(events)
     result
 
-  /** Rewind the best head to `parent` and adopt the heaviest branch that is now acceptable (no invalid block, no
-    * equivocated slot) and heavier than `parent`; `parent` itself when there is none.
+  /** Rewind the best head to `parent` and adopt the best branch that is now acceptable (no invalid block, no
+    * equivocated slot) and preferred to `parent` as a head; `parent` itself when there is none.
     */
   private def leaveBestFrom(parent: Hash, events: mutable.ListBuffer[(ChainHead, Block)]): ChainHead =
     rewindTo(parent)
-    val (pw, ph) = (weightOf(parent), blockHeight(parent).getOrElse(0L))
+    val (pw, ps) = (weightOf(parent), slotOfHeader(parent))
     val candidates = leafMap.keySet.asScala.toList.filter(l =>
       l != parent && !forkChoice.branchInvalid(l) && !forkChoice.branchEquivocates(l) && blockRoot(l).isEmpty &&
-        (weightOf(l) > pw || (weightOf(l) == pw && blockHeight(l).getOrElse(0L) > ph))
+        forkChoice.preferred(weightOf(l), slotOfHeader(l), pw, ps)
     )
-    candidates.sortBy(l => (-weightOf(l), -blockHeight(l).getOrElse(0L))).iterator
+    candidates.sortBy(l => (-weightOf(l), -slotOf(l).getOrElse(0L))).iterator
       .map(l => reorgTo(l, events))
       .collectFirst { case Right(h) => h }
       .getOrElse(bestHead)
@@ -1449,11 +1487,24 @@ final class ChainManager(
     val out = mutable.ListBuffer.empty[Array[Byte]]
     var cursor = from
     var continue = true
+    val bestNow = best.hash
+    val finHeight = blockHeight(finalized.hash).getOrElse(-1L)
+    lazy val bestAboveFinality: Map[Long, Hash] =
+      val chain = mutable.HashMap.empty[Long, Hash]
+      var c: Option[Hash] = Some(bestNow)
+      var h = blockHeight(bestNow).getOrElse(-1L)
+      while h > finHeight && c.isDefined do
+        chain(h) = c.get
+        c = c.flatMap(parentOf)
+        h -= 1
+      chain.toMap
+    def onBestChain(c: Hash): Boolean =
+      blockHeight(c).exists(h => h <= finHeight || bestAboveFinality.get(h).contains(c))
     while out.size < max && continue do
       val children = blockStore.children(cursor).filter(canBeFinalized)
       val preferred = children
-        .find(c => blockHeight(c).exists(h => ancestorAtHeight(best.hash, h).contains(c)))
-        .orElse(children.maxByOption(c => (weightOf(c), blockHeight(c).getOrElse(0L))))
+        .find(onBestChain)
+        .orElse(children.maxByOption(c => (weightOf(c), slotOf(c).getOrElse(0L))))
       preferred.toList match
         case child :: _ =>
           blockStore.getBlock(child) match

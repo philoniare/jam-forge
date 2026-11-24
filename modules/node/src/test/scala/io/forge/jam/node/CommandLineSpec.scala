@@ -105,13 +105,44 @@ class CommandLineSpec extends AnyFunSuite with Matchers:
     finality("--announced-finality") shouldBe Main.Finality.Peers
   }
 
-  test("the RPC listens where the node does, unless --rpc-listen-ip names another address") {
-    val any = java.net.InetAddress.getByName("0.0.0.0")
-    val one = java.net.InetAddress.getByName("10.0.0.5")
-    Main.rpcListenHost(Map.empty, any) shouldBe "0.0.0.0"
-    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5"), one) shouldBe "10.0.0.5"
-    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5", "rpc-listen-ip" -> "127.0.0.1"), one) shouldBe "127.0.0.1"
-    Main.rpcListenHost(Map("rpc-listen-ip" -> "::"), one) shouldBe "::"
+  test("--dev-validator is taken on any chain, as polkajam takes it, with a warning where the chain's key is another") {
+    val devKeys = (0 until 6).map(i => ValidatorKeySet.dev(i).ed25519Public)
+    for i <- 0 until 6 do
+      Main.devValidatorRefusal(i, devKeys) shouldBe None
+      Main.devValidatorWarning(i, devKeys) shouldBe None
+    Main.devValidatorRefusal(6, devKeys).get should include("has 6 validators")
+    Main.devValidatorWarning(6, devKeys) shouldBe None
+    val own = devKeys.updated(2, Array.fill[Byte](32)(9))
+    Main.devValidatorRefusal(2, own) shouldBe None
+    Main.devValidatorWarning(2, own).get should include("does not have dev validator 2's key")
+    Main.devValidatorWarning(1, own) shouldBe None
+    Main.devValidatorWarning(0, devKeys.reverse).get should include("The dev keys are public")
+    val dev = Chains.resolve("dev").flatMap(ChainSpec.fromJson).fold(e => fail(e), identity).genesisValidatorKeys._1
+    dev should not be empty
+    dev.indices.foreach { i =>
+      Main.devValidatorRefusal(i, dev) shouldBe None
+      Main.devValidatorWarning(i, dev) shouldBe None
+    }
+  }
+
+  test("a seed made of four bytes repeated is known for a dev validator's") {
+    for i <- Seq(0, 1, 5, 1022, 0x01020304) do Main.isTrivialSeed(ValidatorKeySet.trivialSeed(i)) shouldBe true
+    val random = new Array[Byte](32)
+    new java.util.Random(7).nextBytes(random)
+    Main.isTrivialSeed(random) shouldBe false
+    Main.isTrivialSeed(ValidatorKeySet.trivialSeed(3).updated(31, 1.toByte)) shouldBe false
+    Main.isTrivialSeed(new Array[Byte](31)) shouldBe false
+  }
+
+  test("the RPC listens on every address unless --rpc-listen-ip names one, as polkajam's does, whatever --listen-ip is") {
+    val v6 = java.net.InetAddress.getByName("::")
+    val v4 = java.net.InetAddress.getByName("0.0.0.0")
+    Main.rpcListenHost(Map.empty, v6) shouldBe "0:0:0:0:0:0:0:0"
+    Main.rpcListenHost(Map.empty, v4) shouldBe "0.0.0.0"
+    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5"), v6) shouldBe "0:0:0:0:0:0:0:0"
+    Main.rpcListenHost(Map("listen-ip" -> "10.0.0.5", "rpc-listen-ip" -> "127.0.0.1"), v6) shouldBe "127.0.0.1"
+    Main.rpcListenHost(Map("rpc-listen-ip" -> "::"), v4) shouldBe "::"
+    Main.CommandUsage("run") should include("to listen on [default: ::, or")
   }
 
   test("--listen-ip, --rpc-listen-ip and --external-ip take an IPv4 or IPv6 address, never a host name") {

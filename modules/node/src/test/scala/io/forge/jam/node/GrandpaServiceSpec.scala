@@ -115,10 +115,11 @@ class GrandpaServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
         }
         def tick(): Int =
           val before = egress.queued.get
+          val statesBefore = g.stateMessagesSent
           now.addAndGet(250)
           g.onVoterThread(_.step())
           g.resendNow()
-          egress.queued.get - before
+          (egress.queued.get - before) - (g.stateMessagesSent - statesBefore).toInt
         while now.get - start < 5000 do tick()
         g.onVoterThread(_.ourVotes.size) shouldBe 2
         g.onVoterThread(_.roundVotes.size) shouldBe 8
@@ -130,6 +131,8 @@ class GrandpaServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
           if entries > 0 then stalls += now.get - start
         g.onVoterThread(_.round) shouldBe 1L
         stalls.take(7).toList shouldBe List(8000L, 12000L, 20000L, 36000L, 68000L, 132000L, 196000L)
+        g.stateMessagesSent should be >= 100L * voterPeers
+        g.stateMessagesSent should be <= 125L * voterPeers
         eventually("every peer to have been forwarded others' votes") {
           (1 to 5).forall(i => received.get(i).asScala.exists(k => k != devKeys(0).ed25519Key && k != devKeys(i).ed25519Key))
         }

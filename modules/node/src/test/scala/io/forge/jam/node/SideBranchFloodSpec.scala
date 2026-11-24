@@ -66,14 +66,15 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
         chain.importBlock(bytes).isRight shouldBe true
         (block, bytes)
 
-      // Shared 1..10 (slot 10 is the ticket cutoff of epoch 0); A adds 11, B adds 12', 13' in epoch 1.
+      // Shared 1..10 (slot 10 is the ticket cutoff of epoch 0); A adds 13, B adds 12', 14' in epoch 1. At equal
+      // ticket weight the head with the later slot is the best one: 12' is behind A's head, 14' ahead of it.
       for slot <- 1L to 10L do
         val (_, bytes) = author(chainA, slot)
         chainB.importBlock(bytes).isRight shouldBe true
-      author(chainA, 11)
+      author(chainA, 13)
       val bestA = chainA.best
       val (b12, b12Bytes) = author(chainB, 12)
-      val (_, b13Bytes) = author(chainB, 13)
+      val (_, b13Bytes) = author(chainB, 14)
       val hash12 = chainA.headerHashOf(b12)
 
       // 12' sits on validated block 10: checked against its state, through the epoch change, markers included.
@@ -89,8 +90,8 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
         chainA.importBlock(chainA.encodeBlock(f), Some(peer(1))).left.toOption.get shouldBe a[ChainError.SideBranchRefused]
         chainA.hasBlock(chainA.headerHashOf(f)) shouldBe false
       }
-      // In epoch 2 they cannot be checked: stored, counted, and counted again after a restart. Each makes its
-      // branch longer than A's chain, so a replay is tried and fails on the forged block.
+      // In epoch 2 they cannot be checked: stored, counted, and counted again after a restart. Each has a later
+      // slot than A's head, so a replay is tried and fails on the forged block.
       val unverifiable = (0 until 5).map(n => forge(b12, hash12, 24 + n, 1000 + n))
       unverifiable.foreach { f =>
         chainA.importBlock(chainA.encodeBlock(f), Some(peer(1))).left.toOption.get shouldBe a[ChainError.ReplayFailed]
@@ -105,17 +106,17 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       restored.unverifiedCount shouldBe 5
       restored.best.hash shouldBe bestA.hash
 
-      // The honest 13' (parent 12' unvalidated) verifies from block 10 and makes the branch longer: reorg.
+      // The honest 14' (parent 12' unvalidated) verifies from block 10 and has the later slot: reorg.
       val reorged = restored.importBlock(b13Bytes)
       withClue(s"reorg across the epoch boundary: $reorged") { reorged.isRight shouldBe true }
       restored.best.hash shouldBe chainB.best.hash
       restored.best.stateRoot shouldBe chainB.best.stateRoot
       restored.unverifiedCount shouldBe 5
 
-      // Finality at slot 13 leaves them (slots 24..28); finality past them removes them.
+      // Finality at slot 14 leaves them (slots 24..28); finality past them removes them.
       restored.finalize(restored.best.hash).isRight shouldBe true
       restored.unverifiedCount shouldBe 5
-      var slot = 14L
+      var slot = 15L
       while restored.best.slot < 28 && slot < 100 do
         new BlockAuthor(restored, devKeys)
           .tryAuthor(slot)
@@ -151,15 +152,17 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
         chain.importBlock(bytes).isRight shouldBe true
         (block, bytes)
 
-      // Shared 1..10. B's 12' is an honest, seal-checked side block on A; A's own chain runs on into epoch 2.
+      // Shared 1..10. B's 12' is an honest, seal-checked side block on A, whose head (slot 13) is later; A's own
+      // chain runs on into epoch 2.
       for slot <- 1L to 10L do
         val (_, bytes) = author(chainA, slot)
         chainB.importBlock(bytes).isRight shouldBe true
       author(chainA, 11)
+      author(chainA, 13)
       val (b12, b12Bytes) = author(chainB, 12)
       chainA.importBlock(b12Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       val hash12 = chainA.headerHashOf(b12)
-      val honest = (12L to 26L).map(slot => slot -> author(chainA, slot)._1).toMap
+      val honest = (14L to 26L).map(slot => slot -> author(chainA, slot)._1).toMap
       val target = honest(25L)
       val best = chainA.best
       best.slot shouldBe 26L
@@ -205,22 +208,24 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
         chain.importBlock(bytes).isRight shouldBe true
         (block, bytes)
 
-      // Shared 1..10; B's 12' is a seal-checked side block on A; A's own chain runs on from 13 to 26 (height 25,
-      // no equivocation at slot 12).
+      // Shared 1..10; B's 12' is a seal-checked side block on A, whose head (slot 13) is later; A's own chain runs
+      // on to 26 and then has a block at slot 80 (no equivocation at slot 12).
       for slot <- 1L to 10L do
         val (_, bytes) = author(chainA, slot)
         chainB.importBlock(bytes).isRight shouldBe true
       author(chainA, 11)
+      author(chainA, 13)
       val (b12, b12Bytes) = author(chainB, 12)
       chainA.importBlock(b12Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
       val hash12 = chainA.headerHashOf(b12)
-      (13L to 26L).foreach(slot => author(chainA, slot))
+      (14L to 26L).foreach(slot => author(chainA, slot))
+      author(chainA, 80)
       val best = chainA.best
       val bestWeight = chainA.weightOf(best.hash)
 
       // A forged branch on 12', one block per epoch from epoch 2 on, each claiming a winning-tickets marker that
       // would make the next one ticket-sealed. No seal can be checked (block 10 is the validated ancestor), and
-      // the branch stays far shorter than A's chain: only claimed weight could make it look heavier.
+      // every one has an earlier slot than A's head: only claimed weight could make the branch the better one.
       val mark = TicketMark(JamBytes(Array.fill(32)(7.toByte)), UByte(0))
       val forged = (0 until 5).scanLeft(Option.empty[Block] -> hash12) { case ((_, parent), i) =>
         val f = forge(b12, parent, 25 + 12L * i, 1 + i)
@@ -280,11 +285,12 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       chainB.importBlock(block1Bytes).isRight shouldBe true
       val hash1 = chainA.headerHashOf(block1)
       authorOn(authorA, chainA, 2)
-      authorOn(authorA, chainA, 3)
+      authorOn(authorA, chainA, 7)
       val bestA = chainA.best
       val (b4, b4Bytes) = authorOn(authorB, chainB, 4)
       val (_, b5Bytes) = authorOn(authorB, chainB, 5)
       val (_, b6Bytes) = authorOn(authorB, chainB, 6)
+      val (_, b8Bytes) = authorOn(authorB, chainB, 8)
       val leavesBefore = chainA.leaves.size
       val cachedBefore = chainA.headerLinks.size
 
@@ -327,11 +333,12 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       chainA.unverifiedCount shouldBe 0
 
       // --- 4. Seal not checkable: forged children of 4' in the next epoch (block 1 is before the cutoff) ----------
-      // Slots 12..23; all siblings at height 3, so none is heavier than A's chain.
+      // Slots 12..23: each is later than A's head, so the branch is tried: 4' replays, the forged block fails, and
+      // A's chain stays. The block is kept, and counted, so that it is not fetched and tried again.
       def unverifiable(n: Int) = forge(b4, hash4, 12 + n % 12, 20000 + n)
       val fromPeer1 = (0 until 1500).map(unverifiable)
       val results1 = fromPeer1.map(f => chainA.importBlock(chainA.encodeBlock(f), Some(peer(1))))
-      results1.count(_.left.toOption.exists(_.isInstanceOf[ChainError.StoredOnSideBranch])) shouldBe
+      results1.count(_.left.toOption.exists(_.isInstanceOf[ChainError.ReplayFailed])) shouldBe
         ChainManager.MaxUnverifiedPerPeer
       results1.count(_ == Left(ChainError.UnverifiedLimit("peer"))) shouldBe 1500 - ChainManager.MaxUnverifiedPerPeer
       chainA.unverifiedCount shouldBe ChainManager.MaxUnverifiedPerPeer
@@ -346,21 +353,22 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       chainA.headerLinks.size should be <= cachedBefore + 1 + ChainManager.MaxUnverifiedBlocks
       chainA.best shouldBe bestA
 
-      // A stored block sent again is not counted twice and is not refused by the cap.
+      // A stored block sent again is not counted twice, is not refused by the cap, and is not tried again.
       val storedOne = fromPeer1.find(f => chainA.hasBlock(chainA.headerHashOf(f))).get
-      chainA.importBlock(chainA.encodeBlock(storedOne), Some(peer(9))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      chainA.importBlock(chainA.encodeBlock(storedOne), Some(peer(9))) shouldBe Left(ChainError.PreviouslyInvalid)
       chainA.unverifiedCount shouldBe ChainManager.MaxUnverifiedBlocks
 
-      // --- 5. The honest fork is still adopted: 5' (parent 4' unvalidated, checked against block 1) then 6' -------
+      // --- 5. The honest fork is still adopted: 5' and 6' (parents unvalidated, checked against block 1), then 8'
       chainA.importBlock(b5Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
-      val reorged = chainA.importBlock(b6Bytes)
+      chainA.importBlock(b6Bytes).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch]
+      val reorged = chainA.importBlock(b8Bytes)
       withClue(s"reorg onto B's chain: $reorged") { reorged.isRight shouldBe true }
       chainA.best.hash shouldBe chainB.best.hash
       chainA.best.stateRoot shouldBe chainB.best.stateRoot
       chainA.unverifiedCount shouldBe ChainManager.MaxUnverifiedBlocks
 
       // --- 6. Finality past their slots deletes the unverified blocks; the validated chain is untouched -----------
-      var slot = 7L
+      var slot = 9L
       while chainA.best.slot < 24 && slot < 100 do
         new BlockAuthor(chainA, devKeys).tryAuthor(slot).foreach(blk => chainA.importBlock(chainA.encodeBlock(blk)).isRight shouldBe true)
         slot += 1
@@ -369,7 +377,7 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       chainA.unverifiedCount shouldBe 0
       allUnverifiable.exists(f => chainA.hasBlock(chainA.headerHashOf(f))) shouldBe false
       chainA.hasBlock(hash4) shouldBe true
-      chainA.hasBlock(bestA.hash) shouldBe true // A's abandoned block 3: seal-verified, not subject to the prune
+      chainA.hasBlock(bestA.hash) shouldBe true // A's abandoned block at slot 7: seal-verified, not subject to the prune
       chainA.leaves.map(_.hash) shouldBe List(chainA.best.hash)
       chainA.headerLinks.size should be <= cachedBefore + 40
 
@@ -381,4 +389,65 @@ class SideBranchFloodSpec extends AnyFunSuite with Matchers with NodeFixture:
       if nodeB != null then nodeB.shutdownStorageOnly()
       cleanup(dirA)
       cleanup(dirB)
+  }
+
+  private def withFork(name: String)(body: (ChainManager, ChainManager, (ChainManager, Long) => Array[Byte]) => Unit): Unit =
+    val genesis = loadGenesis().getOrElse(cancel("dev genesis (jamtestvectors/traces/fuzzy/genesis.json) not available"))
+    val chainSpec = spec(genesis)
+    val dirs = List(tempDir(s"jam-$name-a"), tempDir(s"jam-$name-b"))
+    val nodes = dirs.map(dir => new JamNode(chainSpec, NodeConfig(dataDir = dir, slotTicking = false)))
+    try
+      nodes.foreach(_.chain.initializeOrRestore(chainSpec))
+      val List(chainA, chainB) = nodes.map(_.chain)
+      def author(chain: ChainManager, slot: Long): Array[Byte] =
+        val block = new BlockAuthor(chain, devKeys).tryAuthor(slot).getOrElse(fail(s"author slot $slot"))
+        chain.encodeBlock(block).tap(bytes => chain.importBlock(bytes).isRight shouldBe true)
+      chainB.importBlock(author(chainA, 1)).isRight shouldBe true
+      body(chainA, chainB, author)
+    finally
+      nodes.foreach(_.shutdownStorageOnly())
+      dirs.foreach(cleanup)
+
+  private val CheckedOfTheirs = 9
+  private val KeptOfTheirs = CheckedOfTheirs + ChainManager.MaxUnverifiedPerPeer
+
+  test("a branch with more blocks than are kept unexecuted is adopted at the cap, though the best head has the later slot") {
+    withFork("sidelong") { (chainA, chainB, author) =>
+      author(chainA, 2)
+      author(chainA, 400)
+      val own = chainA.best
+      val theirs = (3L to 290L).map(author(chainB, _))
+      val results = theirs.map(chainA.importBlock(_, Some(peer(1))))
+      results.take(KeptOfTheirs).foreach(_.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch])
+      results.drop(KeptOfTheirs).zipWithIndex.foreach { (r, i) =>
+        withClue(s"B's block at slot ${3 + KeptOfTheirs + i}: $r")(r.isRight shouldBe true)
+      }
+      chainA.best.hash shouldBe chainB.best.hash
+      chainA.best.stateRoot shouldBe chainB.best.stateRoot
+      chainA.best.slot shouldBe 290L
+      chainA.unverifiedCount shouldBe 0
+      chainA.leaves.map(_.hash).toSet shouldBe Set(chainB.best.hash, own.hash)
+      chainA.importBlock(author(chainB, 291), Some(peer(1))) shouldBe Right(chainB.best)
+    }
+  }
+
+  test("at the cap a branch with no more blocks than the best chain is refused, and adopted when its head has the later slot") {
+    withFork("sideshort") { (chainA, chainB, author) =>
+      author(chainA, 2)
+      (301L to 570L).foreach(author(chainA, _))
+      val own = chainA.best
+      val theirs = (3L to 290L).map(author(chainB, _))
+      val results = theirs.map(chainA.importBlock(_, Some(peer(1))))
+      results.take(KeptOfTheirs).foreach(_.left.toOption.get shouldBe a[ChainError.StoredOnSideBranch])
+      results(KeptOfTheirs) shouldBe Left(ChainError.UnverifiedLimit("peer"))
+      results.drop(KeptOfTheirs + 1).foreach(_.left.toOption.get shouldBe a[ChainError.UnknownParent])
+      chainA.best shouldBe own
+      chainA.unverifiedCount shouldBe ChainManager.MaxUnverifiedPerPeer
+
+      theirs.drop(KeptOfTheirs).foreach(chainA.importBlock(_, Some(peer(2))).left.toOption.get shouldBe a[ChainError.StoredOnSideBranch])
+      chainA.best shouldBe own
+      chainA.importBlock(author(chainB, 571), Some(peer(2))) shouldBe Right(chainB.best)
+      chainA.best.stateRoot shouldBe chainB.best.stateRoot
+      chainA.unverifiedCount shouldBe 0
+    }
   }
