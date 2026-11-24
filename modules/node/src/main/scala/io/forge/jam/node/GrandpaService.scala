@@ -47,7 +47,8 @@ final class GrandpaService(
     def best: Vote = toVote(chain.best)
     def slotOf(h: Hash): Option[Long] = chain.slotOf(h).orElse(Option.when(h == genesisHash)(0L))
     def parentOf(h: Hash): Option[Hash] = if h == genesisHash then None else chain.parentHash(h)
-    def stateRootOf(h: Hash): Option[Hash] = chain.postStateRoot(h)
+    // Off the best chain too: a supermajority may be for a block on one of our side branches.
+    def stateRootOf(h: Hash): Option[Hash] = chain.executedStateRoot(h)
     def headerBytes(h: Hash): Option[Array[Byte]] = chain.headerBytes(h)
     def epochMarkerKeys(h: Hash): Option[List[Array[Byte]]] =
       if h == genesisHash then None

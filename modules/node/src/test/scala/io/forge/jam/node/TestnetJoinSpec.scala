@@ -108,8 +108,8 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
       voter.chain.finalized.slot shouldBe 0L
 
       // A node whose best head is on a fork the peer never saw: nothing can be served "after" that head, so it asks
-      // from its finalized block and is led along the peer's chain. It leaves its fork when the peer's chain has
-      // the head with the later slot.
+      // from its finalized block and is led along the peer's chain, executing it beside its own. It leaves its
+      // fork when the peer's chain is the heavier (more ticket-sealed blocks), or as heavy with the later head.
       val forked = new JamNode(spec, NodeConfig(dataDir = dirs(4), slotTicking = false)).start()
       nodes = forked :: nodes
       forked.enableAuthoring((0 until 6).map(ValidatorKeySet.dev))
@@ -119,8 +119,7 @@ class TestnetJoinSpec extends AnyFunSuite with Matchers with NodeFixture:
       forked.authorSlot(72).isDefined shouldBe true
       ahead.chain.hasBlock(forked.chain.best.hash) shouldBe false
       forked.connectPeer(address)
-      eventually("the forked node to hold the peer's chain beside its own")(forked.chain.hasBlock(ahead.chain.best.hash))
-      forked.chain.best.slot shouldBe 72L
+      eventually("the forked node to hold the peer's chain")(forked.chain.hasBlock(ahead.chain.best.hash))
       ahead.authorSlot(73).isDefined shouldBe true
       eventually("the forked node to leave its fork for the peer's chain")(forked.chain.best.hash == ahead.chain.best.hash)
     finally

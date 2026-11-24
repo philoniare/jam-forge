@@ -112,6 +112,9 @@ class FailedCommitSpec extends AnyFunSuite with Matchers with LoopbackFixture:
   test("a reorg whose replay throws partway leaves the stored best chain; more imports and the reorg itself work") {
     withNodes(3, "failed-reorg") { nodes =>
       val Seq(x, y, b) = nodes.toSeq
+      // The branch is executed when it is adopted, as a branch is whose blocks could not be executed as they
+      // arrived. (SideExecutionSpec has the failure of an execution on arrival.)
+      b.chain.executeSideBlocks = false
       author(Seq(x, y, b), 1 to 2)
       val shared = x.chain.blocksAscending(x.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get, 10)
         .map(hashOf(x, _))

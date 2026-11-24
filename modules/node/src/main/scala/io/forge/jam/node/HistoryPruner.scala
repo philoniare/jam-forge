@@ -57,6 +57,7 @@ private[node] final class HistoryPruner(
       if meta.isFinalizedAt(h, c) then recorded = true
       else
         meta.putFinalizedAt(h, c)
+        meta.dropSlotBlock(headers.slotOrZero(c), c)
         cursor = headers.parentOf(c)
         h -= 1
 
@@ -136,6 +137,7 @@ private[node] final class HistoryPruner(
     header(h).foreach { hd =>
       val slot = hd.slot.toLong
       meta.dropSlotAuthorIf(slot, hd.authorIndex.toInt, h)
+      meta.dropSlotBlock(slot, h)
       if finalizedChain then meta.dropEquivocated(slot)
     }
     meta.dropBlock(h)

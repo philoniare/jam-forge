@@ -43,8 +43,25 @@ private[node] final class ForkChoice(config: ChainConfig, meta: ChainMeta, heade
   def recordGenesis(genesisHash: Hash, ticketed: Boolean): Unit =
     meta.putForkChoice(genesisHash, ticketed, marked = false, weight = 0L)
 
-  /** Equivocation tracking: two distinct blocks at one timeslot by one author. A branch holding an unfinalized
-    * equivocated slot is never adopted, and the best chain leaves one as soon as it is seen ([[importBlock]]).
+  /** `hash` at `slot` was executed and found valid. Some(slot) when it is the second such block at the slot, which
+    * is then equivocated whoever sealed the two (Gray Paper section 19; PolkaJam applies it so).
+    */
+  def recordExecuted(hash: Hash, slot: Long): Option[Long] =
+    if !meta.addSlotBlock(slot, hash) then None
+    else
+      val known = meta.slotBlocks(slot)
+      if known.sizeIs < 2 || meta.equivocated(slot) then None
+      else
+        logger.warn(
+          s"two valid blocks at slot $slot: ${known.map(_.toHex.take(18)).mkString(" and ")}; neither may be on the " +
+            "best chain until one is final"
+        )
+        meta.markEquivocated(slot)
+        Some(slot)
+
+  /** Two distinct blocks at one timeslot under one author's seal: the case that needs no execution to see. A branch
+    * holding an unfinalized equivocated slot is never adopted, and the best chain leaves one as soon as it is seen
+    * ([[importBlock]]).
     */
   private def recordSlotAuthor(hash: Hash, slot: Long, author: Int): Option[Long] =
     meta.slotAuthor(slot, author) match

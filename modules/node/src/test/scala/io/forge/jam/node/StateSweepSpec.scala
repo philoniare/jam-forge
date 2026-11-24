@@ -91,7 +91,7 @@ class StateSweepSpec extends AnyFunSuite with Matchers with LoopbackFixture:
         if asked > answers then None else StateDownload.request(head.hash, maxBytes = 2048)(conn, start)
     )
 
-  test("the states of executed blocks a reorg left go once finality passes their fork; every kept state stays whole") {
+  test("the states of executed blocks a reorg left are kept while they can be adopted again, and go once finality passes them; every kept state stays whole") {
     withTwo("sweep-branch") { (_, a, makeB, _) =>
       val b = makeB()
       val block1 = new BlockAuthor(a.chain, devKeys).tryAuthor(1).getOrElse(fail("author block 1"))
@@ -106,20 +106,32 @@ class StateSweepSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       }
       branch.foreach(a.chain.importBlock(_))
       a.chain.best.hash shouldBe b.chain.best.hash
+      // The blocks A left are off the best chain with their states: the chain could come back to them.
       own.foreach(h => a.chain.postStateRoot(h.hash) shouldBe None)
-      own.foreach(h => a.chain.stateBackendForTesting.readNode(h.stateRoot) shouldBe defined) // garbage, kept so far
+      own.foreach(h => a.chain.executedStateRoot(h.hash) shouldBe Some(h.stateRoot))
+      own.foreach(h => a.chain.stateBackendForTesting.readNode(h.stateRoot) shouldBe defined)
       a.chain.meta.sweepWanted shouldBe None
 
-      (7 to 45).foreach { slot =>
+      // Finality passes them: their states are released, and the sweep this asks for deletes them.
+      (7 to 9).foreach { slot =>
         authorOn(a, slot.toLong)
         a.chain.finalizeAtDepth(2)
       }
-      a.chain.pruneFloorHeight should be > 1L
+      a.chain.finalized.slot should be >= 6L
+      own.foreach(h => a.chain.executedStateRoot(h.hash) shouldBe None)
       val stats = completed(a)
       info(stats.toString)
       stats.nodesDeleted should be > 0L
       a.chain.meta.sweepWanted shouldBe None
       own.foreach(h => a.chain.stateBackendForTesting.readNode(h.stateRoot) shouldBe None)
+
+      (10 to 45).foreach { slot =>
+        authorOn(a, slot.toLong)
+        a.chain.finalizeAtDepth(2)
+      }
+      a.chain.pruneFloorHeight should be > 1L
+      a.chain.awaitStatePruning()
+      a.chain.meta.sweepWanted shouldBe None
       val kept = keptBlocks(a)
       kept.size should be > 20
       kept.foreach(h => noException should be thrownBy pairs(a, h))

@@ -148,7 +148,9 @@ certificates, and the UP/CE stream kinds.
 **Purpose:** The node: chain management, sync, and the validator roles.
 
 **Key Components:**
-- `ChainManager`: owns the canonical chain (import, side branches and reorgs, finality). It delegates to
+- `ChainManager`: owns the canonical chain (import, side branches and reorgs, finality). A block off the best
+  chain is executed as it arrives when its parent was, and its state kept beside the best chain's until finality
+  passes it, so a branch is weighed and adopted without being executed again. It delegates to
   `ForkChoice` (branch weight, equivocation and validity marks), `HistoryPruner` (pruning behind finality),
   `UnverifiedBlocks` (caps on side-branch blocks whose seal cannot be checked) and `ChainMeta` (every metadata key
   in the block store and its encoding).

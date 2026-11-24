@@ -51,6 +51,27 @@ final class ChainMeta(store: BlockStore):
   def putBlockRoot(h: Hash, root: Hash): Unit = putHash(s"blockroot:${h.toHex}", root)
   def dropBlockRoot(h: Hash): Unit = store.deleteMeta(s"blockroot:${h.toHex}")
 
+  /** Posterior state root of a block executed off the best chain. A block has this or [[blockRoot]], never both. */
+  def sideRoot(h: Hash): Option[Hash] = hash(s"sideroot:${h.toHex}")
+  def putSideRoot(h: Hash, root: Hash): Unit = putHash(s"sideroot:${h.toHex}", root)
+  def dropSideRoot(h: Hash): Unit = store.deleteMeta(s"sideroot:${h.toHex}")
+
+  /** The executed, valid blocks at `slot` while it is not final, on whatever branch. */
+  def slotBlocks(slot: Long): List[Hash] =
+    store.getMeta(s"slotblocks:$slot").fold(Nil)(_.grouped(32).filter(_.length == 32).map(Hash(_)).toList)
+
+  def addSlotBlock(slot: Long, h: Hash): Boolean =
+    val known = slotBlocks(slot)
+    !known.contains(h) && { putSlotBlocks(slot, known :+ h); true }
+
+  def dropSlotBlock(slot: Long, h: Hash): Unit =
+    val known = slotBlocks(slot)
+    if known.contains(h) then putSlotBlocks(slot, known.filterNot(_ == h))
+
+  private def putSlotBlocks(slot: Long, blocks: List[Hash]): Unit =
+    if blocks.isEmpty then store.deleteMeta(s"slotblocks:$slot")
+    else store.setMeta(s"slotblocks:$slot", blocks.iterator.flatMap(_.bytes.toArray).toArray)
+
   def ticketed(h: Hash): Boolean = flag(s"ticketed:${h.toHex}")
 
   def marked(h: Hash): Boolean = flag(s"marked:${h.toHex}")
@@ -160,4 +181,4 @@ object ChainMeta:
   private val SideBranchKeys = List("height", "ticketed", "marked", "weight")
 
   private val BlockKeys =
-    List("height", "ticketed", "marked", "weight", "blockroot", "unverified", "invalid", "grandpa:just")
+    List("height", "ticketed", "marked", "weight", "blockroot", "sideroot", "unverified", "invalid", "grandpa:just")
