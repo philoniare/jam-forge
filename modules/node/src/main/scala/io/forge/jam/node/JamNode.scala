@@ -582,6 +582,10 @@ final class JamNode(
           head.hash
         )
         Right(head)
+      case Left(err: ChainError.StoredOnSideBranch) =>
+        logger.warn(s"authored block is not the best head: $err")
+        telemetry.foreach(_.authoringFailed(authoring, err.message))
+        Left(err)
       case Left(err) =>
         countImportFailure(Left(err))
         logger.error(s"authored block failed to import: $err")

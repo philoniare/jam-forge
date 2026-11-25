@@ -13,6 +13,12 @@ import io.forge.jam.network.MessageStream
   */
 object OneShotSend:
 
+  private[node] def describe(t: Throwable): String =
+    val cause = t match
+      case c: java.util.concurrent.CompletionException if c.getCause != null => c.getCause
+      case other                                                             => other
+    Option(cause.getMessage).filter(_.nonEmpty).getOrElse(cause.getClass.getSimpleName)
+
   /** Sends that may wait on one peer for a stream. A peer that grants none has this many held for it at most, each
     * for at most the timeout; further sends to it are dropped, as what they carry goes stale first.
     */
@@ -141,7 +147,7 @@ object OneShotSend:
             val sent =
               try
                 if err != null then
-                  failed(String.valueOf(err.getMessage))
+                  failed(OneShotSend.describe(err))
                   false
                 else
                   stream.ignoreInbound()
@@ -150,7 +156,7 @@ object OneShotSend:
                   true
               catch
                 case e: Exception =>
-                  failed(String.valueOf(e.getMessage))
+                  failed(OneShotSend.describe(e))
                   false
             settled(sent)
           else if stream != null then stream.reset() // granted after we gave up
@@ -165,5 +171,5 @@ object OneShotSend:
       catch
         case e: Exception =>
           if settle() then
-            failed(String.valueOf(e.getMessage))
+            failed(OneShotSend.describe(e))
             settled(false)

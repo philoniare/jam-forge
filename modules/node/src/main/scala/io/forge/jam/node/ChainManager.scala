@@ -1102,7 +1102,8 @@ final class ChainManager(
       blocks: Seq[Array[Byte]],
       source: Option[Ed25519PublicKey] = None,
       budgetNanos: Long = Long.MaxValue,
-      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] = (_, run) => run()
+      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] = (_, run) => run(),
+      bufferBelowSlot: Long = Long.MaxValue
   ): Vector[Either[ChainError, ChainHead]] =
     if blocks.isEmpty then return Vector.empty
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
@@ -1116,7 +1117,7 @@ final class ChainManager(
       try
         while more && remaining.hasNext do
           val blockBytes = remaining.next()
-          outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide, several))
+          outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide, several, bufferBelowSlot))
           more = System.nanoTime() - started < budgetNanos
         storeBufferedState()
       catch
@@ -1135,8 +1136,9 @@ final class ChainManager(
     }
     results
 
-  private def farBehindHead(slot: Long): Boolean =
-    batchStateDepth.exists(depth => wallClockSlot.exists(now => slot + depth < now()))
+  private def farBehindHead(slot: Long, bufferBelowSlot: Long): Boolean =
+    batchStateDepth.exists(depth => wallClockSlot.exists(now => slot + depth < now())) &&
+      slot < math.max(bufferBelowSlot, storedFinalized.slot)
 
   private def storeBufferedState(): Unit =
     if stateBuffer.buffering then
@@ -1150,10 +1152,11 @@ final class ChainManager(
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
-      inBatch: Boolean
+      inBatch: Boolean,
+      bufferBelowSlot: Long
   ): Either[ChainError, ChainHead] =
     newEquivocations.clear()
-    val imported = importUnderCommit(blockBytes, source, events, sealedSide, inBatch)
+    val imported = importUnderCommit(blockBytes, source, events, sealedSide, inBatch, bufferBelowSlot)
     settleEquivocations(events)
     imported
 
@@ -1162,7 +1165,8 @@ final class ChainManager(
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
-      inBatch: Boolean
+      inBatch: Boolean,
+      bufferBelowSlot: Long
   ): Either[ChainError, ChainHead] =
       decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
         val hash = headerHashOf(block)
@@ -1183,7 +1187,7 @@ final class ChainManager(
                   storeBufferedState()
                   Right(promote(block, hash, root, events))
                 case None =>
-                  importOnBest(block, blockBytes, events, bodyChecked = true, buffered = inBatch && farBehindHead(slot))
+                  importOnBest(block, blockBytes, events, bodyChecked = true, buffered = inBatch && farBehindHead(slot, bufferBelowSlot))
         else
           storeBufferedState()
           (blockHeight(parent), blockStore.hasBlock(parent)) match

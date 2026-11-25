@@ -208,6 +208,37 @@ class BatchImportSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("a batch far behind the head keeps the states from the finalized slot it is given, so a branch off them is followed") {
+    withNodes(3, "batch-final-bound") { nodes =>
+      val Seq(a, b, c) = nodes.toSeq
+      val blocks = authorOn(a, 1 to 6)
+      blocks.take(4).foreach(c.chain.importBlock(_).isRight shouldBe true)
+      val fork = authorOn(c, 7 to 7).head
+      farBehind(b)
+      b.chain.importBatch(blocks, bufferBelowSlot = 4L).map(_.map(_.slot)) shouldBe (1L to 6L).map(Right(_))
+      blocks.take(2).foreach(bytes => b.chain.stateAt(hashOf(a, bytes)) shouldBe None)
+      blocks.drop(2).foreach(bytes => b.chain.stateAt(hashOf(a, bytes)).isDefined shouldBe true)
+      b.chain.importBlock(fork) shouldBe Right(c.chain.best)
+      stateOf(b) shouldBe stateOf(c)
+    }
+  }
+
+  test("the assurer passes over a block a batch imported without its state, instead of failing on it") {
+    withNodes(2, "batch-assurer") { nodes =>
+      val Seq(a, b) = nodes.toSeq
+      val blocks = authorOn(a, 1 to 4)
+      farBehind(b)
+      b.chain.importBatch(blocks).forall(_.isRight) shouldBe true
+      val stateless = hashOf(a, blocks(1))
+      b.chain.stateAt(stateless) shouldBe None
+      val assurer = new AssurerService(b.chain, b.distribution, b.pools, devKeys.take(1), b.shards, b.shardStore)
+      try
+        noException should be thrownBy assurer.assure(ChainHead(stateless, 2L, b.chain.postStateRoot(stateless).get))
+        noException should be thrownBy assurer.assure(b.chain.best)
+      finally assurer.shutdown()
+    }
+  }
+
   test("a batch near the head keeps every block's state") {
     withNodes(2, "batch-near-head") { nodes =>
       val Seq(a, b) = nodes.toSeq

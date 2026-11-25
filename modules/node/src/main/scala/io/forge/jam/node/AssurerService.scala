@@ -83,6 +83,7 @@ final class AssurerService(
     ()
 
   private[node] def assure(head: ChainHead): Unit =
+    if chain.stateAtRoot(head.stateRoot).isEmpty then return
     // The state of the block being assured, not of whatever is best by now: the assurance is anchored at `head`.
     val view = chain.stateViewAtRoot(head.stateRoot)
     val reports = view.cores.reports

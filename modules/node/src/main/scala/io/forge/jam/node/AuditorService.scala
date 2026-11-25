@@ -209,7 +209,7 @@ final class AuditorService(
   private def track(hash: Hash, slot: Long, block: Block): Unit =
     chain.stateViewAt(block.header.parent) match
       case None =>
-        logger.warn(s"no prior state for ${hash.toHex.take(18)}; it stays unaudited")
+        logger.debug(s"no prior state for ${hash.toHex.take(18)}; it stays unaudited")
         auditedBlocks.put(hash, AuditorService.Mark(slot, false))
       case Some(prior) =>
         val kappa = prior.validators.current.toIndexedSeq
@@ -945,6 +945,8 @@ final class AuditorService(
         if !taken then
           logger.debug(s"judgment from validator $idx not taken (${refusedJudgments.incrementAndGet()} so far)")
         logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
+      else if set.isEmpty then
+        logger.debug(s"judgment of epoch $epoch from validator $idx ignored: not the current epoch $bestEpoch or the one before")
       else
         logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
         source match

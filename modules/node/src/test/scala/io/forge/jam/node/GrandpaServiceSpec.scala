@@ -142,6 +142,65 @@ class GrandpaServiceSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     }
   }
 
+  test("a stalled voter sends a voter still in the previous round that round's votes, and nothing of its own round") {
+    withNodes(1, "grandpa-behind") { nodes =>
+      val node = nodes.head
+      author(nodes, 1 to 3)
+      val egress = Executors.newSingleThreadExecutor()
+      val distribution = new DistributionService(new ExtrinsicPools, coresCount = 1, egress)
+      val start = 1_000_000L
+      val now = new AtomicLong(start)
+      val g = new GrandpaService(node.chain, node.sync, distribution, Some(devKeys(0)), gossipMillis = 1000L, clock = () => now.get)
+      val received = new ConcurrentHashMap[Int, java.util.List[Long]]()
+      val toUs = (1 to 5).map { i =>
+        received.put(i, java.util.Collections.synchronizedList(new java.util.ArrayList[Long]()))
+        val record: PeerStreamHandler = (_: PeerConnection, stream: MessageStream) =>
+          stream.onMessage(msg => decodeVoteMessage(msg).foreach(m => received.get(i).add(m.round): Unit))
+        val (toPeer, fromPeer) = Loopback.pair(
+          devKeys(0).ed25519Public,
+          devKeys(i).ed25519Public,
+          kind => Option.when(kind == StreamKind.GrandpaState)(g.stateHandler),
+          kind => Option.when(kind == StreamKind.GrandpaVote)(record)
+        )
+        distribution.trackConnection(toPeer)
+        i -> fromPeer
+      }.toMap
+      def tellRound(i: Int, round: Long): Unit =
+        val stream = toUs(i).openStream(StreamKind.GrandpaState).get(5, TimeUnit.SECONDS)
+        stream.send(encodeState(round, 0L, 0L))
+        stream.finish()
+      try
+        val validators = node.chain.stateView().validators.current.map(_.ed25519.bytes).toIndexedSeq
+        g.start(node.chain.blockStore.getHead(io.forge.jam.db.BlockStore.GenesisHead).get, validators, validators)
+        val best = node.chain.best
+        val head = Vote(best.hash, best.stateRoot, best.slot)
+        def vote(round: Long, kind: Int, i: Int) =
+          g.onVoterThread(_.onVote(VoteMessage(round, 0L, SignedMessage(kind, sign(kind, head, round, 0L, devKeys(i)))))) shouldBe true
+        (1 to 5).foreach(i => List(Prevote, Precommit).foreach(vote(1L, _, i)))
+        g.onVoterThread(_.round) shouldBe 2L
+        (1 to 3).foreach(vote(2L, Prevote, _))
+        tellRound(4, 1L)
+        tellRound(5, 3L)
+        g.resendNow() // round 2 starts its stall clock now
+        eventually("our round 1 votes to go out")((1 to 5).forall(i => received.get(i).contains(1L)))
+        Thread.sleep(200)
+        (1 to 5).foreach(i => received.get(i).clear())
+
+        now.addAndGet(9000) // past the first stall, 8 gossip periods in
+        g.onVoterThread(_.step())
+        g.resendNow()
+        eventually("voter 4 to be sent round 1 again")(received.get(4).contains(1L))
+        Thread.sleep(200)
+        received.get(4).asScala.count(_ == 1L) shouldBe 12 // six prevotes, six precommits
+        Seq(1, 2, 3, 5).foreach(i => received.get(i).asScala.count(_ == 1L) shouldBe 0)
+        received.get(4).asScala.count(_ == 2L) shouldBe 1
+        Seq(1, 2, 3).foreach(i => received.get(i).asScala.count(_ == 2L) should be >= 2)
+      finally
+        g.shutdown()
+        egress.shutdownNow()
+    }
+  }
+
   test("a round stalls 8 gossip periods in, then after 4, 8, 16 ... periods up to 64, and anew with the next round") {
     val clock = new StallClock(1000L)
     def stallsWithin(from: Long, millis: Long): List[Long] =

@@ -3,6 +3,7 @@ package io.forge.jam.node
 import java.util.concurrent.{ConcurrentHashMap, ScheduledExecutorService, TimeUnit}
 
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.*
 
 import com.typesafe.scalalogging.LazyLogging
 import io.forge.jam.core.LittleEndian
@@ -71,6 +72,9 @@ final class GrandpaService(
       toVoters(StreamKind.GrandpaState, encodeState(round, setId, finalizedSlot))
 
   @volatile private var lastStateBroadcast = 0L
+
+  private val peerRounds = new ConcurrentHashMap[Ed25519PublicKey, (Long, Long)]()
+
   private val stateSends = new java.util.concurrent.atomic.AtomicLong
 
   private[node] def stateMessagesSent: Long = stateSends.get
@@ -130,17 +134,29 @@ final class GrandpaService(
           s"GRANDPA round ${voter.round} of set ${voter.voterSet.setId} stalled: asking ${asked.size} voter(s) not heard from since the start for a catch-up"
         )
         asked.foreach(c => requestCatchUp(c, voter.round, voter.voterSet.setId))
+    val behind =
+      if !stalled then Set.empty[Ed25519PublicKey]
+      else
+        val (set, round) = (voter.voterSet.setId, voter.round)
+        peerRounds.asScala.collect { case (k, (s, r)) if s == set && r < round => k }.toSet
     val peers = voterPeers
     val own = voter.ourVotes
     if own.nonEmpty then
       peers.filterNot(c => votesSentTo.contains(c.peerPublicKey)).foreach { c =>
         votesSentTo.add(c.peerPublicKey)
-        sendVotes(c, own)
+        if !behind.contains(c.peerPublicKey) then sendVotes(c, own)
       }
     if stalled then
       val ours = keys.map(_.ed25519Key)
       val others = voter.roundVotes.filterNot(m => ours.contains(m.message.signed.signerKey))
-      if others.nonEmpty then forwardTargets(peers).foreach(sendVotes(_, others))
+      if others.nonEmpty then forwardTargets(peers.filterNot(c => behind.contains(c.peerPublicKey))).foreach(sendVotes(_, others))
+      val previous = voter.previousRoundVotes
+      if previous.nonEmpty then
+        val behind = (voter.voterSet.setId, voter.round - 1)
+        val heard = voter.heardThisRound
+        peers
+          .filter(c => !heard.contains(c.peerPublicKey) && peerRounds.get(c.peerPublicKey) == behind)
+          .foreach(sendVotes(_, previous))
 
   private def forwardTargets(peers: List[PeerConnection]): List[PeerConnection] =
     val waiting = peers.filterNot(c => forwardedTo.contains(c.peerPublicKey))
@@ -402,6 +418,7 @@ final class GrandpaService(
     * peers never send CE 151 state.
     */
   private def catchUpWith(conn: PeerConnection, round: Long, setId: Long): Unit =
+    peerRounds.put(conn.peerPublicKey, (setId, round))
     val ourSet = voter.voterSet.setId
     if setId > ourSet then
       warpRequests.retain(_ >= ourSet)
@@ -463,7 +480,12 @@ final class GrandpaService(
         val admitted = intake.tryExecute(exec, msg.length.toLong, conn) {
           voter.catchUpFor(round, setId) match
             case Some(c) => stream.send(encodeCatchUp(c)); stream.finish()
-            case None    => stream.reset()
+            case None =>
+              logger.debug(
+                s"CE152: no catch-up for round $round of set $setId to give " +
+                  s"(we are in round ${voter.round} of set ${voter.voterSet.setId})"
+              )
+              stream.reset()
         }
         if !admitted then stream.reset()
       case Left(_) => stream.reset()

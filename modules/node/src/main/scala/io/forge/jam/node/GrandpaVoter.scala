@@ -442,8 +442,16 @@ final class GrandpaVoter(
   /** Every vote we hold for the current round, ours and relayed, to resend while the round is stalled: a voter that
     * was cut off gets the votes it needs to finish the round, since some peers never resend.
     */
-  def roundVotes: List[VoteMessage] =
+  def roundVotes: List[VoteMessage] = votesOf(current)
+
+  def previousRoundVotes: List[VoteMessage] = rounds.get(current.round - 1).toList.flatMap(votesOf)
+
+  def heardThisRound: Set[Ed25519PublicKey] =
     val r = current
+    (r.prevotes.keysIterator ++ r.precommits.keysIterator ++ r.prevoteEquivocations.keysIterator ++
+      r.precommitEquivocations.keysIterator).toSet
+
+  private def votesOf(r: RoundState): List[VoteMessage] =
     (allPrevotes(r).map(Prevote -> _) ++ allPrecommits(r).map(Precommit -> _)).map { (kind, v) =>
       VoteMessage(r.round, set.setId, SignedMessage(kind, v))
     }

@@ -247,6 +247,10 @@ final class SyncService(
       .map(_.map(_._2.slot).max)
       .toList
 
+  private def peersFinalizedSlot: Long =
+    val slots = peerFinalized.map(_._2.slot).sorted
+    if slots.isEmpty then 0L else slots((slots.size - 1) / 2)
+
   /** Finalized blocks announced by peers with a live UP 0 stream, one per peer key (the newest). */
   def peerFinalized: List[(PeerConnection, HashSlot)] =
     peerFinals.asScala.toList
@@ -773,7 +777,8 @@ final class SyncService(
       outcome
     var remaining = ordered
     while remaining.nonEmpty do
-      val outcomes = chain.importBatch(remaining, Some(conn.peerPublicKey), SyncService.BatchBudgetNanos, watch)
+      val outcomes =
+        chain.importBatch(remaining, Some(conn.peerPublicKey), SyncService.BatchBudgetNanos, watch, peersFinalizedSlot)
       val (done, rest) = remaining.splitAt(outcomes.size)
       remaining = rest
       done.lazyZip(outcomes).foreach { (blockBytes, outcome) =>
