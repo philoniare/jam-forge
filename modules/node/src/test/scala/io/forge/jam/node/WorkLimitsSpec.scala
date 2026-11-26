@@ -237,18 +237,27 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers with NodeFixture:
       node = new JamNode(spec, NodeConfig(dataDir = dir, slotTicking = false)).start()
       val conn = peer.connect(new InetSocketAddress("127.0.0.1", node.listenPort)).get(10, TimeUnit.SECONDS)
       val genesis = node.chain.finalized.hash
-      val closed = new AtomicInteger()
+      val ended = new AtomicInteger()
       val answered = new AtomicInteger()
       def ask(kind: Byte, payload: Array[Byte]): Unit =
         val stream = conn.openStream(kind).get(10, TimeUnit.SECONDS)
-        stream.onMessage { _ => answered.incrementAndGet(); () }
-        stream.onClosed(() => { closed.incrementAndGet(); () })
+        val expected = if kind == StreamKind.StateRequest then 2 else 1
+        val got = new AtomicInteger()
+        val over = new java.util.concurrent.atomic.AtomicBoolean()
+        def end(): Unit = if over.compareAndSet(false, true) then ended.incrementAndGet(): Unit
+        stream.onMessage { _ =>
+          answered.incrementAndGet()
+          if got.incrementAndGet() == expected then
+            end()
+            stream.reset()
+        }
+        stream.onClosed(() => end())
         stream.send(payload)
         stream.finish()
       val total = 400
       for i <- 1 to total do
         // QUIC allows a peer only so many streams open at once: keep well under it, still far more than may wait.
-        eventually("earlier requests to finish")(i - 1 - closed.get() < 40)
+        eventually("earlier requests to finish")(i - 1 - ended.get() < 40)
         if i % 2 == 0 then ask(StreamKind.BlockRequest, SyncCodec.encodeBlockRequest(genesis, ascending = true, maxBlocks = 64))
         else
           ask(
@@ -256,7 +265,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers with NodeFixture:
             SyncCodec.encodeStateRequest(genesis, io.forge.jam.core.JamBytes(new Array[Byte](31)), io.forge.jam.core.JamBytes(Array.fill[Byte](31)(-1)), 1L << 20)
           )
       // Every stream ends: answered, or reset when too many waited (a peer may queue only a few).
-      eventually("every request to be answered or refused", 60)(closed.get() == total)
+      eventually("every request to be answered or refused", 60)(ended.get() == total)
       answered.get() should be > 0
       // Still serving afterwards.
       val before = answered.get()
@@ -264,7 +273,7 @@ class WorkLimitsSpec extends AnyFunSuite with Matchers with NodeFixture:
         StreamKind.StateRequest,
         SyncCodec.encodeStateRequest(genesis, io.forge.jam.core.JamBytes(new Array[Byte](31)), io.forge.jam.core.JamBytes(Array.fill[Byte](31)(-1)), 4096L)
       )
-      eventually("a request after the flood to be answered")(answered.get() > before && closed.get() == total + 1)
+      eventually("a request after the flood to be answered")(answered.get() > before && ended.get() == total + 1)
     finally
       peer.shutdown()
       if node != null then node.shutdown()

@@ -37,6 +37,7 @@ object StreamRequest extends LazyLogging:
     case Closed
     /** The first message, or the peer closing without one. The peer's FIN may still be outstanding. */
     case FirstMessage
+    case MaxMessages
 
   /** Send `request` and return the peer's answer, which is empty when it closed the stream without one. Every
     * outcome but a complete answer resets the stream, so neither side keeps it: a failure, and an empty answer.
@@ -65,7 +66,7 @@ object StreamRequest extends LazyLogging:
       catch case e: Exception => Left(Failure.NotOpened(describe(e)))
     opened.flatMap { stream =>
       val result = answer(stream, request, responseTimeoutMs, until, maxMessages, excessFails, maxBytes, onSent)
-      if !result.exists(_.nonEmpty) then
+      if !result.exists(_.nonEmpty) || (until == Until.MaxMessages && stream.isOpen) then
         try stream.reset()
         catch case e: Exception => logger.debug(s"reset of ${StreamKind.name(kind)} failed: ${e.getMessage}")
       result
@@ -91,23 +92,23 @@ object StreamRequest extends LazyLogging:
     val excess = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
     def snapshot(): List[Array[Byte]] = messages.synchronized(messages.toList)
     stream.onMessage { m =>
-      val over = messages.synchronized {
-        if excess.get.isDefined then None
+      val (over, full) = messages.synchronized {
+        if excess.get.isDefined then (None, false)
         else
           received += m.length
           val tooMany = excessFails && messages.size >= maxMessages
-          if tooMany then Some(s"more than $maxMessages message(s)")
-          else if received > maxBytes then Some(s"more than $maxBytes byte(s)")
+          if tooMany then (Some(s"more than $maxMessages message(s)"), false)
+          else if received > maxBytes then (Some(s"more than $maxBytes byte(s)"), false)
           else
             if messages.size < maxMessages then messages += m
-            None
+            (None, messages.size >= maxMessages)
       }
       over match
         case Some(why) =>
           excess.set(Some(why))
           done.complete(Nil): Unit
         case None =>
-          if until == Until.FirstMessage then done.complete(snapshot()): Unit
+          if until == Until.FirstMessage || (until == Until.MaxMessages && full) then done.complete(snapshot()): Unit
     }
     stream.onClosed(() => done.complete(snapshot()): Unit)
     val sent =

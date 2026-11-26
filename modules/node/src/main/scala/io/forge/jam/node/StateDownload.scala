@@ -143,6 +143,7 @@ object StateDownload:
       Seq(SyncCodec.encodeStateRequest(headerHash, start, LastKey, maxBytes)),
       timeoutMs,
       () => timeoutMs,
+      until = StreamRequest.Until.MaxMessages,
       maxMessages = 2,
       excessFails = true,
       maxBytes = bound(maxBytes)
