@@ -82,8 +82,8 @@ class SyncLoopbackSpec extends AnyFunSuite with Matchers with NodeFixture:
       b.sync.openAnnouncementStream(bToA)
       eventually("B reaches A's head")(b.chain.best.hash == a.chain.best.hash)
       b.chain.best.stateRoot shouldBe a.chain.best.stateRoot
+      eventually("B counts the blocks it synced")(b.sync.stats.blocks == 12L)
       val stats = b.sync.stats
-      stats.blocks shouldBe 12L
       (b.chain.timings.snapshot.walSync.count - syncsBefore) should be <= stats.answers
       stats.answers should be < 12L
       eventually("A to hear of B's head")(a.sync.peerBestSlots.contains(12L))
