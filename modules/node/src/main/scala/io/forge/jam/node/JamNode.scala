@@ -1162,7 +1162,10 @@ object JamNode:
   /** How long an accepted connection may go without UP 0 before we open it. */
   val UpZeroGraceMillis: Long = 3000L
 
-  val ImplementationVersion: String = BuildInfo.version
+  val ImplementationVersion: String = implementationVersion(BuildInfo.version, BuildInfo.gitSha)
+
+  def implementationVersion(version: String, gitSha: Option[String]): String =
+    gitSha.fold(version)(sha => s"$version+${sha.take(8)}")
   val GrayPaperVersion: String = "0.8.0"
 
   val AnyAddress: java.net.InetAddress = java.net.InetAddress.getByAddress(Array[Byte](0, 0, 0, 0))

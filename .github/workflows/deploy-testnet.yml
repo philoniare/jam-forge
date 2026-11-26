@@ -62,6 +62,8 @@ jobs:
                     context: .
                     target: node
                     push: true
+                    build-args: |
+                        GIT_SHA=${{ steps.ref.outputs.sha }}
                     tags: |
                         ${{ steps.ref.outputs.image }}
                         ${{ env.IMAGE }}:testnet
