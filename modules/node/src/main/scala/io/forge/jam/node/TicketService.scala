@@ -41,7 +41,10 @@ final class TicketService(
     misbehaved: (PeerConnection, Offence) => Unit = (_, _) => (),
     verifyTickets: TicketService.Verifier = TicketService.ringVerifier,
     ringRootOf: List[BandersnatchPublicKey] => Option[JamBytes] = null,
-    telemetry: Option[Telemetry] = None
+    telemetry: Option[Telemetry] = None,
+    ringProver: (Array[Byte], List[BandersnatchPublicKey], Int, Hash, UByte) => Option[JamBytes] =
+      BandersnatchVrf.createRingProof,
+    stuckAfterMillis: Long = TicketService.StuckAfterMillis
 ) extends LazyLogging:
 
   private val ringRoot: List[BandersnatchPublicKey] => Option[JamBytes] =
@@ -95,20 +98,54 @@ final class TicketService(
   private lazy val generator = threads.single("jam-tickets")
   private val generating = new java.util.concurrent.atomic.AtomicBoolean(false)
 
+  @volatile private var runStartedAt: Long = 0L
+  @volatile private var runThread: Thread = null
+  @volatile private var runEvent: Option[Telemetry.EventRef] = None
+  @volatile private var runReported: Boolean = false
+
   /** [[maybeGenerate]] on a thread of its own, unless one is already running: ring-VRF proofs for an epoch take far
     * longer than authoring a block, and the slot thread must not wait for them. Senders see the tickets once all of
     * them are made ([[hasTicketsFor]]).
     */
   def generateInBackground(wallSlot: Long): Unit =
-    if validatorKeys.nonEmpty && generating.compareAndSet(false, true) then
+    if validatorKeys.isEmpty then ()
+    else if generating.compareAndSet(false, true) then
+      runStartedAt = System.currentTimeMillis()
+      runThread = null
+      runEvent = None
+      runReported = false
       try
         generator.execute { () =>
+          runThread = Thread.currentThread()
           try maybeGenerate(wallSlot): Unit
-          catch case e: Exception => logger.error("ticket generation failed", e)
-          finally generating.set(false)
+          catch
+            case _: InterruptedException => Thread.currentThread().interrupt() // shutting down
+            case e: Throwable =>
+              logger.error("ticket generation failed", e)
+              if !scala.util.control.NonFatal(e) then throw e
+          finally
+            runThread = null
+            generating.set(false)
         }
       catch
         case _: java.util.concurrent.RejectedExecutionException => generating.set(false) // shutting down
+    else reportIfStuck(wallSlot)
+
+  private def reportIfStuck(wallSlot: Long): Unit =
+    val ranFor = System.currentTimeMillis() - runStartedAt
+    if !runReported && ranFor >= stuckAfterMillis then
+      runReported = true
+      val thread = runThread
+      val stack = Option(thread).map(_.getStackTrace.toList).getOrElse(Nil)
+      val where = TicketService.firstOwnFrame(stack).getOrElse(if thread == null then "not started" else "unknown")
+      logger.error(
+        s"ticket generation still running after ${ranFor / 1000} s, so no tickets are made: " +
+          (if stack.isEmpty then where else stack.take(40).mkString("\n\tat ", "\n\tat ", ""))
+      )
+      telemetry.foreach { t =>
+        val ref = runEvent.orElse(t.generatingTickets(wallSlot / chain.config.epochLength + 1))
+        t.ticketGenerationFailed(ref, s"still running after ${ranFor / 1000} s, in $where")
+      }
 
   def shutdown(): Unit =
     if validatorKeys.nonEmpty then generator.shutdownNow(): Unit
@@ -184,21 +221,17 @@ final class TicketService(
     val ringKeys = pending.map(_.bandersnatch).toList.padTo(ringSize, BandersnatchPublicKey(new Array[Byte](32)))
 
     val epoch = view.timeslot / chain.config.epochLength
+    reportForeignKeys(pending, epoch)
     var produced = 0
     pending.zipWithIndex.foreach { case (vk, index) =>
       bsByPublic.get(vk.bandersnatch).foreach { keys =>
         val generating = telemetry.flatMap(_.generatingTickets(epoch + 1))
+        runEvent = generating
         val outputs = scala.collection.mutable.ListBuffer.empty[Array[Byte]]
         var failure: Option[String] = None
         for attemptInt <- 0 until SafroleTransition.maxTicketEntries(pending.size, chain.config) do
           val attempt = UByte(attemptInt)
-          BandersnatchVrf.createRingProof(
-            keys.bandersnatchSecret,
-            ringKeys,
-            index,
-            entropy,
-            attempt
-          ) match
+          ringProver(keys.bandersnatchSecret, ringKeys, index, entropy, attempt) match
             case None =>
               logger.warn(s"ring proof failed for validator index $index attempt $attemptInt")
               failure = failure.orElse(Some(s"ring proof failed for attempt $attemptInt"))
@@ -232,6 +265,28 @@ final class TicketService(
     }
     if produced > 0 then
       logger.info(s"generated $produced Safrole ticket(s) for epoch $epoch")
+
+  private def reportForeignKeys(pending: IndexedSeq[ValidatorKey], epoch: Long): Unit =
+    validatorKeys.foreach { keys =>
+      pending.indexWhere(_.ed25519 == keys.ed25519Key) match
+        case -1 =>
+          if !pending.exists(_.bandersnatch == keys.bandersnatchKey) then
+            logger.info(
+              s"our validator key ${JamBytes.toHex(keys.ed25519Key.bytes).take(16)}… is not in the validator set of epoch ${epoch + 1}: " +
+                "no tickets for it"
+            )
+        case index if pending(index).bandersnatch != keys.bandersnatchKey =>
+          logger.error(
+            s"validator $index of epoch ${epoch + 1} has our Ed25519 key but Bandersnatch key " +
+              s"${JamBytes.toHex(pending(index).bandersnatch.bytes)}, not ours (${JamBytes.toHex(keys.bandersnatchKey.bytes)}): it makes no tickets " +
+              "and cannot author in ticket mode. Check --bandersnatch-key, or the seed in the keystore"
+          )
+          telemetry.foreach { t =>
+            val ref = t.generatingTickets(epoch + 1)
+            t.ticketGenerationFailed(ref, s"Bandersnatch key of validator $index is not its on-chain one: no tickets")
+          }
+        case _ => ()
+    }
 
   /** Inbound CE 131/132: verify the ring proof, pool the ticket, and — when we
     * are the ticket's proxy (CE 131) — forward it to all validators on CE 132.
@@ -651,6 +706,14 @@ final class TicketService(
       case _ => ()
 
 object TicketService:
+  val StuckAfterMillis: Long = 5 * 60 * 1000L
+
+  private[node] def firstOwnFrame(stack: List[StackTraceElement]): Option[String] =
+    val platform = List("java.", "jdk.", "sun.", "scala.")
+    stack.find(f => !platform.exists(f.getClassName.startsWith)).map { f =>
+      s"${f.getClassName.split('.').last}.${f.getMethodName}:${f.getLineNumber}"
+    }
+
   type Verifier = (Seq[TicketEnvelope], JamBytes, Hash, Int) => Seq[Option[Hash]]
 
   val DeferredBatch: Int = 64

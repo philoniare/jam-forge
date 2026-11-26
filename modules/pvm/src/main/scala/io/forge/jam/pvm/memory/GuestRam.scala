@@ -145,6 +145,35 @@ final class GuestRam:
       p += 1
     true
 
+  def accessRuns: IndexedSeq[GuestRam.Run] =
+    var runs = runsCache
+    if runs == null then
+      val sorted = pageAccess.keysIterator.toArray
+      java.util.Arrays.sort(sorted)
+      val out = IndexedSeq.newBuilder[GuestRam.Run]
+      var i = 0
+      while i < sorted.length do
+        val first = sorted(i)
+        val writable = pageAccess(first) == AccessWrite
+        var j = i + 1
+        while j < sorted.length && sorted(j) == sorted(j - 1) + 1 && (pageAccess(sorted(j)) == AccessWrite) == writable do
+          j += 1
+        out += GuestRam.Run(first, (j - i).toLong, writable)
+        i = j
+      runs = out.result()
+      runsCache = runs
+    runs
+
+  @volatile private var runsCache: IndexedSeq[GuestRam.Run] = null
+
+  def materialisedPages: Array[Long] = pageData.keysIterator.toArray
+
+  def pageBytes(page: Long): Array[Byte] = pageData.getOrElse(page, null)
+
+  def storePage(page: Long, bytes: Array[Byte]): Unit =
+    require(bytes.length == PageSize && pageAccess.contains(page))
+    pageData.update(page, bytes)
+
   /** Apply the `pages` host call (Omega_Z) mutation for validated arguments:
     * zero the range's contents when `variant < 3` (preserve when 3/4) and set
     * access to none (0), R (1/3) or W (2/4).
@@ -154,6 +183,7 @@ final class GuestRam:
       case 0     => AccessNone
       case 1 | 3 => AccessRead
       case _     => AccessWrite
+    runsCache = null
     var p = pageStart
     while p < pageStart + count do
       if variant < 3 then pageData.remove(p) // zero contents
@@ -162,6 +192,8 @@ final class GuestRam:
       p += 1
 
 object GuestRam:
+  final case class Run(first: Long, count: Long, writable: Boolean)
+
   inline val PageSize = 4096
   inline val PageShift = 12
   inline val PageMask = PageSize - 1L

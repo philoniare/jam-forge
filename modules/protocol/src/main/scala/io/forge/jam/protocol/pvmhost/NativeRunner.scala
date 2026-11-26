@@ -1,8 +1,8 @@
 package io.forge.jam.protocol.pvmhost
 
-import io.forge.jam.pvm.{ExecutionMode, Instruction, PvmSettings}
+import io.forge.jam.pvm.{ExecutionMode, Instruction, InterruptKind, PvmSettings, SegfaultInfo}
 import io.forge.jam.pvm.engine.{InterpretedInstance, InterpretedModule, RunDeadlinePassed}
-import io.forge.jam.pvm.memory.InstanceMemoryBudget
+import io.forge.jam.pvm.memory.{GuestRam, InstanceMemoryBudget}
 import io.forge.jam.pvm.native_.PvmRecompiler
 import io.forge.jam.pvm.program.InstructionDecoder
 import io.forge.jam.pvm.recompiler.{RecompilerAbi, RecompilerMemory}
@@ -218,8 +218,11 @@ object NativeRunner extends StrictLogging:
       val invalidBlob: Boolean,
       private val byteOffsetToIndex: RecompilerAbi.OffsetIndex,
       val block: PvmRecompiler#Block,
-      val whyNot: String = "compile-null"
+      val whyNot: String = "compile-null",
+      blockGas: Array[Long] = Array.emptyLongArray
   ):
+    def blockGasAt(index: Int): Long = blockGas(index)
+
     def waitsForBudget: Boolean = whyNot == OverBudget
 
     def entryIndex(pc: Int): Option[Int] = byteOffsetToIndex.get(pc)
@@ -479,7 +482,7 @@ object NativeRunner extends StrictLogging:
       module.nativeBytes = codeBytes
       module.nativeHeapBytes = prepared.byteOffsetToIndex.bytes
       cleaner.register(module, () => { blk.close(); nativeCode.remove(codeBytes) })
-      new CompiledProgram(scan, false, prepared.byteOffsetToIndex, blk)
+      new CompiledProgram(scan, false, prepared.byteOffsetToIndex, blk, blockGas = prepared.blockGas)
 
   /** Each thread keeps one execution context (cells, upcall stub, guest-memory mapping) across its runs. */
   private val contexts = new ThreadLocal[PvmRecompiler#ExecContext]()
@@ -613,6 +616,122 @@ object NativeRunner extends StrictLogging:
   private def alignUpLong(v: Long, pageSize: Long): Long =
     val rem = v % pageSize
     if rem == 0 then v else v + (pageSize - rem)
+
+
+  final case class GuestRun(outcome: InterruptKind, regs: Array[Long], gas: Long, pc: Long, gasChargedFlag: Boolean)
+
+  private val guestRuns = new AtomicLong(0)
+
+  def guestNativeCount: Long = guestRuns.get()
+
+  val MaxGuestBlankWritablePages: Long = 1L << 16
+
+  private val guestContexts = new ThreadLocal[PvmRecompiler#ExecContext]()
+
+  private val ZeroPage = java.lang.foreign.MemorySegment.ofArray(new Array[Byte](GuestRam.PageSize))
+
+  def runGuest(
+      module: InterpretedModule,
+      ram: GuestRam,
+      regs: Array[Long],
+      gas: Long,
+      pc: Long,
+      gasChargedFlag: Boolean,
+      deadlineMillis: Option[Long]
+  ): Option[GuestRun] =
+    def deopt(reason: String): Option[GuestRun] =
+      recordDeopt(s"guest-$reason")
+      None
+    deadlineMillis.foreach(d => if System.currentTimeMillis() > d then throw new RunDeadlinePassed(d))
+    recompiler match
+      case None => deopt("no-dylib")
+      case Some(rc) =>
+        val program = compiledFor(rc, module)
+        if program.invalidBlob then deopt("invalid-blob")
+        else if program.block == null then deopt(program.whyNot)
+        else
+          val entry = if pc >= 0 && pc <= Int.MaxValue then program.entryIndex(pc.toInt) else None
+          entry match
+            case None => deopt("invalid-entry-pc")
+            case Some(entryIndex) =>
+              val prepaid = if gasChargedFlag then program.blockGasAt(entryIndex) else 0L
+              val runs = ram.accessRuns
+              val materialised = ram.materialisedPages
+              val writablePages = runs.iterator.filter(_.writable).map(_.count).sum
+              if gas > Long.MaxValue - prepaid then deopt("gas-overflow")
+              else if writablePages - materialised.length > MaxGuestBlankWritablePages then deopt("memory-too-large")
+              else Some(runGuestNatively(rc, program, module, ram, runs, materialised, regs, gas + prepaid, entryIndex, deadlineMillis))
+
+  private def runGuestNatively(
+      rc: PvmRecompiler,
+      program: CompiledProgram,
+      module: InterpretedModule,
+      ram: GuestRam,
+      runs: IndexedSeq[GuestRam.Run],
+      materialised: Array[Long],
+      regs0: Array[Long],
+      gas: Long,
+      entryIndex: Int,
+      deadlineMillis: Option[Long]
+  ): GuestRun =
+    import java.lang.foreign.{MemorySegment, ValueLayout}
+    val shift = GuestRam.PageShift
+    val regions = runs.map(r => new PvmRecompiler.Region(r.first << shift, r.count << shift, r.first << shift, r.writable)).toArray
+    val contents = new Array[Array[Byte]](regions.length) // all zeros: the pages with data are copied in below
+    val regs = java.util.Arrays.copyOf(regs0, 13)
+    var ecalliId = -1L
+    var ecalliPc = -1
+    val handler: PvmRecompiler.HostCallHandler = (hostCallId: Long, at: Int) =>
+      ecalliId = hostCallId
+      ecalliPc = at
+      PvmRecompiler.HOST_PANIC
+    val ctx =
+      var c = guestContexts.get()
+      if c == null then
+        c = rc.newContext()
+        guestContexts.set(c)
+      c
+    val live =
+      val reused = ctx.tryBeginDirect(program.block, regs, gas, regions, contents, shift, entryIndex, handler)
+      if reused != null then reused
+      else rc.beginDirectOnce(program.block, regs, gas, regions, contents, shift, entryIndex, handler)
+    try
+      val memory = live.backingSegment()
+      materialised.foreach { page =>
+        MemorySegment.copy(ram.pageBytes(page), 0, memory, ValueLayout.JAVA_BYTE, page << shift, GuestRam.PageSize)
+      }
+      val out = deadlineMillis match
+        case Some(deadline) => new GasSlices(live, deadline, program.entryIndex).run()
+        case None => live.run()
+      runs.foreach { r =>
+        if r.writable then
+          var page = r.first
+          while page < r.first + r.count do
+            val at = memory.asSlice(page << shift, GuestRam.PageSize.toLong)
+            val bytes = ram.pageBytes(page)
+            if bytes != null then MemorySegment.copy(at, ValueLayout.JAVA_BYTE, 0L, bytes, 0, GuestRam.PageSize)
+            else if at.mismatch(ZeroPage) != -1L then
+              val fresh = new Array[Byte](GuestRam.PageSize)
+              MemorySegment.copy(at, ValueLayout.JAVA_BYTE, 0L, fresh, 0, GuestRam.PageSize)
+              ram.storePage(page, fresh)
+            page += 1
+      }
+      live.close() // copies the registers into `regs`
+      guestRuns.incrementAndGet()
+      val gasLeft = out.gasRemaining
+      out.exit match
+        case PvmRecompiler.EXIT_PANIC if ecalliPc >= 0 =>
+          val blob = module.blob
+          val (_, length) = InstructionDecoder.decode(blob.code, blob.bitmask, ecalliPc)
+          GuestRun(InterruptKind.Ecalli(UInt(ecalliId.toInt)), regs, gasLeft, ecalliPc.toLong + math.max(1, length), true)
+        case PvmRecompiler.EXIT_HALT => GuestRun(InterruptKind.Finished, regs, gasLeft, 0L, true)
+        case PvmRecompiler.EXIT_PANIC => GuestRun(InterruptKind.Panic, regs, gasLeft, 0L, true)
+        case PvmRecompiler.EXIT_OOG => GuestRun(InterruptKind.OutOfGas, regs, gasLeft, out.pc, false)
+        case PvmRecompiler.EXIT_FAULT =>
+          val info = SegfaultInfo(UInt(out.faultPage.toInt), UInt(GuestRam.PageSize))
+          GuestRun(InterruptKind.Segfault(info), regs, gasLeft, out.pc, true)
+        case other => throw new IllegalStateException(s"NativeRunner: unrecognized recompiler exit code $other")
+    finally live.close()
 
   /** What a program needs from the runner beyond plain instruction emission */
   private final case class UnsupportedOpcodeScan(

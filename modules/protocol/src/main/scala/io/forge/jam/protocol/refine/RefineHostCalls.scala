@@ -10,8 +10,8 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.context.Context
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.core.types.workitem.WorkItem
-import io.forge.jam.protocol.pvmhost.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance}
-import io.forge.jam.pvm.InterruptKind
+import io.forge.jam.protocol.pvmhost.{ConstantsBlob, GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, NativeRunner, PvmInstance}
+import io.forge.jam.pvm.{ExecutionMode, InterruptKind}
 import io.forge.jam.pvm.engine.{GuestInstance, InterpretedModule, PvmInternalError}
 import io.forge.jam.pvm.memory.GuestRam
 import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
@@ -19,14 +19,19 @@ import io.forge.jam.pvm.types.ProgramCounter
 import io.forge.jam.core.codec.Codec
 import spire.math.ULong
 
-/** Host-call dispatcher for the refine invocation
-  * INVOKE (12) is not yet wired to the interpreter and currently reports WHAT;
-  * every other refine host call is implemented.
+/** Host-call dispatcher for the refine invocation.
+  *
+  * Inner machines (MACHINE / INVOKE) run on the recompiler when `guestMode` is [[ExecutionMode.Recompiled]], else,
+  * or when the recompiler does not take a machine, on the interpreter, stepped by `guestStep`. A `guestStep` other
+  * than the default always interprets.
   */
 class RefineHostCalls(
     val context: RefineContext,
-    guestStep: GuestInstance => Either[PvmInternalError, InterruptKind] = _.run()
+    guestStep: GuestInstance => Either[PvmInternalError, InterruptKind] = RefineHostCalls.DefaultGuestStep,
+    guestMode: ExecutionMode = ExecutionMode.default
 ) extends HostCallDispatcher:
+  private val guestNatively = guestMode == ExecutionMode.Recompiled && (guestStep eq RefineHostCalls.DefaultGuestStep)
+
   private val config: ChainConfig = context.config
 
   private def getReg(instance: PvmInstance, reg: Int): ULong =
@@ -408,47 +413,22 @@ class RefineHostCalls(
         val guestGas = LittleEndian.get(block, 0, 8)
         val guestRegs = Array.tabulate(13)(i => LittleEndian.get(block, 8 + 8 * i, 8))
 
-        val guestInstance = GuestInstance.create(
-          guest.module,
-          guest.ram,
-          guestRegs,
-          guestGas,
-          ProgramCounter(guest.pc.toInt),
-          gasChargedFlag = guest.gasChargedFlag
-        )
+        val run =
+          (if guestNatively then
+             NativeRunner.runGuest(guest.module, guest.ram, guestRegs, guestGas, guest.pc, guest.gasChargedFlag, context.deadlineMillis)
+           else None).getOrElse(interpret(guest, guestRegs, guestGas))
+        val outcome = run.outcome
 
-        context.deadlineMillis.foreach(guestInstance.setDeadlineMillis)
-
-        var outcome: InterruptKind = InterruptKind.Panic
-        var running = true
-        while running do
-          guestStep(guestInstance) match
-            case Right(InterruptKind.Step) => // step tracing only; continue
-            case Right(interrupt) =>
-              outcome = interrupt
-              running = false
-            case Left(err) => throw new PvmRunner.InternalFailure(err)
-
-        val guestGasLeft = math.max(0L, guestInstance.gas)
+        val guestGasLeft = math.max(0L, run.gas)
         LittleEndian.put(block, 0, guestGasLeft, 8)
         var i = 0
         while i < 13 do
-          LittleEndian.put(block, 8 + 8 * i, guestInstance.regs(i), 8)
+          LittleEndian.put(block, 8 + 8 * i, run.regs(i), 8)
           i += 1
         writeMemory(instance, o, block)
 
-        val pcNow: Long = outcome match
-          case InterruptKind.Ecalli(_) =>
-            guestInstance.nextProgramCounter
-              .map(_.value.toLong)
-              .getOrElse(guest.pc)
-          case InterruptKind.Panic | InterruptKind.Finished => 0L
-          case _ =>
-            guestInstance.programCounter
-              .map(_.value.toLong)
-              .getOrElse(guest.pc)
-        guest.pc = pcNow
-        guest.gasChargedFlag = guestInstance.gasChargedFlag
+        guest.pc = run.pc
+        guest.gasChargedFlag = run.gasChargedFlag
         instance.setGas(instance.gas + guestGasLeft)
 
         outcome match
@@ -465,6 +445,35 @@ class RefineHostCalls(
           case _ =>
             setReg(instance, 7, HostCallResult.HALT)
 
+  private def interpret(guest: InnerPvm, regs: Array[Long], gas: Long): NativeRunner.GuestRun =
+    val guestInstance = GuestInstance.create(
+      guest.module,
+      guest.ram,
+      regs,
+      gas,
+      ProgramCounter(guest.pc.toInt),
+      gasChargedFlag = guest.gasChargedFlag
+    )
+    context.deadlineMillis.foreach(guestInstance.setDeadlineMillis)
+
+    var outcome: InterruptKind = InterruptKind.Panic
+    var running = true
+    while running do
+      guestStep(guestInstance) match
+        case Right(InterruptKind.Step) => // step tracing only; continue
+        case Right(interrupt) =>
+          outcome = interrupt
+          running = false
+        case Left(err) => throw new PvmRunner.InternalFailure(err)
+
+    val pcNow: Long = outcome match
+      case InterruptKind.Ecalli(_) =>
+        guestInstance.nextProgramCounter.map(_.value.toLong).getOrElse(guest.pc)
+      case InterruptKind.Panic | InterruptKind.Finished => 0L
+      case _ =>
+        guestInstance.programCounter.map(_.value.toLong).getOrElse(guest.pc)
+    NativeRunner.GuestRun(outcome, Array.tabulate(13)(guestInstance.regs(_)), guestInstance.gas, pcNow, guestInstance.gasChargedFlag)
+
   // ===========================================================================
   // expunge (13) — Omega_X
   // ===========================================================================
@@ -479,6 +488,8 @@ class RefineHostCalls(
         context.innerPvms.remove(n.toLong)
 
 object RefineHostCalls:
+  val DefaultGuestStep: GuestInstance => Either[PvmInternalError, InterruptKind] = _.run()
+
   /** `-Djam.trace.refine=true`: print every refine host call with its argument registers and result. Diagnostics. */
   val trace: Boolean = PvmRunner.trace
 
