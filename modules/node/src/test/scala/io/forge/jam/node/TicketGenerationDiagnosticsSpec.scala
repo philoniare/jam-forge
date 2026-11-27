@@ -53,7 +53,7 @@ class TicketGenerationDiagnosticsSpec extends AnyFunSuite with Matchers with Loo
       val egress = Executors.newSingleThreadExecutor()
       try
         val tickets = new TicketService(a.chain, a.pools, a.distribution, egress, telemetry = Some(tap.telemetry))
-        val wrong = ValidatorKeySet.withBandersnatchSeed(devKeys(0), Array.fill[Byte](32)(7))
+        val wrong = ValidatorKeySet.withBandersnatchSeed(devKeys(0), Array.fill[Byte](32)(7)).copy(bandersnatchHeld = "0badc0de v0.seed")
         tickets.setValidatorKeys(Seq(wrong))
         tickets.maybeGenerate(1L)
         a.pools.ticketCount shouldBe 0
@@ -62,6 +62,9 @@ class TicketGenerationDiagnosticsSpec extends AnyFunSuite with Matchers with Loo
         val why = tap.reason(tap.of(81).head)
         why should include("Bandersnatch")
         why should include("validator 0")
+        why should include(devKeys(0).bandersnatchPublic.take(4).map(b => f"$b%02x").mkString)
+        why should include("0badc0de v0.seed")
+        why.getBytes("UTF-8").length should be <= 128
       finally
         egress.shutdownNow(): Unit
         tap.close()

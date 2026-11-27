@@ -283,7 +283,11 @@ final class TicketService(
           )
           telemetry.foreach { t =>
             val ref = t.generatingTickets(epoch + 1)
-            t.ticketGenerationFailed(ref, s"Bandersnatch key of validator $index is not its on-chain one: no tickets")
+            val needs = JamBytes.toHex(pending(index).bandersnatch.bytes).stripPrefix("0x").take(8)
+            val has =
+              if keys.bandersnatchHeld.nonEmpty then keys.bandersnatchHeld
+              else JamBytes.toHex(keys.bandersnatchKey.bytes).stripPrefix("0x").take(8)
+            t.ticketGenerationFailed(ref, s"validator $index has no secret for its Bandersnatch key $needs: no tickets. Has $has")
           }
         case _ => ()
     }

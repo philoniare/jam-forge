@@ -135,7 +135,8 @@ docker run -d --name jam-forge --network host -v jam-forge-data:/data \
   Seeds are 32-byte `*.seed` files. `gen-keys [name]` writes a new one (and never replaces an existing file);
   `list-keys` prints each seed's peer ID and Bandersnatch key; `run --key-seed-file <file>` names more.
 - `run --peer-id` makes the node the validator whose seed has that peer ID (its Ed25519 key is the network
-  identity); `--dev-validator i` runs dev validator i with its address and port from the genesis state (the dev
+  identity). Its Bandersnatch key is the one the chain registers for it, from whichever seed gives it, as in
+  polkajam: a validator's two keys may come from two seed files. `--dev-validator i` runs dev validator i with its address and port from the genesis state (the dev
   keys are public; on a chain whose validator i has another key the node says so and runs, as polkajam does); `--mode
   ordinary` follows the chain with the identity `--peer-id` names. Without `--peer-id` an ordinary node takes a new
   identity each start. Proxy mode (`--mode proxy`, `--proxy`) is not implemented.
@@ -154,7 +155,8 @@ docker run -d --name jam-forge --network host -v jam-forge-data:/data \
 - Also: `--sync-from <header hash>[:<set id>]` joins at a trusted checkpoint; `--prune-history`;
   `--metrics-port 9615 --metrics-listen-ip 0.0.0.0` serves Prometheus metrics at `/metrics` and a health check at
   `/health` (loopback only without `--metrics-listen-ip`); `--bandersnatch-key` and `--ed25519-key` (32-byte JIP-5
-  secret seeds, as hex or a file) replace those keys of the validator's seed. `jam-node run --help` lists them all.
+  secret seeds, as hex or a file) give those keys of the validator in place of its seed's; a `--bandersnatch-key`
+  that does not give the validator's on-chain key is ignored when a seed does. `jam-node run --help` lists them all.
 - The image runs as uid/gid 10001, which owns `/data`. A volume an earlier image (which ran as root) wrote must be
   handed over once: `docker run --rm -u 0 -v jam-forge-data:/data --entrypoint chown <image> -R 10001:10001 /data`.
 

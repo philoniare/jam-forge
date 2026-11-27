@@ -149,17 +149,16 @@ object Main extends LazyLogging:
         s"--${ownKeys.head} replaces a key of the validator's seed: give --peer-id or --dev-validator, or keep the seed in " +
           s"$keysDir (gen-keys)"
       )
-    val authorKeys = baseKeys
-      .map(keys =>
-        opts.get("bandersnatch-key").fold(keys)(k => ValidatorKeySet.withBandersnatchSeed(keys, readKey("bandersnatch-key", k)))
-      )
-      .map(keys => opts.get("ed25519-key").fold(keys)(k => ValidatorKeySet.withEd25519Seed(keys, readKey("ed25519-key", k))))
-    for keys <- authorKeys; seed <- peerSeed if !java.util.Arrays.equals(keys.ed25519Public, seed.keys.ed25519Public) do
+    val bandersnatchOption =
+      opts.get("bandersnatch-key").filter(_ => baseKeys.isDefined).map(k => ValidatorKeySet.Secret(readKey("bandersnatch-key", k), "--bandersnatch-key"))
+    val identityKeys =
+      baseKeys.map(keys => opts.get("ed25519-key").fold(keys)(k => ValidatorKeySet.withEd25519Seed(keys, readKey("ed25519-key", k))))
+    for keys <- identityKeys; seed <- peerSeed if !java.util.Arrays.equals(keys.ed25519Public, seed.keys.ed25519Public) do
       fail("--ed25519-key gives the validator another network identity than --peer-id names: give one of them")
-    if validator && authorKeys.isEmpty then
+    if validator && identityKeys.isEmpty then
       logger.warn(s"validator mode, but no validator key: no seed in $keysDir and none named; running without duties")
 
-    val identitySeed = authorKeys.map(_.ed25519Secret).orElse(peerSeed.map(_.keys.ed25519Secret))
+    val identitySeed = identityKeys.map(_.ed25519Secret).orElse(peerSeed.map(_.keys.ed25519Secret))
     val devEndpoint = devIndex.map(i =>
       loadedSpec.genesisValidatorEndpoints.lift(i).flatten.getOrElse(fail(s"--dev-validator $i: the genesis state names no endpoint for it"))
     )
@@ -195,6 +194,18 @@ object Main extends LazyLogging:
     val node = new JamNode(spec, config).start()
     running.set(node)
     logger.info(s"This node is ${node.identity.altName}@${externalIp.getOrElse(InetAddress.getLoopbackAddress).getHostAddress}:${node.listenPort}")
+    val authorKeys = identityKeys.map { keys =>
+      val sets = node.chain.stateView().validators
+      val onChain = (sets.queue ++ sets.nextEpoch ++ sets.current ++ sets.previous).map(v => v.ed25519 -> v.bandersnatch)
+      val files = seeds.map(s => ValidatorKeySet.Secret(s.secret, s.path.getFileName.toString))
+      val resolved = ValidatorKeySet.resolveBandersnatch(keys, onChain, files, bandersnatchOption)
+      logger.info(
+        s"Validator keys: Ed25519 ${JamBytes.toHex(resolved.keys.ed25519Public)}, Bandersnatch " +
+          s"${JamBytes.toHex(resolved.keys.bandersnatchPublic)}${if resolved.matched then " (as on chain)" else ""}"
+      )
+      resolved.notes.foreach(n => if resolved.missing then logger.error(n) else logger.warn(n))
+      resolved.keys
+    }
     authorKeys.foreach { k =>
       node.enableAuthoring(Seq(k))
       node.enableGuaranteeing(Seq(k))
@@ -620,7 +631,7 @@ object Main extends LazyLogging:
       |                                     the peers counted are the bootnodes and the current validators
       |      --announced-finality           Finalize what a quorum of the current validators announce as final
       |      --bandersnatch-key <KEY>       The validator's Bandersnatch secret seed (JIP-5), as hex or a file holding
-      |                                     it, in place of its seed's
+      |                                     it, for a validator none of whose seed files gives its on-chain key
       |      --ed25519-key <KEY>            The validator's Ed25519 secret seed, likewise; also its peer ID
       |      --beefy                        Run the BEEFY prototype
       |      --submit-port <PORT>           Loopback preimage endpoint (POST /preimage/<service-id>)
