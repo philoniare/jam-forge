@@ -65,6 +65,16 @@ private[node] final class PeerConnectivity(
 
   private val connectedAt = new java.util.concurrent.ConcurrentHashMap[PeerConnection, java.lang.Long]()
 
+  /** Connections this node dialed are given traffic when they fall silent, or the peer's idle timeout closes them:
+    * a block request for the finalized block, which any peer answers.
+    */
+  private val keepAlive = new io.forge.jam.network.KeepAlive(conn =>
+    dialer.execute { () =>
+      try sync.fetchBlocks(conn, chain.finalized.hash, 1): Unit
+      catch case e: Exception => logger.debug(s"keep-alive request failed: ${e.getMessage}")
+    }
+  )
+
   private val redialTask = new Periodic("peer redial")
   private val upkeepTask = new Periodic("connectivity upkeep")
 
@@ -267,6 +277,7 @@ private[node] final class PeerConnectivity(
       else if gridRestrictsAnnouncements && !wanted && open && c.initiator then sync.closeAnnouncementStream(c)
     }
     connectedAt.keySet.removeIf(c => !c.isOpen)
+    keepAlive.tick(distribution.openConnections)
 
   private def watchValidatorConnectivity(now: Long): Unit =
     val own = ownKeys

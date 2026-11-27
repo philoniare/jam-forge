@@ -433,9 +433,27 @@ final class JamnpConnection private[network] (
     private[network] val quic: QuicChannel,
     val initiator: Boolean,
     streamIdleTimeoutMillis: Long = JamnpConfig.DefaultStreamIdleTimeoutMillis,
-    outbound: OutboundLimits = OutboundLimits()
+    outbound: OutboundLimits = OutboundLimits(),
+    ownIdleTimeoutMillis: Long = 0L
 ) extends PeerConnection:
   private val flow = JamnpNode.outboundFlow(quic, outbound)
+
+  /** The lower of our idle timeout and the one the peer gave in its transport parameters (0 is none). */
+  override lazy val idleTimeoutMillis: Long =
+    val peers = Option(quic.peerTransportParameters()).fold(0L)(_.maxIdleTimeout())
+    List(ownIdleTimeoutMillis, peers).filter(_ > 0).minOption.getOrElse(0L)
+
+  @volatile private var lastTrafficCount: Long = 0L
+
+  /** QUIC packets sent and received. Asked of the connection's event loop, so not to be called from it; the last
+    * count known when the connection cannot say (it has closed).
+    */
+  override def trafficCount: Long =
+    try
+      val stats = quic.collectStats().get(1, TimeUnit.SECONDS)
+      lastTrafficCount = stats.sent() + stats.recv()
+    catch case _: Exception => ()
+    lastTrafficCount
 
   val openedAtMillis: Long = System.currentTimeMillis()
 
@@ -572,7 +590,8 @@ final class JamnpNode(
           ctx.channel().asInstanceOf[QuicChannel],
           initiator = false,
           config.streamIdleTimeoutMillis,
-          config.outbound
+          config.outbound,
+          config.maxIdleTimeoutMillis
         )
       if !admitInbound(conn) then
         ctx.close()
@@ -797,7 +816,7 @@ final class JamnpNode(
               channel.close()
             else
               val quic = f.getNow
-              val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis, config.outbound)
+              val conn = new JamnpConnection(quic, initiator = true, config.streamIdleTimeoutMillis, config.outbound, config.maxIdleTimeoutMillis)
               countInbound(quic)
               quic.attr(ConnectionKey).set(conn)
               connections.add(conn)

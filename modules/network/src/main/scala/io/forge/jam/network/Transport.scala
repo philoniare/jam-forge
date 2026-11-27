@@ -54,6 +54,14 @@ trait PeerConnection:
   def openStreamCount: Int
   def remoteAddress: Option[java.net.SocketAddress]
 
+  /** Packets sent and received so far. A count that stands still means the connection is silent. */
+  def trafficCount: Long = 0L
+
+  /** How long the connection may be silent before one of its ends closes it: the lower of the two sides' idle
+    * timeouts. 0 when it is never closed for silence.
+    */
+  def idleTimeoutMillis: Long = 0L
+
 /** Handles the streams of one kind that peers open, whatever carries them. */
 trait PeerStreamHandler:
   def onStream(connection: PeerConnection, stream: MessageStream): Unit

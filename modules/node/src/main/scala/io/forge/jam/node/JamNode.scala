@@ -381,7 +381,7 @@ final class JamNode(
       shards,
       shardStore,
       scheduleAssurances,
-      guarantorsFirst = guarantorIndex.first,
+      guarantorsOf = guarantorIndex.guarantorsOf,
       threads = threads
     )
     assurer = Some(a)

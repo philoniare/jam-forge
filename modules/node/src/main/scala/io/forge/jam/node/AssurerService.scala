@@ -25,8 +25,8 @@ final class AssurerService(
       * slot when the node keeps slot time, at once otherwise.
       */
     scheduleDistribution: (() => Unit) => Unit = f => f(),
-    guarantorsFirst: (Hash, List[io.forge.jam.network.PeerConnection]) => List[io.forge.jam.network.PeerConnection] =
-      GuarantorIndex.unordered,
+    /** The Ed25519 keys of the guarantors of the report with this erasure-root; empty when not known. */
+    guarantorsOf: Hash => Set[io.forge.jam.core.primitives.Ed25519PublicKey] = _ => Set.empty,
     /** Owner of this service's threads: the node's, or its own when made alone. */
     threads: NodeThreads = new NodeThreads,
     retryMillis: Long = AssurerService.RetryMillis
@@ -184,7 +184,11 @@ final class AssurerService(
   private def acquireCustody(erasureRoot: Hash, shardIndex: Int, peers: List[io.forge.jam.network.PeerConnection]): Boolean =
     if shardStore.has(erasureRoot, shardIndex) then true
     else
-      shards.firstFrom(guarantorsFirst(erasureRoot, peers))(shards.fetchShards(_, erasureRoot, shardIndex, AssurerService.CustodyTimeoutMillis)) match
+      val keys = guarantorsOf(erasureRoot)
+      val guarantors = peers.filter(c => keys.contains(c.peerPublicKey))
+      def fetch(conn: io.forge.jam.network.PeerConnection) =
+        shards.fetchShards(conn, erasureRoot, shardIndex, AssurerService.CustodyTimeoutMillis)
+      (if guarantors.nonEmpty then shards.firstFrom(guarantors, width = 1)(fetch) else shards.firstFrom(peers)(fetch)) match
         case Some(s) =>
           shardStore.put(erasureRoot, shardIndex, s.encode)
           true
