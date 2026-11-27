@@ -1,6 +1,7 @@
 package io.forge.jam.protocol.pvmhost
 
 import io.forge.jam.core.JamBytes
+import io.forge.jam.core.primitives.Hash
 import io.forge.jam.pvm.engine.{InterpretedModule, ModuleCache}
 import io.forge.jam.pvm.program.{Deblob, ProgramBlob}
 
@@ -21,6 +22,14 @@ object ServiceCode:
     */
   def module(codeHash: JamBytes, code: Array[Byte]): Option[InterpretedModule] =
     modules.getOrCreate(codeHash, code)(parseBlob(code).flatMap(blob => InterpretedModule.create(blob).toOption))
+
+  def module(codeHash: JamBytes, code: Array[Byte], storedHash: Hash): Option[InterpretedModule] =
+    modules.getOrCreate(codeHash, code, ModuleCache.Source.of(storedHash.bytes.toArray))(
+      parseBlob(code).flatMap(blob => InterpretedModule.create(blob).toOption)
+    )
+
+  def storedModule(codeHash: JamBytes, storedHash: Hash): Option[InterpretedModule] =
+    modules.lookupBySource(codeHash, ModuleCache.Source.of(storedHash.bytes.toArray))
 
   def extractCodeBlob(preimage: Array[Byte]): Option[Array[Byte]] =
     if preimage.isEmpty then return None

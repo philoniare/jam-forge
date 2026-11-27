@@ -44,20 +44,26 @@ class AccumulationExecutor(
     val acc = account.get
     val codeHash = acc.info.codeHash
 
-    val preimage = acc.preimages
-      .get(Hash(codeHash.bytes.toArray))
-      .orElse(readOwnPreimage(partialState, serviceId, codeHash.bytes.toArray, storageView))
-
-    if preimage.isEmpty then
-      return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
-
-    // The process-wide module cache only returns a module built from identical code bytes, so the blob is read
-    // without an extra copy of the preimage.
-    val code = extractCodeBlob(preimage.get.toArrayUnsafe)
-    if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
-    then return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
+    val codeKey = JamBytes(codeHash.bytes.toArray)
+    val held = acc.preimages.get(Hash(codeHash.bytes.toArray))
+    val storedHash =
+      if held.isDefined then None
+      else storageView.flatMap(_.storedValueHash(StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, codeKey)))
+    val cached = storedHash.flatMap(h => StageTimers.time("acc/service-module-stored")(ServiceCode.storedModule(codeKey, h)))
     val module: Option[InterpretedModule] =
-      StageTimers.time("acc/service-module")(getOrCompileModule(code.get, JamBytes(codeHash.bytes.toArray)))
+      if cached.isDefined then cached
+      else
+        val preimage = held.orElse(readOwnPreimage(partialState, serviceId, codeHash.bytes.toArray, storageView))
+        if preimage.isEmpty then
+          return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
+        // The process-wide module cache only returns a module built from identical code bytes, so the blob is read
+        // without an extra copy of the preimage.
+        val code = extractCodeBlob(preimage.get.toArrayUnsafe)
+        if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
+        then return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
+        StageTimers.time("acc/service-module")(storedHash match
+          case Some(h) => ServiceCode.module(codeKey, code.get, h)
+          case None    => getOrCompileModule(code.get, codeKey))
     val compileNanos = elapsed
 
     // Apply incoming transfer balances before execution

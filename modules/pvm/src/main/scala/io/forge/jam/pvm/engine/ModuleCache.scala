@@ -18,6 +18,7 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue, maxN
   private final class Entry(val code: Array[Byte], val module: InterpretedModule):
     def bytes: Long = code.length.toLong + module.retainedBytes
     def nativeBytes: Long = module.nativeBytes
+    val sources: java.util.Set[ModuleCache.Source] = java.util.concurrent.ConcurrentHashMap.newKeySet[ModuleCache.Source]()
 
   // Access-ordered: iteration starts at the least recently used entry. Guarded by its own monitor.
   private val entries = new java.util.LinkedHashMap[K, Entry](16, 0.75f, true)
@@ -57,8 +58,10 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue, maxN
   /** The cached module for `key` and `code`, or the result of `create`, cached when defined. `create` runs outside
     * the lock; if two threads miss together, the first module stored wins and both return it.
     */
-  def getOrCreate(key: K, code: Array[Byte])(create: => Option[InterpretedModule]): Option[InterpretedModule] =
-    lookup(key, code).orElse {
+  def getOrCreate(key: K, code: Array[Byte], source: ModuleCache.Source | Null = null)(
+      create: => Option[InterpretedModule]
+  ): Option[InterpretedModule] =
+    val found = lookup(key, code).orElse {
       create.map { module =>
         entries.synchronized {
           val raced = entries.get(key)
@@ -70,6 +73,19 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue, maxN
         }
       }
     }
+    if source != null && found.isDefined then
+      val entry = entries.synchronized(entries.get(key))
+      if entry != null && (entry.module eq found.get) then entry.sources.add(source)
+    found
+
+  def lookupBySource(key: K, source: ModuleCache.Source): Option[InterpretedModule] =
+    val entry = entries.synchronized {
+      val e = entries.get(key)
+      lookups += 1
+      if (lookups & (ModuleCache.ReweighEvery - 1)) == 0 then trim()
+      e
+    }
+    if entry != null && entry.sources.contains(source) then Some(entry.module) else None
 
   def size: Int = entries.synchronized(entries.size())
 
@@ -79,5 +95,10 @@ final class ModuleCache[K](maxEntries: Int, maxBytes: Long = Long.MaxValue, maxN
   def retainedNativeBytes: Long = entries.synchronized(totalNativeBytes())
 
 object ModuleCache:
+  final case class Source(bytes: java.nio.ByteBuffer)
+
+  object Source:
+    def of(bytes: Array[Byte]): Source = Source(java.nio.ByteBuffer.wrap(bytes.clone()).asReadOnlyBuffer())
+
   /** A power of two: every this many lookups the entries are weighed again, as running modules grow. */
   private final val ReweighEvery = 256

@@ -35,6 +35,9 @@ final class ServiceStorageView private (
   def getByStateKey(stateKey: JamBytes): Option[JamBytes] =
     readStaged(pending, stateKey)
 
+  def storedValueHash(stateKey: JamBytes): Option[io.forge.jam.core.primitives.Hash] =
+    if pending.contains(stateKey) then None else trie.valueHash(stateKey)
+
   /**
    * Reads `stateKey` as it was when this view was forked, ignoring this view's own writes since. Every service of an
    * accpar batch starts from the same state, the posterior of the previous batch, so this is what a service sees
