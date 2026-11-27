@@ -41,7 +41,7 @@ class BatchImportSpec extends AnyFunSuite with Matchers with LoopbackFixture:
     n.chain.onImported((head, _) => { seen.add((head.slot, n.chain.best.slot)); () })
     seen
 
-  test("a batch is one commit: one WAL sync and one metadata write for all its blocks") {
+  test("a batch is one commit: one metadata write for all its blocks, and no WAL sync (an import commit is not synced)") {
     withNodes(2, "batch-import") { nodes =>
       val Seq(a, b) = nodes.toSeq
       val blocks = authorOn(a, 1 to 6)
@@ -52,7 +52,7 @@ class BatchImportSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       val results = b.chain.importBatch(blocks)
       results.map(_.map(_.slot)) shouldBe (1L to 6L).map(Right(_))
       b.chain.best shouldBe a.chain.best
-      commits(b) shouldBe (syncs + 1, writes + 1)
+      commits(b) shouldBe (syncs, writes + 1)
       b.chain.timings.snapshot.blockImport.count shouldBe imported + 6
       blocks.foreach(bytes => b.chain.postStateRoot(hashOf(a, bytes)) shouldBe a.chain.postStateRoot(hashOf(a, bytes)))
 
@@ -70,7 +70,7 @@ class BatchImportSpec extends AnyFunSuite with Matchers with LoopbackFixture:
       b.chain.importBatch(Vector(blocks(0))) shouldBe Vector(Left(ChainError.AlreadyImported))
       b.chain.importBatch(Vector(blocks(1))).map(_.map(_.slot)) shouldBe Vector(Right(2L))
       b.chain.importBatch(Vector.empty) shouldBe Vector.empty
-      commits(b)._1 should be >= syncs + 2
+      commits(b)._1 shouldBe syncs
       commits(b)._2 should be >= writes + 2
     }
   }

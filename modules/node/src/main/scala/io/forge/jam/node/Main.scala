@@ -19,7 +19,13 @@ object Main extends LazyLogging:
       case e: Throwable =>
         System.err.println(s"jam-node failed to start: $e")
         e.printStackTrace()
+        stopLogging()
         sys.exit(1)
+
+  private def stopLogging(): Unit =
+    org.slf4j.LoggerFactory.getILoggerFactory match
+      case context: ch.qos.logback.classic.LoggerContext => context.stop()
+      case _                                             => ()
 
   private def installProcessSettings(): Unit =
     PvmSettings.process.install(PvmSettings.process.fromSystemProperties)
@@ -96,6 +102,7 @@ object Main extends LazyLogging:
         () =>
           Option(running.get).foreach(_.shutdown())
           temporaryData.foreach(deleteTree)
+          stopLogging()
         ,
         "jam-shutdown"
       )
@@ -666,8 +673,10 @@ object Main extends LazyLogging:
 
   private def usageError(msg: String): Nothing =
     System.err.println(s"error: $msg")
+    stopLogging()
     sys.exit(2)
 
   private def fail(msg: String): Nothing =
     System.err.println(msg)
+    stopLogging()
     sys.exit(1)

@@ -39,7 +39,7 @@ final class BlockStore private (
     * one. Blocks themselves ([[putBlock]], [[deleteBlock]]) are written at once: a stored block without metadata is
     * an unvalidated side-branch block, which restore handles.
     */
-  def atomically[A](beforeCommit: () => Unit = () => ())(f: => A): A =
+  def atomically[A](beforeCommit: () => Unit = () => (), sync: () => Boolean = () => true)(f: => A): A =
     if pending.get() != null then f
     else
       val writes = new java.util.LinkedHashMap[String, Option[Array[Byte]]]()
@@ -48,6 +48,7 @@ final class BlockStore private (
         val result = f
         if !writes.isEmpty then
           beforeCommit()
+          val synced = sync()
           val batch = new WriteBatch()
           try
             writes.forEach { (name, value) =>
@@ -56,7 +57,7 @@ final class BlockStore private (
                 case Some(v) => batch.put(metaCf, k, v)
                 case None    => batch.delete(metaCf, k)
             }
-            db.write(syncWriteOptions, batch)
+            db.write(if synced then syncWriteOptions else writeOptions, batch)
           finally batch.close()
         result
       finally pending.remove()

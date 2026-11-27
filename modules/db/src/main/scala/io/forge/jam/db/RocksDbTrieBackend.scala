@@ -174,7 +174,7 @@ final class RocksDbTrieBackend private (
 
   def schedulePrune(label: Hash, height: Long): Unit =
     db.put(journalCf, pruneMark(label), encodeBE8(height))
-    flushNow() // the only record of the request: it must outlive a process crash
+    syncWal()
 
   def scheduledPrunes: List[(Hash, Long)] =
     val prefix = RocksDbTrieBackend.PruneMarkPrefix
@@ -633,6 +633,12 @@ final class RocksDbTrieBackend private (
   def syncWal(): Unit =
     unflushed.set(0L)
     db.flushWal(true)
+
+  def flushWal(): Unit = flushNow()
+
+  private[jam] def dropNodeForTesting(hash: Hash): Unit =
+    db.delete(nodesCf, key(hash))
+    nodeCache.remove(hash)
 
   def unflushedWalBytes: Long = unflushed.get
 

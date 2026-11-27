@@ -95,11 +95,11 @@ final case class NodeMetrics(
       "Time to execute and store one block on the best chain, without the commit that makes it durable.",
       timings.blockImport
     )
-    NodeMetrics.histogram(out, "jam_trie_wal_sync_seconds", "Time of the state trie's WAL sync, one per commit.", timings.walSync)
+    NodeMetrics.histogram(out, "jam_trie_wal_sync_seconds", "Time of the state trie's WAL sync, one per synced commit (import commits sync only when finality moves or 10 s after the last).", timings.walSync)
     NodeMetrics.histogram(
       out,
       "jam_chain_meta_write_seconds",
-      "Time of the synced chain-metadata write, one per commit.",
+      "Time of the chain-metadata write, one per commit, synced or not.",
       timings.metaWrite
     )
     metric("jam_sync_answers_total", "counter", "Block requests (CE 128) answered by a peer since start.", sync.answers)

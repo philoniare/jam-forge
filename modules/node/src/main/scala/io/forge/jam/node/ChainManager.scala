@@ -21,6 +21,8 @@ import scala.jdk.CollectionConverters.*
 object ChainManager:
   val KeptAccumulateCosts: Int = 64
 
+  val SyncIntervalNanos: Long = 10_000_000_000L
+
   /** Side-branch blocks stored without a seal check, in all. They are an honest fork's blocks only when the fork
     * is more than an epoch deep and not finalized, which a node can then still follow for this many blocks past the
     * point where seals stop being checkable.
@@ -135,20 +137,35 @@ final class ChainManager(
       commitDepth += 1
       try
         val before = published._2
+        if outermost then importOnly = false
         val started = System.nanoTime()
         var bodyNanos = 0L
         var syncNanos = -1L
-        val result = blockStore.atomically { () =>
-          val syncing = System.nanoTime()
-          trieBackend.syncWal()
-          syncNanos = System.nanoTime() - syncing
-          faultBeforeMetaCommit()
-        } {
-          try f
+        var synced = true
+        var metaWritten = false
+        val result = blockStore.atomically(
+          beforeCommit = { () =>
+            metaWritten = true
+            val syncing = System.nanoTime()
+            synced = !importOnly || storedFinalized.hash != before.hash ||
+              syncing - lastSyncNanos >= syncIntervalNanos
+            if synced then
+              trieBackend.syncWal()
+              lastSyncNanos = syncing
+            else trieBackend.flushWal()
+            syncNanos = System.nanoTime() - syncing
+            faultBeforeMetaCommit()
+          },
+          sync = () => synced
+        ) {
+          try
+            val r = f
+            if outermost then storeBufferedState()
+            r
           finally bodyNanos = System.nanoTime() - started
         }
-        if outermost && syncNanos >= 0 then
-          timings.walSync.observeNanos(syncNanos)
+        if outermost && metaWritten then
+          if synced then timings.walSync.observeNanos(syncNanos)
           timings.metaWrite.observeNanos(math.max(0L, System.nanoTime() - started - bodyNanos - syncNanos))
         if outermost then
           publishHeads()
@@ -158,6 +175,8 @@ final class ChainManager(
       catch
         case t: Throwable if outermost =>
           afterCommit.clear()
+          bufferedTip = null
+          stateBuffer.discard()
           recoverFromStore(t)
           publishHeads()
           throw t
@@ -185,6 +204,11 @@ final class ChainManager(
     }
 
   private var commitDepth = 0
+
+  private var importOnly = false
+
+  @volatile private[node] var syncIntervalNanos: Long = ChainManager.SyncIntervalNanos
+  private var lastSyncNanos: Long = System.nanoTime()
 
   private val afterCommit = mutable.ArrayBuffer.empty[() => Unit]
 
@@ -605,6 +629,8 @@ final class ChainManager(
   /** A recorded root need not have its state: a batch far behind the head stores one state for all its blocks. */
   private def stateHeld(root: Hash): Boolean = root == Hash.zero || trieBackend.readNode(root).isDefined
 
+  private[node] def stateStored(root: Hash): Boolean = stateHeld(root)
+
   /** Posterior state root of an executed block, on the best chain or off it. */
   def executedStateRoot(h: Hash): Option[Hash] = executedRoot(h)
 
@@ -771,7 +797,8 @@ final class ChainManager(
             s"the data directory holds the chain with genesis ${genesisHash.toHex}, but the chain spec's genesis is " +
               s"${spec.genesisHeaderHash.toHex}: start the new chain with an empty data directory"
           )
-        loadStoredChain(genesisHash, bestHash, root)
+        val (bestHash1, root1) = if stateHeld(root) then (bestHash, root) else rollBackToStoredState(bestHash)
+        loadStoredChain(genesisHash, bestHash1, root1)
         resumeStatePruning()
         maybeSweepState(now = true)
         if !meta.hasFinalizedRoot then
@@ -780,10 +807,36 @@ final class ChainManager(
           }
         synchronized(publishHeads())
         logger.info(
-          s"restored chain: best=${bestHash.toHex.take(18)} slot=${bestHead.slot} root=${root.toHex.take(18)}"
+          s"restored chain: best=${bestHash1.toHex.take(18)} slot=${bestHead.slot} root=${root1.toHex.take(18)}"
         )
         false
       case None => commit(initializeGenesis(spec))
+
+  private def rollBackToStoredState(bestHash: Hash): (Hash, Hash) =
+    val finalizedHash = blockStore.getHead(BlockStore.FinalizedHead).getOrElse(Hash.zero)
+    val dropped = mutable.ListBuffer.empty[Hash]
+    var h = bestHash
+    var root = blockRoot(h).filter(stateHeld)
+    while root.isEmpty do
+      if h == finalizedHash || h == Hash.zero then
+        throw new IllegalStateException(
+          s"the state of the finalized block ${h.toHex.take(18)} is not stored: the data directory is damaged; " +
+            "start again from an empty one"
+        )
+      dropped += h
+      h = parentOf(h).getOrElse(throw new IllegalStateException(s"block ${h.toHex.take(18)} has no stored header"))
+      root = blockRoot(h).filter(stateHeld)
+    blockStore.atomically() {
+      dropped.foreach(meta.dropBlockRoot)
+      blockStore.setHead(BlockStore.BestHead, h)
+      meta.stateRoot = root.get
+      meta.bestSlot = slotOfHeader(h)
+    }
+    logger.warn(
+      s"the state of the last ${dropped.size} block(s) was not stored (a power loss before it was synced): the " +
+        s"chain goes on from block ${h.toHex.take(18)} slot=${slotOfHeader(h)}, and imports those blocks again"
+    )
+    (h, root.get)
 
   private def initializeGenesis(spec: ChainSpec): Boolean =
         val genesisHash = spec.genesisHeaderHash
@@ -1112,6 +1165,7 @@ final class ChainManager(
     val results =
       try
         commit {
+          importOnly = commitDepth == 1
           val started = System.nanoTime()
           val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
           val remaining = blocks.iterator
@@ -1324,7 +1378,7 @@ final class ChainManager(
   ): Either[ChainError, ChainHead] =
     if !bodyChecked && !bodyMatchesHeader(block) then return Left(ChainError.BodyMismatch)
     if !buffered then storeBufferedState()
-    else if !stateBuffer.buffering then stateBuffer.begin()
+    if !stateBuffer.buffering then stateBuffer.begin()
     val started = System.nanoTime()
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
