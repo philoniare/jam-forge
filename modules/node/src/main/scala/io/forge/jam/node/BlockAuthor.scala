@@ -68,7 +68,7 @@ final class BlockAuthor(
   /** Try to author a block for `slot` on top of the current best head.
     * Returns the block when one of our keys owns the slot and the guard lets it be sealed.
     */
-  def tryAuthor(slot: Long, withDisputes: Boolean = true): Option[Block] =
+  def tryAuthor(slot: Long, withDisputes: Boolean = true, started: Hash => Unit = _ => ()): Option[Block] =
     val best = chain.best
     if slot <= best.slot then return None
     if !guard.mayAuthor(slot) then return None
@@ -76,13 +76,19 @@ final class BlockAuthor(
     val preView = chain.stateViewOf(best)
     if slot <= preView.timeslot then return None
 
+    val slotIndex = (slot % chain.config.epochLength).toInt
+    val inParentEpoch = slot / chain.config.epochLength == preView.timeslot / chain.config.epochLength
+    if inParentEpoch then
+      if sealerOf(preView.gamma.st, slotIndex, BlockAuthor.sealEntropy(preView.entropy.pool)).isEmpty then return None
+      started(best.hash)
+
     // Candidate tickets while the submission window is open: entered for
     // this slot's epoch, ascending id, not already accumulated, only those
     // the accumulator will retain, at most Cmaxblocktickets. A new epoch
     // starts with an empty accumulator and rotates η_1 into η_2
     val phase = (slot % chain.config.epochLength).toInt
     val epoch = slot / chain.config.epochLength
-    val sameEpoch = epoch == preView.timeslot / chain.config.epochLength
+    val sameEpoch = inParentEpoch
     val accumulatedIds = if sameEpoch then preView.gamma.a.map(_.id).toSet else Set.empty
     val ticketEntropy = preView.entropy.pool.lift(if sameEpoch then 2 else 1).getOrElse(Hash.zero)
     val candidateTickets =
@@ -140,24 +146,11 @@ final class BlockAuthor(
           logger.debug(s"safrole rejected slot $slot: $err")
           return None
 
-    val slotIndex = (slot % chain.config.epochLength).toInt
-
     // Posterior sealer entry for the slot.
-    val sealEntropy =
-      if view.entropy.pool.length > 3 then view.entropy.pool(3).bytes
-      else new Array[Byte](32)
-    val (keys, sealVrfInput) = view.gamma.st match
-      case TicketsOrKeys.Keys(sealerKeys) =>
-        ourBandersnatchKeys.get(sealerKeys(slotIndex)) match
-          case Some(ks) => (ks, SigningContext.fallbackSealInputData(sealEntropy))
-          case None     => return None
-      case TicketsOrKeys.Tickets(marks) =>
-        val mark = marks(slotIndex)
-        ownTicket(Hash(mark.id.toArray), sealEntropy) match
-          case None => return None
-          case Some((ks, attempt)) =>
-            if attempt != mark.attempt then return None
-            (ks, SigningContext.safroleTicketInputData(sealEntropy, attempt.toByte))
+    val (keys, sealVrfInput) = sealerOf(view.gamma.st, slotIndex, BlockAuthor.sealEntropy(view.entropy.pool)) match
+      case Some(sealer) => sealer
+      case None         => return None
+    if !inParentEpoch then started(best.hash)
 
     // authorIndex is the position of the sealing key in the active set.
     val authorIndex = view.validators.current.indexWhere(vk =>
@@ -265,7 +258,22 @@ final class BlockAuthor(
     )
     Some(block)
 
+  private def sealerOf(st: TicketsOrKeys, slotIndex: Int, sealEntropy: Array[Byte])
+      : Option[(ValidatorKeySet, Array[Byte])] =
+    st match
+      case TicketsOrKeys.Keys(sealerKeys) =>
+        ourBandersnatchKeys.get(sealerKeys(slotIndex)).map(ks => (ks, SigningContext.fallbackSealInputData(sealEntropy)))
+      case TicketsOrKeys.Tickets(marks) =>
+        val mark = marks(slotIndex)
+        ownTicket(Hash(mark.id.toArray), sealEntropy).collect {
+          case (ks, attempt) if attempt == mark.attempt =>
+            (ks, SigningContext.safroleTicketInputData(sealEntropy, attempt.toByte))
+        }
+
 object BlockAuthor:
+
+  private[node] def sealEntropy(pool: Seq[Hash]): Array[Byte] =
+    if pool.length > 3 then pool(3).bytes else new Array[Byte](32)
 
   /** The disputes extrinsic for a block on the state `prior`: verdicts built from the pooled judgments on reports
     * someone judged invalid, the guarantors of each (from the credentials of the block that included it, resolved

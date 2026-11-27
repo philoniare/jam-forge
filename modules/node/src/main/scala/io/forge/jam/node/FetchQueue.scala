@@ -83,6 +83,7 @@ private[node] final class FetchQueue[P <: AnyRef](
         ordered.find(r => preferred(r.peer))
           .orElse(if othersOut < maxInFlight - keptForPreferred then ordered.headOption else None)
       next.map { found =>
+        found.dequeuedAt = System.nanoTime()
         pending.removeFirstOccurrence(found)
         inFlight.add(found)
         found
@@ -125,6 +126,7 @@ private[node] final class FetchQueue[P <: AnyRef](
         fallback = others.pollFirst()
       if fallback == null || others.isEmpty then alternates.remove(from)
       if fallback != null then
+        fallback.queuedAt = System.nanoTime()
         if first then pending.addFirst(fallback) else pending.addLast(fallback)
       skipped.result()
 
@@ -136,4 +138,7 @@ private[node] object FetchQueue:
       val onDone: () => Unit,
       val ascending: Boolean = false,
       val announced: Boolean = false
-  )
+  ):
+    @volatile var announcedAt: Long = 0L
+    @volatile var queuedAt: Long = 0L
+    @volatile var dequeuedAt: Long = 0L

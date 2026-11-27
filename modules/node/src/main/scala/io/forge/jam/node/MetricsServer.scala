@@ -45,7 +45,8 @@ final case class NodeMetrics(
     slotsBehindBestPeer: Long = 0L,
     timings: ChainTimings.Snapshot = ChainTimings.Snapshot.empty,
     sync: SyncService.Stats = SyncService.Stats.zero,
-    stages: List[(String, Long, Long)] = Nil
+    stages: List[(String, Long, Long)] = Nil,
+    announce: AnnounceTimings.Snapshot = AnnounceTimings.Snapshot.empty
 ):
   def prometheusText: String =
     val out = new StringBuilder
@@ -105,6 +106,30 @@ final case class NodeMetrics(
     metric("jam_sync_blocks_total", "counter", "Blocks imported onto the best chain from block requests since start.", sync.blocks)
     seconds("jam_sync_fetch_seconds_total", "Time block requests spent waiting for their answers.", sync.fetchNanos)
     seconds("jam_sync_import_seconds_total", "Time spent importing the blocks of block-request answers.", sync.importNanos)
+    NodeMetrics.histogram(
+      out,
+      "jam_announce_to_queued_seconds",
+      "From the announcement handler starting on a block announcement to the request for the block joining the fetch queue.",
+      announce.toQueued
+    )
+    NodeMetrics.histogram(
+      out,
+      "jam_announce_queued_seconds",
+      "Time an announced block's request waits in the fetch queue.",
+      announce.queued
+    )
+    NodeMetrics.histogram(
+      out,
+      "jam_announce_dispatch_seconds",
+      "From an announced block's request leaving the fetch queue to a fetch thread starting it.",
+      announce.dispatched
+    )
+    NodeMetrics.histogram(
+      out,
+      "jam_announce_send_seconds",
+      "From a fetch thread starting an announced block's request to the request being written.",
+      announce.sent
+    )
     if stages.nonEmpty then
       out ++= "# HELP jam_stage_seconds_total Time in each stage of block import (with -Djam.stageTimers=true).\n"
       out ++= "# TYPE jam_stage_seconds_total counter\n"

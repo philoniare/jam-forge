@@ -1108,25 +1108,36 @@ final class ChainManager(
     if blocks.isEmpty then return Vector.empty
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
     val sealedSide = mutable.ListBuffer.empty[(Hash, Block)]
-    val results = commit {
-      val started = System.nanoTime()
-      val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
-      val remaining = blocks.iterator
-      val several = blocks.sizeIs > 1
-      var more = true
+    val executed = mutable.ListBuffer.empty[Hash]
+    val results =
       try
-        while more && remaining.hasNext do
-          val blockBytes = remaining.next()
-          outcomes += each(blockBytes, () => importOne(blockBytes, source, events, sealedSide, several, bufferBelowSlot))
-          more = System.nanoTime() - started < budgetNanos
-        storeBufferedState()
-      catch
-        case t: Throwable =>
-          bufferedTip = null
-          stateBuffer.discard()
-          throw t
-      outcomes.result()
-    }
+        commit {
+          val started = System.nanoTime()
+          val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
+          val remaining = blocks.iterator
+          val several = blocks.sizeIs > 1
+          var more = true
+          try
+            while more && remaining.hasNext do
+              val blockBytes = remaining.next()
+              val run = () =>
+                val outcome = importOne(blockBytes, source, events, sealedSide, several, bufferBelowSlot)
+                outcome.foreach { head =>
+                  executedUncommitted.add(head.hash)
+                  executed += head.hash
+                }
+                outcome
+              outcomes += each(blockBytes, run)
+              more = System.nanoTime() - started < budgetNanos
+            storeBufferedState()
+          catch
+            case t: Throwable =>
+              bufferedTip = null
+              stateBuffer.discard()
+              throw t
+          outcomes.result()
+        }
+      finally executed.foreach(executedUncommitted.remove)
     publishImported(events)
     sealedSide.foreach { (hash, block) =>
       sealedSideListeners.forEach { l =>
@@ -1634,6 +1645,11 @@ final class ChainManager(
       None
     )
   }
+
+  private val executedUncommitted = java.util.concurrent.ConcurrentHashMap.newKeySet[Hash]()
+
+  def servable(hash: Hash): Boolean =
+    hasBlock(hash) && (executedUncommitted.contains(hash) || canBeFinalized(hash))
 
   /** Whether stored block `hash` can still be finalized from our view: it
     * is the finalized block, one of its ancestors, or one of its descendants

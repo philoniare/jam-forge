@@ -425,6 +425,9 @@ final class SyncService(
     closedHere.put(old, "superseded by a newer stream")
     old.reset()
 
+  def announceBlock(blockBytes: Array[Byte]): Unit =
+    chain.decodeBlock(blockBytes).foreach(b => announce(chain.headerCodec.encode(b.header)))
+
   /** Announce a newly imported/authored block on all UP 0 streams. */
   def announce(headerBytes: Array[Byte]): Unit =
     val msg = encodeAnnouncement(headerBytes, ourFinal)
@@ -440,6 +443,7 @@ final class SyncService(
 
   /** `headerBytes` holds at least `MinAnnouncedHeaderBytes`, so its parent hash and slot can be read. */
   private def onAnnouncement(conn: PeerConnection, headerBytes: Array[Byte], peerFinal: HashSlot): Unit =
+    val arrived = System.nanoTime()
     peerFinals.put(conn, peerFinal)
     val headerHash = io.forge.jam.core.Hashing.blake2b256(headerBytes)
     val slot = io.forge.jam.core.LittleEndian.get(headerBytes, 96, 4)
@@ -451,7 +455,7 @@ final class SyncService(
       val wanted = if parentKnown then 1 else blocksWanted(Some(slot))
       if wanted > 0 then
         logger.debug(s"announced block ${headerHash.toHex.take(18)} unknown; requesting $wanted block(s)")
-        requestAndImport(conn, headerHash, wanted, announced = true)
+        requestAndImport(conn, headerHash, wanted, announced = true, announcedAt = arrived)
 
   private def onPeerLeaves(conn: PeerConnection, leaves: List[HashSlot], peerFinal: HashSlot): Unit =
     leaves.maxByOption(_.slot).foreach(notePeerBest(conn, _))
@@ -497,7 +501,7 @@ final class SyncService(
               telemetry.foreach(_.blockRequestReceived(receiving, from, ascending, maxBlocks))
               val taken = serving.submit(conn, msg.length.toLong) {
                 try
-                  if !chain.hasBlock(from) || !chain.canBeFinalized(from) then refuse("block not served: unknown or not on a chain that can be finalized")
+                  if !chain.servable(from) then refuse("block not served: unknown or not on a chain that can be finalized")
                   else
                     val max = math.min(maxBlocks, MaxBlocksPerResponse).toInt
                     val blocks =
@@ -549,15 +553,20 @@ final class SyncService(
       maxBlocks: Int = SyncService.MaxBlocksPerRequest,
       onDone: () => Unit = () => (),
       ascending: Boolean = false,
-      announced: Boolean = false
+      announced: Boolean = false,
+      announcedAt: Long = 0L
   ): Unit =
     if held then
       onDone()
       return
     val request = new FetchQueue.Request(conn, from, maxBlocks, onDone, ascending, announced)
+    request.announcedAt = announcedAt
+    request.queuedAt = System.nanoTime()
     val dropped = fetches.offer(request)
     dropped.foreach(_.onDone())
-    if dropped.forall(_ ne request) then schedulePump()
+    if dropped.forall(_ ne request) then
+      if announcedAt != 0L then announceTimings.toQueued.observeNanos(request.queuedAt - announcedAt)
+      schedulePump()
 
   private val refusedBlocks = new java.util.concurrent.atomic.AtomicLong
   private val genesisMismatchSaid = new java.util.concurrent.atomic.AtomicBoolean
@@ -610,6 +619,8 @@ final class SyncService(
 
   def stats: SyncService.Stats = SyncService.Stats(answers.sum, syncedBlocks.sum, fetchNanos.sum, importNanos.sum)
 
+  val announceTimings = new AnnounceTimings
+
   private def schedulePump(): Unit =
     if pumpScheduled.compareAndSet(false, true) then
       try
@@ -628,7 +639,14 @@ final class SyncService(
       // Nothing a fetch throws may end the loop: no later fetch would ever run.
       try
         // An earlier fetch walking back from a descendant may already have brought this block.
-        if request.ascending || !chain.hasBlock(request.from) then fetchExecutor.execute(() => fetchThenImport(request))
+        if request.ascending || !chain.hasBlock(request.from) then
+          if request.announcedAt != 0L then announceTimings.queued.observeNanos(request.dequeuedAt - request.queuedAt)
+          val handed = System.nanoTime()
+          fetchExecutor.execute { () =>
+            val started = System.nanoTime()
+            if request.announcedAt != 0L then announceTimings.dispatched.observeNanos(started - handed)
+            fetchThenImport(request, started)
+          }
         else finish(request, answered = true)
       catch
         case e: Throwable =>
@@ -636,11 +654,19 @@ final class SyncService(
           finish(request, answered = true)
       next = fetches.next()
 
-  private def fetch(conn: PeerConnection, from: Hash, maxBlocks: Int, ascending: Boolean, announced: Boolean)
-      : Option[List[Array[Byte]]] =
+  private def fetch(
+      conn: PeerConnection,
+      from: Hash,
+      maxBlocks: Int,
+      ascending: Boolean,
+      announced: Boolean,
+      startedAt: Long = 0L
+  ): Option[List[Array[Byte]]] =
     val asked = System.nanoTime()
+    val onSent: () => Unit =
+      if startedAt == 0L then () => () else () => announceTimings.sent.observeNanos(System.nanoTime() - startedAt)
     val answer =
-      try exchange(conn, from, maxBlocks, ascending, announced)
+      try exchange(conn, from, maxBlocks, ascending, announced, onSent = onSent)
       catch
         case e: Exception =>
           logger.warn(s"block sync failed: ${e.getMessage}")
@@ -649,7 +675,7 @@ final class SyncService(
     if answer.isDefined then answers.increment()
     answer
 
-  private def fetchThenImport(request: FetchQueue.Request[PeerConnection]): Unit =
+  private def fetchThenImport(request: FetchQueue.Request[PeerConnection], startedAt: Long): Unit =
     val peer = request.peer
     val room = new java.util.concurrent.Semaphore(SyncService.MaxAnswersAhead)
     val continues = new java.util.concurrent.atomic.AtomicBoolean(true)
@@ -660,7 +686,8 @@ final class SyncService(
       finally importNanos.add(System.nanoTime() - importing)
     try
       var from = request.from
-      var answer = fetch(peer, from, request.maxBlocks, request.ascending, request.announced)
+      var answer =
+        fetch(peer, from, request.maxBlocks, request.ascending, request.announced, if request.announcedAt != 0L then startedAt else 0L)
       var more = true
       while more do
         val blocks = answer
@@ -717,7 +744,8 @@ final class SyncService(
       maxBlocks: Int,
       ascending: Boolean,
       announced: Boolean = false,
-      strict: Boolean = false
+      strict: Boolean = false,
+      onSent: () => Unit = () => ()
   ): Option[List[Array[Byte]]] =
     val sending = telemetry.flatMap(_.sendingBlockRequest(conn.peerKey, from, ascending, maxBlocks.toLong))
     // The response is one message; a peer that keeps sending is not buffered without limit.
@@ -729,7 +757,9 @@ final class SyncService(
       () => 20_000,
       maxMessages = if strict then 1 else SyncService.MaxResponseMessages,
       excessFails = strict,
-      onSent = () => telemetry.foreach(_.blockRequestSent(sending))
+      onSent = () =>
+        onSent()
+        telemetry.foreach(_.blockRequestSent(sending))
     ) match
       case Left(failure) =>
         logger.warn(s"block request failed: ${failure.message}")
@@ -774,6 +804,7 @@ final class SyncService(
       val watched = observer.importing(blockBytes)
       val outcome = run()
       observer.imported(watched, outcome)
+      if outcome.isRight then announceBlock(blockBytes)
       outcome
     var remaining = ordered
     while remaining.nonEmpty do
@@ -785,9 +816,6 @@ final class SyncService(
         outcome match
           case Right(_) =>
             imported += 1
-            chain.decodeBlock(blockBytes).foreach { b =>
-              announce(chain.headerCodec.encode(b.header))
-            }
           case Left(err) =>
             if err.isInstanceOf[ChainError.UnknownParent] then unknownParent = true
             err match

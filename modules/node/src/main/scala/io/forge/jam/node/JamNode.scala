@@ -439,8 +439,26 @@ final class JamNode(
     peers.appliedSlotOf(slot / chain.config.epochLength).foreach(applied => tickets.releaseForwards(slot, applied))
     if catchingUp then return None
     author.flatMap { a =>
-      a.tryAuthor(slot).flatMap { block =>
-        val authoring = telemetry.flatMap(_.authoring(slot, block.header.parent))
+      def attempt(withDisputes: Boolean): (Option[io.forge.jam.core.types.block.Block], Option[Telemetry.EventRef]) =
+        var authoring: Option[Telemetry.EventRef] = None
+        var began = false
+        val built =
+          try
+            a.tryAuthor(
+              slot,
+              withDisputes,
+              started = (parent: Hash) =>
+                began = true
+                authoring = telemetry.flatMap(_.authoring(slot, parent))
+            )
+          catch
+            case e: Throwable =>
+              if began then telemetry.foreach(_.authoringFailed(authoring, s"building failed: ${e.getMessage}"))
+              throw e
+        if built.isEmpty && began then telemetry.foreach(_.authoringFailed(authoring, "block not built"))
+        (built, authoring)
+      val (built, authoring) = attempt(withDisputes = true)
+      built.flatMap { block =>
         importAuthored(block, authoring) match
           case Right(head) => Some(head)
           // Only a block the pipeline found invalid says anything about its contents. Losing a race (a peer's block
@@ -449,8 +467,9 @@ final class JamNode(
             // The contents were checked against the state transitions before sealing, so this should not happen.
             authoringGuard.foreach(_.withdraw(slot))
             def retry(): Option[ChainHead] =
-              a.tryAuthor(slot, withDisputes = false).flatMap { b =>
-                importAuthored(b, telemetry.flatMap(_.authoring(slot, b.header.parent))) match
+              val (rebuilt, again) = attempt(withDisputes = false)
+              rebuilt.flatMap { b =>
+                importAuthored(b, again) match
                   case Right(head) => Some(head)
                   case Left(ChainError.InvalidBlock(_, _)) =>
                     authoringGuard.foreach(_.withdraw(slot))
@@ -963,12 +982,15 @@ final class JamNode(
 
   /** Import a locally produced or externally obtained block and announce it. */
   def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainHead] =
-    chain.importBlock(blockBytes).map { head =>
-      chain.decodeBlock(blockBytes).foreach { b =>
-        sync.announce(chain.headerCodec.encode(b.header))
-      }
-      head
-    }
+    chain
+      .importBatch(
+        List(blockBytes),
+        each = (bytes, run) =>
+          val outcome = run()
+          if outcome.isRight then sync.announceBlock(bytes)
+          outcome
+      )
+      .head
 
   /** Run GRANDPA, voting with `keys` when they are in the voter set. Set 0's voters are the validators of the genesis
     * state.
@@ -1063,7 +1085,8 @@ final class JamNode(
       slotsBehindBestPeer = math.max(0L, credibleBestSlots.maxOption.getOrElse(0L) - h.best.slot),
       timings = chain.timings.snapshot,
       sync = sync.stats,
-      stages = io.forge.jam.protocol.pipeline.StageTimers.timings
+      stages = io.forge.jam.protocol.pipeline.StageTimers.timings,
+      announce = sync.announceTimings.snapshot
     )
 
   /** Port of the local submission endpoint, when it runs. */
