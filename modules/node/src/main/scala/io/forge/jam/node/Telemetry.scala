@@ -560,7 +560,8 @@ object Telemetry:
 
   /** JIP-3 Timestamp: microseconds since the start of the JAM Common Era. */
   def timestampMicros(): Long =
-    System.currentTimeMillis() * 1000L - SlotClock.JamCommonEraSeconds * 1000000L
+    val now = java.time.Instant.now()
+    (now.getEpochSecond - SlotClock.JamCommonEraSeconds) * 1000000L + now.getNano / 1000L
 
   def peerAddress(address: Option[java.net.SocketAddress]): Array[Byte] =
     address match
