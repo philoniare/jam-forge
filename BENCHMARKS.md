@@ -14,6 +14,7 @@ verification and erasure coding. Each suite is a plain `main` under `src/test/..
 | Block import, before/after | `ImportBench` (replay with root check; heap soak) | `sbt benchImport` (see below) |
 | Block import against state size | `ServiceScaleBench` (a trace replayed on a state with N extra service accounts) | `sbt "protocol/Test/runMain io.forge.jam.protocol.benchmark.ServiceScaleBench --services=0,10000,100000"` |
 | Node heap soak | `NodeSoak` (two nodes over loopback JAMNP) | `sbt soakNodes` (see below) |
+| Authoring and import at full size | `AuthorImportBench` (a node authoring, importing and receiving the contents of full blocks) | `sbt benchAuthorImport` (see below) |
 | Trie, large batches | `TrieBatchBench` (in-memory backend: populate 1M keys, insert 1M more as one batch and in 10k batches; `--keys=N`, `--reps=R`) | `sbt "core/Test/runMain io.forge.jam.core.benchmark.TrieBatchBench"` |
 | Hashing | `Blake2bBench` | `sbt "core/Test/runMain io.forge.jam.core.benchmark.Blake2bBench"` |
 | PVM heap growth (`grow_heap`) | `GrowHeapBench` | `sbt benchGrowHeap` |
@@ -283,3 +284,119 @@ M-series Mac.
 | Peers asked for a shard, connection order / guarantors first | 277 / 4.0 | 277 / 3.9 |
 | Shard lookup median, connection order / guarantors first (in memory: no network round trips) | 14 ms / 0.30 ms | 18.5 ms / 0.25 ms |
 | Ordering 1,022 peers: nobody faulted / 10 faulted / all faulted | 1.9 / 106 / 226 us a call | 2.6 / 95 / 252 us a call |
+
+## Authoring and import at full size (`AuthorImportBench`)
+
+What one validator does with a full block, through `ChainManager` on RocksDB: receive its guarantees and assurances
+from peers, author it from the pools at a slot of its own, import it, and import a peer's.
+
+```
+sbt "benchGenTrace --spec=full --blocks=14 --busy-cores=341 --out=target/bench/full-busy-trace"
+sbt benchAuthorImport
+sbt "benchAuthorImport --ab=verified"     # one change off and on, in alternate passes of one process
+```
+
+The trace alternates blocks of 341 guarantees (1,023 signatures) with blocks of 1,023 assurances that make 341
+reports available; its services run almost no code, so this measures the node's own work, not the PVM. Measures,
+per kind of block: `arrival` (a whole block's guarantees or assurances through the CE 135 / CE 141 checks into the
+pool; off the slot's critical path), `author` (`BlockAuthor.tryAuthor`: slot start to sealed block), `import-own`
+(the authored block imported, as `JamNode.authorSlot` does), `import-unseen` and `import-gossiped` (a peer's block,
+its contents never seen or received beforehand), `import-batch` (the trace as one sync batch, per block). Each
+also as `-cpu`: the process's CPU time over the interval, every thread (10 ms clock, so only means are of use).
+Options: `--trace=dir`, `--warmup=2`, `--reps=5`, `--stages` (stage timers, with `author/*`, `plan/*` and `node/*`
+beside the import's), `--ab=verified|own|ahead|admission`.
+
+Runs of this bench in separate processes differ by 10 to 20% on a cloud VM, more than some of the changes below.
+`--ab` therefore alternates a change off and on between passes of one process and reports both, which is how
+every figure marked A/B was taken.
+
+### Review against Substrate, 2026-11-28
+
+Cloud VM, 4 vCPU Intel Xeon @ 2.30 GHz, JDK 24, G1 with the JVM's default heap. "Before" is the code before these changes, with
+this bench. Mean ms; n = 24 to 30 blocks of each kind unless noted.
+
+1. Authoring: the block's contents chosen in one pass. `AuthoringPlan` ran the Assurances transition
+   once per pooled assurance and the Reports transition once per pooled guarantee, each run verifying signatures
+   and shuffling the validator set for the guarantor assignments. Substrate's block builder applies the pool's
+   ready items in one pass. Separate runs, same VM and hour:
+
+   | `author` | Before | After |
+   |---|---|---|
+   | block of 341 guarantees | 137.3 (p90 199) | 16.7 (p90 19.6) |
+   | block of 1,023 assurances | 55.5 | 9.8 |
+   | empty block | 1.5 | 1.6 |
+
+   Of which choosing the assurances: 51.0 to 6.5 ms a block; choosing the guarantees: 133.5 to 12.7 ms.
+
+2. Signatures verified once (`Ed25519.Verified`). A validator verifies an assurance or guarantee on
+   arrival, when authoring and when importing the block that carries it; Polkadot checks a signed statement once
+   at the network boundary and carries it as checked. A/B, off / on:
+
+   | Measure | wall, guarantees | wall, assurances | CPU, guarantees | CPU, assurances |
+   |---|---|---|---|---|
+   | `author` | 15.1 / 10.2 | 9.1 / 5.2 | 30.4 / 9.6 | 17.9 / 5.8 |
+   | `import-own` | 14.4 / 11.6 | 12.9 / 12.3 | 33.3 / 12.9 | 27.1 / 13.8 |
+   | `import-gossiped` | 14.7 / 11.3 | 14.0 / 14.0 | 34.6 / 12.1 | 28.8 / 17.1 |
+   | `import-unseen` (nothing to remember) | 13.9 / 14.3 | 13.5 / 13.4 | 34.6 / 32.1 | 30.0 / 31.7 |
+
+   An assurance block's import takes as long as before on the wall: its signature batch already ran on other
+   cores while the 341 reports it makes available were accumulated. The CPU it no longer uses is the gain there.
+
+3. Blocks made ready before the chain is held. Decoding, the header hash and the body's hash against
+   the header ran on the importing thread inside the commit; our own block was encoded, decoded, re-hashed and
+   decoded again to announce it. Substrate's import queue verifies ahead of the import and imports its own block
+   as built. A/B, off / on:
+
+   | Measure | Off | On |
+   |---|---|---|
+   | `import-own`, guarantees | 12.1 (p50 11.5) | 9.7 (p50 9.5) |
+   | `import-own`, assurances | 13.0 (p50 12.5) | 13.2 (p50 12.5) |
+   | `import-batch` per block (n = 5 batches of 14), next 8 blocks prepared on the pool | 11.9 (p50 12.0) | 11.4 (p50 11.6) |
+
+   The batch figure is at the edge of what the bench resolves: the control (`import-unseen`, untouched by the
+   switch) moved by up to 3% between the same passes.
+
+4. Arrivals checked against the best state worked out once (`PerState`). Each assurance received
+   decoded the validator set from the trie to find its signer's key; each guarantee decoded both sets and
+   shuffled them. A transaction pool validates against the best block's cached state. A/B, off / on, a whole
+   block's worth:
+
+   | `arrival` | wall | CPU |
+   |---|---|---|
+   | 1,023 assurances | 88.2 / 37.2 (86 to 36 us each) | 98.3 / 45.0 |
+   | 341 guarantees | 78.4 / 39.9 (230 to 117 us each) | 85.7 / 46.7 |
+
+5. Core statistics (found by the stage timers). `finalCoreStatistics` copied a
+   core's record for every assurance bit, about 349,000 copies in a full block. `benchImport --spec=full
+   --traces=target/bench/full-busy-trace --stages --reps=8`, two alternating runs each, every state root checked:
+
+   | | Before | After |
+   |---|---|---|
+   | stage `final-stats`, mean us per block | 2,078, 2,160 | 275, 265 |
+   | `import-cpu` mean ms | 11.45, 11.36 | 10.92, 9.41 |
+   | `import` mean ms | 16.17, 15.36 | 15.96, 13.95 |
+
+All five together, one run before and one after (separate processes, so the small rows are within noise):
+
+| Measure | Before: guarantees / assurances | After: guarantees / assurances |
+|---|---|---|
+| `author` | 137.3 / 55.5 | 11.6 / 5.5 |
+| `import-own` | 15.7 / 12.9 | 9.8 / 9.1 |
+| slot start to our block executed (`slot-total`) | 153.0 / 68.4 | 21.3 / 14.5 |
+| `import-gossiped` | 14.6 / 14.4 | 11.2 / 10.7 |
+| `import-unseen` | 13.7 / 13.3 | 14.5 / 11.7 |
+| `import-batch`, per block | 11.3 | 10.9 |
+| `arrival`, a block's worth | 76.4 / 82.8 | 39.3 / 35.8 |
+
+Looked at and not done, with what the stage timers of the last run say is there (mean per import, of 8.2 ms):
+
+- Our block is announced once executed. A JAM header commits to the prior state, so it could be announced when
+  sealed (and its slot's record is on disk): `import-own`, 9 to 10 ms on this trace and the whole accumulation on a
+  real one, would leave the path to our peers. It needs the block served before it is stored, and a decision on a
+  block announced whose import then fails.
+- Our block is executed twice in part: `AuthoringPlan` runs Disputes, Assurances and Reports on a throwaway view
+  and the import runs them again (`assurances` 0.87 ms, `reports` 1.76 ms). Substrate imports what the proposer
+  executed; here the plan's view would have to be carried through the rest of the pipeline.
+- The body's hash of a single peer block still runs on the importing thread (`node/body-check`, 0.70 ms); it
+  could be a pending check beside the seal's.
+- `commit-encode` 0.70 ms, `node/state-store` 0.62 ms, `node/record` 0.48 ms, `node/wal` 0.24 ms.

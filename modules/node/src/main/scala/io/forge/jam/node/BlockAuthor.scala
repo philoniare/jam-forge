@@ -10,7 +10,7 @@ import io.forge.jam.protocol.state.TrieBackedJamStateBridges.DisputeBridge
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.core.types.tickets.TicketEnvelope
 import io.forge.jam.crypto.{BandersnatchVrf, SigningContext}
-import io.forge.jam.protocol.pipeline.{BlockPipeline, ExtrinsicHashing}
+import io.forge.jam.protocol.pipeline.{BlockPipeline, ExtrinsicHashing, StageTimers}
 import io.forge.jam.protocol.safrole.SafroleTransition
 import io.forge.jam.protocol.safrole.SafroleTypes.{SafroleInput, TicketsOrKeys}
 import io.forge.jam.vrfs.BandersnatchWrapper
@@ -102,7 +102,8 @@ final class BlockAuthor(
         )
       else List.empty
 
-    val disputes = if withDisputes then BlockAuthor.disputes(pools, preView, chain) else DisputeBuilder.empty
+    val disputes =
+      StageTimers.time("author/disputes")(if withDisputes then BlockAuthor.disputes(pools, preView, chain) else DisputeBuilder.empty)
 
     // Run Safrole for the target slot (with the real ticket extrinsic) to
     // obtain the posterior sealer sequence and header markers. The view is a
@@ -124,7 +125,7 @@ final class BlockAuthor(
         .map(out => (v, out, tickets))
 
     val (view, markers, includedTickets) =
-      runSafrole(candidateTickets) match
+      StageTimers.time("author/safrole")(runSafrole(candidateTickets)) match
         case Right(res) => res
         case Left(err1) if candidateTickets.nonEmpty =>
           // Keep the tickets that pass on their own (ascending, so each kept
@@ -161,9 +162,11 @@ final class BlockAuthor(
       return None
 
     // Guarantees that can no longer go in a block on `best` leave the pool, so they don't fail the import.
-    val ancestors = chain.ancestorsOf(best.hash, best.stateRoot, slot)
+    val ancestors = StageTimers.time("author/ancestors")(chain.ancestorsOf(best.hash, best.stateRoot, slot))
     val recent = view.beta.history.map(_.headerHash).toSet + best.hash
-    val stale = pools.pendingGuarantees.filterNot(BlockAuthor.guaranteeUsable(_, slot, recent, ancestors, chain.config))
+    val stale = StageTimers.time("author/stale-guarantees")(
+      pools.pendingGuarantees.filterNot(BlockAuthor.guaranteeUsable(_, slot, recent, ancestors, chain.config))
+    )
     if stale.nonEmpty then
       logger.info(s"dropping ${stale.size} guarantee(s) no longer valid at slot $slot")
       pools.removeGuarantees(stale)
@@ -181,7 +184,7 @@ final class BlockAuthor(
           s"${disputes.dispute.faults.size} fault(s)"
       )
 
-    val plan = AuthoringPlan.plan(
+    val plan = StageTimers.time("author/plan")(AuthoringPlan.plan(
       view,
       priorTau = preView.timeslot,
       priorKappa = preView.validators.current,
@@ -194,7 +197,7 @@ final class BlockAuthor(
       guarantees = pools.guaranteesByArrival,
       ancestry = ancestors,
       config = chain.config
-    )
+    ))
     if plan.droppedGuarantees.nonEmpty || plan.droppedAssurances.nonEmpty then
       logger.warn(
         s"leaving out ${plan.droppedGuarantees.size} guarantee(s) and ${plan.droppedAssurances.size} assurance(s) " +
@@ -211,12 +214,12 @@ final class BlockAuthor(
       assurances = plan.assurances,
       disputes = disputes.dispute
     )
-    val extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config)
+    val extrinsicHash = StageTimers.time("author/extrinsic-hash")(ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config))
 
     val ownKey = JamBytes(keys.bandersnatchPublic)
-    val entropyVrf = Option(prepared.remove(slot))
+    val entropyVrf = StageTimers.time("author/entropy-vrf")(Option(prepared.remove(slot))
       .filter(p => p.key == ownKey && java.util.Arrays.equals(p.sealInput, sealVrfInput))
-      .fold(BlockAuthor.entropySignature(keys, sealVrfInput))(_.entropyVrf)
+      .fold(BlockAuthor.entropySignature(keys, sealVrfInput))(_.entropyVrf))
 
     val headerCodec =
       Header.headerCodec(chain.config.epochLength)
@@ -237,7 +240,7 @@ final class BlockAuthor(
     val unsignedHeaderBytes =
       headerCodec.encode(unsealed).dropRight(96)
     val seal =
-      BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes)
+      StageTimers.time("author/seal")(BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, unsignedHeaderBytes))
     val block = Block(unsealed.copy(seal = JamBytes(seal)), extrinsic)
     if !guard.sealing(slot, Hashing.blake2b256(headerCodec.encode(block.header)), block) then
       logger.warn(s"block for slot $slot sealed but not released: this node may no longer author the slot")

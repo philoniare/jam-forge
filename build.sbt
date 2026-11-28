@@ -155,6 +155,7 @@ addCommandAlias("benchGrowHeap", "pvm/Test/runMain io.forge.jam.pvm.benchmark.Gr
 addCommandAlias("benchImport", "conformance/Test/runMain io.forge.jam.conformance.bench.ImportBench")
 addCommandAlias("benchGenTrace", "protocol/Test/runMain io.forge.jam.protocol.benchmark.FuzzSpecTraceGen")
 addCommandAlias("soakNodes", "node/Test/runMain io.forge.jam.node.bench.NodeSoak")
+addCommandAlias("benchAuthorImport", "node/Test/runMain io.forge.jam.node.bench.AuthorImportBench")
 
 lazy val root = (project in file("."))
   .aggregate(core, crypto, pvm, protocol, conformance, network, db, node)

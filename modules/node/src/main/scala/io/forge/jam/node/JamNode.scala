@@ -126,6 +126,8 @@ final class JamNode(
       WorkLimits.dropOldestExecutor("jam-egress", threads = 1, capacity = WorkLimits.EgressQueueCapacity, factory)
     )
 
+  io.forge.jam.crypto.Ed25519.Verified.enable()
+
   /** Checks of received guarantees, assurances and tickets, kept off the network event loops. */
   private[node] val inbound: InboundWork = InboundWork.pooled(threads)
   private[node] val announcing: InboundWork = InboundWork.ordered(threads)
@@ -188,11 +190,14 @@ final class JamNode(
       (p, reason) => t.preimageDiscarded(io.forge.jam.core.Hashing.blake2b256(p.blob.toArray), p.blob.length.toLong, reason)
     )
   }
+  private lazy val assurerKeysOf = new PerState[Hash, IndexedSeq[Array[Byte]]](root =>
+    chain.stateViewAtRoot(root).validators.current.map(_.ed25519.bytes.toArray).toIndexedSeq
+  )
   val distribution = new DistributionService(
     pools,
     spec.config.coresCount,
     egress,
-    assurerKeys = () => chain.stateView().validators.current.map(_.ed25519.bytes.toArray),
+    assurerKeys = () => assurerKeysOf(chain.best.stateRoot),
     admitGuarantee = new GuaranteeAdmission(chain, () => currentSlot).check,
     inbound = inbound,
     threads = threads,
@@ -594,7 +599,7 @@ final class JamNode(
     telemetry.foreach(_.authored(authoring, Telemetry.blockOutline(block, bytes.length, hash)))
     val slot = block.header.slot.toLong
     val guard = authoringGuard
-    importAndAnnounce(bytes, released = () => guard.forall(_.durable(slot))) match
+    importAuthoredBlock(block, bytes, released = () => guard.forall(_.durable(slot))) match
       case Right(head) =>
         telemetry.foreach(_.blockExecuted(authoring, chain.takeAccumulateCosts(hash).getOrElse(Map.empty)))
         pools.pruneAfterImport(
@@ -1015,6 +1020,26 @@ final class JamNode(
             outcome
         )
         .head
+    catch
+      case e: JamNode.NotReleased =>
+        logger.error("authored block not kept: the record that its slot was sealed is not on disk (see the guard's error)")
+        Left(ChainError.ImportFailed(e.getMessage))
+
+  private[node] def importAuthoredBlock(
+      block: io.forge.jam.core.types.block.Block,
+      blockBytes: Array[Byte],
+      released: () => Boolean = () => true
+  ): Either[ChainError, ChainHead] =
+    try
+      chain.importOwn(
+        block,
+        blockBytes,
+        each = (own, run) =>
+          val outcome = run()
+          if !released() then throw JamNode.NotReleased()
+          if outcome.isRight then sync.announce(own.headerBytes)
+          outcome
+      )
     catch
       case e: JamNode.NotReleased =>
         logger.error("authored block not kept: the record that its slot was sealed is not on disk (see the guard's error)")

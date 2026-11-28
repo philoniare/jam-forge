@@ -15,6 +15,10 @@ final class SignatureBatch:
 
   def verify(): Boolean = Ed25519.verifyAll(items.toIndexedSeq)
 
+  def size: Int = items.size
+
+  def snapshot: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)] = items.toIndexedSeq
+
   /**
    * [[verify]] on the shared pool, over the signatures added so far: the keys, messages and signatures are copied out
    * on the calling thread, so the result does not depend on anything the caller does afterwards.

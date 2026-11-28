@@ -41,29 +41,31 @@ final class GuaranteeAdmission(chain: ChainReader, now: () => Long):
     else if epochsAhead > 1 then Left(s"slot $slot is more than an epoch ahead of the best block")
     else
       try
-        val view = chain.stateView()
-        val rotated =
-          if epochsAhead == 0 then Right(())
-          else
-            SafroleTransition
-              .epochStfView(SafroleInput(inclusionSlot, Hash(new Array[Byte](32)), Nil), view)
-              .left
-              .map(e => s"safrole: $e")
-        rotated.flatMap { _ =>
-          ReportTransition
-            .verifyGuaranteeCredentials(
-              g,
-              inclusionSlot,
-              view.validators.current,
-              view.validators.previous,
-              view.entropy.pool,
-              view.psi.offenders.map(k => Hash(k.bytes)).toSet,
-              config
-            )
+        if epochsAhead == 0 then
+          credentials((best, inclusionSlot)).check(g).left.map(_.toString)
+        else
+          val view = chain.stateViewOf(best)
+          SafroleTransition
+            .epochStfView(SafroleInput(inclusionSlot, Hash(new Array[Byte](32)), Nil), view)
             .left
-            .map(_.toString)
-        }
+            .map(e => s"safrole: $e")
+            .flatMap(_ => credentialsOf(view, inclusionSlot).check(g).left.map(_.toString))
       catch case NonFatal(e) => Left(s"cannot check: ${e.getMessage}")
+
+  private def credentialsOf(view: io.forge.jam.protocol.state.TrieBackedJamState, slot: Long) =
+    new ReportTransition.CredentialsChecker(
+      slot,
+      view.validators.current,
+      view.validators.previous,
+      view.entropy.pool,
+      view.psi.offenders.map(k => Hash(k.bytes)).toSet,
+      chain.config
+    )
+
+  private val credentials =
+    new PerState[(ChainHead, Long), ReportTransition.CredentialsChecker]((head, slot) =>
+      credentialsOf(chain.stateViewOf(head), slot)
+    )
 
 object GuaranteeAdmission:
   /** Slots a guarantee may be ahead of this node's clock: one, for clock skew between guarantor and receiver. */

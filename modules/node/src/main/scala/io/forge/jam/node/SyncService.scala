@@ -426,7 +426,7 @@ final class SyncService(
     old.reset()
 
   def announceBlock(blockBytes: Array[Byte]): Unit =
-    chain.decodeBlock(blockBytes).foreach(b => announce(chain.headerCodec.encode(b.header)))
+    chain.headerCodec.decodeAt(blockBytes, 0).foreach((header, _) => announce(chain.headerCodec.encode(header)))
 
   /** Announce a newly imported/authored block on all UP 0 streams. */
   def announce(headerBytes: Array[Byte]): Unit =

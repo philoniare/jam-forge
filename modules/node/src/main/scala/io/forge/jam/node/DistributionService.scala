@@ -231,14 +231,8 @@ final class DistributionService(
           case Right((anchor, bitfield, signature)) =>
             telemetry.foreach(_.assuranceReceived(conn.peerKey, anchor))
             val admitted = inbound.submit(conn, msg.length.toLong) {
-              val signer =
-                try assurerIndex(conn, anchor, bitfield, signature)
-                catch case _: Exception => None
-              signer match
-                case Some(idx) =>
-                  logger.debug(s"pooled assurance from validator $idx")
-                  pools.addAssurance(AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(idx), signature))
-                  stream.finish()
+              receiveAssurance(conn.peerKey, anchor, bitfield, signature) match
+                case Some(_) => stream.finish()
                 case None =>
                   logger.debug("CE141: the sender is not an active validator, or no active validator signed it")
                   stream.reset()
@@ -257,7 +251,7 @@ final class DistributionService(
     * gets no signature check at all: looking for its signer would cost one check per validator.
     */
   private def assurerIndex(
-      conn: PeerConnection,
+      peerKey: Array[Byte],
       anchor: Hash,
       bitfield: JamBytes,
       signature: Ed25519Signature
@@ -265,8 +259,23 @@ final class DistributionService(
     val keys = assurerKeys().toIndexedSeq
     val message = constants.JAM_AVAILABLE_BYTES ++ Hashing.blake2b256(anchor.bytes ++ bitfield.toArray).bytes
     def verifies(i: Int) = Ed25519.verify(keys(i), message, signature.bytes)
-    val byPeer = keys.indices.find(i => java.util.Arrays.equals(keys(i), conn.peerKey))
+    val byPeer = keys.indices.find(i => java.util.Arrays.equals(keys(i), peerKey))
     byPeer.flatMap(own => Some(own).filter(verifies).orElse(keys.indices.find(verifies)))
+
+  private[node] def receiveAssurance(
+      peerKey: Array[Byte],
+      anchor: Hash,
+      bitfield: JamBytes,
+      signature: Ed25519Signature
+  ): Option[Int] =
+    val signer =
+      try assurerIndex(peerKey, anchor, bitfield, signature)
+      catch case _: Exception => None
+    signer.foreach { idx =>
+      logger.debug(s"pooled assurance from validator $idx")
+      pools.addAssurance(AssuranceExtrinsic(anchor, bitfield, ValidatorIndex(idx), signature))
+    }
+    signer
 
   def distributeAssurance(conn: PeerConnection, a: AssuranceExtrinsic): Unit =
     sendItem(conn, StreamKind.AssuranceDistribution, DistributionService.encodeAssurance(a))

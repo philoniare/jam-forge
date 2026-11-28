@@ -186,3 +186,87 @@ class Ed25519Test extends AnyFunSuite with Matchers:
       val alsoLast = corrupted.updated(n - 1, (items(n - 1)._1, items(n - 1)._2, items(0)._3))
       Ed25519.firstInvalid(alsoLast) shouldBe bad
   }
+
+  private def signed(n: Int): IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)] =
+    (0 until n).map { i =>
+      val sk = Array.tabulate[Byte](32)(j => (i * 31 + j).toByte)
+      val msg = Array.tabulate[Byte](i % 50)(j => (i + j).toByte)
+      (Ed25519PublicKey(Ed25519ZebraWrapper.publicFromSecret(sk)), msg, Ed25519Signature(Ed25519ZebraWrapper.sign(sk, msg)))
+    }
+
+  test("validity flags each signature as verify does, whatever the batches") {
+    val n = 300
+    val items = signed(n)
+    Ed25519.validity(IndexedSeq.empty) shouldBe empty
+    Ed25519.validity(items).forall(identity) shouldBe true
+    val bad = Set(0, 63, 64, 150, n - 1)
+    val corrupted = items.indices.map { i =>
+      if !bad(i) then items(i)
+      else
+        val sig = items(i)._3.bytes.clone()
+        sig(5) = (sig(5) ^ 0x10).toByte
+        items(i).copy(_3 = Ed25519Signature(sig))
+    }
+    Ed25519.validity(corrupted).toList shouldBe corrupted.indices.map(!bad(_)).toList
+    val vectors = loadTestVectors().map(v =>
+      (Ed25519PublicKey(hexToBytes(v.pk)), hexToBytes(v.msg), Ed25519Signature(hexToBytes(v.r) ++ hexToBytes(v.s)))
+    ).toIndexedSeq
+    Ed25519.validity(vectors).toList shouldBe vectors.map(i => Ed25519.verify(i._1, i._2, i._3)).toList
+  }
+
+  test("Verified: a remembered success answers for that exact key, message and signature only") {
+    Ed25519.Verified.enabled shouldBe false
+    Ed25519.Verified.enable()
+    try
+      val n = 200
+      val items = signed(n)
+      Ed25519.Verified.size shouldBe 0
+      Ed25519.verify(items(0)._1, items(0)._2, items(0)._3) shouldBe true
+      Ed25519.Verified.size shouldBe 1
+      Ed25519.verifyAll(items.take(100)) shouldBe true
+      Ed25519.Verified.size shouldBe 100
+      Ed25519.validity(items).forall(identity) shouldBe true
+      Ed25519.Verified.size shouldBe n
+      Ed25519.verifyAll(items) shouldBe true
+      Ed25519.firstInvalid(items) shouldBe -1
+
+      val (pk, msg, sig) = items(7)
+      val otherSig = sig.bytes.clone()
+      otherSig(5) = (otherSig(5) ^ 0x10).toByte
+      Ed25519.verify(pk, msg, Ed25519Signature(otherSig)) shouldBe false
+      Ed25519.verify(pk, msg :+ 1.toByte, sig) shouldBe false
+      Ed25519.verify(items(8)._1, msg, sig) shouldBe false
+      Ed25519.Verified.size shouldBe n
+      val mixed = items.updated(7, (pk, msg, Ed25519Signature(otherSig))).updated(150, (items(8)._1, items(150)._2, items(150)._3))
+      Ed25519.firstInvalid(mixed) shouldBe 7
+      Ed25519.verifyAll(mixed) shouldBe false
+      Ed25519.validity(mixed).toList shouldBe mixed.indices.map(i => i != 7 && i != 150).toList
+      Ed25519.Verified.size shouldBe n
+      Ed25519.verify(new Array[Byte](31), msg, sig.bytes) shouldBe false
+      Ed25519.verify(pk.bytes, msg, new Array[Byte](63)) shouldBe false
+
+      val vectors = loadTestVectors().map(v =>
+        (Ed25519PublicKey(hexToBytes(v.pk)), hexToBytes(v.msg), Ed25519Signature(hexToBytes(v.r) ++ hexToBytes(v.s)))
+      ).toIndexedSeq
+      val first = vectors.map(i => Ed25519.verify(i._1, i._2, i._3))
+      vectors.map(i => Ed25519.verify(i._1, i._2, i._3)) shouldBe first
+      Ed25519.validity(vectors).toList shouldBe first.toList
+      Ed25519.firstInvalid(vectors) shouldBe first.indexWhere(!_)
+    finally Ed25519.Verified.disable()
+    Ed25519.Verified.size shouldBe 0
+  }
+
+  test("Verified keeps at most MaxEntries, the newest") {
+    Ed25519.Verified.enable()
+    try
+      val sk = Array.tabulate[Byte](32)(_.toByte)
+      val pk = Ed25519ZebraWrapper.publicFromSecret(sk)
+      val n = Ed25519.Verified.MaxEntries + 500
+      val items = (0 until n).map { i =>
+        val msg = java.nio.ByteBuffer.allocate(4).putInt(i).array()
+        (Ed25519PublicKey(pk), msg, Ed25519Signature(Ed25519ZebraWrapper.sign(sk, msg)))
+      }
+      Ed25519.verifyAll(items) shouldBe true
+      Ed25519.Verified.size shouldBe Ed25519.Verified.MaxEntries
+    finally Ed25519.Verified.disable()
+  }

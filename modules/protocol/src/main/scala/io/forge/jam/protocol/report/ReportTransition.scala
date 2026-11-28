@@ -146,10 +146,11 @@ object ReportTransition:
     deferSignatures: Option[DeferredSignatures] = None,
     serviceInfo: Option[Long => Option[ServiceInfo]] = None
   ): (ReportState, ReportOutput) =
+    val shared = new Shared(preState, input.slot, config, serviceInfo)
     val result =
       for
         _ <- validateGuaranteesOrder(input.guarantees)
-        _ <- validateNoDuplicatePackages(input.guarantees, preState, input)
+        _ <- validateNoDuplicatePackages(input.guarantees, shared, input)
         processedGuarantees <- processGuarantees(
           input,
           preState,
@@ -159,7 +160,7 @@ object ReportTransition:
           skipAnchorContext,
           signatures.getOrElse(new SignatureBatch),
           deferSignatures,
-          serviceInfo
+          shared
         )
       yield processedGuarantees
 
@@ -187,6 +188,53 @@ object ReportTransition:
   private def forEach[A](items: List[A])(check: A => ValidationResult): ValidationResult =
     items.foldLeft[ValidationResult](Right(()))((result, item) => result.flatMap(_ => check(item)))
 
+  private final class Shared(
+    preState: ReportState,
+    slot: Long,
+    config: ChainConfig,
+    serviceInfo: Option[Long => Option[ServiceInfo]]
+  ):
+    lazy val offendersSet: Set[Hash] = preState.offenders.toSet
+    lazy val serviceOf: Long => Option[ServiceInfo] = serviceInfo.getOrElse {
+      val m = scala.collection.mutable.HashMap.empty[Long, ServiceInfo]
+      preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a.data.service))
+      m.get
+    }
+    val cacheFor: RotationContext => RotationCache =
+      rotationCaches(preState.currValidators, preState.prevValidators, preState.entropy, slot, config)
+    lazy val historyReported: Map[Hash, Hash] =
+      preState.recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
+    lazy val pipelined: Set[Hash] = pipelinedPackages(preState)
+
+  final class Checker(
+    preState: ReportState,
+    slot: Long,
+    config: ChainConfig,
+    ancestry: Ancestry,
+    serviceInfo: Option[Long => Option[ServiceInfo]] = None,
+    knownPackages: List[Hash] = Nil
+  ):
+    private val shared = new Shared(preState, slot, config, serviceInfo)
+
+    def check(guarantees: List[GuaranteeExtrinsic], signatures: SignatureBatch): Either[ReportErrorCode, Unit] =
+      val input = ReportInput(guarantees, slot, knownPackages)
+      for
+        _ <- validateGuaranteesOrder(guarantees)
+        _ <- validateNoDuplicatePackages(guarantees, shared, input)
+        _ <- processGuarantees(
+          input,
+          preState,
+          config,
+          ancestry,
+          skipLookupAnchor = false,
+          skipAnchorContext = false,
+          signatures,
+          deferSignatures = None,
+          shared,
+          verifySignatures = false
+        )
+      yield ()
+
   private def processGuarantees(
     input: ReportInput,
     preState: ReportState,
@@ -196,26 +244,21 @@ object ReportTransition:
     skipAnchorContext: Boolean,
     signatures: SignatureBatch,
     deferSignatures: Option[DeferredSignatures],
-    serviceInfo: Option[Long => Option[ServiceInfo]]
+    shared: Shared,
+    verifySignatures: Boolean = true
   ): Either[ReportErrorCode, (List[SegmentRootLookup], List[Hash])] =
-    val offendersSet: Set[Hash] = preState.offenders.toSet
-    val serviceOf: Long => Option[ServiceInfo] = serviceInfo.getOrElse {
-      val m = scala.collection.mutable.HashMap.empty[Long, ServiceInfo]
-      preState.accounts.foreach(a => if !m.contains(a.id) then m.update(a.id, a.data.service))
-      m.get
-    }
+    val offendersSet = shared.offendersSet
+    val serviceOf = shared.serviceOf
     val ancestorIndex = ancestry
-    val cacheFor =
-      rotationCaches(preState.currValidators, preState.prevValidators, preState.entropy, input.slot, config)
+    val cacheFor = shared.cacheFor
 
     val batchPackages = input.guarantees.map(g => g.report.packageSpec.hash -> g.report.packageSpec.exportsRoot).toMap
-    val historyReported: Map[Hash, Hash] =
-      preState.recentBlocks.history.flatMap(_.reported.map(r => r.hash -> r.exportsRoot)).toMap
+    val historyReported = shared.historyReported
 
     for
       _ <- forEach(input.guarantees)(validateGuarantors(_, input.slot, cacheFor, signatures, config))
       // Every signature of the block is in the batch by now, with its key already resolved.
-      _ <- checkSignatures(signatures, deferSignatures)
+      _ <- if verifySignatures then checkSignatures(signatures, deferSignatures) else Right(())
       _ <- forEach(input.guarantees)(guarantee =>
         validateReport(
           guarantee,
@@ -284,19 +327,32 @@ object ReportTransition:
     offenders: Set[Hash],
     config: ChainConfig
   ): Either[ReportErrorCode, Unit] =
-    val cacheFor = rotationCaches(currValidators, prevValidators, entropy, slot, config)
-    val batch = new SignatureBatch
-    val coreIndex = guarantee.report.coreIndex.toInt
-    for
-      _ <- ensure(guarantee.slot.toLong <= slot, ReportErrorCode.FutureReportSlot)
-      _ <- ensure(
-        coreIndex < config.coresCount && coreIndex < currValidators.size / 3,
-        ReportErrorCode.BadCoreIndex
-      )
-      _ <- validateGuarantors(guarantee, slot, cacheFor, batch, config)
-      _ <- validateAssignment(guarantee, slot, offenders, cacheFor, config)
-      _ <- ensure(batch.verify(), ReportErrorCode.BadSignature)
-    yield ()
+    new CredentialsChecker(slot, currValidators, prevValidators, entropy, offenders, config).check(guarantee)
+
+  final class CredentialsChecker(
+    slot: Long,
+    currValidators: IndexedSeq[ValidatorKey],
+    prevValidators: IndexedSeq[ValidatorKey],
+    entropy: List[Hash],
+    offenders: Set[Hash],
+    config: ChainConfig
+  ):
+    private val rotations = rotationCaches(currValidators, prevValidators, entropy, slot, config)
+    private val cacheFor: RotationContext => RotationCache = ctx => rotations.synchronized(rotations(ctx))
+
+    def check(guarantee: GuaranteeExtrinsic): Either[ReportErrorCode, Unit] =
+      val batch = new SignatureBatch
+      val coreIndex = guarantee.report.coreIndex.toInt
+      for
+        _ <- ensure(guarantee.slot.toLong <= slot, ReportErrorCode.FutureReportSlot)
+        _ <- ensure(
+          coreIndex < config.coresCount && coreIndex < currValidators.size / 3,
+          ReportErrorCode.BadCoreIndex
+        )
+        _ <- validateGuarantors(guarantee, slot, cacheFor, batch, config)
+        _ <- validateAssignment(guarantee, slot, offenders, cacheFor, config)
+        _ <- ensure(batch.verify(), ReportErrorCode.BadSignature)
+      yield ()
 
   private def validateGuarantors(
     guarantee: GuaranteeExtrinsic,
@@ -387,15 +443,15 @@ object ReportTransition:
    */
   private def validateNoDuplicatePackages(
     guarantees: List[GuaranteeExtrinsic],
-    preState: ReportState,
+    shared: Shared,
     input: ReportInput
   ): ValidationResult =
     val packageHashes = guarantees.map(_.report.packageSpec.hash)
-    val allPipelinedHashes = pipelinedPackages(preState) ++ input.knownPackages
+    val pipelined = if input.knownPackages.isEmpty then shared.pipelined else shared.pipelined ++ input.knownPackages
     for
       // Check for duplicates within batch
       _ <- ensure(packageHashes.distinct.size == packageHashes.size, ReportErrorCode.DuplicatePackage)
-      _ <- ensure(!packageHashes.exists(allPipelinedHashes.contains), ReportErrorCode.DuplicatePackage)
+      _ <- ensure(!packageHashes.exists(pipelined.contains), ReportErrorCode.DuplicatePackage)
     yield ()
 
   def pipelinedPackages(preState: ReportState): Set[Hash] =

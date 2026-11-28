@@ -166,6 +166,7 @@ object StatisticsTransition:
           cur.copy(daLoad = cur.daLoad + packageLength + segmentsSize)
     }
 
+    val assured = new Array[Int](maxCores)
     assurances.foreach { assurance =>
       val bitfield = assurance.bitfield.toArray
       val bitfieldLen = bitfield.length
@@ -177,12 +178,16 @@ object StatisticsTransition:
           while bit < 8 do
             if (b & (1 << bit)) != 0 then
               val coreIndex = byteIndex * 8 + bit
-              if coreIndex < maxCores then
-                val cur = stats(coreIndex)
-                stats(coreIndex) = cur.copy(popularity = cur.popularity + 1)
+              if coreIndex < maxCores then assured(coreIndex) += 1
             bit += 1
         byteIndex += 1
     }
+    var core = 0
+    while core < maxCores do
+      if assured(core) != 0 then
+        val cur = stats(core)
+        stats(core) = cur.copy(popularity = cur.popularity + assured(core))
+      core += 1
 
     stats.toList
 

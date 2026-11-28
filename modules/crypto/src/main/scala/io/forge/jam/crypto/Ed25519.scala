@@ -39,9 +39,65 @@ object Ed25519:
     if publicKey.length != PublicKeySize then return false
     if signature.length != SignatureSize then return false
     ensureLibraryLoaded()
-    try Ed25519ZebraWrapper.verify(publicKey, message, signature)
-    catch
-      case _: RuntimeException => false
+    val key = if Verified.enabled then Verified.key(publicKey, message, signature) else null
+    if key != null && Verified.contains(key) then true
+    else
+      val ok =
+        try Ed25519ZebraWrapper.verify(publicKey, message, signature)
+        catch case _: RuntimeException => false
+      if ok && key != null then Verified.add(key)
+      ok
+
+  object Verified:
+    val MaxEntries: Int = 1 << 16
+
+    @volatile private var on = false
+    def enabled: Boolean = on
+    def enable(): Unit = on = true
+    def disable(): Unit =
+      on = false
+      clear()
+
+    private val seen =
+      new java.util.LinkedHashMap[io.forge.jam.core.primitives.Hash, java.lang.Boolean](1024, 0.75f, false):
+        override def removeEldestEntry(
+          eldest: java.util.Map.Entry[io.forge.jam.core.primitives.Hash, java.lang.Boolean]
+        ): Boolean = this.size() > MaxEntries
+
+    private[crypto] def key(publicKey: Array[Byte], message: Array[Byte], signature: Array[Byte])
+        : io.forge.jam.core.primitives.Hash =
+      val in = new Array[Byte](publicKey.length + signature.length + message.length)
+      System.arraycopy(publicKey, 0, in, 0, publicKey.length)
+      System.arraycopy(signature, 0, in, publicKey.length, signature.length)
+      System.arraycopy(message, 0, in, publicKey.length + signature.length, message.length)
+      io.forge.jam.core.Hashing.blake2b256(in)
+
+    private[crypto] def contains(key: io.forge.jam.core.primitives.Hash): Boolean =
+      seen.synchronized(seen.containsKey(key))
+
+    private[crypto] def add(key: io.forge.jam.core.primitives.Hash): Unit =
+      seen.synchronized(seen.put(key, java.lang.Boolean.TRUE)): Unit
+
+    def size: Int = seen.synchronized(seen.size())
+
+    def clear(): Unit = seen.synchronized(seen.clear())
+
+  private def unverified(items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)])
+      : (Array[io.forge.jam.core.primitives.Hash | Null], Array[Int]) | Null =
+    if !Verified.enabled then null
+    else
+      val keys = new Array[io.forge.jam.core.primitives.Hash | Null](items.length)
+      val rest = Array.newBuilder[Int]
+      var i = 0
+      while i < items.length do
+        val (pk, msg, sig) = items(i)
+        val wellFormed = pk.toArrayUnsafe.length == PublicKeySize && sig.toArrayUnsafe.length == SignatureSize
+        val key = if wellFormed then Verified.key(pk.toArrayUnsafe, msg, sig.toArrayUnsafe) else null
+        if key == null || !Verified.contains(key) then
+          keys(i) = key
+          rest += i
+        i += 1
+      (keys, rest.result())
 
   /**
    * Verify an Ed25519 signature using typed primitives.
@@ -67,6 +123,18 @@ object Ed25519:
    * [[verify]] gives, since a batch rejects only when some item in it fails alone.
    */
   def firstInvalid(items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)]): Int =
+    unverified(items) match
+      case null => firstInvalidOf(items)
+      case (keys, rest) =>
+        if rest.isEmpty then -1
+        else
+          val failed = firstInvalidOf(if rest.length == items.length then items else rest.toIndexedSeq.map(items))
+          if failed < 0 then
+            rest.foreach(i => if keys(i) != null then Verified.add(keys(i).nn))
+            -1
+          else rest(failed)
+
+  private def firstInvalidOf(items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)]): Int =
     val n = items.length
     if n == 0 then -1
     else
@@ -90,6 +158,40 @@ object Ed25519:
           var j = end
           while j < n && verify(items(j)._1, items(j)._2, items(j)._3) do j += 1
           if j < n then j else -1
+
+  def validity(items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)]): Array[Boolean] =
+    unverified(items) match
+      case null => validityOf(items)
+      case (keys, rest) =>
+        val valid = new Array[Boolean](items.length)
+        java.util.Arrays.fill(valid, true)
+        if rest.nonEmpty then
+          val checked = validityOf(if rest.length == items.length then items else rest.toIndexedSeq.map(items))
+          var j = 0
+          while j < rest.length do
+            val i = rest(j)
+            valid(i) = checked(j)
+            if checked(j) && keys(i) != null then Verified.add(keys(i).nn)
+            j += 1
+        valid
+
+  private def validityOf(items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)]): Array[Boolean] =
+    val n = items.length
+    val valid = new Array[Boolean](n)
+    if n > 0 then
+      ensureLibraryLoaded()
+      val chunks = (n + BatchChunk - 1) / BatchChunk
+      java.util.stream.IntStream.range(0, chunks).parallel().forEach { c =>
+        val from = c * BatchChunk
+        val until = math.min(n, from + BatchChunk)
+        if verifyBatch(items, from, until) then java.util.Arrays.fill(valid, from, until, true)
+        else
+          var i = from
+          while i < until do
+            valid(i) = verify(items(i)._1, items(i)._2, items(i)._3)
+            i += 1
+      }
+    valid
 
   private def verifyBatch(
     items: IndexedSeq[(Ed25519PublicKey, Array[Byte], Ed25519Signature)],

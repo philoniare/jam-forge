@@ -7,7 +7,7 @@ import io.forge.jam.core.trie.{BufferedTrieBackend, MissingTrieNodeException, St
 import io.forge.jam.core.types.block.Block
 import io.forge.jam.core.types.header.Header
 import io.forge.jam.db.{BlockStore, RocksDbTrieBackend}
-import io.forge.jam.protocol.pipeline.{BlockPipeline, HeaderChecks, PipelineError}
+import io.forge.jam.protocol.pipeline.{BlockPipeline, HeaderChecks, PipelineError, StageTimers}
 import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, Ancestry, ReportErrorCode}
 import io.forge.jam.protocol.state.{ServiceStorageView, TrieBackedJamState}
 import io.forge.jam.protocol.importing.{BlockImporter, ImportResult}
@@ -47,6 +47,17 @@ object ChainManager:
   val MaxExecutedPerSlot: Int = 2
 
   val StateSweepIntervalMillis: Long = 60L * 60 * 1000
+
+  val PreparedAhead: Int = 8
+
+  final class PreparedBlock private[node] (
+      val bytes: Array[Byte],
+      val block: Block,
+      val headerBytes: Array[Byte],
+      val hash: Hash,
+      matches: => Boolean
+  ):
+    lazy val bodyMatches: Boolean = matches
 
   val BatchStateDepthProperty = "jam.sync.batchStateDepth"
 
@@ -166,7 +177,10 @@ final class ChainManager(
         }
         if outermost && metaWritten then
           if synced then timings.walSync.observeNanos(syncNanos)
-          timings.metaWrite.observeNanos(math.max(0L, System.nanoTime() - started - bodyNanos - syncNanos))
+          val metaNanos = math.max(0L, System.nanoTime() - started - bodyNanos - syncNanos)
+          timings.metaWrite.observeNanos(metaNanos)
+          StageTimers.addNanos("node/wal", syncNanos)
+          StageTimers.addNanos("node/meta-write", metaNanos)
         if outermost then
           publishHeads()
           if published._2.hash != before.hash then finalizedMoved = Some(published._2)
@@ -1151,6 +1165,54 @@ final class ChainManager(
   def importBlock(blockBytes: Array[Byte], source: Option[Ed25519PublicKey] = None): Either[ChainError, ChainHead] =
     importBatch(List(blockBytes), source).head
 
+  def prepare(bytes: Array[Byte]): Either[ChainError, ChainManager.PreparedBlock] =
+    StageTimers.time("node/decode")(decodeBlock(bytes)).left.map(ChainError.Undecodable(_)).map { block =>
+      val headerBytes = headerCodec.encode(block.header)
+      new ChainManager.PreparedBlock(
+        bytes,
+        block,
+        headerBytes,
+        Hashing.blake2b256(headerBytes),
+        StageTimers.time("node/body-check")(bodyMatchesHeader(block))
+      )
+    }
+
+  def prepareOwn(block: Block, bytes: Array[Byte]): ChainManager.PreparedBlock =
+    val headerBytes = headerCodec.encode(block.header)
+    new ChainManager.PreparedBlock(bytes, block, headerBytes, Hashing.blake2b256(headerBytes), true)
+
+  @volatile private[node] var prepareAhead: Boolean = true
+
+  private def preparing(blocks: Seq[Array[Byte]]): Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])] =
+    if blocks.sizeIs <= 1 || !prepareAhead then blocks.iterator.map(bytes => (bytes, () => prepare(bytes)))
+    else
+      val source = blocks.iterator
+      val ahead = mutable.Queue.empty[(Array[Byte], java.util.concurrent.CompletableFuture[Either[ChainError, ChainManager.PreparedBlock]])]
+      def fill(): Unit =
+        while ahead.sizeIs < ChainManager.PreparedAhead && source.hasNext do
+          val bytes = source.next()
+          ahead.enqueue((bytes, io.forge.jam.core.Parallel.async {
+            val prepared = prepare(bytes)
+            prepared.foreach(_.bodyMatches)
+            prepared
+          }))
+      new Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])]:
+        def hasNext: Boolean = ahead.nonEmpty || source.hasNext
+        def next(): (Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock]) =
+          fill()
+          val (bytes, future) = ahead.dequeue()
+          fill()
+          (bytes, () => io.forge.jam.core.Parallel.await(future))
+
+  def importOwn(
+      block: Block,
+      blockBytes: Array[Byte],
+      each: (ChainManager.PreparedBlock, () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] =
+        (_, run) => run()
+  ): Either[ChainError, ChainHead] =
+    val own = prepareOwn(block, blockBytes)
+    importPrepared(Iterator.single((blockBytes, () => Right(own))), None, Long.MaxValue, (_, run) => each(own, run), Long.MaxValue, several = false).head
+
   def importBatch(
       blocks: Seq[Array[Byte]],
       source: Option[Ed25519PublicKey] = None,
@@ -1159,6 +1221,16 @@ final class ChainManager(
       bufferBelowSlot: Long = Long.MaxValue
   ): Vector[Either[ChainError, ChainHead]] =
     if blocks.isEmpty then return Vector.empty
+    importPrepared(preparing(blocks), source, budgetNanos, each, bufferBelowSlot, several = blocks.sizeIs > 1)
+
+  private def importPrepared(
+      remaining: Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])],
+      source: Option[Ed25519PublicKey],
+      budgetNanos: Long,
+      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead],
+      bufferBelowSlot: Long,
+      several: Boolean
+  ): Vector[Either[ChainError, ChainHead]] =
     val events = mutable.ListBuffer.empty[(ChainHead, Block)]
     val sealedSide = mutable.ListBuffer.empty[(Hash, Block)]
     val executed = mutable.ListBuffer.empty[Hash]
@@ -1168,14 +1240,12 @@ final class ChainManager(
           importOnly = commitDepth == 1
           val started = System.nanoTime()
           val outcomes = Vector.newBuilder[Either[ChainError, ChainHead]]
-          val remaining = blocks.iterator
-          val several = blocks.sizeIs > 1
           var more = true
           try
             while more && remaining.hasNext do
-              val blockBytes = remaining.next()
+              val (blockBytes, prepared) = remaining.next()
               val run = () =>
-                val outcome = importOne(blockBytes, source, events, sealedSide, several, bufferBelowSlot)
+                val outcome = importOne(prepared(), source, events, sealedSide, several, bufferBelowSlot)
                 outcome.foreach { head =>
                   executedUncommitted.add(head.hash)
                   executed += head.hash
@@ -1210,10 +1280,10 @@ final class ChainManager(
       val tip = bufferedTip
       bufferedTip = null
       if tip == null then stateBuffer.discard()
-      else trieBackend.withJournal(tip._1, tip._2)(stateBuffer.flush())
+      else StageTimers.time("node/state-store")(trieBackend.withJournal(tip._1, tip._2)(stateBuffer.flush()))
 
   private def importOne(
-      blockBytes: Array[Byte],
+      prepared: Either[ChainError, ChainManager.PreparedBlock],
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
@@ -1221,25 +1291,27 @@ final class ChainManager(
       bufferBelowSlot: Long
   ): Either[ChainError, ChainHead] =
     newEquivocations.clear()
-    val imported = importUnderCommit(blockBytes, source, events, sealedSide, inBatch, bufferBelowSlot)
+    val imported = importUnderCommit(prepared, source, events, sealedSide, inBatch, bufferBelowSlot)
     settleEquivocations(events)
     imported
 
   private def importUnderCommit(
-      blockBytes: Array[Byte],
+      prepared: Either[ChainError, ChainManager.PreparedBlock],
       source: Option[Ed25519PublicKey],
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
       inBatch: Boolean,
       bufferBelowSlot: Long
   ): Either[ChainError, ChainHead] =
-      decodeBlock(blockBytes).left.map(ChainError.Undecodable(_)).flatMap { block =>
-        val hash = headerHashOf(block)
+      prepared.flatMap { ready =>
+        val block = ready.block
+        val blockBytes = ready.bytes
+        val hash = ready.hash
         val parent = block.header.parent
         if blockRoot(hash).isDefined then Left(ChainError.AlreadyImported)
         else if meta.invalid(hash) then
           Left(if meta.disregarded(hash) then ChainError.Disregarded else ChainError.PreviouslyInvalid)
-        else if !bodyMatchesHeader(block) then Left(ChainError.BodyMismatch)
+        else if !ready.bodyMatches then Left(ChainError.BodyMismatch)
         else if parent == bestHead.hash then
           // The same clock check side-branch blocks get: a block ahead of our clock is not executed, and nothing
           // is recorded against it.
@@ -1382,7 +1454,8 @@ final class ChainManager(
     val started = System.nanoTime()
     val parent = block.header.parent
     val preState = RawState(bestHead.stateRoot, Nil)
-    val ancestry = ancestorWindow.at(parent, block.header.parentStateRoot, block.header.slot.toLong)
+    val ancestry =
+      StageTimers.time("node/ancestry")(ancestorWindow.at(parent, block.header.parentStateRoot, block.header.slot.toLong))
     // The save belongs to this block at this height: what it replaces can be deleted once the parent's state is no
     // longer kept (see pruneHistory).
     val journalHeight = blockHeight(parent).getOrElse(0L) + 1
@@ -1397,6 +1470,7 @@ final class ChainManager(
       case ImportResult.Failed(message, _) => Left(ChainError.ImportFailed(message))
       case done @ ImportResult.Success(postRoot, _) =>
         faultAfterStateSave()
+        val recordStarted = if StageTimers.enabled then System.nanoTime() else 0L
         val hash = headerHashOf(block)
         if stateBuffer.buffering then bufferedTip = (hash, journalHeight)
         noteAccumulateCosts(hash, done.accumulateCosts)
@@ -1406,6 +1480,7 @@ final class ChainManager(
         meta.putHeight(hash, journalHeight)
         becomeBest(block, hash, postRoot, events)
         recordExecuted(hash, block.header.slot.toLong)
+        if StageTimers.enabled then StageTimers.addNanos("node/record", System.nanoTime() - recordStarted)
         logger.info(
           s"imported block ${hash.toHex.take(18)} slot=${bestHead.slot} root=${postRoot.toHex.take(18)}"
         )
