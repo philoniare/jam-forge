@@ -78,6 +78,20 @@ final class StateHistoricalLookup(chain: ChainReader, anchorStateRoot: Option[Ha
       else None
     }
 
+  override def storedPreimageHash(serviceId: Long, hash: Hash): Option[Hash] =
+    anchorState.flatMap { trie =>
+      try trie.valueHash(StateKey.computeServiceDataStateKey(serviceId, 0xfffffffeL, JamBytes(hash.bytes.toArray)))
+      catch
+        case _: io.forge.jam.core.trie.MissingTrieNodeException =>
+          lost = true
+          None
+    }
+
+  override def preimageAvailable(serviceId: Long, lookupAnchorTimeslot: Long, hash: Hash, length: Long): Boolean =
+    readRaw(StateKey.computePreimageInfoStateKey(serviceId, length, JamBytes(hash.bytes.toArray)))
+      .flatMap(v => scala.util.Try(StateKey.decodePreimageInfoValue(v)).toOption)
+      .exists(StateHistoricalLookup.availableAt(_, lookupAnchorTimeslot))
+
   @volatile private var lost = false
 
   def anchorLost: Boolean = lost

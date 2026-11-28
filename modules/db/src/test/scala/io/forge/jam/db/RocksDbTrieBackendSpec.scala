@@ -57,6 +57,37 @@ class RocksDbTrieBackendSpec extends AnyFunSuite with Matchers:
     finally deleteRecursively(dir)
   }
 
+  test("a small raw value written or read once is served again without reading RocksDB; a large one is read each time") {
+    val dir = Files.createTempDirectory("jam-rocksdb-value-cache")
+    try
+      val small = JamBytes(Array.tabulate[Byte](100)(_.toByte))
+      val large = JamBytes(new Array[Byte](RocksDbTrieBackend.MaxCachedValueBytes + 1))
+      val (hs, hl) = (Hashing.blake2b256(small), Hashing.blake2b256(large))
+      val b1 = openBackend(dir, trackGarbage = false)
+      try
+        b1.batchUpdate(Seq(BackendOp.writeRawValue(small), BackendOp.writeRawValue(large)))
+        val reads = b1.rawValueDbReads
+        b1.readRawValue(hs) shouldBe Some(small)
+        b1.rawValueDbReads shouldBe reads
+        b1.readRawValue(hl) shouldBe Some(large)
+        b1.readRawValue(hl) shouldBe Some(large)
+        b1.rawValueDbReads shouldBe reads + 2
+        b1.syncWal()
+      finally b1.close()
+      val b2 = openBackend(dir, trackGarbage = false)
+      try
+        b2.readRawValue(hs) shouldBe Some(small)
+        b2.readRawValue(hs) shouldBe Some(small)
+        b2.rawValueDbReads shouldBe 1
+        b2.readRawValue(Hash.zero) shouldBe None
+        b2.readRawValue(Hash.zero) shouldBe None
+        b2.rawValueDbReads shouldBe 3
+        b2.clear()
+        b2.readRawValue(hs) shouldBe None
+      finally b2.close()
+    finally deleteRecursively(dir)
+  }
+
   test("gc reclaims dead nodes and their regular-leaf values, keeps live ones") {
     withBackend { backend =>
       val liveValue = JamBytes(Array.fill[Byte](40)(1))

@@ -6,7 +6,6 @@ import io.forge.jam.core.{ChainConfig, JamBytes, constants}
 import io.forge.jam.core.codec.JamCodecs
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
-import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.protocol.pvmhost.ServiceCode
 
 /** Result of a refine invocation Psi_R: the execution result (Ok(output) or a
@@ -84,24 +83,41 @@ class RefineExecutor(val config: ChainConfig):
     if !accounts.serviceExists(serviceId) then
       return RefineResult(ExecutionResult.BadCode, Nil, 0L)
 
-    val preimage = accounts.historicalLookup(
-      serviceId,
-      lookupAnchorTimeslot,
-      workItem.codeHash
-    ) match
-      case None =>
-        return RefineResult(ExecutionResult.BadCode, Nil, 0L)
-      case Some(bytes) =>
-        // BIG: oversized code.
-        if bytes.length > constants.Cmaxservicecodesize then
+    val codeKey = JamBytes(workItem.codeHash.bytes.toArray)
+    val storedHash = accounts.storedPreimageHash(serviceId, workItem.codeHash)
+    val module = storedHash.flatMap(ServiceCode.stored(codeKey, _)) match
+      case Some(known) =>
+        if !accounts.preimageAvailable(serviceId, lookupAnchorTimeslot, workItem.codeHash, known.sourceSize) then
+          return RefineResult(ExecutionResult.BadCode, Nil, 0L)
+        if known.sourceSize > constants.Cmaxservicecodesize then
           return RefineResult(ExecutionResult.CodeTooLarge, Nil, 0L)
-        bytes
+        known.module
+      case None =>
+        val preimage = accounts.historicalLookup(
+          serviceId,
+          lookupAnchorTimeslot,
+          workItem.codeHash
+        ) match
+          case None =>
+            return RefineResult(ExecutionResult.BadCode, Nil, 0L)
+          case Some(bytes) =>
+            // BIG: oversized code.
+            if bytes.length > constants.Cmaxservicecodesize then
+              return RefineResult(ExecutionResult.CodeTooLarge, Nil, 0L)
+            bytes
 
-    // The preimage is encode(var(metadata), code); extract the code part.
-    val code = ServiceCode.extractCodeBlob(preimage) match
-      case Some(bytes) if bytes.nonEmpty => bytes
-      case _ =>
-        return RefineResult(ExecutionResult.Panic, Nil, 0L)
+        // The preimage is encode(var(metadata), code); extract the code part.
+        val code = ServiceCode.extractCodeBlob(preimage) match
+          case Some(bytes) if bytes.nonEmpty => bytes
+          case _ =>
+            return RefineResult(ExecutionResult.Panic, Nil, 0L)
+        val built = storedHash match
+          case Some(h) => ServiceCode.module(codeKey, code, h, preimage.length.toLong)
+          case None    => ServiceCode.module(codeKey, code)
+        built match
+          // Psi_M: Y(p, a) = none → panic with zero gas used.
+          case None    => return RefineResult(ExecutionResult.Panic, Nil, 0L)
+          case Some(m) => m
 
     // a = encode(c, i, s, var(payload), blake(p))
     val payload = workItem.payload.toArray
@@ -114,14 +130,6 @@ class RefineExecutor(val config: ChainConfig):
     argsBuffer.write(RefineFetch.workPackageHash(workPackage).bytes.toArray)
     val inputData = argsBuffer.toByteArray
 
-    val module = getOrCompileModule(
-      code,
-      JamBytes(workItem.codeHash.bytes.toArray)
-    ) match
-      case None =>
-        // Psi_M: Y(p, a) = none → panic with zero gas used.
-        return RefineResult(ExecutionResult.Panic, Nil, 0L)
-      case Some(m) => m
     probe.codeReady()
 
     val context = new RefineContext(
@@ -170,8 +178,3 @@ class RefineExecutor(val config: ChainConfig):
           gasUsed
         )
 
-  private def getOrCompileModule(
-      code: Array[Byte],
-      codeHash: JamBytes
-  ): Option[InterpretedModule] =
-    ServiceCode.module(codeHash, code)

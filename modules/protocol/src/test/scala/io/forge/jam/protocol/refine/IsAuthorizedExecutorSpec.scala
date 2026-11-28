@@ -65,6 +65,39 @@ class IsAuthorizedExecutorSpec extends AnyFunSuite with Matchers:
       )
     )
 
+  private class StoredCodeLookup(hostService: Long, hash: Hash, preimage: Array[Byte], stored: Hash, availableFrom: Long = 0L)
+      extends HistoricalLookupService:
+    var reads = 0
+    def serviceExists(id: Long): Boolean = id == hostService
+    def historicalLookup(id: Long, t: Long, h: Hash): Option[Array[Byte]] =
+      if id == hostService && h == hash && t >= availableFrom then
+        reads += 1
+        Some(preimage)
+      else None
+    override def storedPreimageHash(id: Long, h: Hash): Option[Hash] =
+      if id == hostService && h == hash then Some(stored) else None
+    override def preimageAvailable(id: Long, t: Long, h: Hash, length: Long): Boolean =
+      id == hostService && h == hash && length == preimage.length && t >= availableFrom
+
+  test("authorization code is read from the state once: a later run finds its module by the stored bytes' hash") {
+    val hash = Hash(Array.fill[Byte](32)(0x61))
+    val preimage = preimageOf(haltCode, haltBitmask)
+    val stored = Hashing.blake2b256(preimage)
+    val wp = workPackage(5L).copy(authCodeHash = hash)
+    val executor = new IsAuthorizedExecutor(config)
+    val accounts = new StoredCodeLookup(5L, hash, preimage, stored)
+    val first = executor.execute(wp, 3, accounts)
+    first.result shouldBe a[ExecutionResult.Ok]
+    accounts.reads shouldBe 1
+    val again = executor.execute(wp, 3, accounts)
+    again.result shouldBe first.result
+    again.gasUsed shouldBe first.gasUsed
+    accounts.reads shouldBe 1
+    val late = new StoredCodeLookup(5L, hash, preimage, stored, availableFrom = 101L)
+    executor.execute(wp, 3, late).result shouldBe ExecutionResult.BadCode
+    late.reads shouldBe 0
+  }
+
   test("BAD when the auth-code host service or preimage is missing") {
     val wp = workPackage(5L)
     val executor = new IsAuthorizedExecutor(config)

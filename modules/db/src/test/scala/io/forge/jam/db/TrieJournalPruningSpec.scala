@@ -194,6 +194,8 @@ class TrieJournalPruningSpec extends AnyFunSuite with Matchers:
       val (nodes, values) = backend.pruneJournal(label("b2"), 3L)
       nodes should be > 0
       values shouldBe 1 // `second` is no leaf's value any more
+      backend.storesRawValueForTesting(Hashing.blake2b256(second)) shouldBe false
+      backend.readRawValue(Hashing.blake2b256(second)) shouldBe None
       (0 until 40).foreach(i => StateTrie.at(backend, b2).read(key(i)) shouldBe Some(first))
       backend.readNode(b1) shouldBe None
     finally

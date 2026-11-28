@@ -62,7 +62,7 @@ class AccumulationExecutor(
         if code.isEmpty || code.get.isEmpty || code.get.length > constants.Cmaxservicecodesize
         then return createEmptyResult(partialState, Some(serviceId), operands, elapsed)
         StageTimers.time("acc/service-module")(storedHash match
-          case Some(h) => ServiceCode.module(codeKey, code.get, h)
+          case Some(h) => ServiceCode.module(codeKey, code.get, h, preimage.get.length.toLong)
           case None    => getOrCompileModule(code.get, codeKey))
     val compileNanos = elapsed
 

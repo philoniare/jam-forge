@@ -104,6 +104,62 @@ class RefineExecutorSpec extends AnyFunSuite with Matchers:
       accounts = accounts
     )
 
+  private class StoredCodeLookup(serviceId: Long, hash: Hash, preimage: Array[Byte], stored: Hash, availableFrom: Long = 0L)
+      extends HistoricalLookupService:
+    var reads = 0
+    def serviceExists(id: Long): Boolean = id == serviceId
+    def historicalLookup(id: Long, t: Long, h: Hash): Option[Array[Byte]] =
+      if id == serviceId && h == hash && t >= availableFrom then
+        reads += 1
+        Some(preimage)
+      else None
+    override def storedPreimageHash(id: Long, h: Hash): Option[Hash] =
+      if id == serviceId && h == hash then Some(stored) else None
+    override def preimageAvailable(id: Long, t: Long, h: Hash, length: Long): Boolean =
+      id == serviceId && h == hash && length == preimage.length && t >= availableFrom
+
+  private def packageWithCode(serviceId: Long, hash: Hash): WorkPackage =
+    val wp = workPackageFor(serviceId, Array[Byte](0x11))
+    wp.copy(items = wp.items.map(_.copy(codeHash = hash)))
+
+  test("a service's code is read from the state once: a later refine finds its module by the stored bytes' hash") {
+    val hash = Hash(Array.fill[Byte](32)(0x51))
+    val stored = Hashing.blake2b256(preimageOf(haltCode, haltBitmask))
+    val accounts = new StoredCodeLookup(42L, hash, preimageOf(haltCode, haltBitmask), stored)
+    val wp = packageWithCode(42L, hash)
+    val first = run(wp, accounts)
+    first.result shouldBe a[ExecutionResult.Ok]
+    accounts.reads shouldBe 1
+    val again = run(wp, accounts)
+    again.result shouldBe first.result
+    again.gasUsed shouldBe first.gasUsed
+    accounts.reads shouldBe 1
+    val other = new StoredCodeLookup(42L, hash, preimageOf(haltCode, haltBitmask), stored)
+    run(wp, other).result shouldBe first.result
+    other.reads shouldBe 0
+  }
+
+  test("code found without reading it is still BAD when it was not available at the lookup anchor") {
+    val hash = Hash(Array.fill[Byte](32)(0x52))
+    val preimage = preimageOf(haltCode, haltBitmask)
+    val stored = Hashing.blake2b256(preimage)
+    run(packageWithCode(42L, hash), new StoredCodeLookup(42L, hash, preimage, stored)).result shouldBe a[ExecutionResult.Ok]
+    val late = new StoredCodeLookup(42L, hash, preimage, stored, availableFrom = 101L)
+    run(packageWithCode(42L, hash), late).result shouldBe ExecutionResult.BadCode
+    late.reads shouldBe 0
+  }
+
+  test("other bytes stored under the same code hash are read and run, not the module of the earlier bytes") {
+    val hash = Hash(Array.fill[Byte](32)(0x53))
+    val halting = preimageOf(haltCode, haltBitmask)
+    run(packageWithCode(42L, hash), new StoredCodeLookup(42L, hash, halting, Hashing.blake2b256(halting))).result shouldBe
+      a[ExecutionResult.Ok]
+    val panicking = preimageOf(panicCode, panicBitmask)
+    val changed = new StoredCodeLookup(42L, hash, panicking, Hashing.blake2b256(panicking))
+    run(packageWithCode(42L, hash), changed).result shouldBe ExecutionResult.Panic
+    changed.reads shouldBe 1
+  }
+
   test("BAD when the service does not exist") {
     val wp = workPackageFor(42L, Array[Byte](1))
     val result = run(wp, new SingleServiceLookup(99L, None))

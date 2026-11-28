@@ -107,6 +107,13 @@ class TrieSweepSpec extends AnyFunSuite with Matchers:
 
       kept.map(s => pairs(backend, s.root)) shouldBe before
       kept.foreach(s => s.model.foreach((k, v) => StateTrie.at(backend, s.root).read(k) shouldBe Some(v)))
+      val everWritten = (chain.iterator ++ sides.iterator).flatMap(_.model.valuesIterator).filter(_.length > 32).toSet
+      stats.valuesDeleted should be > 0L
+      everWritten.count(v => !backend.storesRawValueForTesting(Hashing.blake2b256(v))) should be > 0
+      everWritten.foreach { v =>
+        val vh = Hashing.blake2b256(v)
+        backend.readRawValue(vh).isDefined shouldBe backend.storesRawValueForTesting(vh)
+      }
       val (nodesAfter, valuesAfter) = backend.storedCounts
       nodesAfter shouldBe liveNodes.size.toLong + stats.nodesLeft
       stats.nodesLeft should be < stats.nodesDeleted / 20

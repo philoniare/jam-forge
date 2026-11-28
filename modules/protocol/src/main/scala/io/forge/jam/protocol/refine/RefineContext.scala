@@ -29,6 +29,10 @@ trait HistoricalLookupService:
       hash: Hash
   ): Option[Array[Byte]]
 
+  def storedPreimageHash(serviceId: Long, hash: Hash): Option[Hash] = None
+
+  def preimageAvailable(serviceId: Long, lookupAnchorTimeslot: Long, hash: Hash, length: Long): Boolean = false
+
 /** Mutable context threaded through a refine invocation (Psi_R): the
   * work-package being refined, the (m, e) host-call context pair — inner PVMs
   * and exported segments — and the read-only inputs the fetch host call can

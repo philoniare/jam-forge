@@ -7,7 +7,6 @@ import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.work.ExecutionResult
 import io.forge.jam.core.types.workpackage.WorkPackage
 import io.forge.jam.pvm.ExecutionMode
-import io.forge.jam.pvm.engine.InterpretedModule
 import io.forge.jam.protocol.pvmhost.{GrowHeapHostCall, HostCall, HostCallGas, HostCallResult, PvmInstance, ServiceCode}
 import spire.math.ULong
 
@@ -114,36 +113,38 @@ class IsAuthorizedExecutor(val config: ChainConfig):
     val lookupAnchorTimeslot =
       workPackage.context.lookupAnchorSlot.toLong
 
-    // p_authcode: encode(var(metadata), code) = histlookup(δ[authCodeHost], t, authCodeHash)
-    val preimageOpt =
-      if accounts.serviceExists(hostService) then
-        accounts.historicalLookup(
-          hostService,
-          lookupAnchorTimeslot,
-          workPackage.authCodeHash
-        )
-      else None
+    if !accounts.serviceExists(hostService) then return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
 
-    val preimage = preimageOpt match
+    val codeKey = JamBytes(workPackage.authCodeHash.bytes.toArray)
+    val storedHash = accounts.storedPreimageHash(hostService, workPackage.authCodeHash)
+    val module = storedHash.flatMap(ServiceCode.stored(codeKey, _)) match
+      case Some(known) =>
+        if !accounts.preimageAvailable(hostService, lookupAnchorTimeslot, workPackage.authCodeHash, known.sourceSize) then
+          return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+        if known.codeLength > constants.Cmaxauthcodesize then
+          return IsAuthorizedResult(ExecutionResult.CodeTooLarge, 0L)
+        known.module
       case None =>
-        return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
-      case Some(bytes) => bytes
+        // p_authcode: encode(var(metadata), code) = histlookup(δ[authCodeHost], t, authCodeHash)
+        val preimage = accounts.historicalLookup(hostService, lookupAnchorTimeslot, workPackage.authCodeHash) match
+          case None =>
+            return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+          case Some(bytes) => bytes
 
-    val code = ServiceCode.extractCodeBlob(preimage) match
-      case Some(bytes) if bytes.nonEmpty => bytes
-      case _ =>
-        return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
+        val code = ServiceCode.extractCodeBlob(preimage) match
+          case Some(bytes) if bytes.nonEmpty => bytes
+          case _ =>
+            return IsAuthorizedResult(ExecutionResult.BadCode, 0L)
 
-    if code.length > constants.Cmaxauthcodesize then
-      return IsAuthorizedResult(ExecutionResult.CodeTooLarge, 0L)
+        if code.length > constants.Cmaxauthcodesize then
+          return IsAuthorizedResult(ExecutionResult.CodeTooLarge, 0L)
 
-    val module = getOrCompileModule(
-      code,
-      JamBytes(workPackage.authCodeHash.bytes.toArray)
-    ) match
-      case None =>
-        return IsAuthorizedResult(ExecutionResult.Panic, 0L)
-      case Some(m) => m
+        val built = storedHash match
+          case Some(h) => ServiceCode.module(codeKey, code, h, preimage.length.toLong)
+          case None    => ServiceCode.module(codeKey, code)
+        built match
+          case None    => return IsAuthorizedResult(ExecutionResult.Panic, 0L)
+          case Some(m) => m
     probe.codeReady()
 
     // a = encode[2](c)
@@ -170,12 +171,6 @@ class IsAuthorizedExecutor(val config: ChainConfig):
         IsAuthorizedResult(ExecutionResult.Panic, gasUsed)
       case PvmRunner.PvmExit.Halt =>
         IsAuthorizedResult(ExecutionResult.Ok(JamBytes(output)), gasUsed)
-
-  private def getOrCompileModule(
-      code: Array[Byte],
-      codeHash: JamBytes
-  ): Option[InterpretedModule] =
-    ServiceCode.module(codeHash, code)
 
 object IsAuthorizedExecutor:
   /** The work-package's implied authorizer hash: blake(authCodeHash ++ authorizerConfig). */

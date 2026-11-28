@@ -23,13 +23,16 @@ object ServiceCode:
   def module(codeHash: JamBytes, code: Array[Byte]): Option[InterpretedModule] =
     modules.getOrCreate(codeHash, code)(parseBlob(code).flatMap(blob => InterpretedModule.create(blob).toOption))
 
-  def module(codeHash: JamBytes, code: Array[Byte], storedHash: Hash): Option[InterpretedModule] =
-    modules.getOrCreate(codeHash, code, ModuleCache.Source.of(storedHash.bytes.toArray))(
+  def module(codeHash: JamBytes, code: Array[Byte], storedHash: Hash, preimageLength: Long): Option[InterpretedModule] =
+    modules.getOrCreate(codeHash, code, ModuleCache.Source.of(storedHash.bytes.toArray), preimageLength)(
       parseBlob(code).flatMap(blob => InterpretedModule.create(blob).toOption)
     )
 
   def storedModule(codeHash: JamBytes, storedHash: Hash): Option[InterpretedModule] =
     modules.lookupBySource(codeHash, ModuleCache.Source.of(storedHash.bytes.toArray))
+
+  def stored(codeHash: JamBytes, storedHash: Hash): Option[ModuleCache.Stored] =
+    modules.storedBySource(codeHash, ModuleCache.Source.of(storedHash.bytes.toArray))
 
   def extractCodeBlob(preimage: Array[Byte]): Option[Array[Byte]] =
     if preimage.isEmpty then return None

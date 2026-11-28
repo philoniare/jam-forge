@@ -68,7 +68,14 @@ final class RocksDbTrieBackend private (
     if settings.manualWalFlush then
       unflushed.set(0L)
       db.flushWal(false)
-  private val nodeCache = new RocksDbTrieBackend.NodeCache(RocksDbTrieBackend.NodeCacheSlots)
+  private val nodeCache = new RocksDbTrieBackend.HashCache[TrieNode](RocksDbTrieBackend.NodeCacheSlots)
+
+  private val valueCache = new RocksDbTrieBackend.HashCache[JamBytes](RocksDbTrieBackend.ValueCacheSlots)
+  private val valueDbReads = new java.util.concurrent.atomic.LongAdder
+
+  def rawValueDbReads: Long = valueDbReads.sum()
+
+  private[jam] def storesRawValueForTesting(hash: Hash): Boolean = db.get(valuesCf, key(hash)) != null
 
   // RocksDB copies keys and values into its own buffers, so the backing arrays can be passed as they are.
   private inline def key(h: Hash): Array[Byte] = h.toArrayUnsafe
@@ -217,11 +224,12 @@ final class RocksDbTrieBackend private (
           db.write(writeOptions, plan.batch)
           wrote(plan.batch.getDataSize)
           plan.nodes.foreach(nodeCache.remove)
+          plan.values.foreach(valueCache.remove)
         }
-        (plan.nodes.size, plan.values)
+        (plan.nodes.size, plan.values.size)
       finally plan.batch.close()
 
-  private final class PrunePlan(val batch: WriteBatch, val nodes: IndexedSeq[Hash], val values: Int)
+  private final class PrunePlan(val batch: WriteBatch, val nodes: IndexedSeq[Hash], val values: IndexedSeq[Hash])
 
   private def planPrune(label: Hash, height: Long, journalled: IndexedSeq[RocksDbTrieBackend.Journal.Entry]): PrunePlan =
     val batch = new WriteBatch()
@@ -257,18 +265,18 @@ final class RocksDbTrieBackend private (
           deletedNodes += h
         }
       }
-      var deletedValues = 0
+      val deletedValues = mutable.ArrayBuffer[Hash]()
       val values = valueDeltas.keys.toIndexedSeq
       readCounts(valueRefsCf, values).lazyZip(values).foreach { (stored, v) =>
         if stored + valueDeltas(v) <= 0 then
           batch.delete(valuesCf, key(v))
           batch.delete(valueRefsCf, key(v))
-          deletedValues += 1
+          deletedValues += v
         else batch.merge(valueRefsCf, key(v), encodeLE8(valueDeltas(v)))
       }
       batch.delete(journalCf, key(label))
       batch.delete(journalCf, pruneMark(label))
-      PrunePlan(batch, deletedNodes.toIndexedSeq, deletedValues)
+      PrunePlan(batch, deletedNodes.toIndexedSeq, deletedValues.toIndexedSeq)
     catch
       case e: Throwable =>
         batch.close()
@@ -319,11 +327,21 @@ final class RocksDbTrieBackend private (
       RocksDbTrieBackend.inParallel(settings.storageThreads, chunks.size)(i => load(chunks(i)))
 
   def readRawValue(hash: Hash): Option[JamBytes] =
-    Option(db.get(valuesCf, key(hash))).map(JamBytes.wrap)
+    val cached = valueCache.get(hash)
+    if cached != null then Some(cached)
+    else
+      valueDbReads.increment()
+      val bytes = db.get(valuesCf, key(hash))
+      if bytes == null then None
+      else
+        val value = JamBytes.wrap(bytes)
+        if bytes.length <= RocksDbTrieBackend.MaxCachedValueBytes then valueCache.put(hash, value)
+        Some(value)
 
   def batchUpdate(ops: Seq[BackendOp]): Unit =
     val batch = new WriteBatch()
     val written = mutable.ArrayBuffer[TrieNode]()
+    val writtenValues = mutable.ArrayBuffer[(Hash, JamBytes)]()
     val label = journalLabel
     val journalling = label != null && journalReplaced
     // Outside a journal the height is unknown: such nodes are marked as added "at the end of time" and never pruned.
@@ -339,6 +357,7 @@ final class RocksDbTrieBackend private (
           touched += node.hash
         case BackendOp.WriteRawValue(h, v) =>
           batch.put(valuesCf, key(h), v.toArrayUnsafe)
+          if v.length <= RocksDbTrieBackend.MaxCachedValueBytes then writtenValues += ((h, v))
           touched += h
         case BackendOp.NodeRefDelta(h, d, described) =>
           if tracksGarbage then
@@ -378,6 +397,7 @@ final class RocksDbTrieBackend private (
         db.write(writeOptions, batch)
         wrote(batch.getDataSize)
         written.foreach(n => nodeCache.put(n.hash, n))
+        writtenValues.foreach((h, v) => valueCache.put(h, v))
         saves += 1
         if sweeping != null then touched.foreach(h => sweeping.add(h.toArrayUnsafe))
       }
@@ -485,6 +505,7 @@ final class RocksDbTrieBackend private (
         val batch = new WriteBatch()
         try
           val deleted = mutable.ArrayBuffer[Hash]()
+          val deletedValues = mutable.ArrayBuffer[Hash]()
           val valueDeltas = mutable.LinkedHashMap[Hash, Long]()
           eligible.foreach { i =>
             val h = hashes(i)
@@ -506,12 +527,14 @@ final class RocksDbTrieBackend private (
               if !keep then
                 batch.delete(valuesCf, key(v))
                 batch.delete(valueRefsCf, key(v))
+                deletedValues += v
                 stats.valuesDeleted += 1
             else batch.merge(valueRefsCf, key(v), encodeLE8(delta))
           }
           db.write(writeOptions, batch)
           wrote(batch.getDataSize)
           deleted.foreach(nodeCache.remove)
+          deletedValues.foreach(valueCache.remove)
           stats.nodesDeleted += deleted.size
           stats.nodesLeft += hashes.size - deleted.size
         finally batch.close()
@@ -575,6 +598,7 @@ final class RocksDbTrieBackend private (
     val batch = new WriteBatch()
     try
       val deletedNodes = mutable.ArrayBuffer[Hash]()
+      val deletedValues = mutable.ArrayBuffer[Hash]()
       val valueDeltas = mutable.HashMap[Hash, Long]()
       val nodes = deadNodeCandidates.toIndexedSeq
       readCounts(nodeRefsCf, nodes).lazyZip(nodes).foreach { (count, h) =>
@@ -595,11 +619,13 @@ final class RocksDbTrieBackend private (
         if stored + delta <= 0 then
           batch.delete(valuesCf, key(h))
           batch.delete(valueRefsCf, key(h))
+          deletedValues += h
         else if delta != 0 then batch.merge(valueRefsCf, key(h), encodeLE8(delta))
       }
       db.write(writeOptions, batch)
       wrote(batch.getDataSize)
       deletedNodes.foreach(nodeCache.remove)
+      deletedValues.foreach(valueCache.remove)
       deadNodeCandidates.clear()
       deadValueCandidates.clear()
     finally batch.close()
@@ -611,6 +637,7 @@ final class RocksDbTrieBackend private (
       db.deleteRange(cf, begin, end)
     }
     nodeCache.clear()
+    valueCache.clear()
     deadNodeCandidates.clear()
     deadValueCandidates.clear()
 
@@ -797,6 +824,10 @@ object RocksDbTrieBackend:
    */
   private val NodeCacheSlots = 1 << 20
 
+  val MaxCachedValueBytes: Int = 4096
+
+  private val ValueCacheSlots = 1 << 14
+
   private val pools = new java.util.concurrent.ConcurrentHashMap[Int, java.util.concurrent.ForkJoinPool]()
 
   private def inParallel(threads: Int, n: Int)(f: Int => Unit): Unit =
@@ -940,17 +971,17 @@ object RocksDbTrieBackend:
    * A direct-mapped cache of decoded nodes. Nodes are content-addressed and immutable, so an entry can only go stale
    * by its node being deleted, which gc and clear handle by evicting it.
    */
-  private final class NodeCache(slots: Int):
-    private final class Entry(val hash: Hash, val node: TrieNode)
+  private final class HashCache[V <: AnyRef](slots: Int):
+    private final class Entry(val hash: Hash, val held: V)
     private val entries = new java.util.concurrent.atomic.AtomicReferenceArray[Entry](slots)
     private val mask = slots - 1
 
     /** The cached node, or null. */
-    def get(hash: Hash): TrieNode =
+    def get(hash: Hash): V | Null =
       val e = entries.get(hash.hashCode & mask)
-      if e != null && e.hash == hash then e.node else null
+      if e != null && e.hash == hash then e.held else null
 
-    def put(hash: Hash, node: TrieNode): Unit = entries.set(hash.hashCode & mask, Entry(hash, node))
+    def put(hash: Hash, held: V): Unit = entries.set(hash.hashCode & mask, Entry(hash, held))
 
     def remove(hash: Hash): Unit =
       val i = hash.hashCode & mask

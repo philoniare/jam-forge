@@ -24,7 +24,7 @@ class ImportBlockStepSpec extends AnyFunSuite with Matchers:
     store.initialize(step.block.header.parent, RawState(step.preState.stateRoot, step.preState.keyvals), Nil)
     val ours = new IllegalStateException("jump table entry size 5")
     val importer = new BlockImporter(config, skipAncestryValidation = true):
-      override def importBlock(block: Block, preState: RawState, ancestry: Ancestry, extrinsicHashChecked: Boolean): ImportResult =
+      override def importBlock(block: Block, preState: RawState, ancestry: Ancestry, extrinsicHashChecked: Boolean, onVerified: () => Unit): ImportResult =
         ImportResult.Failed(ours.getMessage, ours)
 
     val thrown = the[IllegalStateException] thrownBy ImportBlockStep(store, importer, step.block)
