@@ -300,6 +300,7 @@ final class JamNode(
     */
   def enableAuthoring(keys: Seq[ValidatorKeySet]): Unit =
     tickets.setValidatorKeys(keys)
+    authoringGuard.foreach(_.close())
     val guard = new EquivocationGuard(
       chain.meta,
       keys,
@@ -591,7 +592,9 @@ final class JamNode(
     val bytes = chain.encodeBlock(block)
     val hash = chain.headerHashOf(block)
     telemetry.foreach(_.authored(authoring, Telemetry.blockOutline(block, bytes.length, hash)))
-    importAndAnnounce(bytes) match
+    val slot = block.header.slot.toLong
+    val guard = authoringGuard
+    importAndAnnounce(bytes, released = () => guard.forall(_.durable(slot))) match
       case Right(head) =>
         telemetry.foreach(_.blockExecuted(authoring, chain.takeAccumulateCosts(hash).getOrElse(Map.empty)))
         pools.pruneAfterImport(
@@ -746,6 +749,25 @@ final class JamNode(
     else logger.info(s"the tick for slot $slot arrived in slot $clockSlot: skipped, and duties wait for two slots")
     reportSyncStatus(slot)
     slotCallback(slot)
+    prepareAhead(slot)
+
+  private lazy val preparing = threads.scheduled("jam-slot-prep")
+
+  private def prepareAhead(slot: Long): Unit =
+    if !catchingUp then
+      try author.foreach(_.prepare(slot + 1): Unit)
+      catch case scala.util.control.NonFatal(e) => logger.debug(s"preparing slot ${slot + 1} failed: ${e.getMessage}")
+      if (slot + 1) % chain.config.epochLength == 0 then
+        try
+          preparing.schedule(
+            (() =>
+              try io.forge.jam.protocol.safrole.SafroleTransition.prepareRingRoot(chain.stateView()): Unit
+              catch case scala.util.control.NonFatal(e) => logger.debug(s"preparing the next epoch's ring commitment failed: ${e.getMessage}")
+            ): Runnable,
+            math.max(0L, slotClock.slotStartMillis(slot) + slotClock.slotSeconds * 500L - System.currentTimeMillis()),
+            java.util.concurrent.TimeUnit.MILLISECONDS
+          ): Unit
+        catch case _: java.util.concurrent.RejectedExecutionException => ()
 
   def listenPort: Int = network.boundPort
 
@@ -981,16 +1003,22 @@ final class JamNode(
   ): PeerConnection = peers.connectPeer(address, expectedEd25519)
 
   /** Import a locally produced or externally obtained block and announce it. */
-  def importAndAnnounce(blockBytes: Array[Byte]): Either[ChainError, ChainHead] =
-    chain
-      .importBatch(
-        List(blockBytes),
-        each = (bytes, run) =>
-          val outcome = run()
-          if outcome.isRight then sync.announceBlock(bytes)
-          outcome
-      )
-      .head
+  def importAndAnnounce(blockBytes: Array[Byte], released: () => Boolean = () => true): Either[ChainError, ChainHead] =
+    try
+      chain
+        .importBatch(
+          List(blockBytes),
+          each = (bytes, run) =>
+            val outcome = run()
+            if !released() then throw JamNode.NotReleased()
+            if outcome.isRight then sync.announceBlock(bytes)
+            outcome
+        )
+        .head
+    catch
+      case e: JamNode.NotReleased =>
+        logger.error("authored block not kept: the record that its slot was sealed is not on disk (see the guard's error)")
+        Left(ChainError.ImportFailed(e.getMessage))
 
   /** Run GRANDPA, voting with `keys` when they are in the voter set. Set 0's voters are the validators of the genesis
     * state.
@@ -1152,6 +1180,8 @@ final class JamNode(
     * did; a failure is logged.
     */
   def shutdownStorageOnly(): Unit =
+    try authoringGuard.foreach(_.close())
+    catch case e: Exception => logger.error("shutdown: the authoring guard failed to finish its writes", e)
     val pruneStopped =
       try chain.shutdown()
       catch
@@ -1167,6 +1197,8 @@ final class JamNode(
       close("state")(trieBackend.close())
 
 object JamNode:
+
+  final class NotReleased extends RuntimeException("the record that the block's slot was sealed is not on disk")
 
   val CheckpointRetryMillis: Long = 2000L
 

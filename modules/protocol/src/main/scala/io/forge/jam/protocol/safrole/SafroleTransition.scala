@@ -176,6 +176,30 @@ object SafroleTransition extends StrictLogging:
       val phase = input.slot % config.epochLength
       processExtrinsics(advanced, input.extrinsic, phase, advanced.gammaZ, config, deferProofs)
 
+  private def pendingAtEpochChange(
+      iota: IndexedSeq[ValidatorKey],
+      offenders: List[Ed25519PublicKey]
+  ): IndexedSeq[ValidatorKey] =
+    val offenderSet = offenders.map(o => JamBytes(o.bytes)).toSet
+    iota.map { validator =>
+      if offenderSet.contains(JamBytes(validator.ed25519.bytes)) then
+        validator.copy(
+          bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
+          ed25519 = Ed25519PublicKey(new Array[Byte](32)),
+          bls = BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
+          metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
+        )
+      else validator
+    }
+
+  private def ringKeysOf(keys: IndexedSeq[ValidatorKey], config: ChainConfig): List[BandersnatchPublicKey] =
+    keys.map(_.bandersnatch).padTo(config.ringSize, BandersnatchPublicKey(new Array[Byte](32))).toList
+
+  def prepareRingRoot(view: TrieBackedJamState): Option[JamBytes] =
+    val preState = SafroleBridge.extract(view)
+    val config = view.config
+    BandersnatchWrapper.generateRingRoot(ringKeysOf(pendingAtEpochChange(preState.iota, view.psi.offenders), config), config.ringSize)
+
   /**
    * Handle epoch transition.
    *
@@ -206,26 +230,10 @@ object SafroleTransition extends StrictLogging:
     val newKappa = preState.gammaK
 
     // Load new pending validators with offender filtering
-    val offenderSet = posteriorOffenders.map(o => JamBytes(o.bytes)).toSet
-    val newGammaK = preState.iota.map { validator =>
-      if offenderSet.contains(JamBytes(validator.ed25519.bytes)) then
-        validator.copy(
-          bandersnatch = BandersnatchPublicKey(new Array[Byte](32)),
-          ed25519 = Ed25519PublicKey(new Array[Byte](32)),
-          bls = BlsPublicKey(new Array[Byte](BlsPublicKey.Size)),
-          metadata = JamBytes.zeros(ValidatorKey.MetadataSize)
-        )
-      else
-        validator
-    }
+    val newGammaK = pendingAtEpochChange(preState.iota, posteriorOffenders)
 
-    // Generate new ring root.
-    val ringKeys = newGammaK
-      .map(_.bandersnatch)
-      .padTo(config.ringSize, BandersnatchPublicKey(new Array[Byte](32)))
-      .toList
     val newGammaZ = BandersnatchWrapper
-      .generateRingRoot(ringKeys, config.ringSize)
+      .generateRingRoot(ringKeysOf(newGammaK, config), config.ringSize)
       .getOrElse(
         throw new SafroleCryptoFailure("Bandersnatch ring-root generation failed during epoch transition")
       )

@@ -46,7 +46,7 @@ class AuthoringGuardSpec extends AnyFunSuite with Matchers with NodeFixture:
       first.blockAuthor.getOrElse(fail("no author")).tryAuthor(2).isDefined shouldBe true
       first.chain.best.slot shouldBe 1L
       first.authorSlot(2) shouldBe None
-      first.chain.meta.lastAuthoredSlot shouldBe Some(2L)
+      eventually("the sealed slot to be on disk")(first.chain.meta.lastAuthoredSlot.contains(2L))
 
       val again = start().node
       again.chain.best.slot shouldBe 1L

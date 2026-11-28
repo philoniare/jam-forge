@@ -14,14 +14,31 @@ trait AuthoringGuard:
 
   def sealing(slot: Long, hash: Hash, block: Block): Boolean
 
+  def durable(slot: Long): Boolean = true
+
 object AuthoringGuard:
   val none: AuthoringGuard = new AuthoringGuard:
     def mayAuthor(slot: Long): Boolean = true
     def sealing(slot: Long, hash: Hash, block: Block): Boolean = true
 
-final class EquivocationGuard(meta: ChainMeta, keys: Seq[ValidatorKeySet], reported: String => Unit)
-    extends AuthoringGuard
-    with LazyLogging:
+final class EquivocationGuard(
+    meta: ChainMeta,
+    keys: Seq[ValidatorKeySet],
+    reported: String => Unit,
+    write: Long => Unit = null
+) extends AuthoringGuard
+    with LazyLogging
+    with AutoCloseable:
+
+  private val writeSlot: Long => Unit = if write != null then write else meta.putLastAuthoredSlot
+
+  private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = new Thread(r, "jam-author-guard")
+    t.setDaemon(true)
+    t
+  }
+
+  private val writes = mutable.HashMap.empty[Long, java.util.concurrent.Future[?]]
 
   private val ourKeys: Set[JamBytes] = keys.map(k => JamBytes(k.bandersnatchPublic)).toSet
 
@@ -40,9 +57,15 @@ final class EquivocationGuard(meta: ChainMeta, keys: Seq[ValidatorKeySet], repor
   def mayAuthor(slot: Long): Boolean = synchronized(stoppedFor.isEmpty && slot > last)
 
   def sealing(slot: Long, hash: Hash, block: Block): Boolean = synchronized {
-    if !mayAuthor(slot) then false
+    val write =
+      if !mayAuthor(slot) then None
+      else
+        try Some(writer.submit((() => writeSlot(slot)): Runnable))
+        catch case _: java.util.concurrent.RejectedExecutionException => None
+    if write.isEmpty then false
     else
-      meta.putLastAuthoredSlot(slot)
+      writes.filterInPlace((_, w) => !(w.isDone && scala.util.Try(w.get()).isSuccess))
+      writes.update(slot, write.get)
       beforeLast = last
       last = slot
       if armedFrom == Long.MaxValue then armedFrom = slot
@@ -54,8 +77,36 @@ final class EquivocationGuard(meta: ChainMeta, keys: Seq[ValidatorKeySet], repor
   def withdraw(slot: Long): Unit = synchronized {
     if last == slot && beforeLast < slot then
       last = beforeLast
-      if last >= 0 then meta.putLastAuthoredSlot(last) else meta.dropLastAuthoredSlot()
+      val back = last
+      try writer.submit((() => if back >= 0 then meta.putLastAuthoredSlot(back) else meta.dropLastAuthoredSlot()): Runnable).get()
+      catch case _: java.util.concurrent.RejectedExecutionException => ()
   }
+
+  override def durable(slot: Long): Boolean =
+    val pending = synchronized(writes.remove(slot))
+    pending.forall { w =>
+      try
+        w.get(EquivocationGuard.ReleaseWaitMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
+        true
+      catch
+        case _: java.util.concurrent.TimeoutException =>
+          logger.warn(
+            s"the record that slot $slot was sealed is not on disk ${EquivocationGuard.ReleaseWaitMillis} ms after " +
+              "sealing (a slow disk): its block is not released"
+          )
+          false
+        case NonFatal(e) =>
+          val cause = Option(e.getCause).getOrElse(e)
+          stop(
+            s"the record that slot $slot was sealed could not be written (${cause.getMessage}), so its block is not released",
+            duplicate = false
+          )
+          false
+    }
+
+  def close(): Unit =
+    writer.shutdown()
+    writer.awaitTermination(EquivocationGuard.WriteTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS): Unit
 
   def observe(hash: Hash, block: Block, sealer: () => Option[Array[Byte]]): Unit =
     val slot = block.header.slot.toLong
@@ -74,18 +125,20 @@ final class EquivocationGuard(meta: ChainMeta, keys: Seq[ValidatorKeySet], repor
         )
     }
 
-  private def stop(why: String): Unit =
+  private def stop(why: String, duplicate: Boolean = true): Unit =
     val first = synchronized {
       val was = stoppedFor.isEmpty
       if was then stoppedFor = Some(why)
       was
     }
     if first then
-      logger.error(
-        s"DUPLICATE AUTHORING: $why. Authoring stops so that this validator does not equivocate; stop the other " +
-          "process, then restart this node"
-      )
-      reported(why)
+      if duplicate then
+        logger.error(
+          s"DUPLICATE AUTHORING: $why. Authoring stops so that this validator does not equivocate; stop the other " +
+            "process, then restart this node"
+        )
+        reported(why)
+      else logger.error(s"$why. Authoring stops; restart the node once the disk is writable")
 
   private def sealOutput(block: Block): JamBytes =
     try JamBytes(BandersnatchWrapper.getIetfVrfOutput(block.header.seal.toArray))
@@ -93,3 +146,7 @@ final class EquivocationGuard(meta: ChainMeta, keys: Seq[ValidatorKeySet], repor
 
 object EquivocationGuard:
   val Kept: Int = 4096
+
+  val WriteTimeoutSeconds: Long = 10L
+
+  val ReleaseWaitMillis: Long = 2000L

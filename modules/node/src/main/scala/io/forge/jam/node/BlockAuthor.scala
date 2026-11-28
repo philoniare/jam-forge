@@ -181,10 +181,8 @@ final class BlockAuthor(
           s"${disputes.dispute.faults.size} fault(s)"
       )
 
-    // Assurances and guarantees that pass the pipeline's checks on a throwaway posterior-Safrole view; the rest are
-    // left out, and those that cannot pass later leave the pool.
     val plan = AuthoringPlan.plan(
-      runSafrole(includedTickets).fold(_ => chain.stateViewOf(best), _._1),
+      view,
       priorTau = preView.timeslot,
       priorKappa = preView.validators.current,
       priorLambda = preView.validators.previous,
@@ -215,15 +213,10 @@ final class BlockAuthor(
     )
     val extrinsicHash = ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config)
 
-    // H_vrfsig: VRF over Xentropy ++ Y(sealsig); the seal's VRF output is
-    // fixed by (context, key) alone, so a message-less pre-signature yields it.
-    val preSeal = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, Array.empty)
-    val sealVrfOutput = BandersnatchWrapper.getIetfVrfOutput(preSeal)
-    val entropyVrf = BandersnatchWrapper.ietfVrfSign(
-      keys.bandersnatchSecret,
-      SigningContext.entropyInputData(sealVrfOutput),
-      Array.empty
-    )
+    val ownKey = JamBytes(keys.bandersnatchPublic)
+    val entropyVrf = Option(prepared.remove(slot))
+      .filter(p => p.key == ownKey && java.util.Arrays.equals(p.sealInput, sealVrfInput))
+      .fold(BlockAuthor.entropySignature(keys, sealVrfInput))(_.entropyVrf)
 
     val headerCodec =
       Header.headerCodec(chain.config.epochLength)
@@ -258,6 +251,24 @@ final class BlockAuthor(
     )
     Some(block)
 
+  private val prepared = new java.util.concurrent.ConcurrentHashMap[Long, BlockAuthor.Prepared]()
+
+  def prepare(slot: Long): Boolean =
+    val best = chain.best
+    val view = chain.stateViewOf(best)
+    val e = chain.config.epochLength
+    if slot <= view.timeslot || slot / e != view.timeslot / e then false
+    else
+      sealerOf(view.gamma.st, (slot % e).toInt, BlockAuthor.sealEntropy(view.entropy.pool)) match
+        case None => false
+        case Some((keys, sealInput)) =>
+          val entropyVrf = BlockAuthor.entropySignature(keys, sealInput)
+          prepared.put(slot, BlockAuthor.Prepared(JamBytes(keys.bandersnatchPublic), sealInput, entropyVrf))
+          prepared.keySet.removeIf(_ < slot - e)
+          true
+
+  private[node] def preparedFor(slot: Long): Boolean = prepared.containsKey(slot)
+
   private def sealerOf(st: TicketsOrKeys, slotIndex: Int, sealEntropy: Array[Byte])
       : Option[(ValidatorKeySet, Array[Byte])] =
     st match
@@ -271,6 +282,16 @@ final class BlockAuthor(
         }
 
 object BlockAuthor:
+
+  private[node] final case class Prepared(key: JamBytes, sealInput: Array[Byte], entropyVrf: Array[Byte])
+
+  private[node] def entropySignature(keys: ValidatorKeySet, sealVrfInput: Array[Byte]): Array[Byte] =
+    val preSeal = BandersnatchWrapper.ietfVrfSign(keys.bandersnatchSecret, sealVrfInput, Array.empty)
+    BandersnatchWrapper.ietfVrfSign(
+      keys.bandersnatchSecret,
+      SigningContext.entropyInputData(BandersnatchWrapper.getIetfVrfOutput(preSeal)),
+      Array.empty
+    )
 
   private[node] def sealEntropy(pool: Seq[Hash]): Array[Byte] =
     if pool.length > 3 then pool(3).bytes else new Array[Byte](32)
