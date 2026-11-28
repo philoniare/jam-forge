@@ -48,8 +48,6 @@ object ChainManager:
 
   val StateSweepIntervalMillis: Long = 60L * 60 * 1000
 
-  val PreparedAhead: Int = 8
-
   final class PreparedBlock private[node] (
       val bytes: Array[Byte],
       val block: Block,
@@ -1181,28 +1179,8 @@ final class ChainManager(
     val headerBytes = headerCodec.encode(block.header)
     new ChainManager.PreparedBlock(bytes, block, headerBytes, Hashing.blake2b256(headerBytes), true)
 
-  @volatile private[node] var prepareAhead: Boolean = true
-
   private def preparing(blocks: Seq[Array[Byte]]): Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])] =
-    if blocks.sizeIs <= 1 || !prepareAhead then blocks.iterator.map(bytes => (bytes, () => prepare(bytes)))
-    else
-      val source = blocks.iterator
-      val ahead = mutable.Queue.empty[(Array[Byte], java.util.concurrent.CompletableFuture[Either[ChainError, ChainManager.PreparedBlock]])]
-      def fill(): Unit =
-        while ahead.sizeIs < ChainManager.PreparedAhead && source.hasNext do
-          val bytes = source.next()
-          ahead.enqueue((bytes, io.forge.jam.core.Parallel.async {
-            val prepared = prepare(bytes)
-            prepared.foreach(_.bodyMatches)
-            prepared
-          }))
-      new Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])]:
-        def hasNext: Boolean = ahead.nonEmpty || source.hasNext
-        def next(): (Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock]) =
-          fill()
-          val (bytes, future) = ahead.dequeue()
-          fill()
-          (bytes, () => io.forge.jam.core.Parallel.await(future))
+    blocks.iterator.map(bytes => (bytes, () => prepare(bytes)))
 
   def importOwn(
       block: Block,

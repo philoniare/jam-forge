@@ -7,7 +7,6 @@ import io.forge.jam.core.types.block.Extrinsic
 import io.forge.jam.core.types.dispute.GuaranteeSignature
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, Dispute}
 import io.forge.jam.core.types.tickets.TicketEnvelope
-import io.forge.jam.core.types.workpackage.WorkReport
 import io.forge.jam.core.codec.Codec
 
 /** H_extrinsichash computation: blake2b over the concatenated
@@ -35,8 +34,7 @@ object ExtrinsicHashing:
       Dispute.codec.encode(ex.disputes)
 
     val guaranteeItems = ex.guarantees.map { g =>
-      val reportEncoded = summon[Codec[WorkReport]].encode(g.report)
-      val reportHash = Hashing.blake2b256(reportEncoded)
+      val reportHash = g.report.hash
       val timeslotEncoded =
         io.forge.jam.core.codec.codecs.uint32L.encode(g.slot.toLong & 0xffffffffL)
       val credentialEncoded =

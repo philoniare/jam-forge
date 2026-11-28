@@ -26,15 +26,6 @@ import io.forge.jam.protocol.SignatureBatch
 object AssuranceTransition:
 
   /**
-   * Check if a bit is set in a byte array at the given position.
-   */
-  private def isBitSet(bytes: Array[Byte], position: Int): Boolean =
-    val byteIndex = position / 8
-    val bitIndex = position % 8
-    if byteIndex >= bytes.length then false
-    else (bytes(byteIndex).toInt & (1 << bitIndex)) != 0
-
-  /**
    * The Ed25519 check of an assurance: its validator's key, the signed message and the signature.
    *
    * The signature message is: "jam_available" + blake2b(anchor + bitfield)
@@ -78,7 +69,7 @@ object AssuranceTransition:
     val engaged = state.availAssignments.iterator.map(_.isDefined).toArray
     val coresCount = engaged.length
     assurances.forall { assurance =>
-      val bitfieldBytes = assurance.bitfield.toArray
+      val bitfieldBytes = assurance.bitfield.toArrayUnsafe
       var ok = true
       var byteIndex = 0
       while ok && byteIndex < bitfieldBytes.length do
@@ -146,12 +137,16 @@ object AssuranceTransition:
     // For each core, count how many validators have assured it
     val counts = new Array[Int](coresCount)
     for assurance <- assurances do
-      val bitfieldBytes = assurance.bitfield.toArray
-      var coreIndex = 0
-      while coreIndex < coresCount do
-        if isBitSet(bitfieldBytes, coreIndex) then
-          counts(coreIndex) = counts(coreIndex) + 1
-        coreIndex += 1
+      val bitfieldBytes = assurance.bitfield.toArrayUnsafe
+      val bytes = math.min(bitfieldBytes.length, (coresCount + 7) / 8)
+      var byteIndex = 0
+      while byteIndex < bytes do
+        var bits = bitfieldBytes(byteIndex) & 0xff
+        while bits != 0 do
+          val coreIndex = byteIndex * 8 + Integer.numberOfTrailingZeros(bits)
+          if coreIndex < coresCount then counts(coreIndex) += 1
+          bits &= bits - 1
+        byteIndex += 1
 
     val result = scala.collection.mutable.Set[Int]()
     var coreIndex = 0
@@ -164,7 +159,10 @@ object AssuranceTransition:
    * Get work reports from available cores in sorted order.
    */
   private def processAvailableReports(availableCores: Set[Int], state: AssuranceState): List[WorkReport] =
-    availableCores.toList.sorted.flatMap(coreIndex => state.availAssignments.lift(coreIndex).flatten.map(_.report))
+    val assignments = state.availAssignments.toArray
+    availableCores.toList.sorted.flatMap(coreIndex =>
+      if coreIndex >= 0 && coreIndex < assignments.length then assignments(coreIndex).map(_.report) else None
+    )
 
   /**
    * Update state by removing available reports.
@@ -173,9 +171,13 @@ object AssuranceTransition:
     state: AssuranceState,
     availableReports: List[WorkReport]
   ): AssuranceState =
-    val availableReportSet = availableReports.toSet
+    val byPackage = availableReports.groupBy(_.packageSpec.hash)
     val newAssignments = state.availAssignments.map {
-      case Some(assignment) if availableReportSet.contains(assignment.report) => None
+      case Some(assignment)
+          if byPackage.get(assignment.report.packageSpec.hash).exists(_.exists(r =>
+            (r eq assignment.report) || r == assignment.report
+          )) =>
+        None
       case other => other
     }
     state.copy(availAssignments = newAssignments)

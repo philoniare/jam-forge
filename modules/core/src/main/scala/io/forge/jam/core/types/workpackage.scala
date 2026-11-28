@@ -122,7 +122,10 @@ object workpackage:
     authOutput: JamBytes,
     segmentRootLookup: List[SegmentRootLookup],
     results: List[WorkResult]
-  )
+  ):
+    lazy val hash: Hash = io.forge.jam.core.Hashing.blake2b256(summon[Codec[WorkReport]].encode(this))
+
+    override lazy val hashCode: Int = scala.runtime.ScalaRunTime._hashCode(this)
 
   object WorkReport:
     given Codec[WorkReport] =

@@ -659,9 +659,8 @@ object Telemetry:
     reportHash.bytes.toArray ++ u32(slot) ++ sequence(guarantors)(v => u16(v.toLong))
 
   def guaranteeOutline(g: io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic): Array[Byte] =
-    import io.forge.jam.core.codec.JamCodecs.encode
     guaranteeOutline(
-      io.forge.jam.core.Hashing.blake2b256(g.report.encode.toArray),
+      g.report.hash,
       g.slot.toLong,
       g.signatures.map(_.validatorIndex.toInt)
     )

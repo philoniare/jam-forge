@@ -202,7 +202,7 @@ final class DistributionService(
     * hash, so it can later be served over CE 136.
     */
   def recordReport(report: WorkReport): Unit =
-    knownReports.put(Hashing.blake2b256(report.encode.toArray), report)
+    knownReports.put(report.hash, report)
 
   def knownReport(hash: Hash): Option[WorkReport] = Option(knownReports.get(hash))
 

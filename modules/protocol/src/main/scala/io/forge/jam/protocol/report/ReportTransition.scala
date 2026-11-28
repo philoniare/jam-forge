@@ -1,7 +1,6 @@
 package io.forge.jam.protocol.report
 
-import io.forge.jam.core.{ChainConfig, Hashing, constants, StfResult, ValidationHelpers}
-import io.forge.jam.core.codec.JamCodecs.encode
+import io.forge.jam.core.{ChainConfig, constants, StfResult, ValidationHelpers}
 import io.forge.jam.core.primitives.Hash
 import io.forge.jam.core.types.workpackage.{WorkReport, SegmentRootLookup, AvailabilityAssignment}
 import io.forge.jam.core.types.extrinsic.GuaranteeExtrinsic
@@ -377,7 +376,7 @@ object ReportTransition:
       _ <- ensure(indices.forall(i => i >= 0 && i < validators.length), ReportErrorCode.BadValidatorIndex)
       _ <- validateGuarantorSignatureOrder(guarantee)
     yield
-      val message = constants.JAM_GUARANTEE_BYTES ++ Hashing.blake2b256(guarantee.report.encode).bytes
+      val message = constants.JAM_GUARANTEE_BYTES ++ guarantee.report.hash.bytes
       signatures.addAll(guarantee.signatures.map(sig => (validators(sig.validatorIndex.toInt).ed25519, message, sig.signature)))
 
   private def validateReport(

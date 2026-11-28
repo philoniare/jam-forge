@@ -2,7 +2,6 @@ package io.forge.jam.node
 
 import io.forge.jam.core.{Hashing, JamBytes}
 import io.forge.jam.core.primitives.Hash
-import io.forge.jam.core.codec.JamCodecs.encode
 import io.forge.jam.core.types.block.Extrinsic
 import io.forge.jam.core.types.extrinsic.{AssuranceExtrinsic, GuaranteeExtrinsic, Preimage}
 import io.forge.jam.core.types.tickets.TicketEnvelope
@@ -83,7 +82,7 @@ final class ExtrinsicPools(
       dropped.foreach(judgments.remove)
       store.write(Nil, dropped.map(ExtrinsicPools.judgmentKey.tupled))
 
-  private def reportHashOf(g: GuaranteeExtrinsic): Hash = Hashing.blake2b256(g.report.encode.toArray)
+  private def reportHashOf(g: GuaranteeExtrinsic): Hash = g.report.hash
 
   @volatile private var guaranteeDiscarded: (GuaranteeExtrinsic, Int) => Unit = (_, _) => ()
   @volatile private var preimageDiscarded: (Preimage, Int) => Unit = (_, _) => ()
@@ -298,7 +297,7 @@ final class ExtrinsicPools(
       newBestHash: Hash
   ): Unit =
     includedGuarantees.foreach { g =>
-      discardGuarantee(Hashing.blake2b256(g.report.encode.toArray), Telemetry.GuaranteeDiscard.ReportedOnChain)
+      discardGuarantee(g.report.hash, Telemetry.GuaranteeDiscard.ReportedOnChain)
     }
     includedAssurances.foreach { a =>
       assurances.remove((a.validatorIndex.toInt, a.anchor))
@@ -349,7 +348,7 @@ final class ExtrinsicPools(
     as.foreach(a => assurances.remove((a.validatorIndex.toInt, a.anchor), a))
 
   def removeGuarantees(gs: Iterable[GuaranteeExtrinsic]): Unit =
-    gs.foreach(g => discardGuarantee(Hashing.blake2b256(g.report.encode.toArray), Telemetry.GuaranteeDiscard.CannotBeReported))
+    gs.foreach(g => discardGuarantee(g.report.hash, Telemetry.GuaranteeDiscard.CannotBeReported))
 
   def clear(): Unit =
     clearGuarantees()
