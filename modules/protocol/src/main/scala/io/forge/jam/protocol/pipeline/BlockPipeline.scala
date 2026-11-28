@@ -249,6 +249,20 @@ object BlockPipeline:
       }
     }: Unit
 
+    Right(afterReports(block, view, run.header, run.priorSlot, safrole, availableReports, sharedExecutor))
+
+  private def afterReports(
+      block: Block,
+      view: TrieBackedJamState,
+      header: EncodedHeader,
+      priorSlot: Long,
+      safrole: SafroleOutputData,
+      availableReports: List[WorkReport],
+      sharedExecutor: Option[AccumulationExecutor]
+  )(using Stop): BlockPipelineResult =
+    import StageTimers.time
+    val slot = block.header.slot.toLong
+
     time("x/savepointStorageView")(view.storage.savepoint())
 
     // Step 7: Accumulation
@@ -257,7 +271,7 @@ object BlockPipeline:
         AccumulationTransition.stfView(
           InputExtractor.extractAccumulationInput(availableReports, slot),
           view,
-          run.priorSlot,
+          priorSlot,
           sharedExecutor,
           Some(view.storage)
         ) match
@@ -271,7 +285,7 @@ object BlockPipeline:
 
     // Step 8: History (uses accumulateRoot)
     time("history")(
-      HistoryTransition.stfView(InputExtractor.extractHistoryInput(block, accumulateRoot, run.header.hash), view)
+      HistoryTransition.stfView(InputExtractor.extractHistoryInput(block, accumulateRoot, header.hash), view)
     )
 
     // Step 9: Authorization
@@ -285,7 +299,7 @@ object BlockPipeline:
     }
 
     // Step 11: Statistics (needs pre-transition tau)
-    time("statistics")(StatisticsTransition.stfView(InputExtractor.extractStatInput(block), view, run.priorSlot)): Unit
+    time("statistics")(StatisticsTransition.stfView(InputExtractor.extractStatInput(block), view, priorSlot)): Unit
     time("final-stats") {
       StatisticsTransition.completeActivityStatistics(
         view,
@@ -298,17 +312,55 @@ object BlockPipeline:
 
     time("x/discardStorageViewCheckpoint")(view.storage.discardCheckpoint())
 
-    Right(
-      BlockPipelineResult(
-        safroleOutput = Some(safrole),
-        availableReports = availableReports,
-        accumulateRoot = Some(accumulateRoot),
-        accumulationStats = accumulated.accumulationStats,
-        accumulationTransferCounts = accumulated.accumulationTransferCounts,
-        headerHash = run.header.hash,
-        accumulateCosts = accumulated.accumulateCosts
-      )
+    BlockPipelineResult(
+      safroleOutput = Some(safrole),
+      availableReports = availableReports,
+      accumulateRoot = Some(accumulateRoot),
+      accumulationStats = accumulated.accumulationStats,
+      accumulationTransferCounts = accumulated.accumulationTransferCounts,
+      headerHash = header.hash,
+      accumulateCosts = accumulated.accumulateCosts
     )
+
+  def executeAfterReports(
+      block: Block,
+      view: TrieBackedJamState,
+      priorSlot: Long,
+      safrole: SafroleOutputData,
+      availableReports: List[WorkReport],
+      sharedExecutor: Option[AccumulationExecutor] = None,
+      whileChecksRun: BlockPipelineResult => Unit = _ => ()
+  ): Either[PipelineError, BlockPipelineResult] =
+    val header = new EncodedHeader(block.header, view.config)
+    val pending = new PendingChecks
+    val result =
+      try
+        val ran = authoredSteps(block, view, header, pending, priorSlot, safrole, availableReports, sharedExecutor)
+        ran.foreach(whileChecksRun)
+        ran
+      catch
+        case NonFatal(e) =>
+          pending.firstFailure() match
+            case Some(err) => Left(err)
+            case None      => throw e
+    val failed = StageTimers.time("await-checks")(pending.firstFailure())
+    result match
+      case Left(err)     => Left(failed.getOrElse(err))
+      case Right(output) => failed.toLeft(output)
+
+  private def authoredSteps(
+      block: Block,
+      view: TrieBackedJamState,
+      header: EncodedHeader,
+      pending: PendingChecks,
+      priorSlot: Long,
+      safrole: SafroleOutputData,
+      availableReports: List[WorkReport],
+      sharedExecutor: Option[AccumulationExecutor]
+  ): Either[PipelineError, BlockPipelineResult] = boundary:
+    StageTimers.time("seal")(HeaderChecks.blockSeal(block, header, view, pending)).orStop
+    StageTimers.time("entropy-vrf")(HeaderChecks.entropyVrf(block, view, pending)).orStop
+    Right(afterReports(block, view, header, priorSlot, safrole, availableReports, sharedExecutor))
 
   def recordParentStateRoot(view: TrieBackedJamState, parentStateRoot: Hash): Unit =
     val recentHistory = view.beta

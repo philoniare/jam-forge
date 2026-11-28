@@ -78,9 +78,30 @@ final class BlockAuthor(
 
     val slotIndex = (slot % chain.config.epochLength).toInt
     val inParentEpoch = slot / chain.config.epochLength == preView.timeslot / chain.config.epochLength
+    val knownSealer =
+      if inParentEpoch then sealerOf(preView.gamma.st, slotIndex, BlockAuthor.sealEntropy(preView.entropy.pool)) else None
     if inParentEpoch then
-      if sealerOf(preView.gamma.st, slotIndex, BlockAuthor.sealEntropy(preView.entropy.pool)).isEmpty then return None
+      if knownSealer.isEmpty then return None
       started(best.hash)
+
+    var entropySignature: (ValidatorKeySet, Array[Byte], Array[Byte]) | Null = null
+    def entropyVrfOf(keys: ValidatorKeySet, sealVrfInput: Array[Byte]): Array[Byte] =
+      val made = entropySignature
+      if made != null && (made._1 eq keys) && java.util.Arrays.equals(made._2, sealVrfInput) then made._3
+      else
+        val ownKey = JamBytes(keys.bandersnatchPublic)
+        val signature = StageTimers.time("author/entropy-vrf")(Option(prepared.remove(slot))
+          .filter(p => p.key == ownKey && java.util.Arrays.equals(p.sealInput, sealVrfInput))
+          .fold(BlockAuthor.entropySignature(keys, sealVrfInput))(_.entropyVrf))
+        entropySignature = (keys, sealVrfInput, signature)
+        signature
+
+    val open = if executeOnce then knownSealer.flatMap(_ => chain.executionStateOf(best)) else None
+    val entropy: Option[Hash] =
+      for
+        _ <- open
+        (keys, sealVrfInput) <- knownSealer
+      yield io.forge.jam.protocol.pipeline.InputExtractor.entropyOutput(entropyVrfOf(keys, sealVrfInput))
 
     // Candidate tickets while the submission window is open: entered for
     // this slot's epoch, ascending id, not already accumulated, only those
@@ -110,24 +131,36 @@ final class BlockAuthor(
     // throwaway (never committed). A rejected ticket set falls back to an
     // empty extrinsic rather than stalling authoring. Its offenders are ψ'_o, this block's disputes included, as
     // the import's (BlockPipeline.posteriorOffenders, GP eq:blacklistfilter).
-    def runSafrole(tickets: List[(Hash, TicketEnvelope)]) =
-      val v = chain.stateViewOf(best)
+    def runSafrole(
+        tickets: List[(Hash, TicketEnvelope)],
+        on: Option[io.forge.jam.protocol.importing.BlockImporter.OpenState] = None
+    ) =
+      val v = on.fold(chain.stateViewOf(best))(_.view)
       v.postOffenders = BlockPipeline.posteriorOffenders(v.psi.offenders, disputes.dispute)
       SafroleTransition
         .stfView(
           SafroleInput(
             slot = slot,
-            entropy = Hash(new Array[Byte](32)),
+            entropy = on.flatMap(_ => entropy).getOrElse(Hash(new Array[Byte](32))),
             extrinsic = tickets.map(_._2)
           ),
           v
         )
         .map(out => (v, out, tickets))
 
+    var builtOn = open.filter(_ => entropy.isDefined)
     val (view, markers, includedTickets) =
-      StageTimers.time("author/safrole")(runSafrole(candidateTickets)) match
+      StageTimers.time("author/safrole")(runSafrole(candidateTickets, builtOn)) match
         case Right(res) => res
+        case Left(_) if builtOn.isDefined && candidateTickets.isEmpty =>
+          builtOn = None
+          runSafrole(Nil) match
+            case Right(res) => res
+            case Left(err) =>
+              logger.debug(s"safrole rejected slot $slot: $err")
+              return None
         case Left(err1) if candidateTickets.nonEmpty =>
+          builtOn = None
           // Keep the tickets that pass on their own (ascending, so each kept
           // set stays ordered) and drop only the failures from the pool.
           val kept = candidateTickets.foldLeft(List.empty[(Hash, TicketEnvelope)]) {
@@ -152,6 +185,7 @@ final class BlockAuthor(
       case Some(sealer) => sealer
       case None         => return None
     if !inParentEpoch then started(best.hash)
+    if !knownSealer.exists((k, in) => (k eq keys) && java.util.Arrays.equals(in, sealVrfInput)) then builtOn = None
 
     // authorIndex is the position of the sealing key in the active set.
     val authorIndex = view.validators.current.indexWhere(vk =>
@@ -196,7 +230,8 @@ final class BlockAuthor(
       assurances = pools.takeAssurances(best.hash),
       guarantees = pools.guaranteesByArrival,
       ancestry = ancestors,
-      config = chain.config
+      config = chain.config,
+      applyReports = builtOn.isDefined
     ))
     if plan.droppedGuarantees.nonEmpty || plan.droppedAssurances.nonEmpty then
       logger.warn(
@@ -216,10 +251,7 @@ final class BlockAuthor(
     )
     val extrinsicHash = StageTimers.time("author/extrinsic-hash")(ExtrinsicHashing.computeExtrinsicHash(extrinsic, chain.config))
 
-    val ownKey = JamBytes(keys.bandersnatchPublic)
-    val entropyVrf = StageTimers.time("author/entropy-vrf")(Option(prepared.remove(slot))
-      .filter(p => p.key == ownKey && java.util.Arrays.equals(p.sealInput, sealVrfInput))
-      .fold(BlockAuthor.entropySignature(keys, sealVrfInput))(_.entropyVrf))
+    val entropyVrf = entropyVrfOf(keys, sealVrfInput)
 
     val headerCodec =
       Header.headerCodec(chain.config.epochLength)
@@ -247,12 +279,22 @@ final class BlockAuthor(
       return None
 
     pools.removeTickets(includedTickets.map(_._1))
+    lastExecuted = builtOn.filter(_ => plan.executed).map(state =>
+      (block, io.forge.jam.protocol.importing.BlockImporter.Executed(state, preView.timeslot, markers, plan.availableReports))
+    ).orNull
     logger.info(
       s"authored block for slot $slot (author index $authorIndex, " +
         s"${extrinsic.tickets.size} tickets, ${extrinsic.guarantees.size} guarantees, " +
         s"${extrinsic.assurances.size} assurances)"
     )
     Some(block)
+
+  @volatile private[node] var executeOnce: Boolean = true
+
+  @volatile private var lastExecuted: (Block, io.forge.jam.protocol.importing.BlockImporter.Executed) | Null = null
+
+  def executedFor(block: Block): Option[io.forge.jam.protocol.importing.BlockImporter.Executed] =
+    Option(lastExecuted).collect { case (built, executed) if built eq block => executed }
 
   private val prepared = new java.util.concurrent.ConcurrentHashMap[Long, BlockAuthor.Prepared]()
 

@@ -53,7 +53,8 @@ object ChainManager:
       val block: Block,
       val headerBytes: Array[Byte],
       val hash: Hash,
-      matches: => Boolean
+      matches: => Boolean,
+      private[node] val executed: Option[BlockImporter.Executed] = None
   ):
     lazy val bodyMatches: Boolean = matches
 
@@ -382,11 +383,15 @@ final class ChainManager(
 
   /** Listeners invoked after every successful import (assurers, watchers). */
   private val importListeners =
-    new java.util.concurrent.CopyOnWriteArrayList[(ChainHead, Block) => Unit]()
+    new java.util.concurrent.CopyOnWriteArrayList[(String, (ChainHead, Block) => Unit)]()
 
-  def onImported(listener: (ChainHead, Block) => Unit): Unit =
-    importListeners.add(listener)
+  def onImported(listener: (ChainHead, Block) => Unit): Unit = onImported("other")(listener)
+
+  def onImported(name: String)(listener: (ChainHead, Block) => Unit): Unit =
+    importListeners.add(("post/" + name, listener))
     ()
+
+  private[node] def postImportIdle: Boolean = postImportBus.idle
 
   private val sealedSideListeners = new java.util.concurrent.CopyOnWriteArrayList[(Hash, Block) => Unit]()
 
@@ -405,8 +410,8 @@ final class ChainManager(
     ()
 
   private val postImportBus = new PostImportBus[ChainHead, Block]((head, block) =>
-    importListeners.forEach { l =>
-      try l(head, block)
+    importListeners.forEach { (name, l) =>
+      try StageTimers.time(name)(l(head, block))
       catch case e: Exception => logger.error("import listener failed", e)
     }
   )
@@ -1175,9 +1180,16 @@ final class ChainManager(
       )
     }
 
-  def prepareOwn(block: Block, bytes: Array[Byte]): ChainManager.PreparedBlock =
+  def prepareOwn(
+      block: Block,
+      bytes: Array[Byte],
+      executed: Option[BlockImporter.Executed] = None
+  ): ChainManager.PreparedBlock =
     val headerBytes = headerCodec.encode(block.header)
-    new ChainManager.PreparedBlock(bytes, block, headerBytes, Hashing.blake2b256(headerBytes), true)
+    new ChainManager.PreparedBlock(bytes, block, headerBytes, Hashing.blake2b256(headerBytes), true, executed)
+
+  private[node] override def executionStateOf(head: ChainHead): Option[BlockImporter.OpenState] =
+    importer.open(head.stateRoot)
 
   private def preparing(blocks: Seq[Array[Byte]]): Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])] =
     blocks.iterator.map(bytes => (bytes, () => prepare(bytes)))
@@ -1186,9 +1198,10 @@ final class ChainManager(
       block: Block,
       blockBytes: Array[Byte],
       each: (ChainManager.PreparedBlock, () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] =
-        (_, run) => run()
+        (_, run) => run(),
+      executed: Option[BlockImporter.Executed] = None
   ): Either[ChainError, ChainHead] =
-    val own = prepareOwn(block, blockBytes)
+    val own = prepareOwn(block, blockBytes, executed)
     importPrepared(Iterator.single((blockBytes, () => Right(own))), None, Long.MaxValue, (_, run) => each(own, run), Long.MaxValue, several = false).head
 
   def importBatch(
@@ -1302,7 +1315,14 @@ final class ChainManager(
                   storeBufferedState()
                   Right(promote(block, hash, root, events))
                 case None =>
-                  importOnBest(block, blockBytes, events, bodyChecked = true, buffered = inBatch && farBehindHead(slot, bufferBelowSlot))
+                  importOnBest(
+                    block,
+                    blockBytes,
+                    events,
+                    bodyChecked = true,
+                    buffered = inBatch && farBehindHead(slot, bufferBelowSlot),
+                    executed = ready.executed
+                  )
         else
           storeBufferedState()
           (blockHeight(parent), blockStore.hasBlock(parent)) match
@@ -1424,7 +1444,8 @@ final class ChainManager(
       blockBytes: Array[Byte],
       events: mutable.ListBuffer[(ChainHead, Block)],
       bodyChecked: Boolean,
-      buffered: Boolean = false
+      buffered: Boolean = false,
+      executed: Option[BlockImporter.Executed] = None
   ): Either[ChainError, ChainHead] =
     if !bodyChecked && !bodyMatchesHeader(block) then return Left(ChainError.BodyMismatch)
     if !buffered then storeBufferedState()
@@ -1437,8 +1458,13 @@ final class ChainManager(
     // The save belongs to this block at this height: what it replaces can be deleted once the parent's state is no
     // longer kept (see pruneHistory).
     val journalHeight = blockHeight(parent).getOrElse(0L) + 1
+    val continued = executed.filter(e =>
+      e.state.root == block.header.parentStateRoot && e.state.root == bestHead.stateRoot && trieStore.currentRoot == e.state.root
+    )
     trieBackend.withJournal(headerHashOf(block), journalHeight)(
-      importer.importBlock(block, preState, ancestry, extrinsicHashChecked = true)
+      continued match
+        case Some(built) => importer.importExecuted(block, built)
+        case None        => importer.importBlock(block, preState, ancestry, extrinsicHashChecked = true)
     ) match
       case ImportResult.Invalid(_, _, cause) if anchoredBelowHistory(block, cause) =>
         Left(ChainError.CannotCheck("its report is anchored before the history this node holds"))

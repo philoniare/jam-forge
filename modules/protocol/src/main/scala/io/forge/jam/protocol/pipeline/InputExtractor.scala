@@ -31,10 +31,12 @@ object InputExtractor:
     SafroleInput(slot = block.header.slot.toLong, entropy = entropy, extrinsic = block.extrinsic.tickets)
 
   /** The output of the header's entropy source, a 96-byte Bandersnatch IETF VRF signature; zeroes when it has none. */
-  def entropyOutput(header: Header): Hash =
+  def entropyOutput(header: Header): Hash = entropyOutput(header.entropySource.toArray)
+
+  def entropyOutput(entropySource: Array[Byte]): Hash =
     BandersnatchWrapper.ensureLibraryLoaded()
     val vrfOutput =
-      try Option(BandersnatchWrapper.getIetfVrfOutput(header.entropySource.toArray)).filter(_.length == 32)
+      try Option(BandersnatchWrapper.getIetfVrfOutput(entropySource)).filter(_.length == 32)
       catch case _: RuntimeException => None
     vrfOutput.fold(Hash(new Array[Byte](32)))(Hash(_))
 

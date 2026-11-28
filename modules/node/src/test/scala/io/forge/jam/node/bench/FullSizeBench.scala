@@ -26,9 +26,13 @@ object FullSizeBench:
 
   private def cpuMillis(prefix: String): Double =
     val mx = ManagementFactory.getThreadMXBean
-    Thread.getAllStackTraces.keySet.asScala.filter(_.getName.startsWith(prefix)).toList
+    Thread.getAllStackTraces.keySet.asScala.filter(_.getName == prefix).toList
       .map(t => math.max(0L, mx.getThreadCpuTime(t.threadId())))
       .sum / 1e6
+
+  private val os = ManagementFactory.getOperatingSystemMXBean.asInstanceOf[com.sun.management.OperatingSystemMXBean]
+
+  private def processCpuMillis: Double = os.getProcessCpuTime / 1e6
 
   private def await(what: String, seconds: Int)(done: => Boolean): Unit =
     val deadline = System.nanoTime() + seconds * 1_000_000_000L
@@ -42,6 +46,7 @@ object FullSizeBench:
   def main(args: Array[String]): Unit =
     val opts = args.collect { case s"--$k=$v" => k -> v }.toMap
     val trace = Paths.get(opts.getOrElse("trace", "target/bench/full-busy-trace"))
+    PerState.enabled = !opts.get("per-state").contains("off")
     if !Files.exists(trace.resolve("genesis.bin")) then
       System.err.println(s"no trace in $trace: make one with\n  sbt \"benchGenTrace --spec=full --blocks=12 --busy-cores=341 --out=$trace\"")
       sys.exit(1)
@@ -50,6 +55,8 @@ object FullSizeBench:
     try
       val keys = (0 until config.validatorCount).map(ValidatorKeySet.dev)
       val (node, auditor, blocks) = replay(trace, dir)
+      auditor.verifyAside = !opts.get("verify-aside").contains("off")
+      auditor.batchJudgments = !opts.get("batch-judgments").contains("off")
       try
         auditing(node, auditor, blocks, keys)
         shardLookup(node, blocks, keys, dir)
@@ -126,6 +133,7 @@ object FullSizeBench:
     def settle(): Unit = await("the auditor to be idle", 120)(auditor.queuedMessages == 0)
 
     val auditCpu0 = cpuMillis("jam-audit")
+    val cpu0 = processCpuMillis
     val t0 = System.nanoTime()
     messages.indices.foreach { v =>
       val (head, evidence, items, _) = messages(v)
@@ -140,6 +148,8 @@ object FullSizeBench:
     settle()
     val t1 = System.nanoTime()
     val auditCpu1 = cpuMillis("jam-audit")
+    val cpu1 = processCpuMillis
+    result("audit_announcements_process_cpu", cpu1 - cpu0, "ms")
     val announcements = messages.count(_._3.nonEmpty)
     result("audit_announcements", announcements.toDouble, "messages")
     result("audit_announcements_wall", (t1 - t0) / 1e6, "ms")
@@ -158,6 +168,7 @@ object FullSizeBench:
     settle()
     val t2 = System.nanoTime()
     val auditCpu2 = cpuMillis("jam-audit")
+    result("audit_judgments_process_cpu", processCpuMillis - cpu1, "ms")
     result("audit_judgments", pairs.toDouble, "messages")
     result("audit_judgments_wall", (t2 - t1) / 1e6, "ms")
     result("audit_judgment_audit_thread_cpu", (auditCpu2 - auditCpu1) * 1000 / pairs, "us/message")

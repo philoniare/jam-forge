@@ -313,7 +313,7 @@ final class JamNode(
     )
     authoringGuard = Some(guard)
     if watchingForTwins.compareAndSet(false, true) then
-      chain.onImported((head, block) => authoringGuard.foreach(_.observe(head.hash, block, () => sealerOf(head.hash, block))))
+      chain.onImported("guard")((head, block) => authoringGuard.foreach(_.observe(head.hash, block, () => sealerOf(head.hash, block))))
       chain.onSealedSideBlock((hash, block) => authoringGuard.foreach(_.observe(hash, block, () => None)))
     author = Some(new BlockAuthor(chain, keys, pools, tickets.ownTickets, guard))
     peers.holdValidatorKeys(keys.map(k => JamBytes(k.ed25519Public)).toSet)
@@ -391,7 +391,7 @@ final class JamNode(
       threads = threads
     )
     assurer = Some(a)
-    chain.onImported((head, _) => if !catchingUp then a.onImported(head))
+    chain.onImported("assurer")((head, _) => if !catchingUp then a.onImported(head))
 
   /** Enable the auditor role: reports that become available are audited per the tranche
     * rules, announced on CE 144 and judged on CE 145. Tranche 0 starts at the block's slot, or at import without
@@ -426,7 +426,7 @@ final class JamNode(
     auditor = Some(a)
     network.registerPeerHandler(StreamKind.AuditAnnouncement, a.auditAnnouncementHandler)
     network.registerPeerHandler(StreamKind.JudgmentPublication, a.judgmentHandler)
-    chain.onImported((head, block) => a.onImported(head, block))
+    chain.onImported("auditor")((head, block) => a.onImported(head, block))
     a
 
   /** The auditor service when auditing is enabled (for verdict queries). */
@@ -599,7 +599,8 @@ final class JamNode(
     telemetry.foreach(_.authored(authoring, Telemetry.blockOutline(block, bytes.length, hash)))
     val slot = block.header.slot.toLong
     val guard = authoringGuard
-    importAuthoredBlock(block, bytes, released = () => guard.forall(_.durable(slot))) match
+    val executed = author.flatMap(_.executedFor(block))
+    importAuthoredBlock(block, bytes, released = () => guard.forall(_.durable(slot)), executed) match
       case Right(head) =>
         telemetry.foreach(_.blockExecuted(authoring, chain.takeAccumulateCosts(hash).getOrElse(Map.empty)))
         pools.pruneAfterImport(
@@ -627,21 +628,21 @@ final class JamNode(
     network.setPriorityPeers(peers.isValidator)
 
     noteRecentValidators()
-    chain.onImported((_, _) => noteRecentValidators())
-    chain.onImported((_, _) => importedBlocks.incrementAndGet(): Unit)
+    chain.onImported("validators")((_, _) => noteRecentValidators())
+    chain.onImported("count")((_, _) => importedBlocks.incrementAndGet(): Unit)
 
-    if nodeConfig.dummyFinality then chain.onImported((_, _) => chain.finalizeAtDepth(1): Unit)
+    if nodeConfig.dummyFinality then chain.onImported("finality")((_, _) => chain.finalizeAtDepth(1): Unit)
     else if !nodeConfig.grandpa then
       if spec.devnetFinalityDepth > 0 then
-        chain.onImported((_, _) =>
+        chain.onImported("finality")((_, _) =>
           chain.finalizeAtDepth(spec.devnetFinalityDepth, sync.peerBests(countsForFinality), spec.finalityQuorum)
         )
-      chain.onImported((_, _) => followPeerFinality())
+      chain.onImported("peer-finality")((_, _) => followPeerFinality())
 
-    chain.onImported((head, block) => preimages.onImported(head, block))
+    chain.onImported("preimages")((head, block) => preimages.onImported(head, block))
     // Guarantor credentials of included reports: the culprits of a bad verdict, should one come. Their exports, so
     // segments can be rebuilt from the availability layer for a later import.
-    chain.onImported((head, block) =>
+    chain.onImported("credentials")((head, block) =>
       if block.extrinsic.guarantees.nonEmpty then
         pools.recordCredentials(block.header.parent, head.slot, block.extrinsic.guarantees)
         exportIndex.record(block.extrinsic.guarantees)
@@ -651,15 +652,15 @@ final class JamNode(
     )
     // Custody units are kept for 28 days (672 epochs) after they were last stored, as exported-segment shards
     // must be; bundle shards share the unit and so are kept as long, which is more than required.
-    chain.onImported { (_, _) =>
+    chain.onImported("shard-expiry") { (_, _) =>
       val deleted = shardStore.deleteStoredBefore(System.currentTimeMillis() / 1000 - JamNode.shardRetentionSeconds(spec.config))
       if deleted > 0 then logger.info(s"expired $deleted shard custody unit(s) older than 28 days")
     }
-    chain.onImported((head, block) => pruneTickets(head, block))
+    chain.onImported("tickets")((head, block) => pruneTickets(head, block))
     // A reorg's abandoned blocks give their guarantees and preimages back, for a later block of the new chain.
     chain.onAbandoned((abandoned, adopted) => pools.restoreAbandoned(abandoned.map(_.extrinsic), adopted.map(_.extrinsic)))
     // Peers' blocks consume pooled extrinsics too, not only our own.
-    chain.onImported { (head, block) =>
+    chain.onImported("pools") { (head, block) =>
       pools.pruneAfterImport(
         block.extrinsic.guarantees,
         block.extrinsic.assurances,
@@ -672,7 +673,7 @@ final class JamNode(
       )
     }
     telemetry.foreach { _ =>
-      chain.onImported((_, _) => reportHeads())
+      chain.onImported("heads")((_, _) => reportHeads())
       chain.onFinalized(_ => reportHeads())
     }
 
@@ -1028,7 +1029,8 @@ final class JamNode(
   private[node] def importAuthoredBlock(
       block: io.forge.jam.core.types.block.Block,
       blockBytes: Array[Byte],
-      released: () => Boolean = () => true
+      released: () => Boolean = () => true,
+      executed: Option[io.forge.jam.protocol.importing.BlockImporter.Executed] = None
   ): Either[ChainError, ChainHead] =
     try
       chain.importOwn(
@@ -1038,7 +1040,8 @@ final class JamNode(
           val outcome = run()
           if !released() then throw JamNode.NotReleased()
           if outcome.isRight then sync.announce(own.headerBytes)
-          outcome
+          outcome,
+        executed = executed
       )
     catch
       case e: JamNode.NotReleased =>

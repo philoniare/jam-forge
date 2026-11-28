@@ -88,6 +88,11 @@ final class AuditorService(
 
     val attempts = mutable.Map.empty[(Int, Int), Int]
 
+    var verifying: Int = 0
+    val heldForVerified = mutable.ListBuffer.empty[() => Unit]
+
+    val verifyingInitial = mutable.Map.empty[Int, mutable.ListBuffer[() => Unit]]
+
     val lost = mutable.Set.empty[Int]
 
     var tranche0Done: Set[Int] = Set.empty
@@ -109,6 +114,12 @@ final class AuditorService(
     * pool at audit priority, ahead of co-signing and new submissions.
     */
   private val workers = threads.fixed("jam-audit-fetch", AuditorService.FetchThreads)
+
+  private val verifiers = threads.fixed("jam-audit-verify", AuditorService.verifyThreads, numbered = true)
+
+  @volatile private[node] var verifyAside: Boolean = true
+
+  private val asideInFlight = new java.util.concurrent.atomic.AtomicInteger
   private val refinePool = sharedRefinePool.getOrElse(new RefinePool("jam-audit-exec", owner = threads))
 
   /** Peers' announcements and judgments waiting for the audit thread are bounded; the thread's own ticks, import
@@ -122,7 +133,7 @@ final class AuditorService(
   private[node] val checks = new AuditorService.Checks
 
   /** Peer messages waiting for the audit thread. */
-  private[node] def queuedMessages: Int = intake.queued
+  private[node] def queuedMessages: Int = intake.queued + asideInFlight.get()
 
   private val auditsDoneCount = new java.util.concurrent.atomic.AtomicLong()
 
@@ -752,6 +763,8 @@ final class AuditorService(
       if v >= 0
     do
       if t.announcements.contains((n, v)) then ()
+      else if n == 0 && t.verifyingInitial.contains(v) then
+        t.verifyingInitial(v) += (() => applyAnnouncement(peer, head, evidence))
       else if n > trancheAt(clock(), t.origin) + 1 then
         logger.debug(s"CE144 from validator $v for tranche $n, not begun: dropped")
       else if a.items.size > t.available.size || a.items.map(_._1).distinct.size != a.items.size ||
@@ -762,7 +775,59 @@ final class AuditorService(
         t.attempts.update((n, v), attempt)
         if attempt > AuditorService.AttemptsPerAnnouncer then
           logger.debug(s"CE144 from validator $v for tranche $n: attempt $attempt, not verified")
+        else if n == 0 && verifyAside then verifyInitialAside(t, v, a, peer, head, evidence)
+        else if t.verifying > 0 then
+          t.heldForVerified += (() => if !t.announcements.contains((n, v)) then verifyAnnouncement(t, v, n, a, peer, head, evidence))
         else verifyAnnouncement(t, v, n, a, peer, head, evidence)
+
+  private def verifyInitialAside(
+      t: Tracked,
+      v: Int,
+      a: Announcement,
+      peer: Array[Byte],
+      head: Array[Byte],
+      evidence: Array[Byte]
+  ): Unit =
+    t.verifying += 1
+    t.verifyingInitial(v) = mutable.ListBuffer.empty
+    asideInFlight.incrementAndGet()
+    def conclude(signed: Boolean, known: Boolean, selected: Boolean): Unit =
+      try
+        guarded {
+          t.verifying -= 1
+          val meanwhile = t.verifyingInitial.remove(v).fold(Nil)(_.toList)
+          if tracked.get(t.hash).exists(_ eq t) then
+            if !t.announcements.contains((0, v)) then
+              concludeAnnouncement(t, v, 0, a, peer, head, evidence, signed, known, selected)
+            meanwhile.foreach(_())
+            if t.verifying == 0 && t.heldForVerified.nonEmpty then
+              val held = t.heldForVerified.toList
+              t.heldForVerified.clear()
+              held.foreach(_())
+        }
+      finally asideInFlight.decrementAndGet(): Unit
+    try
+      verifiers.execute { () =>
+        var (signed, known, selected) = (false, false, false)
+        try
+          checks.signatures.incrementAndGet()
+          signed = Ed25519.verify(t.validators(v), announcementMessage(0, a.items, t.hash), a.signature)
+          known = signed && a.items.forall((c, h) => t.reportHashes.lift(c).flatten.contains(h))
+          selected = known && {
+            checks.vrfs.incrementAndGet()
+            BandersnatchVrf
+              .ietfVrfVerify(t.bandersnatch(v), initialInput(t.vrfOutput), Array.emptyByteArray, evidence, onCaller = true)
+              .exists(y => a.items.map(_._1).toSet.subsetOf(initialCores(t.q, y).toSet))
+          }
+        catch case scala.util.control.NonFatal(e) => logger.warn(s"CE144 from validator $v not verified: ${e.getMessage}")
+        try exec.execute(() => conclude(signed, known, selected))
+        catch case _: java.util.concurrent.RejectedExecutionException => asideInFlight.decrementAndGet(): Unit
+      }
+    catch
+      case _: java.util.concurrent.RejectedExecutionException =>
+        t.verifying -= 1
+        t.verifyingInitial.remove(v)
+        asideInFlight.decrementAndGet(): Unit
 
   private def verifyAnnouncement(
       t: Tracked,
@@ -804,6 +869,20 @@ final class AuditorService(
           }
         }
     }
+    concludeAnnouncement(t, v, n, a, peer, head, evidence, signed, known, selected)
+
+  private def concludeAnnouncement(
+      t: Tracked,
+      v: Int,
+      n: Int,
+      a: Announcement,
+      peer: Array[Byte],
+      head: Array[Byte],
+      evidence: Array[Byte],
+      signed: Boolean,
+      known: Boolean,
+      selected: Boolean
+  ): Unit =
     if selected then
       recordAnnouncement(t, v, n, a)
       logger.debug(s"audit announcement from validator $v, tranche $n, ${a.items.size} report(s)")
@@ -903,6 +982,15 @@ final class AuditorService(
             stream.reset()
       }
 
+  private val judgmentKeys = new PerState[ChainHead, (Long, IndexedSeq[Array[Byte]], IndexedSeq[Array[Byte]])](head =>
+    val view = chain.stateViewOf(head)
+    (
+      view.timeslot / chain.config.epochLength,
+      view.validators.current.map(_.ed25519.bytes.toArray).toIndexedSeq,
+      view.validators.previous.map(_.ed25519.bytes.toArray).toIndexedSeq
+    )
+  )
+
   /** A CE 145 judgment: the signature is checked first, then the judgment is recorded when a tracked block holds
     * its report and kept for that block's import otherwise.
     */
@@ -918,41 +1006,84 @@ final class AuditorService(
       val context = if valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
       // The index is into the validator set of the judgment's epoch: the current one, or the previous one.
       val epoch = io.forge.jam.core.LittleEndian.get(msg, 0, 4)
-      val view = chain.stateView()
-      val bestEpoch = view.timeslot / chain.config.epochLength
+      val (bestEpoch, current, previous) = judgmentKeys(chain.best)
       val set =
-        if epoch == bestEpoch then Some(view.validators.current)
-        else if epoch == bestEpoch - 1 then Some(view.validators.previous)
+        if epoch == bestEpoch then Some(current)
+        else if epoch == bestEpoch - 1 then Some(previous)
         else None
       val signer = set.flatMap(_.lift(idx))
-      val genuine = signer.exists(vk =>
-        Ed25519.verify(
-          vk.ed25519.bytes.toArray,
-          context ++ reportHash.bytes,
-          signature
-        )
-      )
-      if genuine then
-        val taken = intake.tryExecute(exec, msg.length.toLong, source) {
-          guarded {
-            val holders = tracked.values.filter(_.reportSet(reportHash)).toList
-            if holders.nonEmpty then
-              recordJudgment(reportHash, epoch, idx, valid, signature, tally = holders.exists(_.epoch == epoch))
-              holders.foreach(t => updateAudited(t, t.lastTranche, List(reportHash)))
-            else keepJudgment(reportHash, epoch, idx, valid, signature)
-          }
-        }
-        if !taken then
-          logger.debug(s"judgment from validator $idx not taken (${refusedJudgments.incrementAndGet()} so far)")
-        logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
-      else if set.isEmpty then
-        logger.debug(s"judgment of epoch $epoch from validator $idx ignored: not the current epoch $bestEpoch or the one before")
-      else
-        logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
-        source match
-          case conn: PeerConnection if signer.isDefined => misbehaved(conn.peerKey, Offence.BadSignature)
-          case _                                        => ()
+      signer match
+        case Some(key) if batchJudgments =>
+          val judgment = new AuditorService.UnverifiedJudgment(msg.length, idx, valid, reportHash, signature, epoch, key, source)
+          unverifiedJudgments.add(judgment)
+          asideInFlight.incrementAndGet()
+          val taken = judgmentGate.tryExecute(judgmentVerifier, msg.length.toLong, source)(guarded(verifyQueuedJudgments()))
+          if !taken && unverifiedJudgments.remove(judgment) then
+            asideInFlight.decrementAndGet()
+            logger.debug(s"judgment from validator $idx not taken (${refusedJudgments.incrementAndGet()} so far)")
+        case _ =>
+          val genuine = signer.exists(key => Ed25519.verify(key, context ++ reportHash.bytes, signature))
+          if genuine then takeJudgment(msg.length, idx, valid, reportHash, signature, epoch, source)
+          else if set.isEmpty then
+            logger.debug(s"judgment of epoch $epoch from validator $idx ignored: not the current epoch $bestEpoch or the one before")
+          else refuseJudgment(idx, source, signer.isDefined)
     else logger.warn(s"bad CE145 length ${msg.length}")
+
+  private val unverifiedJudgments = new java.util.concurrent.ConcurrentLinkedQueue[AuditorService.UnverifiedJudgment]()
+  private val judgmentVerifier = threads.single("jam-audit-judgments")
+  private val judgmentGate =
+    new WorkGate("judgment verification", AuditorService.MaxQueuedMessages, AuditorService.MaxQueuedBytes)
+
+  @volatile private[node] var batchJudgments: Boolean = true
+
+  private def verifyQueuedJudgments(): Unit =
+    val batch = mutable.ArrayBuffer.empty[AuditorService.UnverifiedJudgment]
+    var more = true
+    while more && batch.size < AuditorService.JudgmentBatch do
+      val judgment = unverifiedJudgments.poll()
+      if judgment == null then more = false else batch += judgment
+    if batch.nonEmpty then
+      try
+        val items = batch.iterator.map { j =>
+          val context = if j.valid then constants.JAM_VALID_BYTES else constants.JAM_INVALID_BYTES
+          (Ed25519PublicKey(j.key), context ++ j.reportHash.bytes, io.forge.jam.core.primitives.Ed25519Signature(j.signature))
+        }.toIndexedSeq
+        val genuine =
+          if items.size == 1 then Array(Ed25519.verify(items(0)._1, items(0)._2, items(0)._3)) else Ed25519.validity(items)
+        batch.indices.foreach { i =>
+          val j = batch(i)
+          if genuine(i) then takeJudgment(j.bytes, j.validator, j.valid, j.reportHash, j.signature, j.epoch, j.source)
+          else refuseJudgment(j.validator, j.source, signerKnown = true)
+        }
+      finally asideInFlight.addAndGet(-batch.size): Unit
+
+  private def takeJudgment(
+      bytes: Int,
+      idx: Int,
+      valid: Boolean,
+      reportHash: Hash,
+      signature: Array[Byte],
+      epoch: Long,
+      source: AnyRef
+  ): Unit =
+    val taken = intake.tryExecute(exec, bytes.toLong, source) {
+      guarded {
+        val holders = tracked.values.filter(_.reportSet(reportHash)).toList
+        if holders.nonEmpty then
+          recordJudgment(reportHash, epoch, idx, valid, signature, tally = holders.exists(_.epoch == epoch))
+          holders.foreach(t => updateAudited(t, t.lastTranche, List(reportHash)))
+        else keepJudgment(reportHash, epoch, idx, valid, signature)
+      }
+    }
+    if !taken then
+      logger.debug(s"judgment from validator $idx not taken (${refusedJudgments.incrementAndGet()} so far)")
+    logger.debug(s"${if valid then "positive" else "negative"} judgment from validator $idx")
+
+  private def refuseJudgment(idx: Int, source: AnyRef, signerKnown: Boolean): Unit =
+    logger.warn(s"rejected judgment with bad signature from claimed validator $idx")
+    source match
+      case conn: PeerConnection if signerKnown => misbehaved(conn.peerKey, Offence.BadSignature)
+      case _                                   => ()
 
   /** Keep a genuine judgment whose report no tracked block holds: the block that makes the report available may
     * not be imported yet, and a judgment taken is not sent to us again (unless finality lags). Anyone can replay a
@@ -968,9 +1099,17 @@ final class AuditorService(
   /** Sizes of the peer-fed audit state: (reports with a recorded judgment, recorded judgments, judgments waiting
     * for a block, announcements waiting for a block).
     */
+  private def observed[A](f: => A): A =
+    def ask(): (Int, A) = exec.submit(() => (asideInFlight.get(), f)).get(30, TimeUnit.SECONDS)
+    var answer = ask()
+    val deadline = System.nanoTime() + 30_000_000_000L
+    while answer._1 > 0 && System.nanoTime() < deadline do
+      Thread.sleep(1)
+      answer = ask()
+    answer._2
+
   private[node] def bufferSizes: (Int, Int, Int, Int) =
-    exec
-      .submit(() =>
+    observed(
         (
           (positive.keySet ++ negative.keySet).size,
           positive.valuesIterator.map(_.size).sum + negative.valuesIterator.map(_.size).sum,
@@ -978,11 +1117,9 @@ final class AuditorService(
           pendingAnnouncements.valuesIterator.map(_.size).sum
         )
       )
-      .get(30, TimeUnit.SECONDS)
 
   private[node] def auditedStateConsistent: Boolean =
-    exec
-      .submit(() =>
+    observed(
         tracked.values.forall { t =>
           t.auditedAt == Int.MinValue || t.reportSet.forall { h =>
             val fresh = audited(
@@ -998,24 +1135,19 @@ final class AuditorService(
           }
         }
       )
-      .get(30, TimeUnit.SECONDS)
 
   private[node] def trackedSelection(hash: Hash): Option[(Array[Byte], IndexedSeq[Option[Hash]], Long)] =
-    exec.submit(() => tracked.get(hash).map(t => (t.vrfOutput, t.reportHashes, t.epoch))).get(30, TimeUnit.SECONDS)
+    observed(tracked.get(hash).map(t => (t.vrfOutput, t.reportHashes, t.epoch)))
 
   /** A_n(w) of the blocks being audited: the validators recorded as announcing `reportHash` in `tranche`. */
   private[node] def announcersOf(reportHash: Hash, tranche: Int): Set[Int] =
-    exec
-      .submit(() => tracked.valuesIterator.flatMap(_.announced.getOrElse((reportHash, tranche), Nil)).toSet)
-      .get(30, TimeUnit.SECONDS)
+    observed( tracked.valuesIterator.flatMap(_.announced.getOrElse((reportHash, tranche), Nil)).toSet)
 
   /** Validators recorded as judging `reportHash` valid and invalid. */
   private[node] def judgesOf(reportHash: Hash): (Set[Int], Set[Int]) =
-    exec
-      .submit(() =>
+    observed(
         (positive.getOrElse(reportHash, Set.empty).toSet, negative.getOrElse(reportHash, Set.empty).toSet)
       )
-      .get(30, TimeUnit.SECONDS)
 
   // =========================================================================
   // helpers
@@ -1082,6 +1214,21 @@ object AuditorService extends LazyLogging:
 
   /** Audits fetching their bundles at once. */
   val FetchThreads: Int = 4
+
+  val JudgmentBatch: Int = 1024
+
+  private final class UnverifiedJudgment(
+      val bytes: Int,
+      val validator: Int,
+      val valid: Boolean,
+      val reportHash: Hash,
+      val signature: Array[Byte],
+      val epoch: Long,
+      val key: Array[Byte],
+      val source: AnyRef
+  )
+
+  def verifyThreads: Int = math.max(2, Runtime.getRuntime.availableProcessors() / 2)
 
   val FinalityLagSlots: Long = 10L
 

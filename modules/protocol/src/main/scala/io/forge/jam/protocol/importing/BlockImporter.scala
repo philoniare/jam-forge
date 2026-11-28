@@ -160,51 +160,94 @@ class BlockImporter(
 
       val storageView = new ServiceStorageView(trie)
       val view = new TrieBackedJamState(trie, config, storageView, Some(trieStore))
-
-      // The state update for a block whose steps passed: every write hashed into the block's own trie handle. It
-      // runs while the block's signature checks finish on other threads and touches nothing shared; the handle is
-      // saved below only once those checks have passed.
-      def stageUpdates(): Unit =
-        // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
-        // A key in both takes the storage view's value, as when they were applied one after the other.
-        val updates = StageTimers.time("commit-encode") {
-          val u = view.commitUpdates()
-          u ++= storageView.commitUpdates()
-          u
-        }
-        StageTimers.time("trie-update")(trie.update(updates.toIndexedSeq))
-
-      val pipelineResult =
-        StageTimers.time("pipeline")(
-          BlockPipeline.execute(
-            block,
-            view,
-            skipAncestryValidation,
-            Some(sharedExecutor),
-            ancestry,
-            _ => stageUpdates(),
-            extrinsicHashChecked
-          )
+      finish(block, trie, view) { whileChecksRun =>
+        BlockPipeline.execute(
+          block,
+          view,
+          skipAncestryValidation,
+          Some(sharedExecutor),
+          ancestry,
+          whileChecksRun,
+          extrinsicHashChecked
         )
-
-      pipelineResult match
-        case Left(error) =>
-          ImportResult.Invalid(mapPipelineError(error), error.message, Some(error))
-
-        case Right(result) =>
-          backendLock.synchronized {
-            StageTimers.time("trie-save")(trie.save())
-            trieStore.commitChild(block.header.parentStateRoot, trie.rootHash, view.accountRecordChanges)
-            if gcAfterImport then StageTimers.time("trie-gc")(trieStore.gc())
-          }
-
-          ImportResult.Success(trie.rootHash, result.headerHash)(result.accumulateCosts)
+      }
     catch
       case e: Throwable if BlockImporter.isFatalCrash(e) =>
         throw e
       case e: Throwable =>
         logger.error("Unexpected error during block import", e)
         ImportResult.Failed(Option(e.getMessage).getOrElse(e.getClass.getSimpleName), e)
+
+  private def finish(block: Block, trie: io.forge.jam.core.trie.StateTrie, view: TrieBackedJamState)(
+      pipeline: (io.forge.jam.protocol.pipeline.BlockPipelineResult => Unit) => Either[
+        PipelineError,
+        io.forge.jam.protocol.pipeline.BlockPipelineResult
+      ]
+  ): ImportResult =
+    val storageView = view.storage
+    // The state update for a block whose steps passed: every write hashed into the block's own trie handle. It
+    // runs while the block's signature checks finish on other threads and touches nothing shared; the handle is
+    // saved below only once those checks have passed.
+    def stageUpdates(): Unit =
+      // One update for state and storage writes, so nodes on shared paths are rebuilt and hashed once.
+      // A key in both takes the storage view's value, as when they were applied one after the other.
+      val updates = StageTimers.time("commit-encode") {
+        val u = view.commitUpdates()
+        u ++= storageView.commitUpdates()
+        u
+      }
+      StageTimers.time("trie-update")(trie.update(updates.toIndexedSeq))
+
+    StageTimers.time("pipeline")(pipeline(_ => stageUpdates())) match
+      case Left(error) =>
+        ImportResult.Invalid(mapPipelineError(error), error.message, Some(error))
+
+      case Right(result) =>
+        backendLock.synchronized {
+          StageTimers.time("trie-save")(trie.save())
+          trieStore.commitChild(block.header.parentStateRoot, trie.rootHash, view.accountRecordChanges)
+          if gcAfterImport then StageTimers.time("trie-gc")(trieStore.gc())
+        }
+
+        ImportResult.Success(trie.rootHash, result.headerHash)(result.accumulateCosts)
+
+  def open(root: Hash): Option[BlockImporter.OpenState] =
+    try
+      if trieStore.currentRoot != root then None
+      else
+        val trie = trieStore.at(root)
+        Some(new BlockImporter.OpenState(root, trie, new TrieBackedJamState(trie, config, new ServiceStorageView(trie), Some(trieStore))))
+    catch case _: IllegalStateException => None
+
+  def importExecuted(block: Block, executed: BlockImporter.Executed): ImportResult =
+    if !importInFlight.compareAndSet(false, true) then
+      throw new IllegalStateException("BlockImporter.importExecuted invoked while another import is in flight")
+    try
+      StageTimers.time("total") {
+        val state = executed.state
+        if state.root != block.header.parentStateRoot || trieStore.currentRoot != state.root then
+          val message = "the state the block was built on is not the importer's"
+          ImportResult.Failed(message, new IllegalStateException(message))
+        else
+          try
+            finish(block, state.trie, state.view) { whileChecksRun =>
+              BlockPipeline.executeAfterReports(
+                block,
+                state.view,
+                executed.priorSlot,
+                executed.safrole,
+                executed.availableReports,
+                Some(sharedExecutor),
+                whileChecksRun
+              )
+            }
+          catch
+            case e: Throwable if BlockImporter.isFatalCrash(e) => throw e
+            case e: Throwable =>
+              logger.error("Unexpected error during the import of an authored block", e)
+              ImportResult.Failed(Option(e.getMessage).getOrElse(e.getClass.getSimpleName), e)
+      }
+    finally importInFlight.set(false)
 
   /** Maps pipeline errors to import errors.
     */
@@ -231,3 +274,16 @@ class BlockImporter(
 
 object BlockImporter:
   def isFatalCrash(t: Throwable): Boolean = t.isInstanceOf[VirtualMachineError]
+
+  final class OpenState private[importing] (
+      val root: Hash,
+      private[importing] val trie: io.forge.jam.core.trie.StateTrie,
+      val view: TrieBackedJamState
+  )
+
+  final case class Executed(
+      state: OpenState,
+      priorSlot: Long,
+      safrole: io.forge.jam.protocol.safrole.SafroleTypes.SafroleOutputData,
+      availableReports: List[io.forge.jam.core.types.workpackage.WorkReport]
+  )

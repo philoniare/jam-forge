@@ -12,7 +12,7 @@ import io.forge.jam.protocol.dispute.DisputeTypes.DisputeInput
 import io.forge.jam.crypto.Ed25519
 import io.forge.jam.protocol.SignatureBatch
 import io.forge.jam.protocol.report.ReportTransition
-import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, ReportErrorCode}
+import io.forge.jam.protocol.report.ReportTypes.{AncestorHeader, ReportErrorCode, ReportInput}
 import io.forge.jam.protocol.state.TrieBackedJamState
 import io.forge.jam.protocol.state.TrieBackedJamStateBridges.{AssuranceBridge, ReportBridge}
 
@@ -32,7 +32,9 @@ object AuthoringPlan:
       assurances: List[AssuranceExtrinsic],
       guarantees: List[GuaranteeExtrinsic],
       droppedAssurances: List[AssuranceExtrinsic],
-      droppedGuarantees: List[GuaranteeExtrinsic]
+      droppedGuarantees: List[GuaranteeExtrinsic],
+      availableReports: List[io.forge.jam.core.types.workpackage.WorkReport] = Nil,
+      executed: Boolean = false
   )
 
   /** @param view the posterior-Safrole view for the block; consumed (left in an undefined state)
@@ -52,21 +54,23 @@ object AuthoringPlan:
       assurances: List[AssuranceExtrinsic],
       guarantees: List[GuaranteeExtrinsic],
       ancestry: List[AncestorHeader],
-      config: ChainConfig
+      config: ChainConfig,
+      applyReports: Boolean = false
   ): Plan =
     // 2. Disputes: already checked against the same prior state when built; they clear the cores of bad and wonky
     // reports.
-    StageTimers.time("plan/disputes")(DisputeTransition.stfViewWithPriorState(DisputeInput(disputes), view, priorTau, priorKappa, priorLambda))
+    val disputed =
+      StageTimers.time("plan/disputes")(DisputeTransition.stfViewWithPriorState(DisputeInput(disputes), view, priorTau, priorKappa, priorLambda))
 
     // 3. Assurances, against the parent state's current validator set.
     val assurancePre = StageTimers.time("plan/assurances-extract")(AssuranceBridge.extract(view).copy(currValidators = priorKappa))
     def assure(as: List[AssuranceExtrinsic], batch: SignatureBatch = new SignatureBatch) =
       AssuranceTransition.stfInternal(AssuranceInput(as, slot, parent), assurancePre, config, Some(batch))
     val sortedAssurances = assurances.sortBy(_.validatorIndex.toInt).distinctBy(_.validatorIndex.toInt)
-    val (chosenAssurances, assured, singlyValid) = StageTimers.time("plan/assurances-set") {
+    val (chosenAssurances, (assured, assurance), singlyValid) = StageTimers.time("plan/assurances-set") {
       val wholeBatch = new SignatureBatch
       val whole = assure(sortedAssurances, wholeBatch)
-      if whole._2.isRight && Ed25519.verifyAll(wholeBatch.snapshot) then (sortedAssurances, whole._1, sortedAssurances)
+      if whole._2.isRight && Ed25519.verifyAll(wholeBatch.snapshot) then (sortedAssurances, whole, sortedAssurances)
       else
         val candidates = sortedAssurances.flatMap { a =>
           val batch = new SignatureBatch
@@ -77,7 +81,7 @@ object AuthoringPlan:
         val chosen =
           if assure(singlyValid)._2.isRight then singlyValid
           else singlyValid.foldLeft(List.empty[AssuranceExtrinsic])((acc, a) => if assure(acc :+ a)._2.isRight then acc :+ a else acc)
-        (chosen, assure(chosen)._1, singlyValid)
+        (chosen, assure(chosen), singlyValid)
     }
     StageTimers.time("plan/assurances-apply")(AssuranceBridge.apply(view, assured))
 
@@ -105,9 +109,16 @@ object AuthoringPlan:
     val byCore = guarantees.groupBy(_.report.coreIndex.toInt).toList.sortBy(_._1)
     // Per core, the first candidate that passes alone, oldest first.
     val singly = byCore.flatMap((_, gs) => gs.find(g => alone(g).isRight))
-    val chosenGuarantees = StageTimers.time("plan/reports-set") {
-      if singly.isEmpty || report(singly).isRight then singly
-      else singly.foldLeft(List.empty[GuaranteeExtrinsic])((acc, g) => if report(acc :+ g).isRight then acc :+ g else acc)
+    def applied(gs: List[GuaranteeExtrinsic]) =
+      ReportTransition.stfView(ReportInput(gs, slot), view, skipAncestryValidation = false, ancestry).isRight
+    val (chosenGuarantees, reportsApplied) = StageTimers.time("plan/reports-set") {
+      if applyReports then
+        if applied(singly) then (singly, true)
+        else
+          val kept = singly.foldLeft(List.empty[GuaranteeExtrinsic])((acc, g) => if report(acc :+ g).isRight then acc :+ g else acc)
+          (kept, applied(kept))
+      else if singly.isEmpty || report(singly).isRight then (singly, false)
+      else (singly.foldLeft(List.empty[GuaranteeExtrinsic])((acc, g) => if report(acc :+ g).isRight then acc :+ g else acc), false)
     }
 
     Plan(
@@ -116,5 +127,7 @@ object AuthoringPlan:
       // An assurance is anchored at this block's parent: one that fails now is of no use to a later block.
       if singlyValid eq sortedAssurances then Nil else sortedAssurances.filterNot(singlyValid.contains),
       // A guarantee whose core is still engaged may go in once the core frees; any other failure lasts.
-      guarantees.filter(g => alone(g).left.exists(_ != ReportErrorCode.CoreEngaged))
+      guarantees.filter(g => alone(g).left.exists(_ != ReportErrorCode.CoreEngaged)),
+      assurance.toOption.fold(Nil)(_.reported),
+      executed = reportsApplied && disputed.isRight && assurance.isRight
     )

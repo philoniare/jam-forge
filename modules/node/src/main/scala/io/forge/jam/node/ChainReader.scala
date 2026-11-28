@@ -29,6 +29,8 @@ trait ChainReader:
 
   def stateViewOf(head: ChainHead): TrieBackedJamState
 
+  private[node] def executionStateOf(head: ChainHead): Option[io.forge.jam.protocol.importing.BlockImporter.OpenState] = None
+
   /** As [[stateViewOf]], by the head's state root. */
   def stateViewAtRoot(root: Hash): TrieBackedJamState
 
