@@ -37,6 +37,10 @@ final class PendingChecks:
   def adopt(other: PendingChecks): Unit =
     checks ++= other.checks
 
+  def whenAllPass(action: () => Unit): Unit =
+    val started = checks.toArray
+    CompletableFuture.allOf(started*).thenRun(() => if started.forall(_.getNow(None).isEmpty) then action()): Unit
+
   /** Waits for the checks in start order and returns the first failure. */
   def firstFailure(): Option[PipelineError] =
     checks.iterator.map(Parallel.await).collectFirst { case Some(err) => err }

@@ -46,6 +46,14 @@ object BlockPipeline:
   ): List[Ed25519PublicKey] =
     (prior ++ disputes.culprits.map(_.key) ++ disputes.faults.map(_.key)).distinct
 
+  private[pipeline] final class Once(action: () => Unit):
+    private var done = false
+    def run(): Unit = synchronized {
+      if !done then
+        done = true
+        action()
+    }
+
   private final class Run(val block: Block, val view: TrieBackedJamState):
     val config: ChainConfig = view.config
     val header = new EncodedHeader(block.header, config)
@@ -133,13 +141,15 @@ object BlockPipeline:
       sharedExecutor: Option[AccumulationExecutor] = None,
       ancestry: Ancestry = Ancestry.none,
       whileChecksRun: BlockPipelineResult => Unit = _ => (),
-      extrinsicHashChecked: Boolean = false
+      extrinsicHashChecked: Boolean = false,
+      onVerified: () => Unit = () => ()
   ): Either[PipelineError, BlockPipelineResult] =
     val run = StageTimers.time("x/context")(new Run(block, view))
     val pending = run.checks
+    val verified = new BlockPipeline.Once(onVerified)
     val result =
       try
-        val ran = steps(run, skipAncestryValidation, sharedExecutor, ancestry, extrinsicHashChecked)
+        val ran = steps(run, skipAncestryValidation, sharedExecutor, ancestry, extrinsicHashChecked, verified)
         ran.foreach(whileChecksRun)
         ran
       catch
@@ -149,15 +159,18 @@ object BlockPipeline:
             case None      => throw e
     val failed = StageTimers.time("await-checks")(pending.firstFailure())
     result match
-      case Left(err)     => Left(failed.getOrElse(err))
-      case Right(output) => failed.toLeft(output)
+      case Left(err) => Left(failed.getOrElse(err))
+      case Right(output) =>
+        if failed.isEmpty then verified.run()
+        failed.toLeft(output)
 
   private def steps(
       run: Run,
       skipAncestryValidation: Boolean,
       sharedExecutor: Option[AccumulationExecutor],
       ancestry: Ancestry,
-      extrinsicHashChecked: Boolean
+      extrinsicHashChecked: Boolean,
+      verified: BlockPipeline.Once
   ): Either[PipelineError, BlockPipelineResult] = boundary:
     import StageTimers.time
     val block = run.block
@@ -249,6 +262,7 @@ object BlockPipeline:
       }
     }: Unit
 
+    run.checks.whenAllPass(() => verified.run())
     Right(afterReports(block, view, run.header, run.priorSlot, safrole, availableReports, sharedExecutor))
 
   private def afterReports(

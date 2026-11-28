@@ -111,21 +111,23 @@ class BlockImporter(
       block: Block,
       preState: RawState,
       ancestry: Ancestry = Ancestry.none,
-      extrinsicHashChecked: Boolean = false
+      extrinsicHashChecked: Boolean = false,
+      onVerified: () => Unit = () => ()
   ): ImportResult =
     if !importInFlight.compareAndSet(false, true) then
       throw new IllegalStateException(
         "BlockImporter.importBlock invoked concurrently on the same instance; " +
           "callers must serialize imports per instance (e.g. via synchronized)"
       )
-    try StageTimers.time("total")(importBlockUnguarded(block, preState, ancestry, extrinsicHashChecked))
+    try StageTimers.time("total")(importBlockUnguarded(block, preState, ancestry, extrinsicHashChecked, onVerified))
     finally importInFlight.set(false)
 
   private def importBlockUnguarded(
       block: Block,
       preState: RawState,
       ancestry: Ancestry,
-      extrinsicHashChecked: Boolean
+      extrinsicHashChecked: Boolean,
+      onVerified: () => Unit
   ): ImportResult =
     try
       if block.header.parentStateRoot != preState.stateRoot then
@@ -168,7 +170,8 @@ class BlockImporter(
           Some(sharedExecutor),
           ancestry,
           whileChecksRun,
-          extrinsicHashChecked
+          extrinsicHashChecked,
+          onVerified
         )
       }
     catch

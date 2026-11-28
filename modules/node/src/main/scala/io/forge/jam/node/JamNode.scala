@@ -165,21 +165,24 @@ final class JamNode(
       telemetry.flatMap { t =>
         chain.decodeBlock(blockBytes).toOption.filterNot(b => chain.hasBlock(chain.headerHashOf(b))).map { block =>
           val hash = chain.headerHashOf(block)
-          (t.importing(block.header.slot.toLong, Telemetry.blockOutline(block, blockBytes.length, hash)), hash)
+          new JamNode.WatchedImport(t.importing(block.header.slot.toLong, Telemetry.blockOutline(block, blockBytes.length, hash)), hash)
         }
       }.orNull
+    override def verified(handle: AnyRef | Null): Unit = (handle, telemetry) match
+      case (w: JamNode.WatchedImport, Some(t)) => w.verified(t)
+      case _                                   => ()
     def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit =
       countImportFailure(outcome)
       (handle, telemetry) match
-        case ((ref: Option[?], hash: Hash), Some(t)) =>
-          val importing = ref.collect { case r: Telemetry.EventRef => r }
+        case (w: JamNode.WatchedImport, Some(t)) =>
           outcome match
             case Right(_) =>
-              t.blockVerified(importing)
-              t.blockExecuted(importing, chain.takeAccumulateCosts(hash).getOrElse(Map.empty))
-            case Left(e: ChainError.InvalidBlock)   => t.blockVerificationFailed(importing, e.message)
-            case Left(e: ChainError.ImportFailed)   => t.blockExecutionFailed(importing, e.message)
-            case Left(_)                            => ()
+              w.verified(t)
+              t.blockExecuted(w.importing, chain.takeAccumulateCosts(w.hash).getOrElse(Map.empty))
+            case Left(e: ChainError.InvalidBlock) if w.wasVerified => t.blockExecutionFailed(w.importing, e.message)
+            case Left(e: ChainError.InvalidBlock) => t.blockVerificationFailed(w.importing, e.message)
+            case Left(e: ChainError.ImportFailed) => t.blockExecutionFailed(w.importing, e.message)
+            case Left(_)                          => ()
         case _ => ()
   val sync = new SyncService(chain, serving, announcing, threads, misbehaved, importTelemetry, scores, telemetry)
   private val roleStore = RoleStore.over(blockStore)
@@ -1015,7 +1018,7 @@ final class JamNode(
         .importBatch(
           List(blockBytes),
           each = (bytes, run) =>
-            val outcome = run()
+            val outcome = run(() => ())
             if !released() then throw JamNode.NotReleased()
             if outcome.isRight then sync.announceBlock(bytes)
             outcome
@@ -1225,6 +1228,11 @@ final class JamNode(
       close("state")(trieBackend.close())
 
 object JamNode:
+
+  private[node] final class WatchedImport(val importing: Option[Telemetry.EventRef], val hash: Hash):
+    private val sent = new java.util.concurrent.atomic.AtomicBoolean
+    def wasVerified: Boolean = sent.get
+    def verified(t: Telemetry): Unit = if sent.compareAndSet(false, true) then t.blockVerified(importing)
 
   final class NotReleased extends RuntimeException("the record that the block's slot was sealed is not on disk")
 

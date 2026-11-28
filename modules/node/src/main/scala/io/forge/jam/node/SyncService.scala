@@ -800,9 +800,9 @@ final class SyncService(
     var stored = 0 // new to us, kept on a side branch
     var unknownParent = false
     val ordered = if ascending then blocks else blocks.reverse
-    val watch = (blockBytes: Array[Byte], run: () => Either[ChainError, ChainHead]) =>
+    val watch = (blockBytes: Array[Byte], run: ChainManager.ImportRun) =>
       val watched = observer.importing(blockBytes)
-      val outcome = run()
+      val outcome = run(() => observer.verified(watched))
       observer.imported(watched, outcome)
       if outcome.isRight then announceBlock(blockBytes)
       outcome
@@ -900,6 +900,8 @@ object SyncService:
 
   trait ImportObserver:
     def importing(blockBytes: Array[Byte]): AnyRef | Null
+
+    def verified(handle: AnyRef | Null): Unit = ()
     def imported(handle: AnyRef | Null, outcome: Either[ChainError, ChainHead]): Unit
 
   object ImportObserver:

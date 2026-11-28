@@ -21,6 +21,8 @@ import scala.jdk.CollectionConverters.*
 object ChainManager:
   val KeptAccumulateCosts: Int = 64
 
+  type ImportRun = (() => Unit) => Either[ChainError, ChainHead]
+
   val SyncIntervalNanos: Long = 10_000_000_000L
 
   /** Side-branch blocks stored without a seal check, in all. They are an honest fork's blocks only when the fork
@@ -1202,13 +1204,13 @@ final class ChainManager(
       executed: Option[BlockImporter.Executed] = None
   ): Either[ChainError, ChainHead] =
     val own = prepareOwn(block, blockBytes, executed)
-    importPrepared(Iterator.single((blockBytes, () => Right(own))), None, Long.MaxValue, (_, run) => each(own, run), Long.MaxValue, several = false).head
+    importPrepared(Iterator.single((blockBytes, () => Right(own))), None, Long.MaxValue, (_, run) => each(own, () => run(() => ())), Long.MaxValue, several = false).head
 
   def importBatch(
       blocks: Seq[Array[Byte]],
       source: Option[Ed25519PublicKey] = None,
       budgetNanos: Long = Long.MaxValue,
-      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead] = (_, run) => run(),
+      each: (Array[Byte], ChainManager.ImportRun) => Either[ChainError, ChainHead] = (_, run) => run(() => ()),
       bufferBelowSlot: Long = Long.MaxValue
   ): Vector[Either[ChainError, ChainHead]] =
     if blocks.isEmpty then return Vector.empty
@@ -1218,7 +1220,7 @@ final class ChainManager(
       remaining: Iterator[(Array[Byte], () => Either[ChainError, ChainManager.PreparedBlock])],
       source: Option[Ed25519PublicKey],
       budgetNanos: Long,
-      each: (Array[Byte], () => Either[ChainError, ChainHead]) => Either[ChainError, ChainHead],
+      each: (Array[Byte], ChainManager.ImportRun) => Either[ChainError, ChainHead],
       bufferBelowSlot: Long,
       several: Boolean
   ): Vector[Either[ChainError, ChainHead]] =
@@ -1235,8 +1237,8 @@ final class ChainManager(
           try
             while more && remaining.hasNext do
               val (blockBytes, prepared) = remaining.next()
-              val run = () =>
-                val outcome = importOne(prepared(), source, events, sealedSide, several, bufferBelowSlot)
+              val run: ChainManager.ImportRun = verified =>
+                val outcome = importOne(prepared(), source, events, sealedSide, several, bufferBelowSlot, verified)
                 outcome.foreach { head =>
                   executedUncommitted.add(head.hash)
                   executed += head.hash
@@ -1279,10 +1281,11 @@ final class ChainManager(
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
       inBatch: Boolean,
-      bufferBelowSlot: Long
+      bufferBelowSlot: Long,
+      onVerified: () => Unit
   ): Either[ChainError, ChainHead] =
     newEquivocations.clear()
-    val imported = importUnderCommit(prepared, source, events, sealedSide, inBatch, bufferBelowSlot)
+    val imported = importUnderCommit(prepared, source, events, sealedSide, inBatch, bufferBelowSlot, onVerified)
     settleEquivocations(events)
     imported
 
@@ -1292,7 +1295,8 @@ final class ChainManager(
       events: mutable.ListBuffer[(ChainHead, Block)],
       sealedSide: mutable.ListBuffer[(Hash, Block)],
       inBatch: Boolean,
-      bufferBelowSlot: Long
+      bufferBelowSlot: Long,
+      onVerified: () => Unit
   ): Either[ChainError, ChainHead] =
       prepared.flatMap { ready =>
         val block = ready.block
@@ -1321,7 +1325,8 @@ final class ChainManager(
                     events,
                     bodyChecked = true,
                     buffered = inBatch && farBehindHead(slot, bufferBelowSlot),
-                    executed = ready.executed
+                    executed = ready.executed,
+                    onVerified = onVerified
                   )
         else
           storeBufferedState()
@@ -1339,7 +1344,7 @@ final class ChainManager(
                 case SideAdmission.Sealed(Some(parentRoot))
                     if executeSideBlocks && meta.slotBlocks(slot).sizeIs < ChainManager.MaxExecutedPerSlot &&
                       descendsFromFinalized(parent, parentHeight) =>
-                  executeOnSide(block, blockBytes, hash, parentHeight + 1, parentRoot).flatMap { _ =>
+                  executeOnSide(block, blockBytes, hash, parentHeight + 1, parentRoot, onVerified).flatMap { _ =>
                     sealedSide += ((hash, block))
                     chooseAfterSideBlock(hash, block, events)
                   }
@@ -1384,7 +1389,8 @@ final class ChainManager(
       blockBytes: Array[Byte],
       hash: Hash,
       height: Long,
-      parentRoot: Hash
+      parentRoot: Hash,
+      onVerified: () => Unit
   ): Either[ChainError, Unit] =
     val parent = block.header.parent
     val slot = block.header.slot.toLong
@@ -1393,7 +1399,7 @@ final class ChainManager(
       try
         trieStore.markCommitted(parentRoot)
         trieBackend.withJournal(hash, height)(
-          importer.importBlock(block, RawState(parentRoot, Nil), ancestry, extrinsicHashChecked = true)
+          importer.importBlock(block, RawState(parentRoot, Nil), ancestry, extrinsicHashChecked = true, onVerified)
         )
       finally trieStore.markCommitted(bestHead.stateRoot)
     outcome match
@@ -1445,7 +1451,8 @@ final class ChainManager(
       events: mutable.ListBuffer[(ChainHead, Block)],
       bodyChecked: Boolean,
       buffered: Boolean = false,
-      executed: Option[BlockImporter.Executed] = None
+      executed: Option[BlockImporter.Executed] = None,
+      onVerified: () => Unit = () => ()
   ): Either[ChainError, ChainHead] =
     if !bodyChecked && !bodyMatchesHeader(block) then return Left(ChainError.BodyMismatch)
     if !buffered then storeBufferedState()
@@ -1464,7 +1471,7 @@ final class ChainManager(
     trieBackend.withJournal(headerHashOf(block), journalHeight)(
       continued match
         case Some(built) => importer.importExecuted(block, built)
-        case None        => importer.importBlock(block, preState, ancestry, extrinsicHashChecked = true)
+        case None        => importer.importBlock(block, preState, ancestry, extrinsicHashChecked = true, onVerified)
     ) match
       case ImportResult.Invalid(_, _, cause) if anchoredBelowHistory(block, cause) =>
         Left(ChainError.CannotCheck("its report is anchored before the history this node holds"))
